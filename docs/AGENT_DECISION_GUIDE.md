@@ -75,6 +75,14 @@ Regex → JSON-LD → (LLM last). If `webrain_extract_json` returns 0 items:
 2. Re-run `webrain_autoschema` + field probe (selectors may not match DOM).
 3. If page is a JS SPA that renders late → scroll/wait, then retry.
 
+**HTML is the LAST resort — never default to it.** `webrain_snapshot`
+(text+elements), `webrain_clean` (stripped text), `webrain_eval` (sync JS),
+and `webrain_extract_json`/`table`/`regex` (structure) all return page content
+far cheaper than `webrain_get_html` (raw markup, token-heavy, unreadable to an
+LLM). Call `webrain_get_html` ONLY when the task explicitly asks for HTML
+markup (a scraper spec, a tag/attribute audit) — and if you do, tell the user
+you're pulling HTML and why. Otherwise: snapshot first, always.
+
 ---
 
 ## 4. From-scratch discovery workflow (schema + URLs unknown)

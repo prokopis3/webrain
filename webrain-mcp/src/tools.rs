@@ -82,9 +82,13 @@ LOAD-MORE / INFINITE-SCROLL SHORTCUT (fastest path, beats click/scroll loops)
   windows by url/name if the endpoint returns a sliding window.
 
 RULES
+- NEVER return raw HTML. webrain_snapshot, webrain_clean, webrain_eval, and
+  webrain_extract_json/table/regex all give you page text/structure far cheaper
+  than webrain_get_html (token-heavy, unreadable). get_html is the LAST resort:
+  only when the task explicitly asks for HTML markup, and if you use it, remind
+  the user you're pulling HTML and why.
 - Never guess selectors/browsers from memory — discover via autoschema/eval and
   read the `challenge` field on every navigate.
-- Prefer extract_json / table / regex over get_html (token-cheap).
 - webrain_batch(op=extract) returns each result's products as a parsed `data`
   array (single-page extract_json shape) — read `data`, don't parse `text`.
 - webrain_eval does NOT reliably await async JS on obscura (returns null). For
@@ -184,7 +188,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_get_html",
-            "description": "Get the HTML of the current page or a specific element by CSS selector",
+            "description": "LAST RESORT — full raw HTML of the page/element (token-heavy, unreadable). Never use for page text: webrain_snapshot/clean/eval/extract_json return text/structure cheaper. Only call when the task EXPLICITLY asks for HTML markup (e.g. a scraper spec or a tag/attribute audit). If you do use it, tell the user you're pulling HTML and why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

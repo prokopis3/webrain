@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +
+  AGENT_GUIDE rules + decision guide all instruct: never return raw HTML when
+  `webrain_snapshot`/`clean`/`eval`/`extract_json`/`table`/`regex` give page
+  text/structure cheaper. Only call `get_html` when the task explicitly asks
+  for HTML markup, and remind the user why.
 - **core**: pooled HTTP agent — `webrain_fetch_http`, `webrain_validate_urls`,
   `webrain_download` now share ONE `ureq::Agent` (static `OnceLock`) instead of
   building a fresh agent (new TCP+TLS handshake) per call. Keep-alive across
