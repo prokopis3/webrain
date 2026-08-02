@@ -19,6 +19,8 @@ pub struct PageState {
     pub text: String,
     /// Interactive elements indexed by position for click/type tools.
     pub elements: Vec<InteractiveElement>,
+    /// Same-origin internal links (deduped) — one-call crawl discovery.
+    pub links: Vec<String>,
     /// Anti-bot challenge/block kind (`cloudflare_challenge`, `blocked`, `captcha`) when detected.
     pub challenge: Option<String>,
 }
@@ -148,12 +150,17 @@ pub trait BrowserBackend: Send + Sync {
             self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?,
         )
         .unwrap_or_default();
+        let links: Vec<String> = serde_json::from_value(
+            self.evaluate(crate::backends::cdp::LINKS_JS).await?,
+        )
+        .unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
         Ok(PageState {
             url,
             title,
             text: text.chars().take(8000).collect(),
             elements,
+            links,
             challenge,
         })
     }

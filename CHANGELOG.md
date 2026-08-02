@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core**: `webrain_navigate`/`snapshot` now return a `links` field — deduped
+  same-origin hrefs (≤200) via new `LINKS_JS`. One-call crawl/internal-link
+  discovery (was: separate eval for hrefs).
+- **core**: `webrain_batch(op=extract|interact)` results now carry a parsed
+  `data` array (single-page `extract_json` shape) instead of a JSON string
+  inside `text` (`text` kept for backward compat). Kills the data/text
+  confusion an agent hits when tallying batch results.
+- **docs**: agent guide + decision guide gain task-derived lessons — `/ajax`
+  offset shortcut for load-more/infinite pages (fastest path, dedupe sliding
+  windows), the async-eval-on-obscura null caveat (use `op=interact`), and the
+  obscura Docker `--host 0.0.0.0` requirement.
 - **core**: adaptive selectors (Scrapling-style `adaptive=True`) — `webrain_extract_json`
   gains `adaptive: bool`. When the base selector matches 0 items (site redesigned / class
   renamed), the extractor auto-relocates to elements that still contain ≥2 of the field

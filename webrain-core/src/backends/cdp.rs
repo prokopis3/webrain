@@ -150,6 +150,22 @@ pub const ELEMENTS_JS: &str = r#"
 /// ponytail: 60 elements + 3k text is enough for an agent step; a11y gives full structure.
 const PAGE_TEXT_CAP: usize = 3000;
 
+/// JS that collects deduped same-origin links (capped) for the PageState `links`
+/// field. Turns "crawl + internal links" into a single navigate call.
+pub const LINKS_JS: &str = r#"
+    (() => {
+        try {
+            const origin = location.origin;
+            const seen = new Set();
+            for (const a of document.querySelectorAll('a[href]')) {
+                const h = a.href;
+                if (h && h.startsWith(origin)) seen.add(h);
+            }
+            return JSON.stringify(Array.from(seen).slice(0, 200));
+        } catch (e) { return JSON.stringify([]); }
+    })()
+    "#;
+
 /// Resolve a CDP HTTP endpoint (or pass through a ws:// URL) to its browser WebSocket URL.
 fn resolve_ws(http_url: &str) -> anyhow::Result<String> {
     if http_url.starts_with("ws://") || http_url.starts_with("wss://") {
@@ -836,11 +852,13 @@ impl CdpBackend {
             serde_json::from_value(elements_val).unwrap_or_default();
 
         let challenge = detect_antibot(&title, &text);
+        let links: Vec<String> = serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
         Ok(PageState {
             url: url.to_string(),
             title,
             text: text.chars().take(PAGE_TEXT_CAP).collect(),
             elements,
+            links,
             challenge,
         })
     }
@@ -1007,11 +1025,13 @@ impl BrowserBackend for CdpBackend {
         let elements: Vec<InteractiveElement> =
             serde_json::from_value(self.eval_js(ELEMENTS_JS).await?).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
+        let links: Vec<String> = serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
         let state = PageState {
             url,
             title,
             text: text.chars().take(PAGE_TEXT_CAP).collect(),
             elements,
+            links,
             challenge,
         };
         *self.snap.lock().await = Some(state.clone());

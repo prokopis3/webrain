@@ -65,17 +65,31 @@ EXTRACTION MATRIX
 - relevance filter                     -> webrain_bm25
 
 FROM-SCRATCH DISCOVERY (schema + urls unknown)
-  1. webrain_navigate(seed)
-  2. webrain_eval -> pagination hrefs (structural, no class assumptions) -> max page -> urls
+  1. webrain_navigate(seed) — read `links` (same-origin) + `challenge`
+  2. derive urls from `links` (pagination/next via webrain_eval if needed) -> max page -> urls
   3. webrain_autoschema -> container selector
   4. webrain_eval -> descendant tags/classes + samples -> fields
   5. webrain_batch(op=extract, urls, base_selector, fields, concurrency=8) -> aggregate
+     (each result has parsed `data` array — no need to parse `text`)
   6. done(summary="Extracted N items across M pages")
+
+LOAD-MORE / INFINITE-SCROLL SHORTCUT (fastest path, beats click/scroll loops)
+  These pages almost always back the button/observer with a plain JSON/HTML
+  endpoint (scrapingcourse uses /ajax/products?offset=N). Find it in the page's
+  own script via webrain_eval (grep '/ajax/' in script tags), then
+  webrain_batch(op=extract, urls=[...offset=0,10,20...], base_selector, fields)
+  directly — one call, no interaction, no scroll. Dedupe overlapping offset
+  windows by url/name if the endpoint returns a sliding window.
 
 RULES
 - Never guess selectors/browsers from memory — discover via autoschema/eval and
   read the `challenge` field on every navigate.
 - Prefer extract_json / table / regex over get_html (token-cheap).
+- webrain_batch(op=extract) returns each result's products as a parsed `data`
+  array (single-page extract_json shape) — read `data`, don't parse `text`.
+- webrain_eval does NOT reliably await async JS on obscura (returns null). For
+  async work use webrain_batch(op=interact, ...) — its interaction runs in a
+  session where awaits resolve.
 - webrain_fetch_http needs NO browser (pure HTTP, 10-100x faster for static pages).
 - webrain_tab manages tabs: new(url) | switch(id) | close(id) | list. Use tabs to
   isolate parallel scrapes or pre-load login sessions in one tab while scraping
@@ -110,7 +124,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_navigate",
-            "description": "Navigate to a URL and return page state (title, visible text, interactive elements) plus a `challenge` field (cloudflare_challenge|blocked|captcha) when the page is gated by an anti-bot challenge. If `challenge` is set, see webrain_guide for the real-Chrome bypass (obscura/lightpanda cannot pass interactive challenges). Optional request-quality params (Scrapling-style): disable_resources (block fonts/images/media for speed+token savings), network_idle (wait until no new network activity), wait_selector + wait_selector_state (attached|visible|hidden|detached) to wait for a specific element, css_selector to narrow returned text to one element.",
+            "description": "Navigate to a URL and return page state (title, visible text, interactive elements, deduped same-origin `links`) plus a `challenge` field (cloudflare_challenge|blocked|captcha) when the page is gated by an anti-bot challenge. Use `links` for one-call crawl/internal-link discovery. If `challenge` is set, see webrain_guide for the real-Chrome bypass (obscura/lightpanda cannot pass interactive challenges). Optional request-quality params (Scrapling-style): disable_resources (block fonts/images/media for speed+token savings), network_idle (wait until no new network activity), wait_selector + wait_selector_state (attached|visible|hidden|detached) to wait for a specific element, css_selector to narrow returned text to one element.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -573,7 +587,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             let opts = nav_opts(args);
             match backend.navigate_opts(url, &opts).await {
-                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "challenge": s.challenge}),
+                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge}),
                 Err(e) => err(e),
             }
         }
@@ -663,7 +677,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         "webrain_snapshot" => {
             match backend.snapshot().await {
-                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "challenge": s.challenge}),
+                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge}),
                 Err(e) => err(e),
             }
         }
@@ -938,6 +952,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         Ok(b) => backends.push(b),
                         Err(e) => all.push(BatchResult {
                             url: u.clone(), title: String::new(), text: String::new(),
+                            data: None,
                             error: Some(format!("cdp connect failed: {e}")),
                         }),
                     }
@@ -1068,7 +1083,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Ok(s) => json!({
                     "status": "ok", "engine": engine, "url": s.url, "title": s.title,
                     "text": s.text.chars().take(3000).collect::<String>(), "elements": s.elements,
-                    "challenge": s.challenge
+                    "links": s.links, "challenge": s.challenge
                 }),
                 Err(e) => err(e),
             }

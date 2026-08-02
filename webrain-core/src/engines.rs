@@ -704,13 +704,17 @@ pub async fn regex_extract(
 }
 
 /// One row of a batch result. Fields are reused per op:
-/// fetch → title/text; extract → text = extracted JSON;
-/// screenshot → title = saved file path.
+/// fetch → title/text; extract → data = parsed JSON array (text = same, as JSON
+/// string, for backward compat); screenshot → title = saved file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BatchResult {
     pub url: String,
     pub title: String,
     pub text: String,
+    /// Parsed payload for extract/interact (JSON array); null for fetch/screenshot.
+    /// ponytail: mirrors webrain_extract_json's `data` so the LLM reads one shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
     pub error: Option<String>,
 }
 
@@ -719,6 +723,7 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
         url: url.to_string(),
         title: String::new(),
         text: String::new(),
+        data: None,
         error: Some(e.to_string()),
     }
 }
@@ -727,7 +732,7 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
 /// MemoryAdaptiveDispatcher / arun_many max_session_permit). Each URL gets its
 /// own tab driven via per-session CDP routing; a tokio semaphore bounds in-flight
 /// tabs. `per_url(b, sid, url)` runs in the tab after navigate and returns
-/// `(title, text)` for the BatchResult. ponytail: one WS serializes the command
+/// `(title, text, data)` for the BatchResult. ponytail: one WS serializes the command
 /// layer, but page loads (the real cost) overlap — that's the whole win.
 async fn batch_map<F, Fut>(
     browser: &CdpBackend,
@@ -738,7 +743,7 @@ async fn batch_map<F, Fut>(
 ) -> Vec<BatchResult>
 where
     F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
-    Fut: std::future::Future<Output = anyhow::Result<(String, String)>> + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>> + Send + 'static,
 {
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::with_capacity(urls.len());
@@ -754,9 +759,9 @@ where
                 let id = b.open_tab(&url).await?;
                 let sid = b.tab_session(&id).await?;
                 b.navigate_session_opts(&sid, &url, &opts).await?;
-                let (title, text) = per_url(b.clone(), sid, url.clone()).await?;
+                let (title, text, data) = per_url(b.clone(), sid, url.clone()).await?;
                 let _ = b.close_tab(&id).await;
-                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, error: None })
+                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None })
             }
             .await;
             match res {
@@ -785,7 +790,7 @@ pub async fn batch_fetch(
         let title = b.eval_session(&sid, "document.title").await?.as_str().unwrap_or("").to_string();
         let text = b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
             .as_str().unwrap_or("").to_string();
-        Ok((title, text.chars().take(3000).collect()))
+        Ok((title, text.chars().take(3000).collect(), None))
     }).await
 }
 
@@ -806,7 +811,7 @@ pub async fn batch_extract(
         async move {
             let v = b.eval_session(&sid, &js).await?;
             let data = v.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
-            Ok((String::new(), data.to_string()))
+            Ok((String::new(), data.to_string(), Some(data)))
         }
     }).await
 }
@@ -841,13 +846,14 @@ pub async fn batch_interact(
         async move {
             // Run the interaction; it does its own waits (load-more clicks etc).
             b.eval_session(&sid, &interaction).await?;
-            let data = if extract_js.is_empty() {
+            let raw = if extract_js.is_empty() {
                 b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
             } else {
                 b.eval_session(&sid, &extract_js).await?
             };
-            let text = data.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(data);
-            Ok((String::new(), text.to_string()))
+            let data = raw.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok());
+            let text = data.clone().unwrap_or(raw);
+            Ok((String::new(), text.to_string(), data))
         }
     }).await
 }
@@ -876,7 +882,7 @@ pub async fn batch_screenshot(
             let h = format!("{:x}", hasher.finalize());
             let path = format!("{dir}/page_{}.png", &h[..12]);
             std::fs::write(&path, &png)?;
-            Ok((path, format!("{} bytes", png.len())))
+            Ok((path, format!("{} bytes", png.len()), None))
         }
     }).await
 }
@@ -1040,6 +1046,7 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
                 url: url.clone(),
                 title: path,
                 text: format!("{n} bytes"),
+                data: None,
                 error: None,
             })
         })();

@@ -159,3 +159,44 @@ STEP 6: extract (§3) → done
 | lightpanda | ❌ | ❌ | ~ | ❌ |
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
+
+---
+
+## 7. Task-derived lessons (verified on a full scrapingcourse.com crawl)
+
+These come from running a real 6-source crawl (653 products) and shaving the
+latency that cost an agent the most.
+
+**Internal-link discovery is now free.** `webrain_navigate`/`snapshot` return a
+`links` field — deduped same-origin hrefs (≤200). For "crawl site + internal
+links", navigate the seed and read `links` directly; no separate
+`webrain_eval` for hrefs. Expand only the links you need (pagination patterns
+etc.), capped at your URL budget.
+
+**Read `data`, not `text`, from batch.** `webrain_batch(op=extract|interact)`
+now returns each result's products as a parsed `data` array (same shape as
+single-page `webrain_extract_json`). Parse nothing; `text` is kept only for
+backward compat. Previously the products were a JSON *string* inside `text`,
+which cost repeated `data`/`text` confusion.
+
+**Load-more / infinite-scroll shortcut (fastest path).** These pages back the
+button/observer with a plain endpoint (scrapingcourse: `/ajax/products?offset=N`).
+Find it by grepping the page's own scripts via `webrain_eval` for `/ajax/`.
+Then `webrain_batch(op=extract, urls=[...offset=0,10,20...], base_selector,
+fields)` directly — no click/scroll loop, one call. The endpoint often returns
+a sliding window (offset=0→1-12, offset=10→11-22…): dedupe by url/name. This
+beat the interaction loop by ~3× and avoided observer/scroll races entirely.
+
+**`webrain_eval` + async on obscura.** Browser-level `Runtime.evaluate` does not
+reliably await async JS on obscura — an async IIFE returns `null`. For async
+work (fetch loops, waits), use `webrain_batch(op=interact, ...)`: its
+interaction runs in a session where `await` resolves. Sync JS on `webrain_eval`
+is fine.
+
+**obscura in Docker must bind `0.0.0.0`.** Default `obscura serve` binds
+`127.0.0.1` *inside* the container — the published `-p HOST:9222` port accepts
+TCP but answers nothing (docker-proxy → loopback mismatch). Start with
+`serve --port 9222 --host 0.0.0.0 --stealth` and point webrain at
+`ws://<host>:<mapped>/devtools/browser`. A curl `http://host:port/json/version`
+probe confirms reachability before any crawl.
+
