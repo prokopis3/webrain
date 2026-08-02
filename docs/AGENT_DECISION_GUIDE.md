@@ -239,7 +239,7 @@ ERRORs.
 
 **`obscura::console` also logs third-party widget failures (benign).** Pages
 with accessibility/livechat/tracker widgets (e.g. `cdn.equalweb.com
-accessibility.js`, seen on mymarket.gr) log `Dynamic script error: Cannot read
+accessibility.js`, seen on any domain) log `Dynamic script error: Cannot read
 properties of undefined` — those widgets need a full DOM obscura doesn't
 provide. Same category as Worker errors: noise, not a scrape failure. If a page
 extracts cleanly (`data` non-empty, `challenge` null), ignore them.

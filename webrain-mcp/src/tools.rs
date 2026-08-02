@@ -958,6 +958,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             url: u.clone(), title: String::new(), text: String::new(),
                             data: None,
                             error: Some(format!("cdp connect failed: {e}")),
+                            ms: 0,
                         }),
                     }
                 }
@@ -991,6 +992,14 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         Err(e) => payload["write_error"] = json!(e.to_string()),
                     }
                 }
+            }
+            // ponytail: batch stats — the LLM sees total/ok/errors + total ms at a
+            // glance for a heavy run, instead of counting results rows itself.
+            if let Some(res) = payload.get("results").and_then(|v| v.as_array()) {
+                let ok = res.iter().filter(|r| r.get("error").is_none() || r["error"].is_null()).count();
+                let errs = res.iter().filter(|r| r.get("error").is_some() && !r["error"].is_null()).count();
+                let ms: u64 = res.iter().filter_map(|r| r.get("ms").and_then(|v| v.as_u64())).sum();
+                payload["stats"] = json!({"total": res.len(), "ok": ok, "errors": errs, "ms_total": ms});
             }
             payload
         }

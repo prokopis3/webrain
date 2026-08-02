@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **mcp**: every tool response now carries `ms` (wall-clock elapsed) next to the
+  existing `tokens` — per-tool-run latency + token cost at the one choke point
+  (`with_token_cost`), both stdio and HTTP transports.
+- **core/mcp**: batch results gain per-URL `ms` (tab-open→result wall-clock) and
+  `webrain_batch` responses gain a `stats` block
+  `{total, ok, errors, ms_total}` — the LLM sees at a glance which URL was slow
+  and the whole run's cost, instead of counting result rows.
+
 ### Changed
 - **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +
   AGENT_GUIDE rules + decision guide all instruct: never return raw HTML when

@@ -716,6 +716,14 @@ pub struct BatchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     pub error: Option<String>,
+    /// Wall-clock ms spent on this URL (tab open → result). Lets the LLM see
+    /// which URL was slow, and feeds the batch `stats` block.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ms: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
@@ -725,6 +733,7 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
         text: String::new(),
         data: None,
         error: Some(e.to_string()),
+        ms: 0,
     }
 }
 
@@ -755,18 +764,24 @@ where
         let per_url = per_url.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok();
+            let t0 = std::time::Instant::now();
             let res = async {
                 let id = b.open_tab(&url).await?;
                 let sid = b.tab_session(&id).await?;
                 b.navigate_session_opts(&sid, &url, &opts).await?;
                 let (title, text, data) = per_url(b.clone(), sid, url.clone()).await?;
                 let _ = b.close_tab(&id).await;
-                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None })
+                let ms = t0.elapsed().as_millis() as u64;
+                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None, ms })
             }
             .await;
             match res {
                 Ok(r) => r,
-                Err(e) => batch_err(&url, e),
+                Err(e) => {
+                    let mut r = batch_err(&url, e);
+                    r.ms = t0.elapsed().as_millis() as u64;
+                    r
+                }
             }
         }));
     }
@@ -1081,6 +1096,7 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
                 text: format!("{n} bytes"),
                 data: None,
                 error: None,
+                ms: 0,
             })
         })();
         out.push(match res {

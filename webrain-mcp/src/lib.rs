@@ -250,9 +250,10 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
 
 /// Estimate output token cost at the serialization choke point — one place covers
 /// every tool (browser-harness tracks usage; here it's computed, no daemon state).
+/// Also stamps wall-clock `ms` so the LLM sees per-tool-run cost + latency.
 /// ponytail: exact BPE via tiktoken-rs (cl100k_base vocab compiled in, zero infra —
 /// no runtime download, matches OpenAI/Anthropic-style billing closely).
-fn with_token_cost(mut resp: Value) -> Value {
+fn with_token_cost(mut resp: Value, start: std::time::Instant) -> Value {
     // ponytail: build the BPE once, reuse for every response (~2MB vocab, don't
     // re-parse per call). encode_with_special_tokens handles <|...|> literally.
     static BPE: std::sync::OnceLock<tiktoken_rs::CoreBPE> = std::sync::OnceLock::new();
@@ -272,6 +273,7 @@ fn with_token_cost(mut resp: Value) -> Value {
             .encode_with_special_tokens(&text)
             .len();
         result["tokens"] = json!({"chars": chars, "est_tokens": est_tokens});
+        result["ms"] = json!(start.elapsed().as_millis() as u64);
     }
     resp
 }
@@ -300,7 +302,8 @@ pub async fn run_stdio() -> anyhow::Result<()> {
             Ok(m) => m,
             Err(_) => continue,
         };
-        let response = with_token_cost(handle_rpc(msg, &mut backend, None).await);
+        let t0 = std::time::Instant::now();
+        let response = with_token_cost(handle_rpc(msg, &mut backend, None).await, t0);
         writeln!(writer, "{}", serde_json::to_string(&response)?)?;
         writer.flush()?;
     }
@@ -406,6 +409,7 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
             // ── session management tools (no CDP connect, operate on HttpState) ──
             let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
             let id = msg.get("id").cloned();
+            let t0 = std::time::Instant::now();
 
             let resp = match method {
                 "tools/call" => {
@@ -456,7 +460,7 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
                     }
                 }
             };
-            let resp = with_token_cost(resp);
+            let resp = with_token_cost(resp, t0);
             let resp_body = serde_json::to_string(&resp)?;
             let mut response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close",
