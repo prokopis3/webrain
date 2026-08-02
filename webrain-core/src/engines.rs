@@ -99,8 +99,7 @@ mod tests {
 
     // ponytail: one check for extended extract_js — nested, base_fields, list.
     #[test]
-    fn extract_js_nested_and_base_fields() {
-        let base_fields = vec![serde_json::json!({"name":"url","attribute":"href"})];
+    fn extract_js_nested_and_base_fields() {        let base_fields = vec![serde_json::json!({"name":"url","attribute":"href"})];
         let fields = vec![serde_json::json!({
             "name": "title", "selector": "h2", "type": "text"
         }), serde_json::json!({
@@ -123,6 +122,28 @@ mod tests {
         })];
         let js2 = super::build_extract_js("div.product", &[], &list_fields);
         assert!(js2.contains("Array.from(el.querySelectorAll('ul.features li')).map(c=>"));
+    }
+
+    // ponytail: one check for adaptive extract — exact path + relocation fallback present.
+    #[test]
+    fn adaptive_js_has_exact_and_relocation_paths() {
+        let fields = vec![serde_json::json!({
+            "name": "title", "selector": "h2", "type": "text"
+        }), serde_json::json!({
+            "name": "price", "selector": "span.price", "type": "text"
+        })];
+        let js = super::build_adaptive_extract_js("div.product", &[], &fields);
+        // exact path first: querySelectorAll('div.product')
+        assert!(js.contains("document.querySelectorAll('div.product')"));
+        assert!(js.contains("if (exact.length) return JSON.stringify(exact);"));
+        // relocation probe embeds field selectors and requires >= 2 hits
+        assert!(js.contains("FIELD_SELS = ['h2', 'span.price']"));
+        assert!(js.contains("hits >= 2"));
+        assert!(js.contains("c.contains(d)"));
+        // exact builder stays untouched (no fallback)
+        let exact = super::build_extract_js("div.product", &[], &fields);
+        assert!(!exact.contains("FIELD_SELS"));
+        assert!(exact.contains("JSON.stringify(Array.from"));
     }
 
     // ponytail: one check for BM25 — query "rust" ranks the rust doc first.
@@ -442,7 +463,7 @@ impl SpiderEngine {
 /// `base_fields` extracts attributes from the container element (e.g. href from <a>).
 /// `source` on a field targets the next sibling element (`+ tr`) instead of the container.
 /// ponytail: all JS stays in-page via evaluate(), zero deps, zero serialisation overhead.
-pub fn build_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Value]) -> String {
+fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
     fn esc(s: &str) -> String {
         s.replace('\\', "\\\\").replace('\'', "\\'")
     }
@@ -555,9 +576,53 @@ pub fn build_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Va
         };
         field_js.push_str(&format!("{n}: {val}, "));
     }
+    field_js
+}
+
+/// Exact CSS extraction: `JSON.stringify(Array.from(document.querySelectorAll(base)).map(extract))`.
+pub fn build_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Value]) -> String {
+    let field_js = build_field_js(base_fields, fields);
     let base = base_selector.replace('\'', "\\'");
     format!(
         "JSON.stringify(Array.from(document.querySelectorAll('{base}')).map(el => ({{ {field_js} }})))"
+    )
+}
+
+/// Adaptive extraction (Scrapling-style `adaptive=True`): try the exact base selector, and if it
+/// matches nothing (site redesigned/class renamed), relocate to elements that still contain >= 2 of
+/// the field selectors, keeping only the deepest (row-level) candidates.
+/// ponytail: zero-LLM structural re-anchoring in-page; opt-in via `adaptive: true` on extract_json.
+pub fn build_adaptive_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Value]) -> String {
+    let field_js = build_field_js(base_fields, fields);
+    let base = base_selector.replace('\'', "\\'");
+    let sels: Vec<String> = fields
+        .iter()
+        .filter_map(|f| f.get("selector").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\'', "\\'"))
+        .collect();
+    let sel_js = sels.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ");
+    format!(
+        r#"(() => {{
+  const FIELD_SELS = [{sel_js}];
+  const extract = (el) => ({{ {field_js} }});
+  const exact = Array.from(document.querySelectorAll('{base}')).map(extract);
+  if (exact.length) return JSON.stringify(exact);
+  if (!FIELD_SELS.length) return JSON.stringify([]);
+  // Relocate: find elements that contain >= 2 field selectors, keep the deepest ones.
+  const cands = [];
+  for (const el of document.querySelectorAll('div, li, article, section, tr, td')) {{
+    let hits = 0;
+    for (const s of FIELD_SELS) {{ if (el.querySelector(s) && ++hits >= 2) break; }}
+    if (hits >= 2) cands.push(el);
+  }}
+  const minimal = [];
+  outer: for (const c of cands) {{
+    for (const d of cands) {{ if (d !== c && c.contains(d)) continue outer; }}
+    minimal.push(c);
+  }}
+  return JSON.stringify(minimal.map(extract));
+}})()"#
     )
 }
 
@@ -658,17 +723,23 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
     }
 }
 
-/// Batch fetch with concurrency: N tabs load IN PARALLEL in the browser
-/// (crawl4ai MemoryAdaptiveDispatcher / arun_many max_session_permit). Each URL
-/// gets its own tab driven via per-session CDP routing; a tokio semaphore bounds
-/// in-flight tabs. ponytail: one WS serializes the command layer, but page loads
-/// (the real cost) overlap — that's the whole win.
-pub async fn batch_fetch(
+/// Shared batch skeleton: N tabs load IN PARALLEL in the browser (crawl4ai
+/// MemoryAdaptiveDispatcher / arun_many max_session_permit). Each URL gets its
+/// own tab driven via per-session CDP routing; a tokio semaphore bounds in-flight
+/// tabs. `per_url(b, sid, url)` runs in the tab after navigate and returns
+/// `(title, text)` for the BatchResult. ponytail: one WS serializes the command
+/// layer, but page loads (the real cost) overlap — that's the whole win.
+async fn batch_map<F, Fut>(
     browser: &CdpBackend,
     urls: &[String],
     concurrency: usize,
     opts: &crate::backends::cdp::NavOpts,
-) -> Vec<BatchResult> {
+    per_url: F,
+) -> Vec<BatchResult>
+where
+    F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String)>> + Send + 'static,
+{
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::with_capacity(urls.len());
     for url in urls {
@@ -676,31 +747,16 @@ pub async fn batch_fetch(
         let sem = sem.clone();
         let url = url.clone();
         let opts = opts.clone();
+        let per_url = per_url.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok();
             let res = async {
                 let id = b.open_tab(&url).await?;
                 let sid = b.tab_session(&id).await?;
                 b.navigate_session_opts(&sid, &url, &opts).await?;
-                let title = b
-                    .eval_session(&sid, "document.title")
-                    .await?
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                let text = b
-                    .eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
-                    .await?
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let (title, text) = per_url(b.clone(), sid, url.clone()).await?;
                 let _ = b.close_tab(&id).await;
-                Ok::<_, anyhow::Error>(BatchResult {
-                    url: url.clone(),
-                    title,
-                    text: text.chars().take(3000).collect(),
-                    error: None,
-                })
+                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, error: None })
             }
             .await;
             match res {
@@ -718,6 +774,21 @@ pub async fn batch_fetch(
     out
 }
 
+/// Batch fetch: read title + visible text per URL, concurrently.
+pub async fn batch_fetch(
+    browser: &CdpBackend,
+    urls: &[String],
+    concurrency: usize,
+    opts: &crate::backends::cdp::NavOpts,
+) -> Vec<BatchResult> {
+    batch_map(browser, urls, concurrency, opts, |b, sid, _url| async move {
+        let title = b.eval_session(&sid, "document.title").await?.as_str().unwrap_or("").to_string();
+        let text = b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
+            .as_str().unwrap_or("").to_string();
+        Ok((title, text.chars().take(3000).collect()))
+    }).await
+}
+
 /// Batch extraction: run a CSS/XPath schema over every URL concurrently
 /// (one tab per URL, semaphore-bounded). Zero-LLM, in-page JS.
 pub async fn batch_extract(
@@ -730,47 +801,14 @@ pub async fn batch_extract(
     opts: &crate::backends::cdp::NavOpts,
 ) -> Vec<BatchResult> {
     let js = build_extract_js(base_selector, base_fields, fields);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-    let mut handles = Vec::with_capacity(urls.len());
-    for url in urls {
-        let b = browser.clone();
-        let sem = sem.clone();
-        let url = url.clone();
+    batch_map(browser, urls, concurrency, opts, move |b, sid, _url| {
         let js = js.clone();
-        let opts = opts.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            let res = async {
-                let id = b.open_tab(&url).await?;
-                let sid = b.tab_session(&id).await?;
-                b.navigate_session_opts(&sid, &url, &opts).await?;
-                let v = b.eval_session(&sid, &js).await?;
-                let _ = b.close_tab(&id).await;
-                let data = v
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                    .unwrap_or(Value::Null);
-                Ok::<_, anyhow::Error>(BatchResult {
-                    url: url.to_string(),
-                    title: String::new(),
-                    text: data.to_string(),
-                    error: None,
-                })
-            }
-            .await;
-            match res {
-                Ok(r) => r,
-                Err(e) => batch_err(&url, e),
-            }
-        }));
-    }
-    let mut out = Vec::with_capacity(urls.len());
-    for h in handles {
-        if let Ok(r) = h.await {
-            out.push(r);
+        async move {
+            let v = b.eval_session(&sid, &js).await?;
+            let data = v.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
+            Ok((String::new(), data.to_string()))
         }
-    }
-    out
+    }).await
 }
 
 /// Batch interaction: run an arbitrary async JS interaction (click "Load More"
@@ -791,60 +829,27 @@ pub async fn batch_interact(
     concurrency: usize,
     opts: &crate::backends::cdp::NavOpts,
 ) -> Vec<BatchResult> {
+    let interaction = interaction.to_string();
     let extract_js = if base_selector.is_empty() {
         String::new()
     } else {
         build_extract_js(base_selector, base_fields, fields)
     };
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-    let mut handles = Vec::with_capacity(urls.len());
-    for url in urls {
-        let b = browser.clone();
-        let sem = sem.clone();
-        let url = url.clone();
-        let interaction = interaction.to_string();
+    batch_map(browser, urls, concurrency, opts, move |b, sid, _url| {
+        let interaction = interaction.clone();
         let extract_js = extract_js.clone();
-        let opts = opts.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            let res = async {
-                let id = b.open_tab(&url).await?;
-                let sid = b.tab_session(&id).await?;
-                b.navigate_session_opts(&sid, &url, &opts).await?;
-                // Run the interaction; it does its own waits (load-more clicks etc).
-                b.eval_session(&sid, &interaction).await?;
-                let data = if extract_js.is_empty() {
-                    b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
-                        .await?
-                } else {
-                    b.eval_session(&sid, &extract_js).await?
-                };
-                let _ = b.close_tab(&id).await;
-                let text = data
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                    .unwrap_or(data);
-                Ok::<_, anyhow::Error>(BatchResult {
-                    url: url.to_string(),
-                    title: String::new(),
-                    text: text.to_string(),
-                    error: None,
-                })
-            }
-            .await;
-            match res {
-                Ok(r) => r,
-                Err(e) => batch_err(&url, e),
-            }
-        }));
-    }
-    let mut out = Vec::with_capacity(urls.len());
-    for h in handles {
-        if let Ok(r) = h.await {
-            out.push(r);
+        async move {
+            // Run the interaction; it does its own waits (load-more clicks etc).
+            b.eval_session(&sid, &interaction).await?;
+            let data = if extract_js.is_empty() {
+                b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
+            } else {
+                b.eval_session(&sid, &extract_js).await?
+            };
+            let text = data.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(data);
+            Ok((String::new(), text.to_string()))
         }
-    }
-    out
+    }).await
 }
 
 /// Batch screenshots: save a full-page PNG per URL into `dir`, concurrently
@@ -859,46 +864,21 @@ pub async fn batch_screenshot(
 ) -> Vec<BatchResult> {
     std::fs::create_dir_all(dir).ok();
     let dir = dir.to_string();
-    let opts = opts.clone();
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-    let mut handles = Vec::with_capacity(urls.len());
-    for (i, url) in urls.iter().enumerate() {
-        let b = browser.clone();
-        let sem = sem.clone();
-        let url = url.clone();
+    batch_map(browser, urls, concurrency, opts, move |b, sid, url| {
         let dir = dir.clone();
-        let opts = opts.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            let res = async {
-                let id = b.open_tab(&url).await?;
-                let sid = b.tab_session(&id).await?;
-                b.navigate_session_opts(&sid, &url, &opts).await?;
-                let png = b.screenshot_session(&sid, true).await?;
-                let _ = b.close_tab(&id).await;
-                let path = format!("{dir}/page_{i}.png");
-                std::fs::write(&path, &png)?;
-                Ok::<_, anyhow::Error>(BatchResult {
-                    url: url.to_string(),
-                    title: path,
-                    text: format!("{} bytes", png.len()),
-                    error: None,
-                })
-            }
-            .await;
-            match res {
-                Ok(r) => r,
-                Err(e) => batch_err(&url, e),
-            }
-        }));
-    }
-    let mut out = Vec::with_capacity(urls.len());
-    for h in handles {
-        if let Ok(r) = h.await {
-            out.push(r);
+        async move {
+            let png = b.screenshot_session(&sid, true).await?;
+            // ponytail: short URL hash keeps filenames unique across URLs that
+            // share a last path segment (page_x/page_y both ending '/page').
+            let mut hasher = sha2::Sha256::new();
+            use sha2::Digest;
+            hasher.update(url.as_bytes());
+            let h = format!("{:x}", hasher.finalize());
+            let path = format!("{dir}/page_{}.png", &h[..12]);
+            std::fs::write(&path, &png)?;
+            Ok((path, format!("{} bytes", png.len())))
         }
-    }
-    out
+    }).await
 }
 
 /// Chrome-identical HTTP layer for the no-browser fast path (obscura's

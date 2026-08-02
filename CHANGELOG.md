@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core**: adaptive selectors (Scrapling-style `adaptive=True`) — `webrain_extract_json`
+  gains `adaptive: bool`. When the base selector matches 0 items (site redesigned / class
+  renamed), the extractor auto-relocates to elements that still contain ≥2 of the field
+  selectors, keeping only the deepest (row-level) candidates. Zero-LLM structural
+  re-anchoring, all in-page via one `evaluate()`.
+- **core**: 3500-domain tracker blocklist — `webrain_navigate`/`webrain_batch` gain
+  `block_trackers: bool`. Ported from anudeepND/blacklist via
+  `scripts/port_blocklist.ps1` into `webrain-core/data/tracker_domains.txt`, embedded at
+  compile time (`include_str!`), lazy-parsed once. Applied to CDP only when opted in
+  (~35KB over CDP per navigate) — the default fast path stays at the 28 wildcards.
+- **core**: batch consolidation — 4 near-identical batch fns (fetch/extract/interact/
+  screenshot, ~685–892 lines) collapsed into one generic `batch_map<F, Fut>` helper + 4
+  thin wrappers (-74 net lines). One tab lifecycle (open → session → navigate → op →
+  close) shared by every op, so a fix covers all callers.
+- **api**: `webrain_batch` gains `per_backend_concurrency` — bounds tabs per CDP backend
+  when `cdp_urls` is set (memory cap: total tabs = this × backends; default = concurrency).
 - **perf**: `bm25_filter` now precomputes per-term doc-frequency once
   (O(docs·terms)) instead of re-scanning all docs per (doc, term) inside the
   score loop (O(docs²·terms)). Kills the flagged linear-scan-in-loop hot path.

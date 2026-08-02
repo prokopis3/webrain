@@ -2,7 +2,7 @@ use webrain_core::backends::cdp::CdpBackend;
 use webrain_core::browser::BrowserBackend;
 use webrain_core::engines::{
     batch_extract, batch_fetch, batch_interact, batch_screenshot, bm25_filter, build_clean_js,
-    build_extract_js, download_files, http_fetch, regex_extract,
+    build_adaptive_extract_js, build_extract_js, download_files, http_fetch, regex_extract,
     validate_urls, BatchResult, CrawlStrategy, SpiderEngine, TileEngine,
 };
 use webrain_core::vision::{index_current_page, retrieve as vision_retrieve};
@@ -116,6 +116,7 @@ pub fn list_tools() -> Vec<Value> {
                 "properties": {
                     "url": {"type": "string", "description": "The URL to navigate to"},
                     "disable_resources": {"type": "boolean", "description": "Block font/image/media/stylesheet requests (faster, fewer tokens)", "default": false},
+                    "block_trackers": {"type": "boolean", "description": "Also block the 3500-domain tracker/ad list (max privacy; ~35KB over CDP per navigate)", "default": false},
                     "network_idle": {"type": "boolean", "description": "Wait until no new network resource entries (~400ms stable) before returning", "default": false},
                     "wait_selector": {"type": "string", "description": "Wait for this CSS selector before returning"},
                     "wait_selector_state": {"type": "string", "enum": ["attached", "visible", "hidden", "detached"], "description": "State to wait for (default visible)", "default": "visible"},
@@ -212,12 +213,14 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_extract_json",
-            "description": "CSS-schema extraction: build a JSON array from a base selector + field selectors. Zero-LLM structured extraction (crawl4ai JsonCssExtractionStrategy style).",
+            "description": "CSS-schema extraction: build a JSON array from a base selector + field selectors. Zero-LLM structured extraction (crawl4ai JsonCssExtractionStrategy style). Set adaptive:true to auto-relocate the container when the base selector matches nothing (site redesigned) — finds elements still containing >=2 of the field selectors.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "base_selector": {"type": "string", "description": "CSS selector for each repeated item, e.g. '.product'"},
-                    "fields": {"type": "array", "items": {"type": "object"}, "description": "[{\"name\": \"title\", \"selector\": \"h3 a\", \"type\": \"text\"}] — type: text|attr|html|xpath, attr required for attr"}
+                    "fields": {"type": "array", "items": {"type": "object"}, "description": "[{\"name\": \"title\", \"selector\": \"h3 a\", \"type\": \"text\"}] — type: text|attr|html|xpath, attr required for attr"},
+                    "base_fields": {"type": "array", "items": {"type": "object"}, "description": "Optional attributes pulled from the container element, e.g. [{\"name\": \"href\", \"attribute\": \"href\"}]"},
+                    "adaptive": {"type": "boolean", "description": "If true and base_selector matches 0 items, relocate to elements still containing >=2 field selectors (survives class renames). Default false."}
                 },
                 "required": ["base_selector", "fields"]
             }
@@ -339,9 +342,11 @@ pub fn list_tools() -> Vec<Value> {
                     "base_selector": {"type": "string", "description": "CSS selector for repeated items (op=extract / interact)"},
                     "fields": {"type": "array", "items": {"type": "object"}, "description": "[{name, selector, type: text|attr|html|xpath, attr?}] (op=extract / interact)"},
                     "concurrency": {"type": "integer", "description": "Max in-flight tabs (parallel loads)", "default": 4},
+                    "per_backend_concurrency": {"type": "integer", "description": "Max tabs per CDP backend when `cdp_urls` is set (memory cap — total tabs = this × backends; default = concurrency)", "default": 4},
                     "dir": {"type": "string", "description": "Output dir (op=screenshot)", "default": "screenshots"},
                     "output": {"type": "string", "description": "Optional file path to persist the full batch payload (JSON) — survives temp-file GC"},
                     "disable_resources": {"type": "boolean", "description": "Block font/image/media/stylesheet requests (faster, fewer tokens)", "default": false},
+                    "block_trackers": {"type": "boolean", "description": "Also block the 3500-domain tracker/ad list (max privacy)", "default": false},
                     "network_idle": {"type": "boolean", "description": "Wait until no new network resource entries before extracting", "default": false},
                     "wait_selector": {"type": "string", "description": "Wait for this CSS selector on each page before extracting"},
                     "wait_selector_state": {"type": "string", "enum": ["attached", "visible", "hidden", "detached"], "description": "State to wait for (default visible)", "default": "visible"}
@@ -551,6 +556,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         use webrain_core::backends::cdp::NavOpts;
         NavOpts {
             disable_resources: args.get("disable_resources").and_then(|v| v.as_bool()).unwrap_or(false),
+            block_trackers: args.get("block_trackers").and_then(|v| v.as_bool()).unwrap_or(false),
             network_idle: args.get("network_idle").and_then(|v| v.as_bool()).unwrap_or(false),
             wait_selector: args.get("wait_selector").and_then(|v| v.as_str()).map(String::from),
             wait_selector_state: args.get("wait_selector_state").and_then(|v| v.as_str()).unwrap_or("visible").to_string(),
@@ -678,7 +684,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             let base_fields = args.get("base_fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let fields = args.get("fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let js = build_extract_js(&base, &base_fields, &fields);
+            let adaptive = args.get("adaptive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let js = if adaptive {
+                build_adaptive_extract_js(&base, &base_fields, &fields)
+            } else {
+                build_extract_js(&base, &base_fields, &fields)
+            };
             match backend.evaluate(&js).await {
                 Ok(v) => {
                     let arr = v
@@ -908,6 +919,15 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            // Per-backend memory cap: N backends × `concurrency` tabs = N× tabs total,
+            // which OOMs on huge jobs. `per_backend_concurrency` bounds tabs per browser
+            // (default = concurrency, i.e. current behavior). ponytail: total tabs =
+            // per_backend_concurrency × backends; raise it only when memory allows.
+            let per_backend_concurrency = args
+                .get("per_backend_concurrency")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(concurrency);
             let results = if cdp_urls.is_empty() {
                 run_batch(backend, &op, &urls, args, &opts, concurrency).await
             } else {
@@ -924,15 +944,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 }
                 let n = backends.len().max(1);
                 // Round-robin: url[i] -> backend[i % n]. Each backend runs its share
-                // concurrently; backends themselves run sequentially (connect cost
-                // dominates; true cross-backend concurrency is the agent's job).
+                // at `per_backend_concurrency` tabs; backends themselves run
+                // sequentially (connect cost dominates; true cross-backend
+                // concurrency is the agent's job).
                 for (bi, b) in backends.iter().enumerate() {
                     let share: Vec<String> = urls.iter().enumerate()
                         .filter(|(i, _)| i % n == bi)
                         .map(|(_, u)| u.clone())
                         .collect();
                     if !share.is_empty() {
-                        all.extend(run_batch(b, &op, &share, args, &opts, concurrency).await);
+                        all.extend(run_batch(b, &op, &share, args, &opts, per_backend_concurrency).await);
                     }
                 }
                 all

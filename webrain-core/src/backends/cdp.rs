@@ -95,6 +95,20 @@ const RESOURCE_PATTERNS: &[&str] = &[
     "*.mp3", "*.ogg", "*.wav", "*.m4a", "*.pdf",
 ];
 
+/// 3500 tracker/ad domains ported from anudeepND/blacklist (see scripts/port_blocklist.ps1).
+/// Loaded at compile time via include_str! — zero runtime IO. Applied to CDP only when
+/// `block_trackers` is on (the big list is ~35KB over CDP per navigate; keep default fast path
+/// at the 28 wildcards above). Lazy OnceLock parse: 3500 lines split once, microsecond cost.
+fn tracker_domains() -> &'static [&'static str] {
+    static DOMAINS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    DOMAINS.get_or_init(|| {
+        include_str!("../../data/tracker_domains.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+}
 /// Optional navigate/batch request-quality params (Scrapling-style). All default off.
 /// ponytail: one shared struct, threaded through navigate + navigate_session so the
 /// single-tool path and the batch crawl path hit the SAME wait logic — a fix here
@@ -103,6 +117,8 @@ const RESOURCE_PATTERNS: &[&str] = &[
 pub struct NavOpts {
     /// Block font/image/media/stylesheet requests for speed + token savings.
     pub disable_resources: bool,
+    /// Also block the 3500-domain tracker list (default off — ~35KB over CDP per navigate).
+    pub block_trackers: bool,
     /// Wait until network is idle (no new resource entries ~400ms) before returning.
     pub network_idle: bool,
     /// Wait for a CSS selector to reach `wait_selector_state` before returning.
@@ -481,7 +497,7 @@ impl CdpBackend {
     /// idle, wait_selector). Single shared root — batch and session tools both route
     /// through here so a wait fix covers every caller.
     pub async fn navigate_session_opts(&self, sid: &str, url: &str, opts: &NavOpts) -> anyhow::Result<()> {
-        self.apply_blocking(Some(sid), opts.disable_resources).await?;
+        self.apply_blocking(Some(sid), opts).await?;
         self.send_cmd_with(Some(sid), "Page.navigate", json!({"url": url}))
             .await?;
         // ponytail: eval_session omits contextId (default ctx), so no stale ctx here.
@@ -503,11 +519,15 @@ impl CdpBackend {
     }
 
     /// (Re)apply the network block list; adds resource-type patterns when
-    /// `disable_resources` is on. Blocks before navigate so requests never start.
-    async fn apply_blocking(&self, sid: Option<&str>, disable_resources: bool) -> anyhow::Result<()> {
+    /// `disable_resources` is on and the 3500-domain tracker list when `block_trackers`
+    /// is on. Blocks before navigate so requests never start.
+    async fn apply_blocking(&self, sid: Option<&str>, opts: &NavOpts) -> anyhow::Result<()> {
         let mut urls: Vec<&str> = BLOCKED_URLS.to_vec();
-        if disable_resources {
+        if opts.disable_resources {
             urls.extend_from_slice(RESOURCE_PATTERNS);
+        }
+        if opts.block_trackers {
+            urls.extend_from_slice(tracker_domains());
         }
         self.send_cmd_with(sid, "Network.setBlockedURLs", json!({ "urls": urls }))
             .await?;
@@ -733,7 +753,7 @@ impl CdpBackend {
         *self.snap.lock().await = None;
         *self.fp.lock().await = None;
 
-        self.apply_blocking(self.active_session().await.as_deref(), opts.disable_resources)
+        self.apply_blocking(self.active_session().await.as_deref(), opts)
             .await?;
         self.send_cmd("Page.navigate", json!({"url": url}))
             .await?;
