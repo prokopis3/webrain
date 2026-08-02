@@ -1,0 +1,45 @@
+[package]
+name = "webrain-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# In-process Obscura stealth engine (no Docker needed).
+obscura = ["dep:obscura"]
+# Google Pdfium backend for PDF text extraction — handles ALL fonts (LaTeX,
+# CJK, custom encodings). Requires pdfium.dll/libpdfium.so at runtime.
+# Also adds pdf_render() for PixelRAG-style visual page rendering.
+pdfium = ["dep:pdfium-render"]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
+futures-util = "0.3"
+url = "2"
+base64 = "0.22"
+ureq = { version = "3", features = ["json"] }
+sha2 = "0.10"
+# Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
+# Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
+pdfium-render = { version = "0.9", optional = true }
+image = "0.25"
+# Used directly for image XObject extraction from PDFs (matches pdf-inspector's
+# transitive lopdf dep). Removed when pdf-inspector exposes images natively.
+lopdf = "0.41"
+flate2 = "1"
+# In-process Obscura (optional — feature-gated so the default build stays green
+# and only the Docker serve-path is used). Not on crates.io; pin for reproducibility.
+obscura = { git = "https://github.com/h4ckf0r0day/obscura", rev = "3a68457c0bedeedd7792d02810d16393961b6a5a", features = ["api"], optional = true }
+# Firecrawl pdf-inspector: pure Rust on lopdf — proper ToUnicode CMap decoding,
+# Markdown output, table detection, layout classification.
+pdf-inspector = "0.1.7"
+# Zero-code alternative (the implemented path): `obscura serve --host 0.0.0.0
+# --stealth` in Docker maps :9222 — CdpBackend drives it via
+# CDP_URL=ws://127.0.0.1:9222/devtools/browser (raw ws:// passthrough in resolve_ws).
