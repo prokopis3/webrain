@@ -152,6 +152,8 @@ const PAGE_TEXT_CAP: usize = 3000;
 
 /// JS that collects deduped same-origin links (capped) for the PageState `links`
 /// field. Turns "crawl + internal links" into a single navigate call.
+/// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
+/// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
 pub const LINKS_JS: &str = r#"
     (() => {
         try {
@@ -161,8 +163,8 @@ pub const LINKS_JS: &str = r#"
                 const h = a.href;
                 if (h && h.startsWith(origin)) seen.add(h);
             }
-            return JSON.stringify(Array.from(seen).slice(0, 200));
-        } catch (e) { return JSON.stringify([]); }
+            return Array.from(seen).slice(0, 200);
+        } catch (e) { return []; }
     })()
     "#;
 
