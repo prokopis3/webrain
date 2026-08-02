@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **core**: pooled HTTP agent — `webrain_fetch_http`, `webrain_validate_urls`,
+  `webrain_download` now share ONE `ureq::Agent` (static `OnceLock`) instead of
+  building a fresh agent (new TCP+TLS handshake) per call. Keep-alive across
+  calls makes offset/pagination probing ~0.3-1s faster each.
+- **core**: `webrain_fetch_http` returns `content_type` + `bytes` and no longer
+  truncates JSON responses (HTML still capped at 3000 chars), so a single probe
+  can reveal a JSON `total`. Captures pagination headers (`x-total-count`,
+  `link`, `content-range`, `x-next-page`) into `headers` when the server sends
+  them — one-call count discovery instead of boundary-probing.
+
 ### Fixed
 - **core**: `webrain_type` index mismatch — the index now uses the SAME selector
   as `ELEMENTS_JS`/`click` (`a, button, input, select, textarea, [role=button]`),

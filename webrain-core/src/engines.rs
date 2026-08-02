@@ -910,12 +910,23 @@ const BROWSER_HEADERS: &[(&str, &str)] = &[
     ("upgrade-insecure-requests", "1"),
 ];
 
+/// Shared HTTP agent — ONE connection pool for all no-browser fetches
+/// (http_fetch, validate_urls, download_files). Before, every call built a
+/// fresh `ureq::Agent`, so each offset probe paid a new TCP+TLS handshake
+/// (~0.3-1s each). Agent is cheap to clone (inner Arc → same pool).
+/// ponytail: static OnceLock instead of a builder wrapper per call.
+static HTTP_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+
 fn browser_agent() -> ureq::Agent {
-    ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build(),
-    )
+    HTTP_AGENT
+        .get_or_init(|| {
+            ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(30)))
+                    .build(),
+            )
+        })
+        .clone()
 }
 
 /// Attach the Chrome header set to a no-body request (GET/HEAD).
@@ -931,15 +942,41 @@ fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
 /// No-browser HTTP fetch (browsemind `http_crawl`): GET a URL, return status +
 /// visible-ish text. 10-100x faster than browser navigation, zero memory — but no
 /// JS/SPA/auth. ponytail: ureq GET → plain text; cap to keep MCP replies small.
+/// Reuses the shared pooled agent (keep-alive). JSON responses are NOT truncated
+/// so a single probe can reveal a total; text/HTML is capped at 3000 chars.
+/// Returns pagination headers (X-Total-Count/Link/Content-Range) when present
+/// so an agent can discover `total` in one call instead of boundary-probing.
 pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
     let resp = browser_req(browser_agent().get(url)).call()?;
     let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Pagination / total signals, if the server exposes them (capture before
+    // consuming the body).
+    let mut hdrs = serde_json::Map::new();
+    for name in ["x-total-count", "link", "content-range", "x-next-page"] {
+        if let Some(val) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
+            hdrs.insert(name.to_string(), serde_json::Value::String(val.to_string()));
+        }
+    }
     let text = resp.into_body().read_to_string()?;
-    Ok(json!({
+    let is_json = content_type.contains("json") || text.trim_start().starts_with(['{', '[']);
+    let out_text = if is_json { text } else { text.chars().take(3000).collect::<String>() };
+    let mut v = json!({
         "url": url,
         "status": status,
-        "text": text.chars().take(3000).collect::<String>(),
-    }))
+        "content_type": content_type,
+        "text": out_text,
+        "bytes": out_text.len(),
+    });
+    if !hdrs.is_empty() {
+        v["headers"] = serde_json::Value::Object(hdrs);
+    }
+    Ok(v)
 }
 
 /// BM25 relevance filter (browsemind BM25 filter / crawl4ai ContentRelevanceFilter):
@@ -1002,11 +1039,7 @@ pub fn bm25_filter(items: &[String], query: &str, top_k: usize) -> Vec<Value> {
 /// browsemind `seed(from_links, validate=True)`. ponytail: HEAD first, GET
 /// fallback for HEAD-blocking servers, status < 400 = alive, short timeouts.
 pub fn validate_urls(urls: &[String]) -> Vec<Value> {
-    let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(6)))
-            .build(),
-    );
+    let agent = browser_agent();
     urls.iter()
         .map(|u| {
             let alive = match browser_req(agent.head(u)).call() {
