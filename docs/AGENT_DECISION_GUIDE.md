@@ -168,10 +168,16 @@ These come from running a real 6-source crawl (653 products) and shaving the
 latency that cost an agent the most.
 
 **Internal-link discovery is now free.** `webrain_navigate`/`snapshot` return a
-`links` field — deduped same-origin hrefs (≤200). For "crawl site + internal
-links", navigate the seed and read `links` directly; no separate
-`webrain_eval` for hrefs. Expand only the links you need (pagination patterns
-etc.), capped at your URL budget.
+`links` field — deduped same-origin hrefs (≤200). **Scrapling LinkExtractor-quality
+cleaning:** URLs are canonicalized (trailing-slash normalized), fragments
+stripped, non-http(s) schemes dropped (mailto:, javascript:, tel:), 50+
+content-obvious extensions filtered (images, fonts, pdf, archives, css/js, ico,
+video/audio), and `area[href]` is supported. Verified: scrapingcourse /ecommerce →
+28 clean links (product + page), down from ~50 raw containing product images,
+add-to-cart fragments, and ico/css/js noise.
+For "crawl site + internal links", navigate the seed and read `links` directly;
+no separate `webrain_eval` for hrefs. Expand only the links you need (pagination
+patterns etc.), capped at your URL budget.
 
 **Read `data`, not `text`, from batch.** `webrain_batch(op=extract|interact)`
 now returns each result's products as a parsed `data` array (same shape as
