@@ -237,6 +237,13 @@ fails here. This is benign: it doesn't affect scraping. Judge success by the
 `challenge` field and the extracted `data`, not by scanning docker console
 ERRORs.
 
+**`obscura::console` also logs third-party widget failures (benign).** Pages
+with accessibility/livechat/tracker widgets (e.g. `cdn.equalweb.com
+accessibility.js`, seen on mymarket.gr) log `Dynamic script error: Cannot read
+properties of undefined` — those widgets need a full DOM obscura doesn't
+provide. Same category as Worker errors: noise, not a scrape failure. If a page
+extracts cleanly (`data` non-empty, `challenge` null), ignore them.
+
 **obscura in Docker must bind `0.0.0.0`.** Default `obscura serve` binds
 `127.0.0.1` *inside* the container — the published `-p HOST:9222` port accepts
 TCP but answers nothing (docker-proxy → loopback mismatch). Start with
