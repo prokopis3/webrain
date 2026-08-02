@@ -283,8 +283,25 @@ per-tool request deadlines on the MCP server. The connect timeouts cover the rea
 → done: persist `webrain_batch` payloads to disk via optional `output` arg (survives temp-file GC between turns). Verified live on scrapingcourse.com full-site crawl.
 → done: `webrain_batch op=interact` — run an async JS interaction (load-more loop, infinite-scroll, form fill) in PARALLEL tabs across N URLs, then optionally extract. The game-changer for "N independent interactive sites": one call replaces N serial agent loops. Verified live: button-click → 132 products, infinite-scrolling in a single parallel call.
 → done: `webrain_batch cdp_urls` — round-robins URLs across N CDP backends (per-proxy isolation: each browser = own proxy/cookies/fingerprint) in ONE call, no subagents. `batch_screenshot` now honors NavOpts. Benchmarked 4 URLs: single 2.0s warm / multi (2 Chrome) 2.3s — isolation win, not raw speed (single-backend already parallelizes tabs).
+→ done: `LINKS_JS` upgraded to Scrapling LinkExtractor quality — canonicalizes URLs (trailing-slash normalise), strips fragments, drops non-http(s) schemes (mailto:, javascript:, tel:), filters content-obvious extensions (images, fonts, pdf, archives, css/js, ico, video/audio), dedupes in insertion order. From ~50 raw hrefs → 28 cleaned, canonicalized links on scrapingcourse /ecommerce. Verified live.
 → next when you want: port the 3500-domain list.
 → skipped: Cloudflare/Antibot gated pages (need the stealth sidecar — documented, out of anonymous scope), login pages (auth-gated).
+
+## Remaining gaps (audit vs Scrapling LinkExtractor, Aug 2026)
+
+The `links` field is now Scrapling-quality for individual pages. What a full
+`LinkExtractor` provides that's still missing:
+
+| Feature | Scrapling | webrain | Why skip |
+|---|---|---|---|
+| Regex `allow`/`deny` | `LinkExtractor(allow=r"/posts/", deny=r"/tag/")` | None | The LLM can filter client-side; add when agent misses this |
+| Domain `allow_domains`/`deny_domains` | Subdomain-matching rules | same-origin only (`startsWith(origin)`) | same-origin covers most crawls; add when cross-domain needed |
+| CSS/XPath `restrict_css`/`restrict_xpath` | Scope link extraction to page region | whole page only | Add when an agent scrapes a nav/footer-heavy site |
+| `SitemapSpider` | Parse sitemap.xml / sitemap_index.xml / robots.txt | None | `webrain_fetch_http` + regex can cover this; dedicated tool when common |
+| Spider + extract integration | `Spider.parse()` yields items + follows links to different callbacks | Spider = link-only; batch extract = separate call | Agent glues them; dedicated `webrain_crawl` tool when proven needed |
+| Dev/resume mode | `development_mode` caches responses, `crawldir` persists state | None | Add when long crawls break; currently the output-persist covers the data |
+
+→ skipped: these are all "add when proven needed by a real task" — not YAGNI until a crawl fails because of them.
 
 ## Multi-session / per-proxy dispatch (P2 — doc, infra exists)
 
