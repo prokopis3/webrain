@@ -193,6 +193,16 @@ work (fetch loops, waits), use `webrain_batch(op=interact, ...)`: its
 interaction runs in a session where `await` resolves. Sync JS on `webrain_eval`
 is fine.
 
+**`obscura::console` ERROR lines are page noise, not failures.** obscura logs
+every page `console.error(...)` at ERROR level under the `obscura::console`
+target. Its Web Worker shim (`globalThis.Worker` in bootstrap.js) runs page
+worker code via `new Function(...)` and logs `Worker error: <msg>` when that
+worker script throws a ReferenceError (e.g. `i is not defined`) — obscura has
+no real Worker global, so page code that spawns `new Worker()` typically
+fails here. This is benign: it doesn't affect scraping. Judge success by the
+`challenge` field and the extracted `data`, not by scanning docker console
+ERRORs.
+
 **obscura in Docker must bind `0.0.0.0`.** Default `obscura serve` binds
 `127.0.0.1` *inside* the container — the published `-p HOST:9222` port accepts
 TCP but answers nothing (docker-proxy → loopback mismatch). Start with
