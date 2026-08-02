@@ -172,6 +172,21 @@ mod tests {
             .all(|(k, v)| !k.is_empty() && !v.is_empty()));
         assert!(super::SEC_CH_UA.contains("Chromium\";v=\"145\""));
     }
+
+    // ponytail: one check for the spider allow/deny filter (branchy logic).
+    // Sitemap parse is verified live — regex over simple XML, low risk.
+    #[test]
+    fn spider_filters_allow_deny() {
+        let s = super::SpiderEngine::new(2, 10)
+            .with_filters(vec!["/product/".to_string()], vec!["/cart".to_string(), "/login".to_string()]);
+        assert!(s.url_ok("https://site.com/product/1"));
+        assert!(!s.url_ok("https://site.com/about"));            // fails allow
+        assert!(!s.url_ok("https://site.com/product/cart"));     // fails deny
+        // empty allow = allow all; deny still prunes
+        let s2 = super::SpiderEngine::new(2, 10).with_filters(vec![], vec!["/login".to_string()]);
+        assert!(s2.url_ok("https://site.com/product/1"));
+        assert!(!s2.url_ok("https://site.com/login"));
+    }
 }
 
 /// Spider engine: BFS, DFS, or BestFirst crawler (crawl4ai deep-crawl strategies).
@@ -198,6 +213,18 @@ pub struct SpiderEngine {
     respect_robots: bool,
     /// KeywordRelevanceScorer for BestFirst (crawl4ai): URL scored by keyword hits.
     keywords: Vec<String>,
+    /// Only follow URLs matching ALL of these regexes (Scrapling LinkExtractor
+    /// `allow` / spider-rs `whitelist_url`). Empty = allow all.
+    allow: Vec<regex::Regex>,
+    /// Skip URLs matching ANY of these regexes (Scrapling `deny` / spider-rs
+    /// `blacklist_url`). Applied after allow.
+    deny: Vec<regex::Regex>,
+    /// Retry a failed page fetch up to N extra times (200ms backoff between).
+    retry: u32,
+    /// Polite delay between page fetches, ms (spider-rs `with_delay`).
+    delay_ms: u64,
+    /// Hard wall-clock cap on the whole crawl, seconds (spider-rs `crawl_timeout`).
+    crawl_timeout_secs: Option<u64>,
 }
 
 impl Default for SpiderEngine {
@@ -211,6 +238,11 @@ impl Default for SpiderEngine {
             discover_only: false,
             respect_robots: false,
             keywords: vec![],
+            allow: vec![],
+            deny: vec![],
+            retry: 0,
+            delay_ms: 0,
+            crawl_timeout_secs: None,
         }
     }
 }
@@ -233,6 +265,39 @@ impl SpiderEngine {
     pub fn with_discover_only(mut self, v: bool) -> Self { self.discover_only = v; self }
     pub fn with_respect_robots(mut self, v: bool) -> Self { self.respect_robots = v; self }
     pub fn with_keywords(mut self, k: Vec<String>) -> Self { self.keywords = k; self }
+    /// Compile allow/deny regexes once. Invalid patterns are ignored (a bad deny
+    /// regex must not silently let everything through — log it, skip the pattern).
+    pub fn with_filters(mut self, allow: Vec<String>, deny: Vec<String>) -> Self {
+        let compile = |pats: Vec<String>| -> Vec<regex::Regex> {
+            pats.iter().filter_map(|p| match regex::Regex::new(p) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("spider filter regex invalid '{p}': {e}");
+                    None
+                }
+            }).collect()
+        };
+        self.allow = compile(allow);
+        self.deny = compile(deny);
+        self
+    }
+    pub fn with_retry(mut self, n: u32) -> Self { self.retry = n; self }
+    pub fn with_delay_ms(mut self, ms: u64) -> Self { self.delay_ms = ms; self }
+    /// 0 = no cap (Some(0) would make the deadline `now` and kill the crawl
+    /// before the first page — treat it as "not set" at the shared entry point).
+    pub fn with_crawl_timeout(mut self, secs: u64) -> Self {
+        self.crawl_timeout_secs = if secs > 0 { Some(secs) } else { None };
+        self
+    }
+
+    /// Scrapling LinkExtractor filter: URL must match every `allow` (if any) and
+    /// no `deny`. Empty allow = pass.
+    fn url_ok(&self, url: &str) -> bool {
+        if !self.allow.is_empty() && !self.allow.iter().all(|r| r.is_match(url)) {
+            return false;
+        }
+        !self.deny.iter().any(|r| r.is_match(url))
+    }
 
     /// Accept a URL for crawling based on domain filter.
     fn domain_ok(&self, href: &str, seed_host: &str) -> bool {
@@ -302,6 +367,7 @@ impl SpiderEngine {
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
         let mut results: Vec<SpiderResult> = Vec::new();
+        let crawl_deadline = self.crawl_timeout_secs.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
 
         queue.push_back((seed_url.to_string(), 0));
         visited.insert(seed_url.to_string());
@@ -309,6 +375,11 @@ impl SpiderEngine {
         while let Some((url, depth)) = self.pop(&mut queue) {
             if results.len() >= self.max_pages {
                 break;
+            }
+            if let Some(deadline) = crawl_deadline {
+                if std::time::Instant::now() >= deadline {
+                    break; // wall-clock cap (spider-rs crawl_timeout) — stop the crawl.
+                }
             }
 
             let start = std::time::Instant::now();
@@ -345,31 +416,48 @@ impl SpiderEngine {
                     }
                 }
             } else {
-                let page_result = match browser.navigate(&url).await {
-                    Ok(state) => PageResult {
-                        url: url.clone(),
-                        title: Some(state.title.clone()),
-                        content: Some(state.text),
-                        screenshot_b64: None,
-                        error: None,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                    },
-                    Err(e) => {
-                        results.push(SpiderResult {
-                            page: PageResult {
-                                url: url.clone(),
-                                title: None,
-                                content: None,
-                                screenshot_b64: None,
-                                error: Some(e.to_string()),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                            },
-                            depth,
-                            links: vec![],
-                        });
-                        continue;
-                    }
+                // retry (spider-rs with_retry): re-fetch up to N times on error.
+                let mut page_result: PageResult = PageResult {
+                    url: url.clone(),
+                    title: None,
+                    content: None,
+                    screenshot_b64: None,
+                    error: Some("unreached".into()),
+                    duration_ms: 0,
                 };
+                let mut attempts = 0;
+                loop {
+                    match browser.navigate(&url).await {
+                        Ok(state) => {
+                            page_result = PageResult {
+                                url: url.clone(),
+                                title: Some(state.title.clone()),
+                                content: Some(state.text),
+                                screenshot_b64: None,
+                                error: None,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                            };
+                            break;
+                        }
+                        Err(e) => {
+                            attempts += 1;
+                            if attempts > self.retry {
+                                page_result.error = Some(e.to_string());
+                                page_result.duration_ms = start.elapsed().as_millis() as u64;
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+                if page_result.error.is_some() {
+                    results.push(SpiderResult {
+                        page: page_result,
+                        depth,
+                        links: vec![],
+                    });
+                    continue;
+                }
                 // ponytail: SPA/VitePress render links after initial DOM — short settle.
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                 let links = match browser
@@ -404,12 +492,17 @@ impl SpiderEngine {
                 for link in &links {
                     if !visited.contains(link)
                         && self.domain_ok(link, &seed_host)
+                        && self.url_ok(link)
                         && robots_ok(link)
                     {
                         visited.insert(link.clone());
                         self.push_link(&mut queue, link.clone(), depth + 1);
                     }
                 }
+            }
+
+            if self.delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
         }
 
@@ -990,6 +1083,97 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
     });
     if !hdrs.is_empty() {
         v["headers"] = serde_json::Value::Object(hdrs);
+    }
+    Ok(v)
+}
+
+/// Discover crawlable URLs from the site's sitemap (spider-rs `crawl_sitemap` /
+/// Scrapling `SitemapSpider`). Flow: robots.txt `Sitemap:` → sitemap_index.xml
+/// (or the URL given directly) → leaf sitemaps → every `<loc>`. Uses the pooled
+/// HTTP agent (no browser), zero new deps — regex `<loc>` parse, sitemap XML is
+/// simple enough. ponytail: no XML parser, `<loc>` regex is correct on the
+/// sitemap format; if a server serves a nonstandard sitemap, it yields fewer
+/// URLs, the agent falls back to crawl.
+/// Returns a JSON object: {urls: [...], sources: [fetched sitemap urls], error?}.
+pub fn sitemap_urls(start_url: &str) -> anyhow::Result<Value> {
+    fn get_text(url: &str) -> anyhow::Result<String> {
+        let resp = browser_req(browser_agent().get(url)).call()?;
+        let status = resp.status().as_u16();
+        let text = resp.into_body().read_to_string()?;
+        if !(200..300).contains(&status) {
+            return Err(anyhow::anyhow!("GET {url} -> {status}"));
+        }
+        Ok(text)
+    }
+    fn locs(xml: &str) -> Vec<String> {
+        // sitemap `<loc>` is CDATA-free; capture the URL inside the tags.
+        xml.split("<loc>")
+            .skip(1)
+            .filter_map(|s| s.split("</loc>").next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+    fn is_index(xml: &str) -> bool {
+        // sitemap index contains <sitemap> entries; leaf contains <url>.
+        xml.contains("<sitemap>") && !xml.contains("<url>")
+    }
+
+    let mut sources = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
+
+    // 1. If not given a sitemap URL, ask robots.txt for the Sitemap: line.
+    let mut frontier: Vec<String> = Vec::new();
+    let seed = start_url.trim_end_matches('/').to_string();
+    if seed.contains("/sitemap") || seed.ends_with(".xml") {
+        frontier.push(seed);
+    } else {
+        let robots = format!("{seed}/robots.txt");
+        if let Ok(text) = get_text(&robots) {
+            // ponytail: multi-line Sitemap: entries; case-insensitive key.
+            for line in text.lines() {
+                if let Some(idx) = line.to_lowercase().find("sitemap:") {
+                    let url = line[idx + 8..].trim();
+                    if !url.is_empty() {
+                        frontier.push(url.to_string());
+                    }
+                }
+            }
+            sources.push(robots);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    while let Some(f) = frontier.pop() {
+        if !seen.insert(f.clone()) {
+            continue;
+        }
+        sources.push(f.clone());
+        match get_text(&f) {
+            Ok(xml) => {
+                if is_index(&xml) {
+                    // sitemap index → push child sitemaps onto the frontier.
+                    for child in locs(&xml) {
+                        if !seen.contains(&child) {
+                            frontier.push(child);
+                        }
+                    }
+                } else {
+                    urls.extend(locs(&xml));
+                }
+            }
+            Err(e) => {
+                // A 404'd sitemap isn't fatal — keep going through the frontier.
+                tracing::debug!("sitemap fetch failed {f}: {e}");
+            }
+        }
+    }
+
+    urls.sort();
+    urls.dedup();
+    let mut v = json!({"urls": urls, "sources": sources, "count": urls.len()});
+    if urls.is_empty() {
+        v["error"] = json!("no sitemap URLs found — site may not expose sitemap.xml/robots.txt Sitemap");
     }
     Ok(v)
 }

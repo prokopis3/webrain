@@ -26,6 +26,7 @@ url = "2"
 base64 = "0.22"
 ureq = { version = "3", features = ["json"] }
 sha2 = "0.10"
+regex = "1"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
 # Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
 pdfium-render = { version = "0.9", optional = true }

@@ -3,7 +3,7 @@ use webrain_core::browser::BrowserBackend;
 use webrain_core::engines::{
     batch_extract, batch_fetch, batch_interact, batch_screenshot, bm25_filter, build_clean_js,
     build_adaptive_extract_js, build_extract_js, download_files, http_fetch, regex_extract,
-    validate_urls, BatchResult, CrawlStrategy, SpiderEngine, TileEngine,
+    sitemap_urls, validate_urls, BatchResult, CrawlStrategy, SpiderEngine, TileEngine,
 };
 use webrain_core::vision::{index_current_page, retrieve as vision_retrieve};
 use serde_json::{json, Value};
@@ -198,15 +198,37 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_spider",
-            "description": "Crawl a website starting from a seed URL using BFS, following links",
+            "description": "Crawl a website starting from a seed URL using BFS, following links. Supports allow/deny URL regex filters, retry, polite delay, and a hard wall-clock timeout.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "seed_url": {"type": "string", "description": "Starting URL for the crawl"},
                     "max_depth": {"type": "integer", "description": "Maximum link depth", "default": 2},
-                    "max_pages": {"type": "integer", "description": "Maximum pages to crawl", "default": 20}
+                    "max_pages": {"type": "integer", "description": "Maximum pages to crawl", "default": 20},
+                    "strategy": {"type": "string", "description": "bfs (default) | dfs | bestfirst"},
+                    "same_domain": {"type": "boolean", "description": "Only crawl same-origin links (default true)"},
+                    "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "Extra domains allowed when same_domain is false"},
+                    "no_content": {"type": "boolean", "description": "Link-only fast path (no innerText extraction)"},
+                    "respect_robots": {"type": "boolean", "description": "Honor robots.txt Disallow (default false)"},
+                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "BestFirst relevance scoring keywords"},
+                    "allow": {"type": "array", "items": {"type": "string"}, "description": "Only follow URLs matching ALL these regexes (e.g. [\"/product/\"]) — Scrapling LinkExtractor allow"},
+                    "deny": {"type": "array", "items": {"type": "string"}, "description": "Skip URLs matching ANY of these regexes (e.g. [\"/cart\", \"/login\"]) — Scrapling LinkExtractor deny"},
+                    "retry": {"type": "integer", "description": "Re-fetch a failed page up to N extra times (200ms backoff). Default 0."},
+                    "delay_ms": {"type": "integer", "description": "Polite delay between page fetches, ms. Default 0."},
+                    "crawl_timeout_secs": {"type": "integer", "description": "Hard wall-clock cap on the whole crawl, seconds. Default none."}
                 },
                 "required": ["seed_url"]
+            }
+        }),
+        json!({
+            "name": "webrain_sitemap",
+            "description": "Discover crawlable URLs from a site's sitemap (spider-rs crawl_sitemap / Scrapling SitemapSpider). Follows robots.txt Sitemap: -> sitemap_index.xml -> leaf sitemaps -> every <loc>. Pure HTTP (no browser, uses the pooled agent). Returns {urls, count, sources} — feed the urls into webrain_batch/spider for a full crawl. Zero new deps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Site root (e.g. https://example.com) OR a direct sitemap URL (e.g. https://example.com/sitemap.xml)"}
+                },
+                "required": ["url"]
             }
         }),
         json!({
@@ -669,15 +691,40 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            let allow: Vec<String> = args.get("allow")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let deny: Vec<String> = args.get("deny")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let retry = args.get("retry").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let delay_ms = args.get("delay_ms").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
+            let crawl_timeout = args.get("crawl_timeout_secs").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
             let spider = SpiderEngine::new(depth, pages)
                 .with_strategy(strategy)
                 .with_same_domain(same_domain)
                 .with_allowed_domains(allowed)
                 .with_discover_only(discover_only)
                 .with_respect_robots(respect_robots)
-                .with_keywords(keywords);
+                .with_keywords(keywords)
+                .with_filters(allow, deny)
+                .with_retry(retry)
+                .with_delay_ms(delay_ms)
+                .with_crawl_timeout(crawl_timeout);
             let results = spider.crawl(backend, seed).await;
             json!({"status": "ok", "pages": results.len(), "results": results})
+        }
+        "webrain_sitemap" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() {
+                return json!({"status": "error", "message": "url required"});
+            }
+            match sitemap_urls(url) {
+                Ok(v) => json!({"status": "ok", "result": v}),
+                Err(e) => json!({"status": "error", "message": e.to_string()}),
+            }
         }
         "webrain_snapshot" => {
             match backend.snapshot().await {

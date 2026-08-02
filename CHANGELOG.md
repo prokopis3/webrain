@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core/mcp**: `webrain_sitemap` tool — discover crawlable URLs from a site's
+  sitemap (spider-rs `crawl_sitemap` / Scrapling `SitemapSpider`). Follows
+  robots.txt `Sitemap:` → sitemap_index.xml → leaf sitemaps → every `<loc>`.
+  Pure HTTP via the pooled agent, zero new deps (regex `<loc>` parse). Feed the
+  returned URLs into `webrain_batch`/`webrain_spider` for a full crawl.
+- **core/mcp**: `webrain_spider` gains Scrapling/spider-rs features:
+  `allow`/`deny` URL regex filters (LinkExtractor `allow`/`deny`,
+  spider-rs whitelist/blacklist), `retry` (re-fetch failed pages, 200ms backoff),
+  `delay_ms` (polite crawl), and `crawl_timeout_secs` (hard wall-clock cap).
+  Filters applied in the shared crawl loop — one spot covers every strategy.
 - **mcp**: every tool response now carries `ms` (wall-clock elapsed) next to the
   existing `tokens` — per-tool-run latency + token cost at the one choke point
   (`with_token_cost`), both stdio and HTTP transports.
@@ -15,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webrain_batch` responses gain a `stats` block
   `{total, ok, errors, ms_total}` — the LLM sees at a glance which URL was slow
   and the whole run's cost, instead of counting result rows.
+
+### Fixed
+- **core**: `with_crawl_timeout(0)` now means "no cap". Before, tools.rs passed
+  `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
+  stopped before the first page (returned 0 pages). One guard in the shared
+  builder fixed all callers.
 
 ### Changed
 - **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +
