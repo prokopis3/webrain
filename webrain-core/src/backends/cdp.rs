@@ -151,19 +151,48 @@ pub const ELEMENTS_JS: &str = r#"
 const PAGE_TEXT_CAP: usize = 3000;
 
 /// JS that collects deduped same-origin links (capped) for the PageState `links`
-/// field. Turns "crawl + internal links" into a single navigate call.
+/// field. Scrapling LinkExtractor-level quality: canonicalize, filter non-http
+/// schemes, strip fragments, drop content-obvious extensions (images, fonts,
+/// pdf, archives, ico, css/js), dedupe in insertion order. Turns "crawl +
+/// internal links" into a single navigate call.
 /// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
 /// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
 pub const LINKS_JS: &str = r#"
     (() => {
         try {
             const origin = location.origin;
+            const skipExt = new Set(['pdf','zip','rar','7z','tar','gz','xz','bz2',
+                'jpg','jpeg','png','gif','webp','avif','svg','ico','bmp','tif','tiff',
+                'woff','woff2','ttf','otf','eot',
+                'mp4','webm','mp3','ogg','wav','mov','avi','m4a',
+                'css','js','json','xml','rss',
+                'exe','dmg','iso','apk','msi']);
             const seen = new Set();
-            for (const a of document.querySelectorAll('a[href]')) {
-                const h = a.href;
-                if (h && h.startsWith(origin)) seen.add(h);
+            const out = [];
+            for (const el of document.querySelectorAll('a[href], area[href]')) {
+                const raw = el.href || '';
+                if (!raw) continue;
+                // strip fragment + trailing slash; drop non-http
+                let u = raw;
+                const hash = u.indexOf('#');
+                if (hash > -1) u = u.slice(0, hash);
+                // drop non-http(s) schemes (mailto, javascript, tel, file, etc.)
+                if (!u.startsWith('http://') && !u.startsWith('https://')) continue;
+                // same-origin only
+                if (!u.startsWith(origin)) continue;
+                // trailing-slash normalise
+                const qp = u.indexOf('?');
+                let path = qp > -1 ? u.slice(0, qp) : u;
+                if (path.endsWith('/')) u = u.slice(0, path.length - 1) + (qp > -1 ? u.slice(qp) : '');
+                // drop known non-content extensions
+                const seg = u.split('/').pop() || '';
+                const dot = seg.lastIndexOf('.');
+                if (dot > -1 && skipExt.has(seg.slice(dot + 1).toLowerCase())) continue;
+                if (seen.has(u)) continue;
+                seen.add(u);
+                if (out.push(u) >= 200) break;
             }
-            return Array.from(seen).slice(0, 200);
+            return out;
         } catch (e) { return []; }
     })()
     "#;
