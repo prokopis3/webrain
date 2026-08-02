@@ -1,0 +1,52 @@
+# ============================================================================
+# Changelog Enforcement
+# ============================================================================
+# Ensures CHANGELOG.md is updated whenever code changes are made to main
+# source files. This keeps the changelog accurate and release-ready.
+# ============================================================================
+
+name: Changelog Enforce
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  enforce-changelog:
+    name: Enforce Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for CHANGELOG changes
+        id: changelog_check
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -c "CHANGELOG.md" || true)
+          echo "changelog_changed=$CHANGED" >> $GITHUB_OUTPUT
+
+          # Check if source files were changed (exclude docs, config, tests)
+          SOURCE_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -cE "^(lib/|main\.py|run_api\.py)" || true)
+          echo "source_changed=$SOURCE_CHANGED" >> $GITHUB_OUTPUT
+
+      - name: Comment if changelog missing
+        if: steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: changelog
+          message: |
+            ## ⚠️ CHANGELOG.md not updated
+
+            Source code files in `lib/`, `main.py`, or `run_api.py` were changed,
+            but `CHANGELOG.md` was not updated.
+
+            Please add an entry under `[Unreleased]` describing your changes.
+            See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format guidelines.

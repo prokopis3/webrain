@@ -1,0 +1,92 @@
+# ============================================================================
+# PR Conventional Commit Lint
+# ============================================================================
+# Validates that pull request titles follow the Conventional Commits format:
+#   <type>(<scope>): <description>
+#
+# Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+# This keeps the git history clean and enables automatic CHANGELOG generation.
+# ============================================================================
+
+name: PR Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  lint-commits:
+    name: Lint Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install commitlint
+        run: |
+          npm install -g @commitlint/cli @commitlint/config-conventional
+
+      - name: Lint PR title
+        uses: amannn/action-semantic-pull-request@v6
+        id: lint_pr_title
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          wip: true
+          validateSingleCommit: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint all commits in PR
+        run: |
+          npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
+      - name: Post lint result
+        if: failure() && steps.lint_pr_title.outputs.error_message != null
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-lint
+          message: |
+            ## ❌ PR Title doesn't follow Conventional Commits
+
+            ${{ steps.lint_pr_title.outputs.error_message }}
+
+            ### ✅ Examples of valid PR titles:
+
+            ```
+            feat(core): add authentication middleware
+            fix(api): resolve timeout on large responses
+            refactor(pipeline): rewrite pagination with crawl4ai-native discovery
+            docs: update README with architecture overview
+            test: add handler unit tests
+            chore(deps): update crawl4ai to v0.8.9
+            ```
+
+            ---
+            *Format: `<type>(<scope>): <description>`*
+
+            See [Conventional Commits](https://www.conventionalcommits.org/) for details.
