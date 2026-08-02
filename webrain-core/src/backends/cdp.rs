@@ -940,10 +940,13 @@ impl BrowserBackend for CdpBackend {
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+        // Same selector as ELEMENTS_JS/click so indices from navigate/snapshot
+        // map 1:1 to type_text (was: input-only list — index mismatch bug).
         let js = format!(
             r#"(function() {{
-                const el = document.querySelectorAll('input, textarea, select, [contenteditable="true"]')[{index}];
+                const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
                 if (!el) return 'not found';
+                if (!/input|textarea|select/i.test(el.tagName) && !el.isContentEditable) return 'not an input';
                 el.focus();
                 el.value = '{escaped}';
                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
