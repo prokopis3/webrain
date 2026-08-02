@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core/mcp**: `webrain_spider` gains Scrapling `AutoThrottle` — adaptive
+  per-domain delay tuned from observed latency (speeds up on fast servers,
+  doubles on a blocked/error page, capped at `autothrottle_max_ms`, floored at
+  `delay_ms`). Never guess a delay again.
+- **core/mcp**: `webrain_spider` gains Scrapling `crawldir` checkpoint/resume —
+  persists `{queue, seen}` every N pages; a later crawl with the same `crawldir`
+  resumes from where it stopped. Checkpoint deleted on a clean (queue-drained)
+  finish, kept when the crawl is capped/timed-out so resume continues.
+- **core/mcp**: `webrain_spider` returns a `stats` block `{elapsed_ms,
+  pages_ok, pages_err, page_ms_total}` — consistent with the batch stats block.
 - **core/mcp**: `webrain_sitemap` tool — discover crawlable URLs from a site's
   sitemap (spider-rs `crawl_sitemap` / Scrapling `SitemapSpider`). Follows
   robots.txt `Sitemap:` → sitemap_index.xml → leaf sitemaps → every `<loc>`.

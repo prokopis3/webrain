@@ -187,6 +187,29 @@ mod tests {
         assert!(s2.url_ok("https://site.com/product/1"));
         assert!(!s2.url_ok("https://site.com/login"));
     }
+
+    // ponytail: one check for AutoThrottle math — fast server speeds up, a block
+    // doubles (capped at max), and the politeness floor is never undercut.
+    #[test]
+    fn autothrottle_speeds_up_and_backs_off() {
+        let s = super::SpiderEngine::new(2, 10)
+            .with_delay_ms(100)
+            .with_autothrottle(true, 200, 5000);
+        let mut d = std::collections::HashMap::new();
+        // fast server (50ms latency): delay moves down toward ~50, floored at 100
+        let d1 = s.throttle_tick(&mut d, "fast.com", 50, true);
+        assert!(d1 >= 100 && d1 < 200);
+        // slow-but-ok server (800ms): delay rises toward 800
+        let d2 = s.throttle_tick(&mut d, "slow.com", 800, true);
+        assert!(d2 >= 400 && d2 <= 800);
+        // blocked: doubles each time, capped at max
+        let d3 = s.throttle_tick(&mut d, "blocked.com", 5, false);
+        let d4 = s.throttle_tick(&mut d, "blocked.com", 5, false);
+        assert!(d4 >= d3 * 2 || d4 >= 200, "block should double: {d3} -> {d4}");
+        let mut dmax = std::collections::HashMap::new();
+        for _ in 0..10 { s.throttle_tick(&mut dmax, "capped.com", 1, false); }
+        assert!(*dmax.get("capped.com").unwrap() <= 5000, "never exceeds max");
+    }
 }
 
 /// Spider engine: BFS, DFS, or BestFirst crawler (crawl4ai deep-crawl strategies).
@@ -225,6 +248,17 @@ pub struct SpiderEngine {
     delay_ms: u64,
     /// Hard wall-clock cap on the whole crawl, seconds (spider-rs `crawl_timeout`).
     crawl_timeout_secs: Option<u64>,
+    /// AutoThrottle (Scrapling AutoThrottle): per-domain adaptive delay tuned from
+    /// observed latency. Speeds up on fast servers, doubles on a blocked/challenge
+    /// response, capped at max. Floor = delay_ms (never undercut politeness).
+    autothrottle: bool,
+    autothrottle_start_delay_ms: u64,
+    autothrottle_max_delay_ms: u64,
+    /// Checkpoint/resume (Scrapling crawldir): persist {queue, seen} every N pages
+    /// to this dir so a long crawl survives interruption and resumes from where it
+    /// stopped. Deleted on a clean finish.
+    crawldir: Option<std::path::PathBuf>,
+    checkpoint_every: usize,
 }
 
 impl Default for SpiderEngine {
@@ -243,6 +277,11 @@ impl Default for SpiderEngine {
             retry: 0,
             delay_ms: 0,
             crawl_timeout_secs: None,
+            autothrottle: false,
+            autothrottle_start_delay_ms: 200,
+            autothrottle_max_delay_ms: 30_000,
+            crawldir: None,
+            checkpoint_every: 10,
         }
     }
 }
@@ -289,6 +328,53 @@ impl SpiderEngine {
         self.crawl_timeout_secs = if secs > 0 { Some(secs) } else { None };
         self
     }
+    /// Enable Scrapling-style AutoThrottle. `floor_ms` = the spider's own
+    /// `delay_ms` floor (never undercut). `max_ms` caps the adaptive delay.
+    pub fn with_autothrottle(mut self, enabled: bool, start_ms: u64, max_ms: u64) -> Self {
+        self.autothrottle = enabled;
+        self.autothrottle_start_delay_ms = start_ms.max(self.delay_ms);
+        self.autothrottle_max_delay_ms = max_ms.max(self.autothrottle_start_delay_ms);
+        self
+    }
+    /// Enable checkpoint/resume: persist crawl state every `every` pages to `dir`.
+    pub fn with_checkpoint(mut self, dir: String, every: usize) -> Self {
+        self.crawldir = if dir.is_empty() { None } else { Some(std::path::PathBuf::from(dir)) };
+        self.checkpoint_every = every.max(1);
+        self
+    }
+
+    /// AutoThrottle: move the per-domain delay toward observed latency (fast
+    /// servers speed up), or double it on a block (slow/hostile servers back off).
+    /// Returns the delay to sleep before the next request to that domain.
+    /// ponytail: `(cur + target) / 2` averaging like Scrapling; block doubling
+    /// capped at max; delay never below the politeness floor.
+    fn throttle_tick(
+        &self,
+        delays: &mut std::collections::HashMap<String, u64>,
+        domain: &str,
+        latency_ms: u64,
+        ok: bool,
+    ) -> u64 {
+        if !self.autothrottle {
+            return self.delay_ms;
+        }
+        let floor = self.delay_ms;
+        let cur = *delays.get(domain).unwrap_or(&self.autothrottle_start_delay_ms);
+        let new_delay = if ok {
+            // Latency-driven: move halfway toward the server's real response time.
+            let target = latency_ms.max(floor);
+            let avg = (cur + target) / 2;
+            avg.max(target.min(avg.max(target)))
+                .min(self.autothrottle_max_delay_ms)
+                .max(floor)
+        } else {
+            // Blocked/challenge: double (or wait longer if the site already
+            // slowed us down). A block never speeds the crawl up.
+            cur.saturating_mul(2).max(cur).min(self.autothrottle_max_delay_ms).max(floor)
+        };
+        delays.insert(domain.to_string(), new_delay);
+        new_delay
+    }
 
     /// Scrapling LinkExtractor filter: URL must match every `allow` (if any) and
     /// no `deny`. Empty allow = pass.
@@ -297,6 +383,63 @@ impl SpiderEngine {
             return false;
         }
         !self.deny.iter().any(|r| r.is_match(url))
+    }
+
+    /// Checkpoint file: {queue: [[url, depth]...], seen: [...]}. One JSON file,
+    /// atomic-ish rewrite. ponytail: no serde for the queue — (String, usize)
+    /// pairs serialize fine as arrays.
+    fn checkpoint_path(&self) -> Option<std::path::PathBuf> {
+        self.crawldir.as_ref().map(|d| d.join("checkpoint.json"))
+    }
+
+    fn save_checkpoint(
+        &self,
+        queue: &std::collections::VecDeque<(String, usize)>,
+        visited: &std::collections::HashSet<String>,
+    ) {
+        let Some(path) = self.checkpoint_path() else { return };
+        let q: Vec<Value> = queue.iter().map(|(u, d)| json!([u, d])).collect();
+        let seen: Vec<String> = visited.iter().cloned().collect();
+        let saved_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let data = json!({"queue": q, "seen": seen, "saved_at": saved_at});
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        if let Ok(s) = serde_json::to_string(&data) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+
+    /// Restore {queue, seen} from checkpoint. Returns (queue, seen) or (empty,
+    /// empty) when no checkpoint exists. ponytail: missing/corrupt = start fresh.
+    fn load_checkpoint(
+        &self,
+    ) -> (std::collections::VecDeque<(String, usize)>, std::collections::HashSet<String>) {
+        let mut queue = std::collections::VecDeque::new();
+        let mut seen = std::collections::HashSet::new();
+        let Some(path) = self.checkpoint_path() else { return (queue, seen) };
+        let Ok(raw) = std::fs::read_to_string(path) else { return (queue, seen) };
+        let Ok(data) = serde_json::from_str::<Value>(&raw) else { return (queue, seen) };
+        if let Some(q) = data.get("queue").and_then(|v| v.as_array()) {
+            for item in q {
+                if let (Some(u), Some(d)) = (item[0].as_str(), item[1].as_u64()) {
+                    queue.push_back((u.to_string(), d as usize));
+                }
+            }
+        }
+        if let Some(s) = data.get("seen").and_then(|v| v.as_array()) {
+            for u in s.iter().filter_map(|x| x.as_str()) {
+                seen.insert(u.to_string());
+            }
+        }
+        (queue, seen)
+    }
+
+    fn delete_checkpoint(&self) {
+        if let Some(path) = self.checkpoint_path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Accept a URL for crawling based on domain filter.
@@ -368,9 +511,20 @@ impl SpiderEngine {
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
         let mut results: Vec<SpiderResult> = Vec::new();
         let crawl_deadline = self.crawl_timeout_secs.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+        // AutoThrottle per-domain delays (learned during this crawl, not persisted).
+        let mut throttle: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-        queue.push_back((seed_url.to_string(), 0));
-        visited.insert(seed_url.to_string());
+        // Checkpoint/resume: restore {queue, seen} from a previous interrupted run.
+        if self.crawldir.is_some() {
+            let (q, s) = self.load_checkpoint();
+            queue = q;
+            visited = s;
+        }
+        if queue.is_empty() {
+            queue.push_back((seed_url.to_string(), 0));
+            visited.insert(seed_url.to_string());
+        }
+        let mut since_checkpoint = 0usize;
 
         while let Some((url, depth)) = self.pop(&mut queue) {
             if results.len() >= self.max_pages {
@@ -383,6 +537,18 @@ impl SpiderEngine {
             }
 
             let start = std::time::Instant::now();
+
+            // AutoThrottle: sleep the learned delay for this domain before
+            // fetching (floor = delay_ms; starts at autothrottle_start_delay_ms).
+            let domain = url.split('/').nth(2).unwrap_or("").to_string();
+            let pre_delay = if self.autothrottle {
+                throttle.get(&domain).copied().unwrap_or(self.autothrottle_start_delay_ms).max(self.delay_ms)
+            } else {
+                self.delay_ms
+            };
+            if pre_delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pre_delay)).await;
+            }
 
             // ponytail: discover_only uses the link-only fast path (no innerText,
             // no full-load fallback) — that's crawl4ai prefetch / "no navigation".
@@ -501,9 +667,35 @@ impl SpiderEngine {
                 }
             }
 
-            if self.delay_ms > 0 {
+            // AutoThrottle: feed the finished request back. Blocked = the page
+            // errored OR carried a challenge (non-2xx / gated) → double the delay.
+            if self.autothrottle {
+                let blocked = results.last().map(|r| r.page.error.is_some()).unwrap_or(false);
+                let _ = self.throttle_tick(
+                    &mut throttle,
+                    &domain,
+                    start.elapsed().as_millis() as u64,
+                    !blocked,
+                );
+            } else if self.delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
+
+            // Checkpoint: persist {queue, seen} every N pages so a long crawl
+            // survives interruption and resumes from here (Scrapling crawldir).
+            since_checkpoint += 1;
+            if self.crawldir.is_some() && since_checkpoint >= self.checkpoint_every {
+                since_checkpoint = 0;
+                self.save_checkpoint(&queue, &visited);
+            }
+        }
+
+        // Clean finish: only drop the checkpoint when the crawl genuinely
+        // completed (queue drained, no error page we can't recover). A break on
+        // max_pages/timeout/errors must KEEP the checkpoint so a resume continues.
+        let queue_drained = queue.is_empty() && results.iter().all(|r| r.page.error.is_none());
+        if self.crawldir.is_some() && queue_drained {
+            self.delete_checkpoint();
         }
 
         results

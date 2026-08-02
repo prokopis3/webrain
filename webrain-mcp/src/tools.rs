@@ -215,7 +215,11 @@ pub fn list_tools() -> Vec<Value> {
                     "deny": {"type": "array", "items": {"type": "string"}, "description": "Skip URLs matching ANY of these regexes (e.g. [\"/cart\", \"/login\"]) — Scrapling LinkExtractor deny"},
                     "retry": {"type": "integer", "description": "Re-fetch a failed page up to N extra times (200ms backoff). Default 0."},
                     "delay_ms": {"type": "integer", "description": "Polite delay between page fetches, ms. Default 0."},
-                    "crawl_timeout_secs": {"type": "integer", "description": "Hard wall-clock cap on the whole crawl, seconds. Default none."}
+                    "crawl_timeout_secs": {"type": "integer", "description": "Hard wall-clock cap on the whole crawl, seconds. Default none."},
+                    "autothrottle": {"type": "boolean", "description": "Adaptive per-domain delay tuned from observed latency (Scrapling AutoThrottle): speeds up on fast servers, doubles on a blocked/error page, capped. Default false."},
+                    "autothrottle_max_ms": {"type": "integer", "description": "Max adaptive delay in ms when autothrottle is on. Default 30000."},
+                    "crawldir": {"type": "string", "description": "Enable checkpoint/resume: persist crawl state every N pages to this dir; a later crawl with the same crawldir resumes from where it stopped. Deleted on clean finish."},
+                    "checkpoint_every": {"type": "integer", "description": "Save checkpoint every N pages when crawldir is set. Default 10."}
                 },
                 "required": ["seed_url"]
             }
@@ -702,6 +706,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let retry = args.get("retry").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
             let delay_ms = args.get("delay_ms").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
             let crawl_timeout = args.get("crawl_timeout_secs").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
+            let autothrottle = args.get("autothrottle").and_then(|v| v.as_bool()).unwrap_or(false);
+            let autothrottle_max = args.get("autothrottle_max_ms").and_then(|v| v.as_i64()).unwrap_or(30_000).max(0) as u64;
+            let crawldir = args.get("crawldir").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let checkpoint_every = args.get("checkpoint_every").and_then(|v| v.as_i64()).unwrap_or(10).max(1) as usize;
             let spider = SpiderEngine::new(depth, pages)
                 .with_strategy(strategy)
                 .with_same_domain(same_domain)
@@ -712,9 +720,21 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .with_filters(allow, deny)
                 .with_retry(retry)
                 .with_delay_ms(delay_ms)
-                .with_crawl_timeout(crawl_timeout);
+                .with_crawl_timeout(crawl_timeout)
+                .with_autothrottle(autothrottle, 200, autothrottle_max)
+                .with_checkpoint(crawldir, checkpoint_every);
+            let t0 = std::time::Instant::now();
             let results = spider.crawl(backend, seed).await;
-            json!({"status": "ok", "pages": results.len(), "results": results})
+            // ponytail: spider stats — consistent with the batch stats block; the
+            // LLM sees elapsed + ok/err at a glance for a long crawl.
+            let total_ms = t0.elapsed().as_millis() as u64;
+            let ok = results.iter().filter(|r| r.page.error.is_none()).count();
+            let errs = results.len() - ok;
+            let page_ms: u64 = results.iter().map(|r| r.page.duration_ms).sum();
+            json!({
+                "status": "ok", "pages": results.len(), "results": results,
+                "stats": {"elapsed_ms": total_ms, "pages_ok": ok, "pages_err": errs, "page_ms_total": page_ms}
+            })
         }
         "webrain_sitemap" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
