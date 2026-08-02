@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **core**: `webrain_type` index mismatch — the index now uses the SAME selector
+  as `ELEMENTS_JS`/`click` (`a, button, input, select, textarea, [role=button]`),
+  so snapshot/navigate indices map 1:1 to `type_text`. Before, `type_text`
+  enumerated only `input/textarea/select`, so on pages with a leading link/button
+  (e.g. the scrapingcourse CSRF login: `#logo-link` first), the index pointed at
+  the wrong field (typed into password instead of email). Guard also rejects
+  non-input targets.
+
 ### Added
 - **core**: `webrain_navigate`/`snapshot` now return a `links` field — deduped
   same-origin hrefs (≤200) via new `LINKS_JS`. One-call crawl/internal-link

@@ -199,6 +199,26 @@ work (fetch loops, waits), use `webrain_batch(op=interact, ...)`: its
 interaction runs in a session where `await` resolves. Sync JS on `webrain_eval`
 is fine.
 
+**`webrain_type` index = the SAME list as `navigate`/`snapshot` elements.**
+`type_text` now uses the identical selector as `ELEMENTS_JS`/`click`
+(`a, button, input, select, textarea, [role="button"]`), so the index you read
+from a snapshot maps 1:1 to `webrain_type`. Before the fix it enumerated only
+`input/textarea/select` — on a page whose first interactive element is a link
+(like scrapingcourse's CSRF login: `#logo-link` first), the index pointed at
+the wrong field. If a type lands in the wrong box, re-check the page's FIRST
+interactive element — it may be a logo link or button that shifts indices.
+Hidden inputs (e.g. CSRF tokens) also occupy an index.
+
+**Chrome sidecar solves managed-CF + login, but NOT embedded Turnstile
+widgets.** `scripts/stealth_solve.py` waits out title-based interstitials
+("Just a moment…"), then fills the login form. It works for `/login/cf-antibot`
+(full solve → dashboard) and plain/CSRF login. But a page that embeds a
+Turnstile *checkbox widget* (scrapingcourse `/login/cf-turnstile`) has a normal
+title from load, so the sidecar skips the wait and submits without a token →
+`Forbidden`. Solving that needs a real click on the widget's iframe checkbox
+(manual or a click-capable automation loop). `cf_clearance` from one challenge
+does not transfer to a differently-solved page.
+
 **`obscura::console` ERROR lines are page noise, not failures.** obscura logs
 every page `console.error(...)` at ERROR level under the `obscura::console`
 target. Its Web Worker shim (`globalThis.Worker` in bootstrap.js) runs page
