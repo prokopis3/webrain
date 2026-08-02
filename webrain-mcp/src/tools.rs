@@ -198,7 +198,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_spider",
-            "description": "Crawl a website starting from a seed URL using BFS, following links. Supports allow/deny URL regex filters, retry, polite delay, and a hard wall-clock timeout.",
+            "description": "Crawl a website starting from a seed URL using BFS, following links. Supports allow/deny URL regex filters, retry, polite delay, AutoThrottle (adaptive backoff when blocked), checkpoint/resume via crawldir (persist {queue,seen} every checkpoint_every pages; re-run with the same crawldir to continue), and a hard wall-clock timeout.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

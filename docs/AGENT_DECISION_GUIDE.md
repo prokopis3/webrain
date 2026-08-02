@@ -76,6 +76,34 @@ Regex → JSON-LD → (LLM last). If `webrain_extract_json` returns 0 items:
 2. Re-run `webrain_autoschema` + field probe (selectors may not match DOM).
 3. If page is a JS SPA that renders late → scroll/wait, then retry.
 
+## Checkpoints on `webrain_spider` — when and how
+
+`webrain_spider(crawldir="<dir>", checkpoint_every=N)` persists `{queue, seen}`
+to `<dir>/checkpoint.json` every N pages, and a later call with the SAME
+`crawldir` resumes from where it stopped. The checkpoint is deleted only on a
+clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
+
+**Use a checkpoint when:**
+- The crawl is big enough that it might not finish in one call — roughly
+  `max_pages × per-page-cost > your timeout budget`. On obscura a page is
+  ~8-13s, so `max_pages=30`+ is already a multi-minute crawl: set a
+  `crawldir`.
+- You're being polite/throttled (`autothrottle` + `delay_ms` slow it down) and
+  a hard `crawl_timeout_secs` will cut it off mid-way.
+- You want to iterate: run once to seed the queue, then re-run with a bigger
+  `max_pages` to continue — the second run resumes, it doesn't restart.
+
+**How (typical flow for a long crawl):**
+1. First call: `webrain_spider(seed_url, crawldir="output/site_crawl", max_pages=50, checkpoint_every=10, crawl_timeout_secs=<your call budget>, ...)`. Run it; if it returns all 50, done. If it stops early (timeout/cap), the checkpoint is left on disk.
+2. Continue: call `webrain_spider(seed_url, crawldir="output/site_crawl", max_pages=200, ...)` — same `crawldir` → resumes the queue, skips already-visited URLs. Repeat raising `max_pages` until the crawl reports a clean finish (checkpoint auto-deleted).
+3. Each response returns `stats: {elapsed_ms, pages_ok, pages_err, page_ms_total}` — use it to judge whether to continue (pages_ok growing, queue not drained) or stop.
+
+**Gotchas:**
+- Use the SAME `crawldir` string to resume; a different dir = a fresh crawl.
+- `max_pages` still caps each *call*, not the whole resume chain — raise it per call to go further.
+- The checkpoint does NOT store extracted items, only crawl state (queue + seen) — persist products separately via `output="..."` on a batch, or read each page as you go.
+- Autothrottle's learned delays are per-crawl (not checkpointed) — a resumed crawl starts throttling fresh.
+
 **HTML is the LAST resort — never default to it.** `webrain_snapshot`
 (text+elements), `webrain_clean` (stripped text), `webrain_eval` (sync JS),
 and `webrain_extract_json`/`table`/`regex` (structure) all return page content
