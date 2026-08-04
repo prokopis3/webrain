@@ -91,7 +91,7 @@ One command per OS — downloads the release binary and puts `webrain` on PATH, 
 
 ```powershell
 $dir = "$env:LOCALAPPDATA\Programs\webrain"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Invoke-WebRequest "https://github.com/prokopis3/webrain/releases/download/v0.1.0/webrain-windows.exe" -OutFile "$dir\webrain.exe"
+Invoke-WebRequest "https://github.com/prokopis3/webrain/releases/latest/download/webrain-windows.exe" -OutFile "$dir\webrain.exe"
 [Environment]::SetEnvironmentVariable("Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$dir", "User")
 # open a new terminal, then:
 webrain install          # Download Chrome for Testing (first time only)
@@ -101,7 +101,7 @@ webrain mcp --http 9223  # start the MCP server
 **Linux / macOS:**
 
 ```bash
-curl -L -o ~/.local/bin/webrain https://github.com/prokopis3/webrain/releases/download/v0.1.0/webrain-linux
+curl -L -o ~/.local/bin/webrain https://github.com/prokopis3/webrain/releases/latest/download/webrain-linux
 chmod +x ~/.local/bin/webrain
 webrain install          # Download Chrome for Testing (first time only)
 webrain mcp --http 9223  # start the MCP server
