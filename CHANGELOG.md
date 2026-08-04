@@ -18,6 +18,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-08-04
 
 ### Added
+- **workspace**: Cargo workspace (`resolver 3`, `edition 2024`, Rust 1.85) with
+  `webrain-core` / `webrain-mcp` / `webrain-cli`; MIT license; docs/
+  `ARCHITECTURE.md`; Keep-a-Changelog `CHANGELOG.md`; CI + release +
+  changelog-enforce workflows.
+- **core**: Rust CDP browser-automation agent. `webrain-core` defines one
+  `BrowserBackend` trait over CDP WebSocket (`CdpBackend`) that drives Chrome,
+  Edge, Lightpanda, or Obscura with the same code; `SessionPool` per-session
+  isolation; `STEALTH_JS` anti-bot injection; default-execution-context tracking.
+- **mcp**: `webrain-mcp` stdio JSON-RPC server owning the CDP connection, with a
+  25-tool dispatch table (`webrain_eval`, `webrain_navigate`, `webrain_click`,
+  `webrain_media`, `webrain_console`, …).
+- **cli**: `webrain-cli` single `webrain` binary, `match`-based subcommands
+  (no clap) mirroring the MCP tool surface.
+- **core**: page interaction — `navigate`, `evaluate` (arbitrary JS → JSON),
+  `click`/`type`/`press`/`scroll`, `snapshot`, `get_html`, `get_images`,
+  multi-tab (`open_tab`/`close_tab`), accessibility tree, overlay dismissal.
+- **core**: capture — single + full-page `screenshot` (`webrain_screenshot`),
+  PDF export, PixelRAG vision tiles (`webrain_pixel`), and a vision index with
+  cosine `VectorStore` + embed `Endpoint` (`webrain_vision_index` / `retrieve`).
+- **core**: extraction — `webrain_extract_json` (CSS-schema, zero-LLM),
+  `webrain_extract_regex` (built-in patterns + custom `{label, re}`), and
+  `webrain_eval` (JS → JSON).
+- **core**: spider/crawl — BFS `SpiderEngine` (`webrain_spider`) and web search
+  (`webrain_search`).
+- **core**: batch + download — `webrain_batch` (fetch/extract/screenshot),
+  `webrain_download` (streaming `Body::into_reader`, extension filter).
 - **cli**: `webrain doctor` — full install diagnosis: version, MCP server, CDP
   ports (9222/9224/9225), engine discovery (chrome/lightpanda/obscura),
   encrypted vault, Python stealth sidecar, and a `recommend` line. Exit 0 when a
@@ -81,86 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{total, ok, errors, ms_total}` — the LLM sees at a glance which URL was slow
   and the whole run's cost, instead of counting result rows.
 
-### Fixed
-- **core**: `with_crawl_timeout(0)` now means "no cap". Before, tools.rs passed
-  `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
-  stopped before the first page (returned 0 pages). One guard in the shared
-  builder fixed all callers.
-- **core**: `Network.setBlockedURLs` now adapts to the backend's param shape —
-  Chrome/obscura take `urls: [string]`, lightpanda takes
-  `urlPatterns: [{urlPattern, block}]` (custom; lightpanda src/cdp/domains/network.zig).
-  Tries standard first, retries with lightpanda's shape on `MissingField`, so
-  tracker/resource blocking works on both engines.
-- **core**: dropped the `exec_ctx` contextId tracking on `Runtime.evaluate`.
-  Lightpanda fires a SECOND `Runtime.executionContextCreated` marked
-  `isDefault=true` when a Turbo-style page re-renders into a new frame (FID-2),
-  and that context is empty — the reader cached it and every later eval hit a
-  blank page. Callers already wait for interactive/complete before extracting,
-  so the browser default context is live; no-contextId eval works on both
-  engines (verified live on obscura + lightpanda).
-- **core**: `webrain_batch` now detects single-target backends and falls back to
-  sequential single-tab reuse. Lightpanda `serve` holds ONE browser context and
-  its 2nd `Target.createTarget` errors `TargetAlreadyLoaded`
-  (src/cdp/domains/target.zig) — parallel tabs are impossible by design. A raw
-  CDP probe (`single_target_probe`) distinguishes it from obscura/Chrome
-  (multi-tab parallel), which keeps its parallel path untouched. Also handles
-  the "a target is already open from a prior navigate" case by reusing it.
-
-### Changed
-- **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +
-  AGENT_GUIDE rules + decision guide all instruct: never return raw HTML when
-  `webrain_snapshot`/`clean`/`eval`/`extract_json`/`table`/`regex` give page
-  text/structure cheaper. Only call `get_html` when the task explicitly asks
-  for HTML markup, and remind the user why.
-- **core**: pooled HTTP agent — `webrain_fetch_http`, `webrain_validate_urls`,
-  `webrain_download` now share ONE `ureq::Agent` (static `OnceLock`) instead of
-  building a fresh agent (new TCP+TLS handshake) per call. Keep-alive across
-  calls makes offset/pagination probing ~0.3-1s faster each.
-- **core**: `webrain_fetch_http` returns `content_type` + `bytes` and no longer
-  truncates JSON responses (HTML still capped at 3000 chars), so a single probe
-  can reveal a JSON `total`. Captures pagination headers (`x-total-count`,
-  `link`, `content-range`, `x-next-page`) into `headers` when the server sends
-  them — one-call count discovery instead of boundary-probing.
-- **core/mcp**: `webrain_batch(op=extract|interact)` no longer mirrors the parsed
-  `data` array into `text` as the same JSON string. Every extract batch previously
-  carried the products TWICE (response bytes + LLM output tokens ~2×). `data` is
-  the payload now; `text` stays empty for schema extract (interact keeps raw
-  innerText in `text` only when no schema is set). Halves batch extract payloads.
-- **core**: `apply_blocking` is a no-op for default `NavOpts` — the base
-  `BLOCKED_URLS` is already set once at tab attach, so per-navigation re-sending
-  the same 28 patterns was a redundant CDP round-trip per page.
-- **mcp**: `webrain_a11y` filter is forgiving — `role` is a substring match
-  (`button` finds `pushbutton`/`radiobutton`) and `filter` matches node name OR
-  value OR css_path, so Material/Google controls whose label lives in a
-  descendant are found. Description carries the ARIA role cheat-sheet
-  (combobox/option/tab/radio…).
-- **agent**: decision guides (`AGENTS.md` + `docs/AGENT_DECISION_GUIDE.md`)
-  codify the verified rules: Material/SPA interaction → real Chrome via
-  `cdp_urls` (never obscura/lightpanda — no layout/paint engine); lightpanda
-  `captureScreenshot` returns a fake placeholder PNG; extract from
-  container/card-level DOM, not bare `$` text nodes.
-- **core**: `launch_chrome`/`launch_lightpanda`/`launch_obscura` share one
-  `spawn_and_wait` helper (port-open bail + 20s CDP wait + kill-on-drop).
-
-### Removed
-- **core**: dead SHA-256 crawl disk cache (`cache_read`/`cache_write`) — zero
-  callers (ponytail-audit).
-- **core**: unused `PageResult.screenshot_b64` field and dead `lib.rs` re-exports
-  (`EmbedInput`, `VectorStore`).
-- **core**: unused in-process `obscura` git dependency + `obscura` feature —
-  replaced by the `webrain install --engine obscura` binary path.
-- **scripts**: one-off `scripts/merge_task2.ps1` data migration.
-
-### Fixed
-- **core**: `webrain_type` index mismatch — the index now uses the SAME selector
-  as `ELEMENTS_JS`/`click` (`a, button, input, select, textarea, [role=button]`),
-  so snapshot/navigate indices map 1:1 to `type_text`. Before, `type_text`
-  enumerated only `input/textarea/select`, so on pages with a leading link/button
-  (e.g. the scrapingcourse CSRF login: `#logo-link` first), the index pointed at
-  the wrong field (typed into password instead of email). Guard also rejects
-  non-input targets.
-
-### Added
 - **core**: `webrain_navigate`/`snapshot` now return a `links` field — deduped
   same-origin hrefs (≤200) via new `LINKS_JS`. One-call crawl/internal-link
   discovery (was: separate eval for hrefs).
@@ -241,8 +187,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-browser bypass as `webrain_fetch_http`). Uses `ureq` internally.
 - **clean**: `webrain_clean` — in-page JS text cleaning (strip nav/footer/social,
   word threshold). Zero-LLM, zero deps.
-- **cache**: SHA-256 disk cache (`cache_read`/`cache_write`) for crawl results.
-  Direct token-cost win — re-crawling same URL costs same prompt tokens.
 - **mcp**: `with_token_cost()` now uses **real BPE tokenization** via `tiktoken-rs`
   (cl100k_base vocab compiled in with `include_bytes!` — zero runtime download,
   zero infrastructure, matches OpenAI-style billing) instead of the chars/4
@@ -272,9 +216,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `navigate_session_opts`), exposed on `webrain_navigate` and `webrain_batch`.
 - **deploy**: multi-stage `Dockerfile` (rust:alpine builder → alpine + chromium
   runtime). `docker build -t webrain . && docker run -p 9223:9223 webrain`.
-- **cli**: `--doctor` diagnostics — probes MCP port (9223), CDP ports (9222,
-  9224), browser name/version, Python/stealth deps, cargo version. Exit 0 when
-  healthy, 2 when a browser or MCP is missing. Zero-config health check.
 - **mcp**: `webrain_fetch_http` now works WITHOUT a browser backend
   (special-cased in `handle_rpc` alongside `webrain_guide`). Pure `ureq` HTTP
   GET → `{status, url, text}`. 10-100× faster for static pages, zero memory.
@@ -389,33 +330,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--write-subs`, `--embed-thumbnail`, `--cookies`, `--proxy`, …). Single URL
   or batch (`urls[]`) on one tool.
 
-### Fixed
-- **core**: `solve_turnstile` used the ureq 2.x `.set()` API — renamed to
-  `.header()` for ureq 3 (unblocked the workspace build).
-
 ### Changed
-- **tools**: `webrain_download` is browsemind `download_many` — `urls[]` plus optional
-  `filter_extension` (`.mp4`, `.pdf`, `.js`, …) to narrow a batch to one file type;
-  returns a clear error when nothing matches. Batch extraction is
-  `webrain_batch` `op=extract`. Now a combined download surface: `engine` defaults
-  to `http` (streaming, backward-compatible) and switches to `ytdlp` for
-  video/audio; the standalone `webrain_ytdlp` tool was folded in (removed).
+- **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +
+  AGENT_GUIDE rules + decision guide all instruct: never return raw HTML when
+  `webrain_snapshot`/`clean`/`eval`/`extract_json`/`table`/`regex` give page
+  text/structure cheaper. Only call `get_html` when the task explicitly asks
+  for HTML markup, and remind the user why.
+- **core**: pooled HTTP agent — `webrain_fetch_http`, `webrain_validate_urls`,
+  `webrain_download` now share ONE `ureq::Agent` (static `OnceLock`) instead of
+  building a fresh agent (new TCP+TLS handshake) per call. Keep-alive across
+  calls makes offset/pagination probing ~0.3-1s faster each.
+- **core**: `webrain_fetch_http` returns `content_type` + `bytes` and no longer
+  truncates JSON responses (HTML still capped at 3000 chars), so a single probe
+  can reveal a JSON `total`. Captures pagination headers (`x-total-count`,
+  `link`, `content-range`, `x-next-page`) into `headers` when the server sends
+  them — one-call count discovery instead of boundary-probing.
+- **core/mcp**: `webrain_batch(op=extract|interact)` no longer mirrors the parsed
+  `data` array into `text` as the same JSON string. Every extract batch previously
+  carried the products TWICE (response bytes + LLM output tokens ~2×). `data` is
+  the payload now; `text` stays empty for schema extract (interact keeps raw
+  innerText in `text` only when no schema is set). Halves batch extract payloads.
+- **core**: `apply_blocking` is a no-op for default `NavOpts` — the base
+  `BLOCKED_URLS` is already set once at tab attach, so per-navigation re-sending
+  the same 28 patterns was a redundant CDP round-trip per page.
+- **mcp**: `webrain_a11y` filter is forgiving — `role` is a substring match
+  (`button` finds `pushbutton`/`radiobutton`) and `filter` matches node name OR
+  value OR css_path, so Material/Google controls whose label lives in a
+  descendant are found. Description carries the ARIA role cheat-sheet
+  (combobox/option/tab/radio…). Now emits `{role, name, value, css_path,
+  xpath}` for each node (single `DOM.getDocument` walk); interactive elements
+  are index-only; precise selectors come from the a11y tree.
+- **agent**: decision guides (`AGENTS.md` + `docs/AGENT_DECISION_GUIDE.md`)
+  codify the verified rules: Material/SPA interaction → real Chrome via
+  `cdp_urls` (never obscura/lightpanda — no layout/paint engine); lightpanda
+  `captureScreenshot` returns a fake placeholder PNG; extract from
+  container/card-level DOM, not bare `$` text nodes.
+- **core**: `launch_chrome`/`launch_lightpanda`/`launch_obscura` share one
+  `spawn_and_wait` helper (port-open bail + 20s CDP wait + kill-on-drop).
+- **tools**: `webrain_download` is browsemind `download_many` — `urls[]` plus
+  optional `filter_extension` (`.mp4`, `.pdf`, `.js`, …) to narrow a batch to
+  one file type; returns a clear error when nothing matches. Now a combined
+  download surface: `engine` defaults to `http` (streaming, backward-compatible)
+  and switches to `ytdlp` for video/audio; the standalone `webrain_ytdlp` tool
+  was folded in (removed).
 - **core**: `webrain_media` network capture now also flags downloadable
   docs/archives (`.pdf` `.zip` `.doc(x)` `.xls(x)` `.ppt(x)` `.csv` …) so
-  `download_many(urls=[...], filter_extension=...)` covers "download any file from
-  network captures".
+  `download_many(urls=[...], filter_extension=...)` covers "download any file
+  from network captures".
 - **core**: `download_files` now streams responses to file via
   `Body::into_reader()` instead of `read_to_vec()`. The default 10 MiB body cap
   silently failed on multi-hundred-MB video files; large mp4s now download
   correctly and without buffering the whole file in memory.
 - **core**: page-state responses made compact — `ELEMENTS_JS` capped at 60
-  elements and visible text at ~3 KB (`PAGE_TEXT_CAP`), cutting `webrain_navigate`
-  responses from ~40 KB to ~9 KB.
-- **core**: `webrain_a11y` now emits `{role, name, value, css_path, xpath}` for
-  each accessibility node (single `DOM.getDocument` walk). Interactive elements
-  are index-only; precise selectors come from the a11y tree.
+  elements and visible text at ~3 KB (`PAGE_TEXT_CAP`), cutting
+  `webrain_navigate` responses from ~40 KB to ~9 KB.
 
 ### Fixed
+- **core**: `with_crawl_timeout(0)` now means "no cap". Before, tools.rs passed
+  `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
+  stopped before the first page (returned 0 pages). One guard in the shared
+  builder fixed all callers.
+- **core**: `Network.setBlockedURLs` now adapts to the backend's param shape —
+  Chrome/obscura take `urls: [string]`, lightpanda takes
+  `urlPatterns: [{urlPattern, block}]` (custom; lightpanda src/cdp/domains/network.zig).
+  Tries standard first, retries with lightpanda's shape on `MissingField`, so
+  tracker/resource blocking works on both engines.
+- **core**: dropped the `exec_ctx` contextId tracking on `Runtime.evaluate`.
+  Lightpanda fires a SECOND `Runtime.executionContextCreated` marked
+  `isDefault=true` when a Turbo-style page re-renders into a new frame (FID-2),
+  and that context is empty — the reader cached it and every later eval hit a
+  blank page. Callers already wait for interactive/complete before extracting,
+  so the browser default context is live; no-contextId eval works on both
+  engines (verified live on obscura + lightpanda).
+- **core**: `webrain_batch` now detects single-target backends and falls back to
+  sequential single-tab reuse. Lightpanda `serve` holds ONE browser context and
+  its 2nd `Target.createTarget` errors `TargetAlreadyLoaded`
+  (src/cdp/domains/target.zig) — parallel tabs are impossible by design. A raw
+  CDP probe (`single_target_probe`) distinguishes it from obscura/Chrome
+  (multi-tab parallel), which keeps its parallel path untouched. Also handles
+  the "a target is already open from a prior navigate" case by reusing it.
+- **core**: `webrain_type` index mismatch — the index now uses the SAME selector
+  as `ELEMENTS_JS`/`click` (`a, button, input, select, textarea, [role=button]`),
+  so snapshot/navigate indices map 1:1 to `type_text`. Before, `type_text`
+  enumerated only `input/textarea/select`, so on pages with a leading link/button
+  (e.g. the scrapingcourse CSRF login: `#logo-link` first), the index pointed at
+  the wrong field (typed into password instead of email). Guard also rejects
+  non-input targets.
 - **mcp**: `tools/call` responses were MCP-nonconforming — the raw tool payload
   (`{"status":...}`) was returned directly as `result`, so `result.content` was
   missing and clients threw "r.content is not iterable" on every tool call.
@@ -425,35 +425,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after `Page.navigate` (empty `document.body`, stub `performance`). The WS
   reader now tracks the default execution context from
   `Runtime.executionContextCreated` and passes `contextId` to evaluate.
+- **core**: `solve_turnstile` used the ureq 2.x `.set()` API — renamed to
+  `.header()` for ureq 3 (unblocked the workspace build).
 - **core**: regex `url` pattern unterminated-char-literal build error.
 - **core**: open-tab double-load (tab opened blank, then navigated once).
 
-## [0.1.0] - 2026-07-31
-
-### Added
-- **core**: Rust CDP browser-automation agent. `webrain-core` defines one
-  `BrowserBackend` trait over CDP WebSocket (`CdpBackend`) that drives Chrome,
-  Edge, Lightpanda, or Obscura with the same code; `SessionPool` per-session
-  isolation; `STEALTH_JS` anti-bot injection; default-execution-context tracking.
-- **core**: page interaction — `navigate`, `evaluate` (arbitrary JS → JSON),
-  `click`/`type`/`press`/`scroll`, `snapshot`, `get_html`, `get_images`,
-  multi-tab (`open_tab`/`close_tab`), accessibility tree, overlay dismissal.
-- **core**: capture — single + full-page `screenshot` (`webrain_screenshot`),
-  PDF export, PixelRAG vision tiles (`webrain_pixel`), and a vision index with
-  cosine `VectorStore` + embed `Endpoint` (`webrain_vision_index` / `retrieve`).
-- **core**: extraction — `webrain_extract_json` (CSS-schema, zero-LLM),
-  `webrain_extract_regex` (built-in patterns + custom `{label, re}`), and
-  `webrain_eval` (JS → JSON).
-- **core**: spider/crawl — BFS `SpiderEngine` (`webrain_spider`) and web search
-  (`webrain_search`).
-- **core**: batch + download — `webrain_batch` (fetch/extract/screenshot),
-  `webrain_download` (streaming `Body::into_reader`, extension filter).
-- **mcp**: `webrain-mcp` stdio JSON-RPC server owning the CDP connection, with a
-  25-tool dispatch table (`webrain_eval`, `webrain_navigate`, `webrain_click`,
-  `webrain_media`, `webrain_console`, …).
-- **cli**: `webrain-cli` single `webrain` binary, `match`-based subcommands
-  (no clap) mirroring the MCP tool surface.
-- **workspace**: Cargo workspace (`resolver 3`, `edition 2024`, Rust 1.85) with
-  `webrain-core` / `webrain-mcp` / `webrain-cli`; MIT license; docs/
-  `ARCHITECTURE.md`; Keep-a-Changelog `CHANGELOG.md`; CI + release +
-  changelog-enforce workflows.
+### Removed
+- **core**: dead SHA-256 crawl disk cache (`cache_read`/`cache_write`) — zero
+  callers (ponytail-audit).
+- **core**: unused `PageResult.screenshot_b64` field and dead `lib.rs` re-exports
+  (`EmbedInput`, `VectorStore`).
+- **core**: unused in-process `obscura` git dependency + `obscura` feature —
+  replaced by the `webrain install --engine obscura` binary path.
+- **tools**: standalone `webrain_ytdlp` tool — folded into `webrain_download`
+  (`engine=ytdlp`).
+- **scripts**: one-off `scripts/merge_task2.ps1` data migration.
