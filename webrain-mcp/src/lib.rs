@@ -113,8 +113,21 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     });
                 }
                 let dir = arguments.get("dir").and_then(|v| v.as_str()).unwrap_or("downloads").to_string();
-                let results = webrain_core::engines::download_files(&urls, &dir);
-                let result = json!({"status": "ok", "count": results.len(), "results": results});
+                // ponytail: honor engine — ytdlp shells out to the installed binary.
+                // (This short-circuit used to ALWAYS force the HTTP path, silently
+                // ignoring engine:"ytdlp", so the advertised ytdlp engine was dead.)
+                // http keeps the no-browser streaming path.
+                let result = if arguments.get("engine").and_then(|v| v.as_str()) == Some("ytdlp") {
+                    let audio_only = arguments.get("audio_only").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let format = arguments.get("format").and_then(|v| v.as_str()).map(String::from);
+                    let extra: Vec<String> = arguments.get("args").and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    webrain_core::engines::download_ytdlp(&urls, &dir, audio_only, format.as_deref(), &extra)
+                } else {
+                    let results = webrain_core::engines::download_files(&urls, &dir);
+                    json!({"status": "ok", "count": results.len(), "results": results})
+                };
                 return json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {

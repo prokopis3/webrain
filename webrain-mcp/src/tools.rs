@@ -1088,42 +1088,14 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .unwrap_or("downloads")
                 .to_string();
             if args.get("engine").and_then(|v| v.as_str()).unwrap_or("http") == "ytdlp" {
-                // ponytail: shell out to the installed yt-dlp binary — no new Rust
-                // dep; `args` passthrough exposes every other yt-dlp flag.
-                std::fs::create_dir_all(&dir).ok();
-                let mut cmd = std::process::Command::new("yt-dlp");
-                cmd.arg("-o").arg(format!("{dir}/%(title)s.%(ext)s"));
-                if args.get("audio_only").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    cmd.arg("-x").arg("--audio-format").arg("mp3");
-                } else if let Some(f) = args
-                    .get("format")
-                    .and_then(|v| v.as_str())
-                    .filter(|f| !f.is_empty())
-                {
-                    cmd.arg("-f").arg(f);
-                } else {
-                    cmd.arg("-f").arg("bestvideo*+bestaudio/best");
-                }
-                if let Some(extra) = args.get("args").and_then(|v| v.as_array()) {
-                    for a in extra.iter().filter_map(|x| x.as_str()) {
-                        cmd.arg(a);
-                    }
-                }
-                cmd.args(&urls);
-                return match cmd.output() {
-                    Ok(o) => {
-                        let stdout = String::from_utf8_lossy(&o.stdout);
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        let cap = |s: &str| -> String { s.chars().take(2000).collect() };
-                        json!({
-                            "status": if o.status.success() { "ok" } else { "error" },
-                            "exit": o.status.code(),
-                            "dir": dir,
-                            "message": if o.status.success() { cap(&stdout) } else { cap(&stderr) },
-                        })
-                    }
-                    Err(e) => json!({"status": "error", "message": format!("failed to run yt-dlp: {e}")}),
-                };
+                // ponytail: single implementation lives in webrain_core::engines
+                // (same one the no-browser path in lib.rs uses) — no duplication.
+                let extra: Vec<String> = args.get("args").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let audio_only = args.get("audio_only").and_then(|v| v.as_bool()).unwrap_or(false);
+                let format = args.get("format").and_then(|v| v.as_str()).map(String::from);
+                return webrain_core::engines::download_ytdlp(&urls, &dir, audio_only, format.as_deref(), &extra);
             }
             // browsemind download_many: narrow to one file type (.mp4/.pdf/.js...).
             if let Some(ext) = args

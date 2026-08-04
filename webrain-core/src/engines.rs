@@ -989,8 +989,9 @@ pub async fn regex_extract(
 }
 
 /// One row of a batch result. Fields are reused per op:
-/// fetch → title/text; extract → data = parsed JSON array (text = same, as JSON
-/// string, for backward compat); screenshot → title = saved file path.
+/// fetch → title/text; extract → data = parsed JSON array (text empty — data
+/// carries the payload, don't duplicate it); interact → data (schema) or text
+/// (raw innerText); screenshot → title = saved file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BatchResult {
     pub url: String,
@@ -1164,7 +1165,11 @@ pub async fn batch_extract(
         async move {
             let v = b.eval_session(&sid, &js).await?;
             let data = v.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
-            Ok((String::new(), data.to_string(), Some(data)))
+            // ponytail: `data` already carries the parsed array — do NOT mirror it
+            // into `text` as the same JSON string. That duplicated every extract
+            // batch's payload ~2× (response bytes + LLM output tokens). text stays
+            // empty for extract; tools/AGENT_GUIDE already say "read data".
+            Ok((String::new(), String::new(), Some(data)))
         }
     }).await
 }
@@ -1205,8 +1210,14 @@ pub async fn batch_interact(
                 b.eval_session(&sid, &extract_js).await?
             };
             let data = raw.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok());
-            let text = data.clone().unwrap_or(raw);
-            Ok((String::new(), text.to_string(), data))
+            // ponytail: schema extract → `data` is the payload; don't duplicate it
+            // into text. No schema → text carries the raw innerText, data stays None.
+            let text = if data.is_some() {
+                String::new()
+            } else {
+                raw.as_str().unwrap_or("").to_string()
+            };
+            Ok((String::new(), text, data))
         }
     }).await
 }
@@ -1503,6 +1514,49 @@ pub fn validate_urls(urls: &[String]) -> Vec<Value> {
 /// ponytail: ureq stream-to-file via into_reader() (unlimited — read_to_vec caps
 /// at 10 MiB, which silently failed on antenna's multi-hundred-MB mp4s);
 /// cookie plumbing still pending — add when downloads need auth.
+/// yt-dlp download (video/audio/HLS/playlists/age-gated media). Shells out to
+/// the installed yt-dlp binary — no new Rust dep; `extra` passthrough exposes
+/// every yt-dlp flag (--write-subs, --embed-thumbnail, --cookies, --proxy...).
+/// ponytail: ONE implementation shared by the MCP no-browser path (lib.rs) and
+/// the tools.rs dispatch, so the advertised `engine: "ytdlp"` actually works
+/// instead of being silently ignored by the HTTP short-circuit.
+pub fn download_ytdlp(
+    urls: &[String],
+    dir: &str,
+    audio_only: bool,
+    format: Option<&str>,
+    extra: &[String],
+) -> Value {
+    std::fs::create_dir_all(dir).ok();
+    let mut cmd = std::process::Command::new("yt-dlp");
+    cmd.arg("-o").arg(format!("{dir}/%(title)s.%(ext)s"));
+    if audio_only {
+        cmd.arg("-x").arg("--audio-format").arg("mp3");
+    } else if let Some(f) = format.filter(|f| !f.is_empty()) {
+        cmd.arg("-f").arg(f);
+    } else {
+        cmd.arg("-f").arg("bestvideo*+bestaudio/best");
+    }
+    for a in extra {
+        cmd.arg(a);
+    }
+    cmd.args(urls);
+    match cmd.output() {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let cap = |s: &str| -> String { s.chars().take(2000).collect() };
+            json!({
+                "status": if o.status.success() { "ok" } else { "error" },
+                "exit": o.status.code(),
+                "dir": dir,
+                "message": if o.status.success() { cap(&stdout) } else { cap(&stderr) },
+            })
+        }
+        Err(e) => json!({"status": "error", "message": format!("failed to run yt-dlp: {e}")}),
+    }
+}
+
 pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
     std::fs::create_dir_all(dir).ok();
     let agent = browser_agent();
