@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **tools** `webrain_page_info` —
   just-in-time page context (viewport/page size, scroll position,
   pixels/pages above & below, position %) so the LLM knows when to scroll.
-- **tools** `--state`/`--restore`):
+- **tools** `--state`/`--restore`:
   `webrain_save_state` / `webrain_restore_state` — export/import a profile's
   auth state (cookies + localStorage) to `state.json` so logins follow you
   across machines.
