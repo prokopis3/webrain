@@ -22,13 +22,30 @@ const STEALTH_JS: &str = r#"
   };
   apply(Navigator.prototype, 'webdriver', false);
   apply(Navigator.prototype, 'languages', ['en-US', 'en']);
-  apply(Navigator.prototype, 'plugins', [1, 2, 3, 4, 5]);
+  // Real fake PluginArray built on the REAL prototype — Array.isArray stays false
+  // (a plain array here is the classic detectable leak).
+  try {
+    const proto = Object.getPrototypeOf(navigator.plugins);
+    const names = [['PDF Viewer', 'Portable Document Format'], ['Chrome PDF Viewer', ''], ['Chromium PDF Viewer', ''], ['Internal PDF Viewer', ''], ['Microsoft Edge PDF Viewer', '']];
+    const arr = Object.create(proto);
+    names.forEach(([n, d], i) => {
+      const p = Object.create(proto);
+      p.name = n; p.description = d; p.filename = n + '.dll'; p.length = 0;
+      arr[i] = p;
+    });
+    arr.length = names.length;
+    arr.item = (i) => arr[i] || null;
+    arr.namedItem = (n) => Array.from(arr).find((p) => p.name === n) || null;
+    apply(Navigator.prototype, 'plugins', arr);
+    apply(Navigator.prototype, 'mimeTypes', arr);
+  } catch (e) {}
   apply(Navigator.prototype, 'maxTouchPoints', 1);
   apply(Navigator.prototype, 'hardwareConcurrency', 8);
   apply(Navigator.prototype, 'deviceMemory', 8);
   apply(Navigator.prototype, 'platform', 'Win32');
   apply(Navigator.prototype, 'vendor', 'Google Inc.');
   apply(Navigator.prototype, 'oscpu', 'Windows NT 10.0; Win64; x64');
+  apply(Navigator.prototype, 'connection', { effectiveType: '4g', rtt: 100, downlink: 10, saveData: false });
   // WebGL vendor/renderer — hook getParameter once, self-destruct inside the IIFE.
   try {
     const gl = document.createElement('canvas').getContext('webgl');
@@ -69,7 +86,22 @@ const STEALTH_JS: &str = r#"
       for (let i = 0; i < buf.length; i++) buf[i] *= 1 + (_det(i, 25) - 12) / 1000;
     });
   } catch (e) {}
-  window.chrome = window.chrome || { runtime: {} };
+  // Full window.chrome stub (app/runtime/csi/loadTimes) — the `{runtime:{}}`
+  // one is detectable (chrome.app/csi/loadTimes missing).
+  try {
+    window.chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+      csi: () => {}, loadTimes: () => {},
+      runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} },
+    };
+  } catch (e) {}
+  // permissions.query: 'notifications' reflects Notification.permission.
+  try {
+    const q = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (p) => (p && p.name === 'notifications')
+      ? Promise.resolve({ state: Notification.permission, onchange: null })
+      : q(p);
+  } catch (e) {}
 })();
 "#;
 
@@ -139,7 +171,7 @@ pub const ELEMENTS_JS: &str = r#"
             return Array.from(elems).slice(0, 60).map((el, i) => ({
                 index: i,
                 tag: el.tagName.toLowerCase(),
-                text: (el.textContent || el.value || '').trim().substring(0, 80),
+                text: (el.type === 'password' ? '' : (el.textContent || el.value || '')).trim().substring(0, 80),
                 selector: el.id ? '#' + el.id : el.className ? '.' + el.className.split(' ')[0] : el.tagName.toLowerCase(),
                 visible: el.offsetParent !== null
             }));
@@ -464,6 +496,22 @@ impl CdpBackend {
             .to_string();
         self.send_cmd_with(Some(&sid), "Runtime.enable", json!({})).await?;
         self.send_cmd_with(Some(&sid), "Page.enable", json!({})).await?;
+        // Stealth at the CDP level: real Windows-Chrome UA + clear the automation
+        // flag (best-effort — lightpanda/older Chrome may not implement these).
+        let _ = self.send_cmd_with(Some(&sid), "Network.enable", json!({})).await;
+        let _ = self.send_cmd_with(
+            Some(&sid),
+            "Network.setUserAgentOverride",
+            json!({
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+                "acceptLanguage": "en-US,en;q=0.9",
+                "platform": "Win32",
+            }),
+        )
+        .await;
+        let _ = self
+            .send_cmd_with(Some(&sid), "Emulation.setAutomationOverride", json!({"enabled": true}))
+            .await;
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
         self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
@@ -628,15 +676,20 @@ impl CdpBackend {
     /// (Re)apply the network block list; adds resource-type patterns when
     /// `disable_resources` is on and the 3500-domain tracker list when `block_trackers`
     /// is on. Blocks before navigate so requests never start.
+    /// ponytail: the base BLOCKED_URLS is already set once at attach_and_init, so
+    /// with default opts this is a no-op — saves a redundant CDP round-trip per page.
     async fn apply_blocking(&self, sid: Option<&str>, opts: &NavOpts) -> anyhow::Result<()> {
-        let mut urls: Vec<&str> = BLOCKED_URLS.to_vec();
-        if opts.disable_resources {
-            urls.extend_from_slice(RESOURCE_PATTERNS);
+        if opts.disable_resources || opts.block_trackers {
+            let mut urls: Vec<&str> = BLOCKED_URLS.to_vec();
+            if opts.disable_resources {
+                urls.extend_from_slice(RESOURCE_PATTERNS);
+            }
+            if opts.block_trackers {
+                urls.extend_from_slice(tracker_domains());
+            }
+            self.set_blocked_urls(sid, &urls).await?;
         }
-        if opts.block_trackers {
-            urls.extend_from_slice(tracker_domains());
-        }
-        self.set_blocked_urls(sid, &urls).await
+        Ok(())
     }
 
     /// Post-navigate quality waits: network idle + wait_selector(state). Zero-LLM,
