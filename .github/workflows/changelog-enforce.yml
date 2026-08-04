@@ -31,9 +31,12 @@ jobs:
       - name: Check for CHANGELOG changes
         id: changelog_check
         run: |
-          # PR: diff against the base branch; push: last commit.
+          # PR: diff against the base branch; push: the exact pushed range
+          # (github.event.before), falling back to the last commit.
           if [ "${{ github.base_ref }}" != "" ]; then
             RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && [ "${{ github.event.before }}" != "" ]; then
+            RANGE="${{ github.event.before }}...HEAD"
           else
             RANGE="HEAD~1...HEAD"
           fi
@@ -43,6 +46,12 @@ jobs:
           # Check if Rust source files were changed (exclude docs, config)
           SOURCE_CHANGED=$(git diff --name-only $RANGE | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
           echo "source_changed=$SOURCE_CHANGED" >> $GITHUB_OUTPUT
+
+      - name: Fail if changelog missing
+        if: steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
+        run: |
+          echo "::error::Rust source changed but CHANGELOG.md was not updated. Add an entry under [Unreleased]. See https://keepachangelog.com for format."
+          exit 1
 
       - name: Comment if changelog missing
         if: github.event_name == 'pull_request' && steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
