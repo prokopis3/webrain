@@ -71,6 +71,46 @@ at `CDP_URL=http://127.0.0.1:9222` and re-navigate — the session is shared.
 
 **From-scratch discovery (schema + URLs unknown):** navigate → eval pagination hrefs → autoschema → eval field probe → batch → done(summary="Extracted N items across M pages").
 
+## Auth-gated pages: cross-browser cookie transfer (LLM MUST follow this)
+
+When a page needs a login / Turnstile / Cloudflare session (auth-gated data) and
+you want to batch it through **obscura** (fast, cheap) instead of keeping Chrome
+open: log in once in real Chrome, **export the session cookies, import them into
+the MCP session connection, then batch on that same connection.**
+
+Proven sequence (scrapingcourse Turnstile case):
+
+1. **Log in in real Chrome** — `webrain_launch(service, profile, login_url)` then
+   `webrain_login` (or CLI `webrain login`), or the human logs in on the headed
+   Chrome. Turnstile auto-solves in real Chrome (`cf-turnstile-response` token
+   appears; obscura CANNOT solve it — `token` stays 0).
+   Verify: navigate to the protected page → expect "Welcome/Logout", not the
+   login form.
+2. **Export cookies on the LIVE authenticated browser** — `webrain_cookies`
+   (MCP, session backend) or CLI `webrain cookies --port 9222 --out file.json`.
+   ⚠️ Session cookies (`scrapingcoursecom_session`, `PHPSESSID`, `laravel_session`,
+   etc.) **do NOT survive a Chrome restart** — if you restarted Chrome you MUST
+   re-login first. Export while Chrome is alive.
+3. **Point the MCP at the target browser** — restart `webrain.exe mcp --http 9223`
+   with `$env:CDP_URL="http://127.0.0.1:9224"` (obscura). Do NOT use the CLI
+   `setcookies` here: the CLI opens a fresh connection each run.
+4. **Import on the MCP session connection** — `webrain_setcookies(cookies=...)`
+   (same call as step 2's output). Readback should be 12 ≈ export count.
+5. **Batch WITHOUT `cdp_urls`** — `webrain_batch(op=..., urls, ...)` with no
+   `cdp_urls` uses the MCP's persistent session connection, so it shares the
+   imported cookies. ⚠️ obscura (stealth) isolates cookie jars **per CDP
+   connection**: any fresh connection (`cdp_urls`, CLI, separate tool call that
+   reconnects) starts with EMPTY cookies. Set + batch MUST share one connection.
+6. Write results to `output/` JSON.
+
+Gotchas learned the hard way:
+- `Network.getCookies` is deprecated on Chrome 151 and returns `[]` — the
+  backend now prefers `Storage.getCookies` (browser-level, all context cookies
+  incl. HttpOnly). If `webrain cookies` ever shows 0 on a logged-in browser,
+  it's a restart-killed session cookie, not the tool.
+- The auth cookie is often HttpOnly (invisible to `document.cookie`) — always
+  verify via `webrain_cookies`/`webrain navigate` text, not `eval(document.cookie)`.
+
 ## Failure modes
 - `stealth_solve.py` prints `challenge_cleared=False` → still gated; the challenge
   may be interactive Turnstile needing a human click or a solver service — tell

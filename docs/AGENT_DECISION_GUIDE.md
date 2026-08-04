@@ -10,9 +10,10 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 
 | Situation | Browser | Why |
 |---|---|---|
-| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need screenshots / pixel rendering | **Real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
-| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. Cannot do interactive challenges or screenshots. |
-| Lightweight / minimal footprint static-ish JS pages | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest. **Single-target CDP** — `webrain_batch` auto-falls back to sequential single-tab reuse (probe detects it). No screenshots/interactive challenges. |
+| **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns/comboboxes, segmented controls) | **real Chrome**, routed per-tab via `cdp_urls:["http://127.0.0.1:9222"]` | Material/Google widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda**: no layout engine → synthetic clicks don't open the controls. |
+| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **Real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
+| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. No paint engine → no screenshots (errors loudly) and no interactive Material. |
+| Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target CDP** — `webrain_batch` falls back to sequential single-tab reuse (probe detects it). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10-100× faster than a browser, zero memory. |
 
 > **lightpanda vs obscura batch note:** obscura opens N parallel tabs
@@ -22,6 +23,17 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 > same schema; just no intra-call parallelism. Pick obscura for large parallel
 > crawls, lightpanda for footprint/velocity per page (verified: ~2-4s/page on
 > mymarket.gr vs ~12s/page on obscura).
+
+### a11y (webrain_a11y)
+Google/Material widgets are often NOT `button`: dropdowns are `combobox`, menu
+items `option`, segmented controls `radio`/`tab`. `filter` matches name OR value
+OR css_path (case-insensitive); `role` is a substring match, so `role=button`
+also finds `pushbutton`/`radiobutton`. If `role=<x>` returns [], drop the role
+filter and `filter` on the visible label text instead. If the whole tree is
+empty, the page never rendered (check `webrain_navigate`'s challenge/consent
+field — e.g. obscura on Google Flights sat on the consent page, so a11y found
+nothing). Known upstream gap: obscura's AX role map has no `option` arm
+(`role="option"` → `generic`); don't rely on obscura for option roles.
 
 > Golden rule: don't guess the browser. `webrain_navigate` returns a
 > **`challenge`** field — read it, then pick the browser for the next hop.
@@ -201,7 +213,7 @@ STEP 6: extract (§3) → done
 |---|---|---|---|---|
 | obscura `--stealth` (lean build) | ❌ V8 crashes (`YS is not a function`) | ❌ no iframe, no token | ~ (best effort) | ❌ no paint engine |
 | real Chrome + `stealth_solve.py` (headed) | ✅ | ⚠️ needs solve service/click | ✅ | ✅ |
-| lightpanda | ❌ | ❌ | ~ | ❌ |
+| lightpanda | ❌ | ❌ | ~ | ❌ returns fake placeholder PNG (no paint) |
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
 
