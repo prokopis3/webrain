@@ -41,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
   stopped before the first page (returned 0 pages). One guard in the shared
   builder fixed all callers.
+- **core**: `Network.setBlockedURLs` now adapts to the backend's param shape —
+  Chrome/obscura take `urls: [string]`, lightpanda takes
+  `urlPatterns: [{urlPattern, block}]` (custom; lightpanda src/cdp/domains/network.zig).
+  Tries standard first, retries with lightpanda's shape on `MissingField`, so
+  tracker/resource blocking works on both engines.
+- **core**: dropped the `exec_ctx` contextId tracking on `Runtime.evaluate`.
+  Lightpanda fires a SECOND `Runtime.executionContextCreated` marked
+  `isDefault=true` when a Turbo-style page re-renders into a new frame (FID-2),
+  and that context is empty — the reader cached it and every later eval hit a
+  blank page. Callers already wait for interactive/complete before extracting,
+  so the browser default context is live; no-contextId eval works on both
+  engines (verified live on obscura + lightpanda).
+- **core**: `webrain_batch` now detects single-target backends and falls back to
+  sequential single-tab reuse. Lightpanda `serve` holds ONE browser context and
+  its 2nd `Target.createTarget` errors `TargetAlreadyLoaded`
+  (src/cdp/domains/target.zig) — parallel tabs are impossible by design. A raw
+  CDP probe (`single_target_probe`) distinguishes it from obscura/Chrome
+  (multi-tab parallel), which keeps its parallel path untouched. Also handles
+  the "a target is already open from a prior navigate" case by reusing it.
 
 ### Changed
 - **agent guidance**: `webrain_get_html` is now LAST RESORT. Tool description +

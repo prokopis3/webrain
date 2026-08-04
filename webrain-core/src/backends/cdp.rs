@@ -234,10 +234,6 @@ pub struct CdpBackend {
     /// D1 fingerprint cache: (element count, text hash) → last PageState.
     fp: Arc<Mutex<Option<(usize, usize)>>>,
     snap: Arc<Mutex<Option<PageState>>>,
-    /// Default execution-context id of the active document (from
-    /// Runtime.executionContextCreated). Runtime.evaluate without a contextId can
-    /// land in a stale pre-navigation context (empty body, stub performance).
-    exec_ctx: Arc<Mutex<Option<i64>>>,
     /// Network capture: while net_capture is set, requestWillBeSent URLs are
     /// buffered in net_urls (browsemind NetworkCapture pattern).
     net_capture: Arc<Mutex<bool>>,
@@ -291,7 +287,6 @@ impl CdpBackend {
             next_id: Arc::new(Mutex::new(0)),
             fp: Arc::new(Mutex::new(None)),
             snap: Arc::new(Mutex::new(None)),
-            exec_ctx: Arc::new(Mutex::new(None)),
             net_capture: Arc::new(Mutex::new(false)),
             net_urls: Arc::new(Mutex::new(Vec::new())),
         })
@@ -347,24 +342,12 @@ impl CdpBackend {
                         }
                         return Ok(v.get("result").cloned().unwrap_or(json!({})));
                     }
-                    // Event (no id). Track the default execution context for the
-                    // session we're driving so later Runtime.evaluate calls land in
-                    // the CURRENT document, not a stale pre-navigation one.
+                    // Event (no id). Network capture: while net_capture is set,
+                    // requestWillBeSent URLs are buffered (browsemind pattern).
                     let ev_session = v.get("sessionId").and_then(|s| s.as_str());
                     if ev_session == session {
                         if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                            if m == "Runtime.executionContextCreated" {
-                                let c = &v["params"]["context"];
-                                if c.get("auxData").and_then(|a| a.get("isDefault")).and_then(|d| d.as_bool()) == Some(true) {
-                                    if let Some(id) = c.get("id").and_then(|i| i.as_i64()) {
-                                        *self.exec_ctx.lock().await = Some(id);
-                                    }
-                                }
-                            } else if m == "Runtime.executionContextsCleared"
-                                || m == "Runtime.executionContextDestroyed"
-                            {
-                                *self.exec_ctx.lock().await = None;
-                            } else if m == "Network.requestWillBeSent" {
+                            if m == "Network.requestWillBeSent" {
                                 if *self.net_capture.lock().await {
                                     if let Some(u) = v.get("params").and_then(|p| p.get("request")).and_then(|r| r.get("url")).and_then(|u| u.as_str()) {
                                         self.net_urls.lock().await.push(u.to_string());
@@ -401,16 +384,19 @@ impl CdpBackend {
         *self.active.lock().await = id;
         *self.fp.lock().await = None;
         *self.snap.lock().await = None;
-        *self.exec_ctx.lock().await = None;
     }
 
     async fn eval_js(&self, expression: &str) -> anyhow::Result<Value> {
-        let mut params = json!({"expression": expression, "returnByValue": true, "awaitPromise": true});
-        if let Some(ctx) = *self.exec_ctx.lock().await {
-            params["contextId"] = json!(ctx);
-        }
+        // ponytail: NO contextId — same as eval_session. The exec_ctx tracking
+        // (for Chrome's stale pre-navigation context) misfires on lightpanda:
+        // a Turbo-style client re-render fires a SECOND isDefault context that
+        // is empty, poisoning every later eval. Callers wait for interactive/
+        // complete before extracting, so the browser default context is live.
         let result = self
-            .send_cmd("Runtime.evaluate", params)
+            .send_cmd(
+                "Runtime.evaluate",
+                json!({"expression": expression, "returnByValue": true, "awaitPromise": true}),
+            )
             .await?;
         Ok(result
             .get("result")
@@ -479,8 +465,8 @@ impl CdpBackend {
         self.send_cmd_with(Some(&sid), "Runtime.enable", json!({})).await?;
         self.send_cmd_with(Some(&sid), "Page.enable", json!({})).await?;
         // Block trackers/analytics/fingerprinting hosts before they load.
-        self.send_cmd_with(Some(&sid), "Network.setBlockedURLs", json!({ "urls": BLOCKED_URLS }))
-            .await?;
+        // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
+        self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
         // Stealth: mask automation markers before any page script runs.
         self.send_cmd_with(
             Some(&sid),
@@ -489,6 +475,54 @@ impl CdpBackend {
         )
         .await?;
         Ok(sid)
+    }
+
+    /// Id of the first registered tab, if any (single-target reuse).
+    pub async fn existing_tab(&self) -> Option<String> {
+        self.tabs.lock().await.keys().next().cloned()
+    }
+
+    /// Detect single-target mode (lightpanda serve) by probing
+    /// `Target.createTarget` directly — bypasses open_tab so it sees the raw
+    /// CDP behavior. lightpanda holds ONE browser context; its 2nd createTarget
+    /// errors `TargetAlreadyLoaded` (src/cdp/domains/target.zig). Scratch
+    /// targets are closed before returning so the caller starts clean.
+    pub async fn single_target_probe(&self) -> anyhow::Result<bool> {
+        let first = self
+            .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
+            .await;
+        let (tid, first_err) = match first {
+            Ok(r) => (r["targetId"].as_str().unwrap_or("").to_string(), None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        if let Some(e) = first_err {
+            // A target already exists (e.g. from a prior navigate) → single-target.
+            return Ok(e.to_string().contains("TargetAlreadyLoaded"));
+        }
+        match self
+            .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
+            .await
+        {
+            Ok(r2) => {
+                if let Some(t2) = r2["targetId"].as_str() {
+                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": t2})).await;
+                }
+                if !tid.is_empty() {
+                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid})).await;
+                }
+                Ok(false)
+            }
+            Err(e) => {
+                if !tid.is_empty() {
+                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid})).await;
+                }
+                if e.to_string().contains("TargetAlreadyLoaded") {
+                    Ok(true)
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Open a new blank tab, attach, and make it active. Returns the tab id.
@@ -565,6 +599,32 @@ impl CdpBackend {
         Ok(())
     }
 
+    /// Send Network.setBlockedURLs, adapting to backend shape: Chrome/obscura
+    /// take `urls: [string]`, lightpanda takes `urlPatterns: [{urlPattern, block}]`.
+    /// ponytail: try standard first, retry with lightpanda's shape on MissingField.
+    async fn set_blocked_urls(&self, sid: Option<&str>, urls: &[&str]) -> anyhow::Result<()> {
+        match self
+            .send_cmd_with(sid, "Network.setBlockedURLs", json!({ "urls": urls }))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("MissingField") => {
+                let patterns: Vec<Value> = urls
+                    .iter()
+                    .map(|u| json!({ "urlPattern": u, "block": true }))
+                    .collect();
+                self.send_cmd_with(
+                    sid,
+                    "Network.setBlockedURLs",
+                    json!({ "urlPatterns": patterns }),
+                )
+                .await
+                .map(|_| ())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// (Re)apply the network block list; adds resource-type patterns when
     /// `disable_resources` is on and the 3500-domain tracker list when `block_trackers`
     /// is on. Blocks before navigate so requests never start.
@@ -576,9 +636,7 @@ impl CdpBackend {
         if opts.block_trackers {
             urls.extend_from_slice(tracker_domains());
         }
-        self.send_cmd_with(sid, "Network.setBlockedURLs", json!({ "urls": urls }))
-            .await?;
-        Ok(())
+        self.set_blocked_urls(sid, &urls).await
     }
 
     /// Post-navigate quality waits: network idle + wait_selector(state). Zero-LLM,
@@ -655,8 +713,7 @@ impl CdpBackend {
         }
     }
 
-    /// Evaluate JS in a specific tab, scoped to its session's default context
-    /// (no global exec_ctx — safe for concurrent tabs).
+    /// Evaluate JS in a specific tab, scoped to its session (safe for concurrent tabs).
     pub async fn eval_session(&self, sid: &str, expr: &str) -> anyhow::Result<Value> {
         let result = self
             .send_cmd_with(
@@ -804,10 +861,6 @@ impl CdpBackend {
             .await?;
         self.send_cmd("Page.navigate", json!({"url": url}))
             .await?;
-
-        // ponytail: clear stale execution context so eval_js sends browser-level
-        // evaluate until the reader picks up the new Runtime.executionContextCreated.
-        *self.exec_ctx.lock().await = None;
 
         // Queen Reader wait: poll until DOMContentLoaded (interactive), fall back to
         // full load when the page is still sparse (<500 chars). Faster than a fixed
@@ -1097,7 +1150,6 @@ impl BrowserBackend for CdpBackend {
         *self.snap.lock().await = None;
         *self.fp.lock().await = None;
         self.send_cmd("Page.navigate", json!({"url": url})).await?;
-        *self.exec_ctx.lock().await = None;
         let start = std::time::Instant::now();
         loop {
             let rs: String = self

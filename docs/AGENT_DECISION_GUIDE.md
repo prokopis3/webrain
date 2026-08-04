@@ -11,9 +11,17 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 | Situation | Browser | Why |
 |---|---|---|
 | **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need screenshots / pixel rendering | **Real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
-| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Cannot do interactive challenges or screenshots. |
-| Lightweight / minimal footprint static-ish pages | **lightpanda** (if configured) | Fastest, lightest; no full browser. |
+| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. Cannot do interactive challenges or screenshots. |
+| Lightweight / minimal footprint static-ish JS pages | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest. **Single-target CDP** — `webrain_batch` auto-falls back to sequential single-tab reuse (probe detects it). No screenshots/interactive challenges. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10-100× faster than a browser, zero memory. |
+
+> **lightpanda vs obscura batch note:** obscura opens N parallel tabs
+> (concurrency = real overlap). lightpanda `serve` holds ONE browser context —
+> its 2nd `Target.createTarget` errors `TargetAlreadyLoaded` — so `webrain_batch`
+> detects it and runs all URLs sequentially on one reused tab. Same tool call,
+> same schema; just no intra-call parallelism. Pick obscura for large parallel
+> crawls, lightpanda for footprint/velocity per page (verified: ~2-4s/page on
+> mymarket.gr vs ~12s/page on obscura).
 
 > Golden rule: don't guess the browser. `webrain_navigate` returns a
 > **`challenge`** field — read it, then pick the browser for the next hop.

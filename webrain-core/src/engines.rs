@@ -1022,12 +1022,47 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
     }
 }
 
-/// Shared batch skeleton: N tabs load IN PARALLEL in the browser (crawl4ai
-/// MemoryAdaptiveDispatcher / arun_many max_session_permit). Each URL gets its
-/// own tab driven via per-session CDP routing; a tokio semaphore bounds in-flight
-/// tabs. `per_url(b, sid, url)` runs in the tab after navigate and returns
-/// `(title, text, data)` for the BatchResult. ponytail: one WS serializes the command
-/// layer, but page loads (the real cost) overlap — that's the whole win.
+/// Run one URL on a given (already-open) tab: navigate its session, run
+/// `per_url`, return the BatchResult with wall-clock ms. Shared by the parallel
+/// path (each URL's own tab) and the single-target sequential fallback (one
+/// tab reused for every URL — navigate_session re-navigates it each time).
+async fn run_on_tab<F, Fut>(
+    browser: &CdpBackend,
+    id: String,
+    url: String,
+    opts: crate::backends::cdp::NavOpts,
+    per_url: F,
+) -> BatchResult
+where
+    F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>> + Send + 'static,
+{
+    let t0 = std::time::Instant::now();
+    let res = async {
+        let sid = browser.tab_session(&id).await?;
+        browser.navigate_session_opts(&sid, &url, &opts).await?;
+        let (title, text, data) = per_url(browser.clone(), sid, url.clone()).await?;
+        Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None, ms: 0 })
+    }
+    .await;
+    let mut r = match res {
+        Ok(r) => r,
+        Err(e) => batch_err(&url, e),
+    };
+    r.ms = t0.elapsed().as_millis() as u64;
+    r
+}
+
+/// Shared batch skeleton. Multi-target browsers (obscura/Chrome) load N tabs IN
+/// PARALLEL (crawl4ai MemoryAdaptiveDispatcher / arun_many): each URL gets its
+/// own tab driven via per-session CDP routing; a tokio semaphore bounds
+/// in-flight tabs. lightpanda serve is SINGLE-target by design — its CDP holds
+/// one browser context and `Target.createTarget` errors `TargetAlreadyLoaded`
+/// once one exists (src/cdp/domains/target.zig) — so batch probes tab
+/// capability and falls back to running every URL SEQUENTIALLY on one reused
+/// tab (page loads serialize, but the whole crawl still works).
+/// ponytail: one WS serializes the command layer; parallel page loads overlap
+/// on multi-target engines, single-target just accepts the serialization.
 async fn batch_map<F, Fut>(
     browser: &CdpBackend,
     urls: &[String],
@@ -1039,6 +1074,32 @@ where
     F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
     Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>> + Send + 'static,
 {
+    // Capability probe (raw CDP — sees the real single-target behavior even
+    // when a target already exists): lightpanda errors TargetAlreadyLoaded on
+    // any 2nd createTarget → sequential reuse; obscura/Chrome → parallel.
+    let single = match browser.single_target_probe().await {
+        Ok(s) => s,
+        Err(e) => return vec![batch_err(&urls[0], e)],
+    };
+
+    if single {
+        // lightpanda: reuse one tab for every URL, strictly sequential. Prefer
+        // an already-registered tab (e.g. from a prior navigate), else open one.
+        let id = match browser.existing_tab().await {
+            Some(id) => id,
+            None => match browser.open_tab("about:blank").await {
+                Ok(id) => id,
+                Err(e) => return vec![batch_err(&urls[0], e)],
+            },
+        };
+        let mut out = Vec::with_capacity(urls.len());
+        for url in urls {
+            out.push(run_on_tab(browser, id.clone(), url.clone(), opts.clone(), per_url.clone()).await);
+        }
+        return out;
+    }
+
+    // Multi-target: original parallel path.
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::with_capacity(urls.len());
     for url in urls {
@@ -1052,22 +1113,14 @@ where
             let t0 = std::time::Instant::now();
             let res = async {
                 let id = b.open_tab(&url).await?;
-                let sid = b.tab_session(&id).await?;
-                b.navigate_session_opts(&sid, &url, &opts).await?;
-                let (title, text, data) = per_url(b.clone(), sid, url.clone()).await?;
+                let r = run_on_tab(&b, id.clone(), url.clone(), opts, per_url).await;
                 let _ = b.close_tab(&id).await;
-                let ms = t0.elapsed().as_millis() as u64;
-                Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None, ms })
+                Ok::<_, anyhow::Error>(r)
             }
             .await;
-            match res {
-                Ok(r) => r,
-                Err(e) => {
-                    let mut r = batch_err(&url, e);
-                    r.ms = t0.elapsed().as_millis() as u64;
-                    r
-                }
-            }
+            let mut r = res.unwrap_or_else(|e| batch_err(&url, e));
+            r.ms = t0.elapsed().as_millis() as u64;
+            r
         }));
     }
     let mut out = Vec::with_capacity(urls.len());
