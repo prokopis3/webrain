@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+_No unreleased changes yet._
+
+## [0.2.0] - 2026-08-05
+
+### Added
 - **cli**: `webrain upgrade` — updates to the latest release. Delegates to
   Homebrew/Scoop when installed through one (`brew upgrade webrain` /
   `scoop update webrain`), otherwise self-updates the running binary in place
@@ -16,10 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/install.ps1` (Windows) fetch the latest release binary per OS and
   put `webrain` on PATH:
   `curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash`.
+- **dist**: submitted to the official Scoop `extras` bucket (PR
+  ScoopInstaller/Extras#18455) and published a Homebrew tap
+  (`prokopis3/homebrew-webrain`; `brew tap prokopis3/webrain && brew install
+  webrain`).
 - **docs**: `CONTRIBUTING.md` (conventional commits + changelog-enforced PR
   policy), README badges (release/license/platforms/last-commit/stars),
-  Quick Start + Traditional Selectors + Commands + Updating sections, and a
-  Homebrew tap (`prokopis3/homebrew-webrain`, `brew install webrain`).
+  Quick Start + Traditional Selectors + Commands + Updating sections.
 
 ## [0.1.1] - 2026-08-04
 
