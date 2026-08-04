@@ -8,7 +8,9 @@
 pub mod backends;
 pub mod browser;
 pub mod engines;
+pub mod install;
 pub mod launch;
+pub mod login;
 pub mod vault;
 pub mod vision;
 

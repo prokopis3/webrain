@@ -54,7 +54,7 @@ struct Entry {
     enc: Enc,
 }
 
-fn vault_dir() -> std::path::PathBuf {
+pub fn vault_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("WEBRAIN_VAULT_DIR") {
         return std::path::PathBuf::from(d);
     }

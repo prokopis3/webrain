@@ -12,23 +12,99 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Chrome binary. Override with WEBRAIN_CHROME.
+/// Chrome binary. Override with WEBRAIN_CHROME. Auto-detects the platform's
+/// usual Chrome/Chromium/Edge install + PATH lookup (macOS/Linux).
 pub fn chrome_path() -> PathBuf {
-    std::env::var_os("WEBRAIN_CHROME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"))
+    if let Some(p) = std::env::var_os("WEBRAIN_CHROME") {
+        return PathBuf::from(p);
+    }
+    // agent-browser-style: Chrome downloaded by `webrain install` wins over
+    // system Chrome (fresh Chrome-for-Testing build, known version).
+    if let Some(p) = crate::install::find_cft_chrome() {
+        return p;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for cand in [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ] {
+            let p = PathBuf::from(cand);
+            if p.exists() {
+                return p;
+            }
+        }
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = PathBuf::from(local).join(r"Google\Chrome\Application\chrome.exe");
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for cand in [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ] {
+            let p = PathBuf::from(cand);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    for name in [
+        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+        "microsoft-edge", "msedge", "brave-browser",
+    ] {
+        if let Ok(p) = which(name) {
+            return p;
+        }
+    }
+    // Last resort — spawn fails with a clear "failed to spawn Chrome" error.
+    PathBuf::from("google-chrome")
 }
 
-/// Per-account profile root: `$WEBRAIN_PROFILES_DIR` or `%APPDATA%/webrain/profiles`.
+pub(crate) fn which(name: &str) -> std::io::Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no PATH"))?;
+    for dir in std::env::split_paths(&path) {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))
+}
+
+/// Per-account profile root (platform-idiomatic data dirs). Override with
+/// WEBRAIN_PROFILES_DIR.
 pub fn profiles_dir() -> PathBuf {
-    std::env::var_os("WEBRAIN_PROFILES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let base = std::env::var_os("APPDATA")
-                .or_else(|| std::env::var_os("HOME"))
-                .unwrap_or_else(|| ".".into());
-            PathBuf::from(base).join("webrain").join("profiles")
-        })
+    if let Some(p) = std::env::var_os("WEBRAIN_PROFILES_DIR") {
+        return PathBuf::from(p);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(app) = std::env::var("APPDATA") {
+            return PathBuf::from(app).join("webrain").join("profiles");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join("Library/Application Support/webrain/profiles");
+        }
+    }
+    if let Ok(x) = std::env::var("XDG_DATA_HOME") {
+        return PathBuf::from(x).join("webrain").join("profiles");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".local/share/webrain/profiles");
+    }
+    PathBuf::from("webrain/profiles")
 }
 
 /// A launched Chrome process; kills Chrome on drop (no orphans on normal exit).
@@ -47,6 +123,36 @@ impl Drop for Launched {
 
 fn port_open(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// Shared engine spawn: spawn `bin`, wait up to 20s for the CDP port, kill on
+/// drop. ponytail: one wait loop for Chrome/lightpanda/obscura.
+fn spawn_and_wait(
+    bin: &std::path::Path,
+    args: &[String],
+    port: u16,
+    cdp_url: String,
+    profile_dir: PathBuf,
+    name: &str,
+) -> anyhow::Result<Launched> {
+    let child = std::process::Command::new(bin)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("failed to spawn {name} at {}", bin.display()))?;
+    let launched = Launched {
+        port,
+        cdp_url,
+        profile_dir,
+        child,
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if port_open(port) {
+            return Ok(launched);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    anyhow::bail!("{name} did not open CDP on port {port} within 20s")
 }
 
 /// Spawn real Chrome (headed by default) with a persistent per-account profile
@@ -72,24 +178,76 @@ pub fn launch_chrome(service: &str, profile: &str, port: u16, headed: bool) -> a
     if !headed {
         args.push("--headless=new".to_string());
     }
-    let child = std::process::Command::new(chrome_path())
-        .args(&args)
-        .arg("about:blank")
-        .spawn()
-        .with_context(|| format!("failed to spawn Chrome at {}", chrome_path().display()))?;
-
-    let launched = Launched {
+    args.push("about:blank".to_string());
+    spawn_and_wait(
+        &chrome_path(),
+        &args,
         port,
-        cdp_url: format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
         profile_dir,
-        child,
-    };
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if port_open(port) {
-            return Ok(launched);
-        }
-        std::thread::sleep(Duration::from_millis(250));
+        "Chrome",
+    )
+}
+
+/// Spawn the lightpanda CDP server (agent-browser `--engine lightpanda`).
+/// `lightpanda serve` exposes raw CDP on the port; CdpBackend connects via
+/// ws:// (resolve_ws passes it through). Binary from install::find_lightpanda()
+/// (PATH, ~/.lightpanda, ~/.local/bin, or WEBRAIN_LIGHTPANDA).
+/// ponytail: reuse `Launched` (kills on drop); no profile dir for lightpanda.
+pub fn launch_lightpanda(port: u16) -> anyhow::Result<Launched> {
+    if port_open(port) {
+        anyhow::bail!("port {port} already has a CDP endpoint — another server is running there");
     }
-    anyhow::bail!("Chrome did not open CDP on port {port} within 20s")
+    let bin = crate::install::find_lightpanda().ok_or_else(|| {
+        anyhow::anyhow!(
+            "lightpanda not found — install the binary (see docs/AGENT_DECISION_GUIDE.md) or set WEBRAIN_LIGHTPANDA"
+        )
+    })?;
+    let args = vec![
+        "serve".to_string(),
+        "--host".to_string(),
+        "0.0.0.0".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--advertise-host".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+    spawn_and_wait(
+        &bin,
+        &args,
+        port,
+        format!("ws://127.0.0.1:{port}"),
+        PathBuf::new(),
+        "lightpanda",
+    )
+}
+
+/// Spawn the Obscura CDP server (agent-browser-style engine). Binary from
+/// install::find_obscura() (`webrain install --engine obscura`, PATH,
+/// WEBRAIN_OBSCURA). CDP endpoint mirrors Chrome's /devtools/browser path.
+/// ponytail: reuse `Launched`; no profile dir for obscura.
+pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
+    if port_open(port) {
+        anyhow::bail!("port {port} already has a CDP endpoint — another server is running there");
+    }
+    let bin = crate::install::find_obscura().ok_or_else(|| {
+        anyhow::anyhow!(
+            "obscura not found — run `webrain install --engine obscura` or set WEBRAIN_OBSCURA"
+        )
+    })?;
+    let args = vec![
+        "serve".to_string(),
+        "--host".to_string(),
+        "0.0.0.0".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ];
+    spawn_and_wait(
+        &bin,
+        &args,
+        port,
+        format!("ws://127.0.0.1:{port}/devtools/browser"),
+        PathBuf::new(),
+        "obscura",
+    )
 }
