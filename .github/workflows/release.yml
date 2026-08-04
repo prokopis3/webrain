@@ -80,17 +80,17 @@ jobs:
           else
             echo "No '## [${VER}]' entry — generating from [Unreleased]"
             python3 -c "
-import sys, pathlib, re
-ver, date = sys.argv[1], sys.argv[2]
-p = pathlib.Path('CHANGELOG.md')
-t = p.read_text(encoding='utf-8')
-m = re.search(r'^## \[Unreleased\](.*?)(?=^## \[|\Z)', t, re.M | re.S)
-if not m:
-    sys.exit('no [Unreleased] section in CHANGELOG.md')
-released = f'## [{ver}] - {date}' + m.group(1)
-out = '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + t[:m.start()] + released
-p.write_text(out, encoding='utf-8')
-" "$VER" "$(date +%F)"
+            import sys, pathlib, re
+            ver, date = sys.argv[1], sys.argv[2]
+            p = pathlib.Path('CHANGELOG.md')
+            t = p.read_text(encoding='utf-8')
+            m = re.search(r'^## \[Unreleased\](.*?)(?=^## \[|\Z)', t, re.M | re.S)
+            if not m:
+                sys.exit('no [Unreleased] section in CHANGELOG.md')
+            released = f'## [{ver}] - {date}' + m.group(1)
+            out = '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + t[:m.start()] + released
+            p.write_text(out, encoding='utf-8')
+            " "$VER" "$(date +%F)"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add CHANGELOG.md
