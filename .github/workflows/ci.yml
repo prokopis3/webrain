@@ -2,7 +2,7 @@
 # CI Pipeline
 # ============================================================================
 # Runs on every push and pull request to main.
-# Enforces code quality: linting, type checking, and tests.
+# Enforces code quality: formatting, clippy, and tests.
 # ============================================================================
 
 name: CI
@@ -15,63 +15,23 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: fmt + clippy + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.11"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install ruff mypy
+      - name: fmt
+        run: cargo fmt --all --check
 
-      - name: Ruff lint
-        run: |
-          ruff check lib/ --output-format=github
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
 
-      - name: Ruff format check
-        run: |
-          ruff format lib/ --check --diff
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v6
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -e .
-          pip install pytest pytest-asyncio pytest-cov
-
-      - name: Run unit tests
-        run: |
-          python -m pytest tests/ \
-            --cov=lib \
-            --cov-report=term-missing \
-            --cov-report=xml \
-            -v \
-            --tb=short \
-            -k "not live" \
-            -x
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v6
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+      - name: test
+        run: cargo test --workspace
