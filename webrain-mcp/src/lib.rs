@@ -19,11 +19,11 @@
 
 mod tools;
 
-use webrain_core::backends::cdp::CdpBackend;
-use webrain_core::browser::BrowserBackend;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
+use webrain_core::backends::cdp::CdpBackend;
+use webrain_core::browser::BrowserBackend;
 
 /// Compact error envelope for no-browser tool short-circuits.
 fn tool_error(id: Option<Value>, msg: &str) -> Value {
@@ -61,14 +61,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
         }
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or_default();
-            let tool_name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let arguments = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or(json!({}));
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
             // No-browser tools: serve without a CDP backend, so they work
             // on a fresh install before any browser is up (any-LLM portability).
@@ -113,7 +107,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 let urls: Vec<String> = arguments
                     .get("urls")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if urls.is_empty() {
                     return json!({
@@ -124,18 +122,40 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         }
                     });
                 }
-                let dir = arguments.get("dir").and_then(|v| v.as_str()).unwrap_or("downloads").to_string();
+                let dir = arguments
+                    .get("dir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("downloads")
+                    .to_string();
                 // ponytail: honor engine — ytdlp shells out to the installed binary.
                 // (This short-circuit used to ALWAYS force the HTTP path, silently
                 // ignoring engine:"ytdlp", so the advertised ytdlp engine was dead.)
                 // http keeps the no-browser streaming path.
                 let result = if arguments.get("engine").and_then(|v| v.as_str()) == Some("ytdlp") {
-                    let audio_only = arguments.get("audio_only").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let format = arguments.get("format").and_then(|v| v.as_str()).map(String::from);
-                    let extra: Vec<String> = arguments.get("args").and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    let audio_only = arguments
+                        .get("audio_only")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let format = arguments
+                        .get("format")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let extra: Vec<String> = arguments
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    webrain_core::engines::download_ytdlp(&urls, &dir, audio_only, format.as_deref(), &extra)
+                    webrain_core::engines::download_ytdlp(
+                        &urls,
+                        &dir,
+                        audio_only,
+                        format.as_deref(),
+                        &extra,
+                    )
                 } else {
                     let results = webrain_core::engines::download_files(&urls, &dir);
                     json!({"status": "ok", "count": results.len(), "results": results})
@@ -154,7 +174,10 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 if q.is_empty() {
                     return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"q required"}"#}],"isError":true}});
                 }
-                let engine = arguments.get("engine").and_then(|v| v.as_str()).unwrap_or("duckduckgo");
+                let engine = arguments
+                    .get("engine")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("duckduckgo");
                 let encoded = q.replace(' ', "+");
                 let url = match engine {
                     "bing" => format!("https://www.bing.com/search?q={encoded}"),
@@ -163,7 +186,9 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     _ => format!("https://html.duckduckgo.com/html/?q={encoded}"),
                 };
                 let result = match webrain_core::engines::http_fetch(&url) {
-                    Ok(v) => json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()}),
+                    Ok(v) => {
+                        json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()})
+                    }
                     Err(e) => json!({"status":"error","message":e.to_string()}),
                 };
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
@@ -174,16 +199,32 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 if path.is_empty() {
                     return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
                 }
-                #[cfg(feature = "pdfium")] {
-                let pages: Option<Vec<u32>> = arguments.get("pages").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect());
-                let dpi = arguments.get("dpi").and_then(|v| v.as_f64()).map(|f| f as f32);
-                let tile_size = arguments.get("tile_size").and_then(|v| v.as_u64()).map(|n| n as u32);
-                let result = match webrain_core::engines::pdf_render(path, pages.as_deref(), dpi, tile_size) {
-                    Ok(v) => json!({"status":"ok","result":v}),
-                    Err(e) => json!({"status":"error","message":e.to_string()}),
-                };
-                return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+                #[cfg(feature = "pdfium")]
+                {
+                    let pages: Option<Vec<u32>> =
+                        arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                                .collect()
+                        });
+                    let dpi = arguments
+                        .get("dpi")
+                        .and_then(|v| v.as_f64())
+                        .map(|f| f as f32);
+                    let tile_size = arguments
+                        .get("tile_size")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+                    let result = match webrain_core::engines::pdf_render(
+                        path,
+                        pages.as_deref(),
+                        dpi,
+                        tile_size,
+                    ) {
+                        Ok(v) => json!({"status":"ok","result":v}),
+                        Err(e) => json!({"status":"error","message":e.to_string()}),
+                    };
+                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
                 }
                 #[cfg(not(feature = "pdfium"))]
                 let result = json!({"status":"error","message":"pdf_render requires --features pdfium AND pdfium.dll/libpdfium.so in PATH. Download from https://github.com/bblanchon/pdfium-binaries. Rebuild: cargo build --features pdfium"});
@@ -196,8 +237,12 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 if path.is_empty() {
                     return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
                 }
-                let pages: Option<Vec<u32>> = arguments.get("pages").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect());
+                let pages: Option<Vec<u32>> =
+                    arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_u64().map(|n| n as u32))
+                            .collect()
+                    });
                 let result = match webrain_core::engines::pdf_images(path, pages.as_deref()) {
                     Ok(v) => json!({"status":"ok","result":v}),
                     Err(e) => json!({"status":"error","message":e.to_string()}),
@@ -205,18 +250,29 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
             }
             if tool_name == "webrain_pdf_extract" {
-                let results = if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array()) {
-                    let p: Vec<String> = paths.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                let results = if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array())
+                {
+                    let p: Vec<String> = paths
+                        .iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect();
                     // ponytail: PDF parsing is CPU-bound — run the parallel batch
                     // on the blocking pool so a huge batch never stalls a tokio worker.
-                    tokio::task::spawn_blocking(move || webrain_core::engines::pdf_extract_batch(&p))
-                        .await
-                        .unwrap_or_default()
+                    tokio::task::spawn_blocking(move || {
+                        webrain_core::engines::pdf_extract_batch(&p)
+                    })
+                    .await
+                    .unwrap_or_default()
                 } else if let Some(path) = arguments.get("path").and_then(|v| v.as_str()) {
                     let path = path.to_string();
                     tokio::task::spawn_blocking(move || {
-                        vec![webrain_core::engines::pdf_extract(&path).unwrap_or_else(|e| json!({"error": e.to_string()}))]
-                    }).await.unwrap_or_default()
+                        vec![
+                            webrain_core::engines::pdf_extract(&path)
+                                .unwrap_or_else(|e| json!({"error": e.to_string()})),
+                        ]
+                    })
+                    .await
+                    .unwrap_or_default()
                 } else {
                     return json!({
                         "jsonrpc": "2.0", "id": id,
@@ -238,7 +294,9 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // ponytail: vault listing needs no browser — serve without a CDP backend.
             if tool_name == "webrain_profiles" {
                 let result = match webrain_core::vault::list() {
-                    Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
+                    Ok(profiles) => {
+                        json!({"status": "ok", "count": profiles.len(), "profiles": profiles})
+                    }
                     Err(e) => json!({"status": "error", "message": e.to_string()}),
                 };
                 return json!({
@@ -253,16 +311,34 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // ponytail: launch/login manage their own Chrome + backend — serve
             // without the session backend (the launched Chrome lives in a registry).
             if tool_name == "webrain_launch" {
-                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
-                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                let service = arguments
+                    .get("service")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile = arguments
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if service.is_empty() || profile.is_empty() {
                     return tool_error(id, "service and profile required");
                 }
-                let url = arguments.get("url").and_then(|v| v.as_str())
-                    .unwrap_or("https://accounts.google.com").to_string();
-                let headless = arguments.get("headless").and_then(|v| v.as_bool()).unwrap_or(false);
-                let port: u16 = arguments.get("port").and_then(|v| v.as_u64()).map(|n| n as u16).unwrap_or(9222);
-                let result = match webrain_core::launch::launch_chrome(&service, &profile, port, !headless) {
+                let url = arguments
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://accounts.google.com")
+                    .to_string();
+                let headless = arguments
+                    .get("headless")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let port: u16 = arguments
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u16)
+                    .unwrap_or(9222);
+                let result = match webrain_core::launch::launch_chrome(
+                    &service, &profile, port, !headless,
+                ) {
                     Ok(l) => {
                         let cdp_url = l.cdp_url.clone();
                         let profile_dir = l.profile_dir.clone();
@@ -275,8 +351,12 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         }
                         .await;
                         match prime {
-                            Ok(_) => json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "opened": url}),
-                            Err(e) => json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "warning": format!("launched but attach failed: {e}")}),
+                            Ok(_) => {
+                                json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "opened": url})
+                            }
+                            Err(e) => {
+                                json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "warning": format!("launched but attach failed: {e}")})
+                            }
                         }
                     }
                     Err(e) => json!({"status": "error", "message": e.to_string()}),
@@ -290,13 +370,26 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 });
             }
             if tool_name == "webrain_login" {
-                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
-                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                let service = arguments
+                    .get("service")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile = arguments
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if service.is_empty() || profile.is_empty() {
                     return tool_error(id, "service and profile required");
                 }
-                let url = arguments.get("url").and_then(|v| v.as_str()).map(String::from);
-                let port: u16 = arguments.get("port").and_then(|v| v.as_u64()).map(|n| n as u16).unwrap_or(9222);
+                let url = arguments
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let port: u16 = arguments
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u16)
+                    .unwrap_or(9222);
                 // Creds: vault first (in-process decrypt), else env — never argv/logs.
                 let (user, pass, totp) = match webrain_core::vault::get(&service, &profile) {
                     Ok(c) => (c.username, c.password, c.totp),
@@ -307,15 +400,28 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     ),
                 };
                 if user.is_empty() || pass.is_empty() {
-                    return tool_error(id, "no credentials for this profile — run `webrain vault set <service> <profile>`");
+                    return tool_error(
+                        id,
+                        "no credentials for this profile — run `webrain vault set <service> <profile>`",
+                    );
                 }
                 let cdp = format!("http://127.0.0.1:{port}");
                 let result = match CdpBackend::connect_with_url(&cdp).await {
-                    Ok(b) => match webrain_core::login::run_login(&b, &user, &pass, totp.as_deref(), url.as_deref()).await {
+                    Ok(b) => match webrain_core::login::run_login(
+                        &b,
+                        &user,
+                        &pass,
+                        totp.as_deref(),
+                        url.as_deref(),
+                    )
+                    .await
+                    {
                         Ok(r) => json!({"status": "ok", "result": r}),
                         Err(e) => json!({"status": "error", "message": e.to_string()}),
                     },
-                    Err(e) => json!({"status": "error", "message": format!("cannot connect to {cdp}: {e}")}),
+                    Err(e) => {
+                        json!({"status": "error", "message": format!("cannot connect to {cdp}: {e}")})
+                    }
                 };
                 return json!({
                     "jsonrpc": "2.0", "id": id,
@@ -327,8 +433,14 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             }
 
             if tool_name == "webrain_close_launch" {
-                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
-                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                let service = arguments
+                    .get("service")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile = arguments
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if service.is_empty() || profile.is_empty() {
                     return tool_error(id, "service and profile required");
                 }
@@ -456,7 +568,10 @@ struct SessionMeta {
 
 impl Default for SessionMeta {
     fn default() -> Self {
-        Self { backend: tokio::sync::Mutex::new(None), cdp_url: None }
+        Self {
+            backend: tokio::sync::Mutex::new(None),
+            cdp_url: None,
+        }
     }
 }
 
@@ -491,7 +606,10 @@ pub async fn run_http(addr: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) -> anyhow::Result<()> {
+async fn handle_http_conn(
+    socket: tokio::net::TcpStream,
+    state: Arc<HttpState>,
+) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut socket = socket;
     let mut buf = Vec::new();
@@ -529,9 +647,15 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
             let session_key = if is_initialize {
                 let id = format!(
                     "sess-{}",
-                    state.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    state
+                        .next_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 );
-                state.sessions.lock().await.insert(id.clone(), Arc::new(Default::default()));
+                state
+                    .sessions
+                    .lock()
+                    .await
+                    .insert(id.clone(), Arc::new(Default::default()));
                 id
             } else {
                 session_id.unwrap_or_else(|| "default".to_string())
@@ -553,13 +677,32 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
 
             let resp = match method {
                 "tools/call" => {
-                    let tool_name = msg.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or("");
-                    let args = msg.pointer("/params/arguments").cloned().unwrap_or(Value::Null);
+                    let tool_name = msg
+                        .pointer("/params/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let args = msg
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     match tool_name {
                         "webrain_open_session" => {
-                            let sid = args.get("session_id").and_then(|v| v.as_str()).map(String::from)
-                                .unwrap_or_else(|| format!("sess-{}", state.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-                            let cdp = args.get("cdp_url").and_then(|v| v.as_str()).map(String::from);
+                            let sid = args
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "sess-{}",
+                                        state
+                                            .next_id
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    )
+                                });
+                            let cdp = args
+                                .get("cdp_url")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
                             let meta = Arc::new(SessionMeta {
                                 backend: tokio::sync::Mutex::new(None),
                                 cdp_url: cdp.clone(),
@@ -570,7 +713,10 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
                             json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"created":!exists})).unwrap_or_default()}],"isError":false}})
                         }
                         "webrain_close_session" => {
-                            let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let sid = args
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             if sid.is_empty() || sid == "default" {
                                 json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"error":"cannot close default session"}"#}],"isError":true}})
                             } else {
@@ -580,7 +726,10 @@ async fn handle_http_conn(socket: tokio::net::TcpStream, state: Arc<HttpState>) 
                         }
                         "webrain_list_sessions" => {
                             let map = state.sessions.lock().await;
-                            let list: Vec<Value> = map.iter().map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url})).collect();
+                            let list: Vec<Value> = map
+                                .iter()
+                                .map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url}))
+                                .collect();
                             json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"sessions":list})).unwrap_or_default()}],"isError":false}})
                         }
                         _ => {

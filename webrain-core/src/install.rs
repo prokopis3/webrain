@@ -13,8 +13,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const CFG_JSON_URL: &str =
-    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
+const CFG_JSON_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
 /// Engine cache root. Override with WEBRAIN_BROWSERS_DIR.
 pub fn browsers_dir() -> PathBuf {
@@ -157,7 +156,10 @@ pub fn find_obscura() -> Option<PathBuf> {
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        for cand in [home.join(".obscura/obscura"), home.join(".local/bin/obscura")] {
+        for cand in [
+            home.join(".obscura/obscura"),
+            home.join(".local/bin/obscura"),
+        ] {
             if cand.exists() {
                 return Some(cand);
             }
@@ -211,7 +213,9 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
     let raw = String::from_utf8(download_bytes(OBSCURA_RELEASES_URL)?)
         .context("obscura releases JSON is not UTF-8")?;
     let rel: Value = serde_json::from_str(&raw).context("parse obscura releases JSON")?;
-    let tag = rel["tag_name"].as_str().context("no tag_name in obscura release")?;
+    let tag = rel["tag_name"]
+        .as_str()
+        .context("no tag_name in obscura release")?;
     let key = obscura_asset_key();
     let asset = rel["assets"]
         .as_array()
@@ -234,7 +238,9 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
 }
 
 fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let resp = ureq::get(url).call().with_context(|| format!("GET {url}"))?;
+    let resp = ureq::get(url)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
     // ureq 3: read methods live on Body (resp.into_body()), not Response.
     Ok(resp.into_body().read_to_vec()?)
 }
@@ -299,17 +305,27 @@ pub fn install_chrome(force: bool) -> Result<PathBuf> {
         .context("no Stable version in CfT JSON")?;
     let url = body["channels"]["Stable"]["downloads"]["chrome"]
         .as_array()
-        .and_then(|arr| arr.iter().find(|d| d["platform"].as_str() == Some(platform_key())))
+        .and_then(|arr| {
+            arr.iter()
+                .find(|d| d["platform"].as_str() == Some(platform_key()))
+        })
         .and_then(|d| d["url"].as_str())
         .context("no chrome download for this platform (cf. platform_key())")?;
 
-    println!("Downloading Chrome for Testing {version} ({})...", platform_key());
+    println!(
+        "Downloading Chrome for Testing {version} ({})...",
+        platform_key()
+    );
     println!("  {url}");
     let bytes = download_bytes(url)?;
     let dest = dir.join(format!("chrome-{version}"));
     extract_zip(&bytes, &dest)?;
-    find_named(&dest, &bin_name("chrome"), 4)
-        .with_context(|| format!("chrome binary not found after extract in {}", dest.display()))
+    find_named(&dest, &bin_name("chrome"), 4).with_context(|| {
+        format!(
+            "chrome binary not found after extract in {}",
+            dest.display()
+        )
+    })
 }
 
 #[cfg(test)]

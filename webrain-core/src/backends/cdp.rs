@@ -3,10 +3,10 @@
 //
 // ponytail: single connection, one page, synchronous CDP command/response per call.
 
-use crate::browser::{detect_antibot, BrowserBackend, InteractiveElement, PageState};
+use crate::browser::{BrowserBackend, InteractiveElement, PageState, detect_antibot};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -109,22 +109,42 @@ const STEALTH_JS: &str = r#"
 /// they load (obscura/camofox-browser pattern). CDP `Network.setBlockedURLs`
 /// wildcard patterns; blocking these never breaks page function, only tracking.
 const BLOCKED_URLS: &[&str] = &[
-    "*google-analytics.com*", "*googletagmanager.com*", "*googlesyndication.com*",
-    "*doubleclick.net*", "*facebook.net*", "*facebook.com/tr*", "*ads-twitter.com*",
-    "*hotjar.com*", "*newrelic.com*", "*mixpanel.com*", "*segment.io*",
-    "*amplitude.com*", "*intercomcdn.com*", "*scorecardresearch.com",
-    "*criteo.com*", "*taboola.com*", "*outbrain.com*", "*quantserve.com",
-    "*chartbeat.com*", "*fullstory.com*", "*mouseflow.com*", "*crazyegg.com*",
-    "*snap.licdn.com*", "*linkedin.com/analytics*", "*gtag/js*", "*/gtm.js*",
-    "*/analytics.js*", "*/ga.js*",
+    "*google-analytics.com*",
+    "*googletagmanager.com*",
+    "*googlesyndication.com*",
+    "*doubleclick.net*",
+    "*facebook.net*",
+    "*facebook.com/tr*",
+    "*ads-twitter.com*",
+    "*hotjar.com*",
+    "*newrelic.com*",
+    "*mixpanel.com*",
+    "*segment.io*",
+    "*amplitude.com*",
+    "*intercomcdn.com*",
+    "*scorecardresearch.com",
+    "*criteo.com*",
+    "*taboola.com*",
+    "*outbrain.com*",
+    "*quantserve.com",
+    "*chartbeat.com*",
+    "*fullstory.com*",
+    "*mouseflow.com*",
+    "*crazyegg.com*",
+    "*snap.licdn.com*",
+    "*linkedin.com/analytics*",
+    "*gtag/js*",
+    "*/gtm.js*",
+    "*/analytics.js*",
+    "*/ga.js*",
 ];
 
 /// Resource-type patterns added to the block list when `disable_resources` is on
 /// (Scrapling's font/image/media/stylesheet drop — speeds loads, saves tokens).
 const RESOURCE_PATTERNS: &[&str] = &[
-    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg", "*.ico",
-    "*.css", "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot", "*.mp4", "*.webm",
-    "*.mp3", "*.ogg", "*.wav", "*.m4a", "*.pdf",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg", "*.ico", "*.css", "*.woff",
+    "*.woff2", "*.ttf", "*.otf", "*.eot", "*.mp4", "*.webm", "*.mp3", "*.ogg", "*.wav", "*.m4a",
+    "*.pdf",
 ];
 
 /// 3500 tracker/ad domains ported from anudeepND/blacklist (see scripts/port_blocklist.ps1).
@@ -326,7 +346,11 @@ impl CdpBackend {
 
         let (write, read) = ws.split();
 
-        let inner = CdpConnection { write, read, cmd_id: 1 };
+        let inner = CdpConnection {
+            write,
+            read,
+            cmd_id: 1,
+        };
 
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -367,7 +391,10 @@ impl CdpBackend {
     /// page sessions, so prefer browser-level `Storage.getCookies` first and
     /// fall back to Network on the active page session.
     pub async fn cookies(&self) -> anyhow::Result<Vec<Value>> {
-        if let Ok(r) = self.send_cmd_with(None, "Storage.getCookies", json!({})).await {
+        if let Ok(r) = self
+            .send_cmd_with(None, "Storage.getCookies", json!({}))
+            .await
+        {
             let c = r["cookies"].as_array().cloned().unwrap_or_default();
             if !c.is_empty() {
                 return Ok(c);
@@ -385,7 +412,10 @@ impl CdpBackend {
             .iter()
             .map(|c| {
                 let mut o = serde_json::Map::new();
-                for k in ["name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite", "priority"] {
+                for k in [
+                    "name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite",
+                    "priority",
+                ] {
                     if let Some(v) = c.get(k) {
                         o.insert(k.to_string(), v.clone());
                     }
@@ -393,7 +423,8 @@ impl CdpBackend {
                 Value::Object(o)
             })
             .collect();
-        self.send_cmd("Network.setCookies", json!({ "cookies": clean })).await?;
+        self.send_cmd("Network.setCookies", json!({ "cookies": clean }))
+            .await?;
         Ok(())
     }
 
@@ -434,7 +465,12 @@ impl CdpBackend {
                         if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
                             if m == "Network.requestWillBeSent" {
                                 if *self.net_capture.lock().await {
-                                    if let Some(u) = v.get("params").and_then(|p| p.get("request")).and_then(|r| r.get("url")).and_then(|u| u.as_str()) {
+                                    if let Some(u) = v
+                                        .get("params")
+                                        .and_then(|p| p.get("request"))
+                                        .and_then(|r| r.get("url"))
+                                        .and_then(|u| u.as_str())
+                                    {
                                         self.net_urls.lock().await.push(u.to_string());
                                     }
                                 }
@@ -529,8 +565,15 @@ impl CdpBackend {
 
         let session_id = self.attach_and_init(&target_id).await?;
         let id = self.next_tab_id().await;
-        self.register_tab(id, Tab { target_id, session_id: Some(session_id), url })
-            .await;
+        self.register_tab(
+            id,
+            Tab {
+                target_id,
+                session_id: Some(session_id),
+                url,
+            },
+        )
+        .await;
         Ok(())
     }
 
@@ -547,11 +590,15 @@ impl CdpBackend {
             .as_str()
             .context("No sessionId from attachToTarget")?
             .to_string();
-        self.send_cmd_with(Some(&sid), "Runtime.enable", json!({})).await?;
-        self.send_cmd_with(Some(&sid), "Page.enable", json!({})).await?;
+        self.send_cmd_with(Some(&sid), "Runtime.enable", json!({}))
+            .await?;
+        self.send_cmd_with(Some(&sid), "Page.enable", json!({}))
+            .await?;
         // Stealth at the CDP level: real Windows-Chrome UA + clear the automation
         // flag (best-effort — lightpanda/older Chrome may not implement these).
-        let _ = self.send_cmd_with(Some(&sid), "Network.enable", json!({})).await;
+        let _ = self
+            .send_cmd_with(Some(&sid), "Network.enable", json!({}))
+            .await;
         let _ = self.send_cmd_with(
             Some(&sid),
             "Network.setUserAgentOverride",
@@ -563,7 +610,11 @@ impl CdpBackend {
         )
         .await;
         let _ = self
-            .send_cmd_with(Some(&sid), "Emulation.setAutomationOverride", json!({"enabled": true}))
+            .send_cmd_with(
+                Some(&sid),
+                "Emulation.setAutomationOverride",
+                json!({"enabled": true}),
+            )
             .await;
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
@@ -606,16 +657,22 @@ impl CdpBackend {
         {
             Ok(r2) => {
                 if let Some(t2) = r2["targetId"].as_str() {
-                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": t2})).await;
+                    let _ = self
+                        .send_cmd_with(None, "Target.closeTarget", json!({"targetId": t2}))
+                        .await;
                 }
                 if !tid.is_empty() {
-                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid})).await;
+                    let _ = self
+                        .send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid}))
+                        .await;
                 }
                 Ok(false)
             }
             Err(e) => {
                 if !tid.is_empty() {
-                    let _ = self.send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid})).await;
+                    let _ = self
+                        .send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid}))
+                        .await;
                 }
                 if e.to_string().contains("TargetAlreadyLoaded") {
                     Ok(true)
@@ -641,7 +698,11 @@ impl CdpBackend {
         let id = self.next_tab_id().await;
         self.register_tab(
             id.clone(),
-            Tab { target_id, session_id: Some(session_id), url: url.to_string() },
+            Tab {
+                target_id,
+                session_id: Some(session_id),
+                url: url.to_string(),
+            },
         )
         .await;
         Ok(id)
@@ -672,13 +733,19 @@ impl CdpBackend {
     /// Navigate a specific tab (session-scoped, not the global active) and wait
     /// for interactive/complete. Pages load in parallel in the browser across tabs.
     pub async fn navigate_session(&self, sid: &str, url: &str) -> anyhow::Result<()> {
-        self.navigate_session_opts(sid, url, &NavOpts::default()).await
+        self.navigate_session_opts(sid, url, &NavOpts::default())
+            .await
     }
 
     /// Same as `navigate_session` but honors `NavOpts` (resource blocking, network
     /// idle, wait_selector). Single shared root — batch and session tools both route
     /// through here so a wait fix covers every caller.
-    pub async fn navigate_session_opts(&self, sid: &str, url: &str, opts: &NavOpts) -> anyhow::Result<()> {
+    pub async fn navigate_session_opts(
+        &self,
+        sid: &str,
+        url: &str,
+        opts: &NavOpts,
+    ) -> anyhow::Result<()> {
         self.apply_blocking(Some(sid), opts).await?;
         self.send_cmd_with(Some(sid), "Page.navigate", json!({"url": url}))
             .await?;
@@ -894,11 +961,7 @@ impl CdpBackend {
     /// just captures the tail of the current page's traffic for `wait_ms`.
     /// ponytail: Network.requestWillBeSent buffered by the WS reader; pump with
     /// trivial evals since events are only read while a command is in flight.
-    pub async fn capture_media(
-        &self,
-        url: Option<&str>,
-        wait_ms: u64,
-    ) -> anyhow::Result<Value> {
+    pub async fn capture_media(&self, url: Option<&str>, wait_ms: u64) -> anyhow::Result<Value> {
         self.ensure_page_attached().await?;
         let sid = self.active_session().await;
         self.send_cmd_with(sid.as_deref(), "Network.enable", json!({}))
@@ -920,23 +983,29 @@ impl CdpBackend {
 
         let urls = self.net_urls.lock().await.clone();
         *self.net_capture.lock().await = false;
-        let _ = self.send_cmd_with(sid.as_deref(), "Network.disable", json!({})).await;
+        let _ = self
+            .send_cmd_with(sid.as_deref(), "Network.disable", json!({}))
+            .await;
 
         let ext = |u: &str| {
             let low = u.to_lowercase();
             // media + browsemind _DOWNLOAD_EXTENSIONS (docs/archives) so
             // webrain_media can feed download_many for "download any file".
-            [".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4a", ".mp3", ".wav",
-             ".pdf", ".zip", ".gz", ".tar", ".7z", ".rar", ".csv",
-             ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]
-                .iter()
-                .any(|e| low.contains(e))
+            [
+                ".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".m4a", ".mp3", ".wav", ".pdf", ".zip",
+                ".gz", ".tar", ".7z", ".rar", ".csv", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
+                ".pptx",
+            ]
+            .iter()
+            .any(|e| low.contains(e))
         };
         let hint = |u: &str| {
             let low = u.to_lowercase();
-            ["player", "video", "media", "manifest", "stream", "videos/", "/api/", ".json"]
-                .iter()
-                .any(|k| low.contains(k))
+            [
+                "player", "video", "media", "manifest", "stream", "videos/", "/api/", ".json",
+            ]
+            .iter()
+            .any(|k| low.contains(k))
         };
         let mut seen = std::collections::HashSet::new();
         let mut media: Vec<String> = Vec::new();
@@ -965,8 +1034,7 @@ impl CdpBackend {
 
         self.apply_blocking(self.active_session().await.as_deref(), opts)
             .await?;
-        self.send_cmd("Page.navigate", json!({"url": url}))
-            .await?;
+        self.send_cmd("Page.navigate", json!({"url": url})).await?;
 
         // Queen Reader wait: poll until DOMContentLoaded (interactive), fall back to
         // full load when the page is still sparse (<500 chars). Faster than a fixed
@@ -1042,7 +1110,8 @@ impl CdpBackend {
             serde_json::from_value(elements_val).unwrap_or_default();
 
         let challenge = detect_antibot(&title, &text);
-        let links: Vec<String> = serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
+        let links: Vec<String> =
+            serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
         Ok(PageState {
             url: url.to_string(),
             title,
@@ -1068,9 +1137,7 @@ impl BrowserBackend for CdpBackend {
                 json!({"format": "png", "fullPage": full_page}),
             )
             .await?;
-        let b64 = result["data"]
-            .as_str()
-            .context("No screenshot data")?;
+        let b64 = result["data"].as_str().context("No screenshot data")?;
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(b64)
@@ -1218,7 +1285,8 @@ impl BrowserBackend for CdpBackend {
         let elements: Vec<InteractiveElement> =
             serde_json::from_value(self.eval_js(ELEMENTS_JS).await?).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
-        let links: Vec<String> = serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
+        let links: Vec<String> =
+            serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
         let state = PageState {
             url,
             title,
@@ -1288,7 +1356,9 @@ impl BrowserBackend for CdpBackend {
     /// so extraction (get_html by selector / CSS-schema / regex) can target exactly.
     async fn a11y(&self) -> anyhow::Result<Value> {
         self.ensure_page_attached().await?;
-        let tree = self.send_cmd("Accessibility.getFullAXTree", json!({})).await?;
+        let tree = self
+            .send_cmd("Accessibility.getFullAXTree", json!({}))
+            .await?;
         let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
 
         // One DOM.getDocument walk maps backendNodeId -> (css_path, xpath).
@@ -1297,7 +1367,11 @@ impl BrowserBackend for CdpBackend {
             .send_cmd("DOM.getDocument", json!({"depth": -1, "pierce": true}))
             .await
         {
-            if let Some(children) = doc.get("root").and_then(|r| r.get("children")).and_then(|c| c.as_array()) {
+            if let Some(children) = doc
+                .get("root")
+                .and_then(|r| r.get("children"))
+                .and_then(|c| c.as_array())
+            {
                 build_dom_paths(children, "", "", &mut paths);
             }
         }
@@ -1392,7 +1466,10 @@ fn build_dom_paths(
 
 /// CSS-safe id: plain [A-Za-z0-9_-] as-is, otherwise an attribute selector.
 fn css_escape(id: &str) -> String {
-    if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         id.to_string()
     } else {
         format!("[id={id:?}]")

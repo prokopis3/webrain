@@ -4,7 +4,7 @@
 #   docker build -t webrain .
 #   docker run -p 9223:9223 webrain mcp --http 9223
 #
-# Multi-arch: docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/your-org/webrain .
+# Multi-arch: docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webrain .
 
 # ── Build stage ─────────────────────────────────────────────────
 FROM rust:alpine AS builder

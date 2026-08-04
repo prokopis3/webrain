@@ -8,7 +8,7 @@
 use crate::backends::cdp::CdpBackend;
 use crate::browser::BrowserBackend;
 use crate::vault;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn jstr(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
@@ -17,8 +17,18 @@ fn jstr(s: &str) -> String {
 /// Session-ish cookie names: presence of any after submit implies logged in
 /// (Instagram sessionid, Google SID, Facebook c_user, ...).
 pub const SESSION_COOKIES: &[&str] = &[
-    "sessionid", "session", "SID", "SSID", "APISID", "SAPISID", "c_user",
-    "datr", "dpr", "mid", "ig_did", "auth_token",
+    "sessionid",
+    "session",
+    "SID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "c_user",
+    "datr",
+    "dpr",
+    "mid",
+    "ig_did",
+    "auth_token",
 ];
 
 /// Fill the visible login form + submit. Returns `{ok, clicked, reason?}`.
@@ -42,7 +52,8 @@ pub fn login_js(user: &str, pass: &str) -> String {
   passEl.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
   return {ok:true, clicked:false};
 })()"#;
-    TPL.replace("USER", &jstr(user)).replace("PASS", &jstr(pass))
+    TPL.replace("USER", &jstr(user))
+        .replace("PASS", &jstr(pass))
 }
 
 /// True when a 2FA / approval / device-verification gate needs the human.
@@ -102,7 +113,9 @@ pub async fn run_login(
             // TOTP auto-fill if a seed is stored; the human still confirms submit.
             if let Some(seed) = totp {
                 if let Ok(code) = vault::totp_code(seed) {
-                    let _ = backend.evaluate(&vault::fill_js(otp_selector(), &code)).await;
+                    let _ = backend
+                        .evaluate(&vault::fill_js(otp_selector(), &code))
+                        .await;
                 }
             }
             return Ok(json!({

@@ -144,14 +144,12 @@ pub trait BrowserBackend: Send + Sync {
             .as_str()
             .unwrap_or("")
             .to_string();
-        let elements: Vec<InteractiveElement> = serde_json::from_value(
-            self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?,
-        )
-        .unwrap_or_default();
-        let links: Vec<String> = serde_json::from_value(
-            self.evaluate(crate::backends::cdp::LINKS_JS).await?,
-        )
-        .unwrap_or_default();
+        let elements: Vec<InteractiveElement> =
+            serde_json::from_value(self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?)
+                .unwrap_or_default();
+        let links: Vec<String> =
+            serde_json::from_value(self.evaluate(crate::backends::cdp::LINKS_JS).await?)
+                .unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
         Ok(PageState {
             url,
@@ -165,5 +163,3 @@ pub trait BrowserBackend: Send + Sync {
 
     fn backend_name(&self) -> &'static str;
 }
-
-

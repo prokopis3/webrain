@@ -24,7 +24,7 @@
 
 use crate::browser::BrowserBackend;
 use anyhow::Context;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// One input to the embedding API. Qwen3-VL-Embedding takes images as data URLs;
@@ -69,12 +69,12 @@ impl Endpoint {
         if let Some(key) = &self.api_key {
             req = req.header("Authorization", &format!("Bearer {key}"));
         }
-        let resp = req
-            .send_json(body)
-            .context("embedding request failed")?;
+        let resp = req.send_json(body).context("embedding request failed")?;
         let data: Value = serde_json::from_str(&resp.into_body().read_to_string()?)
             .context("embedding response was not JSON")?;
-        let arr = data["data"].as_array().context("no embeddings in response")?;
+        let arr = data["data"]
+            .as_array()
+            .context("no embeddings in response")?;
         let mut out = Vec::with_capacity(arr.len());
         for e in arr {
             let mut v = Vec::new();
@@ -173,7 +173,11 @@ impl VectorStore {
                 let id = v["id"].as_str().unwrap_or("").to_string();
                 let vec: Vec<f32> = v["vec"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_f64().map(|f| f as f32))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if !id.is_empty() && !vec.is_empty() {
                     self.map.insert(id, vec);
@@ -244,7 +248,10 @@ pub async fn index_current_page(
         .unwrap_or("")
         .to_string();
     let client = EmbeddingClient::from_env();
-    let inputs: Vec<EmbedInput> = tiles.iter().map(|t| EmbedInput::Image(t.png_b64.clone())).collect();
+    let inputs: Vec<EmbedInput> = tiles
+        .iter()
+        .map(|t| EmbedInput::Image(t.png_b64.clone()))
+        .collect();
     let vecs = client.embed(&inputs)?;
     let mut store = VectorStore::new(tag, "vision");
     store.load()?;

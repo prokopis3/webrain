@@ -1,6 +1,6 @@
 use crate::backends::cdp::CdpBackend;
 use crate::browser::{BrowserBackend, PageResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// PixelRAG-style tile capture: split the page into a grid of screenshot tiles
 /// so a vision model can read specific regions (tables/charts/layout survive).
@@ -33,7 +33,9 @@ impl TileEngine {
     /// ponytail: CDP clip per tile (no image decode); cap total tiles at max_tiles.
     pub async fn tile(&self, backend: &impl BrowserBackend) -> anyhow::Result<Vec<TileShot>> {
         let size: Value = backend
-            .evaluate("[document.documentElement.scrollWidth, document.documentElement.scrollHeight]")
+            .evaluate(
+                "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]",
+            )
             .await?;
         let page_w = size[0].as_f64().unwrap_or(1280.0).max(1.0);
         let page_h = size[1].as_f64().unwrap_or(800.0).max(1.0);
@@ -99,16 +101,20 @@ mod tests {
 
     // ponytail: one check for extended extract_js — nested, base_fields, list.
     #[test]
-    fn extract_js_nested_and_base_fields() {        let base_fields = vec![serde_json::json!({"name":"url","attribute":"href"})];
-        let fields = vec![serde_json::json!({
-            "name": "title", "selector": "h2", "type": "text"
-        }), serde_json::json!({
-            "name": "details", "selector": "div.details", "type": "nested",
-            "fields": [
-                {"name":"brand","selector":"span.brand","type":"text"},
-                {"name":"model","selector":"span.model","type":"text"}
-            ]
-        })];
+    fn extract_js_nested_and_base_fields() {
+        let base_fields = vec![serde_json::json!({"name":"url","attribute":"href"})];
+        let fields = vec![
+            serde_json::json!({
+                "name": "title", "selector": "h2", "type": "text"
+            }),
+            serde_json::json!({
+                "name": "details", "selector": "div.details", "type": "nested",
+                "fields": [
+                    {"name":"brand","selector":"span.brand","type":"text"},
+                    {"name":"model","selector":"span.model","type":"text"}
+                ]
+            }),
+        ];
         let js = super::build_extract_js("div.product", &base_fields, &fields);
         // base_fields: url from container href
         assert!(js.contains("\"url\": (el.getAttribute('href') ?? null)"));
@@ -127,11 +133,14 @@ mod tests {
     // ponytail: one check for adaptive extract — exact path + relocation fallback present.
     #[test]
     fn adaptive_js_has_exact_and_relocation_paths() {
-        let fields = vec![serde_json::json!({
-            "name": "title", "selector": "h2", "type": "text"
-        }), serde_json::json!({
-            "name": "price", "selector": "span.price", "type": "text"
-        })];
+        let fields = vec![
+            serde_json::json!({
+                "name": "title", "selector": "h2", "type": "text"
+            }),
+            serde_json::json!({
+                "name": "price", "selector": "span.price", "type": "text"
+            }),
+        ];
         let js = super::build_adaptive_extract_js("div.product", &[], &fields);
         // exact path first: querySelectorAll('div.product')
         assert!(js.contains("document.querySelectorAll('div.product')"));
@@ -167,9 +176,11 @@ mod tests {
         assert!(super::CHROME_UA.contains("Chrome/145."));
         assert!(super::SEC_CH_UA.contains("\"Google Chrome\";v=\"145\""));
         assert!(super::SEC_CH_UA.contains("Not)A;Brand\";v=\"24\"")); // GREASE brand
-        assert!(super::BROWSER_HEADERS
-            .iter()
-            .all(|(k, v)| !k.is_empty() && !v.is_empty()));
+        assert!(
+            super::BROWSER_HEADERS
+                .iter()
+                .all(|(k, v)| !k.is_empty() && !v.is_empty())
+        );
         assert!(super::SEC_CH_UA.contains("Chromium\";v=\"145\""));
     }
 
@@ -177,11 +188,13 @@ mod tests {
     // Sitemap parse is verified live — regex over simple XML, low risk.
     #[test]
     fn spider_filters_allow_deny() {
-        let s = super::SpiderEngine::new(2, 10)
-            .with_filters(vec!["/product/".to_string()], vec!["/cart".to_string(), "/login".to_string()]);
+        let s = super::SpiderEngine::new(2, 10).with_filters(
+            vec!["/product/".to_string()],
+            vec!["/cart".to_string(), "/login".to_string()],
+        );
         assert!(s.url_ok("https://site.com/product/1"));
-        assert!(!s.url_ok("https://site.com/about"));            // fails allow
-        assert!(!s.url_ok("https://site.com/product/cart"));     // fails deny
+        assert!(!s.url_ok("https://site.com/about")); // fails allow
+        assert!(!s.url_ok("https://site.com/product/cart")); // fails deny
         // empty allow = allow all; deny still prunes
         let s2 = super::SpiderEngine::new(2, 10).with_filters(vec![], vec!["/login".to_string()]);
         assert!(s2.url_ok("https://site.com/product/1"));
@@ -205,10 +218,18 @@ mod tests {
         // blocked: doubles each time, capped at max
         let d3 = s.throttle_tick(&mut d, "blocked.com", 5, false);
         let d4 = s.throttle_tick(&mut d, "blocked.com", 5, false);
-        assert!(d4 >= d3 * 2 || d4 >= 200, "block should double: {d3} -> {d4}");
+        assert!(
+            d4 >= d3 * 2 || d4 >= 200,
+            "block should double: {d3} -> {d4}"
+        );
         let mut dmax = std::collections::HashMap::new();
-        for _ in 0..10 { s.throttle_tick(&mut dmax, "capped.com", 1, false); }
-        assert!(*dmax.get("capped.com").unwrap() <= 5000, "never exceeds max");
+        for _ in 0..10 {
+            s.throttle_tick(&mut dmax, "capped.com", 1, false);
+        }
+        assert!(
+            *dmax.get("capped.com").unwrap() <= 5000,
+            "never exceeds max"
+        );
     }
 }
 
@@ -295,33 +316,63 @@ pub struct SpiderResult {
 
 impl SpiderEngine {
     pub fn new(max_depth: usize, max_pages: usize) -> Self {
-        Self { max_depth, max_pages, ..Default::default() }
+        Self {
+            max_depth,
+            max_pages,
+            ..Default::default()
+        }
     }
 
-    pub fn with_strategy(mut self, s: CrawlStrategy) -> Self { self.strategy = s; self }
-    pub fn with_same_domain(mut self, v: bool) -> Self { self.same_domain = v; self }
-    pub fn with_allowed_domains(mut self, d: Vec<String>) -> Self { self.allowed_domains = d; self }
-    pub fn with_discover_only(mut self, v: bool) -> Self { self.discover_only = v; self }
-    pub fn with_respect_robots(mut self, v: bool) -> Self { self.respect_robots = v; self }
-    pub fn with_keywords(mut self, k: Vec<String>) -> Self { self.keywords = k; self }
+    pub fn with_strategy(mut self, s: CrawlStrategy) -> Self {
+        self.strategy = s;
+        self
+    }
+    pub fn with_same_domain(mut self, v: bool) -> Self {
+        self.same_domain = v;
+        self
+    }
+    pub fn with_allowed_domains(mut self, d: Vec<String>) -> Self {
+        self.allowed_domains = d;
+        self
+    }
+    pub fn with_discover_only(mut self, v: bool) -> Self {
+        self.discover_only = v;
+        self
+    }
+    pub fn with_respect_robots(mut self, v: bool) -> Self {
+        self.respect_robots = v;
+        self
+    }
+    pub fn with_keywords(mut self, k: Vec<String>) -> Self {
+        self.keywords = k;
+        self
+    }
     /// Compile allow/deny regexes once. Invalid patterns are ignored (a bad deny
     /// regex must not silently let everything through — log it, skip the pattern).
     pub fn with_filters(mut self, allow: Vec<String>, deny: Vec<String>) -> Self {
         let compile = |pats: Vec<String>| -> Vec<regex::Regex> {
-            pats.iter().filter_map(|p| match regex::Regex::new(p) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    tracing::warn!("spider filter regex invalid '{p}': {e}");
-                    None
-                }
-            }).collect()
+            pats.iter()
+                .filter_map(|p| match regex::Regex::new(p) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        tracing::warn!("spider filter regex invalid '{p}': {e}");
+                        None
+                    }
+                })
+                .collect()
         };
         self.allow = compile(allow);
         self.deny = compile(deny);
         self
     }
-    pub fn with_retry(mut self, n: u32) -> Self { self.retry = n; self }
-    pub fn with_delay_ms(mut self, ms: u64) -> Self { self.delay_ms = ms; self }
+    pub fn with_retry(mut self, n: u32) -> Self {
+        self.retry = n;
+        self
+    }
+    pub fn with_delay_ms(mut self, ms: u64) -> Self {
+        self.delay_ms = ms;
+        self
+    }
     /// 0 = no cap (Some(0) would make the deadline `now` and kill the crawl
     /// before the first page — treat it as "not set" at the shared entry point).
     pub fn with_crawl_timeout(mut self, secs: u64) -> Self {
@@ -338,7 +389,11 @@ impl SpiderEngine {
     }
     /// Enable checkpoint/resume: persist crawl state every `every` pages to `dir`.
     pub fn with_checkpoint(mut self, dir: String, every: usize) -> Self {
-        self.crawldir = if dir.is_empty() { None } else { Some(std::path::PathBuf::from(dir)) };
+        self.crawldir = if dir.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(dir))
+        };
         self.checkpoint_every = every.max(1);
         self
     }
@@ -359,7 +414,9 @@ impl SpiderEngine {
             return self.delay_ms;
         }
         let floor = self.delay_ms;
-        let cur = *delays.get(domain).unwrap_or(&self.autothrottle_start_delay_ms);
+        let cur = *delays
+            .get(domain)
+            .unwrap_or(&self.autothrottle_start_delay_ms);
         let new_delay = if ok {
             // Latency-driven: move halfway toward the server's real response time.
             let target = latency_ms.max(floor);
@@ -370,7 +427,10 @@ impl SpiderEngine {
         } else {
             // Blocked/challenge: double (or wait longer if the site already
             // slowed us down). A block never speeds the crawl up.
-            cur.saturating_mul(2).max(cur).min(self.autothrottle_max_delay_ms).max(floor)
+            cur.saturating_mul(2)
+                .max(cur)
+                .min(self.autothrottle_max_delay_ms)
+                .max(floor)
         };
         delays.insert(domain.to_string(), new_delay);
         new_delay
@@ -397,7 +457,9 @@ impl SpiderEngine {
         queue: &std::collections::VecDeque<(String, usize)>,
         visited: &std::collections::HashSet<String>,
     ) {
-        let Some(path) = self.checkpoint_path() else { return };
+        let Some(path) = self.checkpoint_path() else {
+            return;
+        };
         let q: Vec<Value> = queue.iter().map(|(u, d)| json!([u, d])).collect();
         let seen: Vec<String> = visited.iter().cloned().collect();
         let saved_at = std::time::SystemTime::now()
@@ -415,12 +477,21 @@ impl SpiderEngine {
     /// empty) when no checkpoint exists. ponytail: missing/corrupt = start fresh.
     fn load_checkpoint(
         &self,
-    ) -> (std::collections::VecDeque<(String, usize)>, std::collections::HashSet<String>) {
+    ) -> (
+        std::collections::VecDeque<(String, usize)>,
+        std::collections::HashSet<String>,
+    ) {
         let mut queue = std::collections::VecDeque::new();
         let mut seen = std::collections::HashSet::new();
-        let Some(path) = self.checkpoint_path() else { return (queue, seen) };
-        let Ok(raw) = std::fs::read_to_string(path) else { return (queue, seen) };
-        let Ok(data) = serde_json::from_str::<Value>(&raw) else { return (queue, seen) };
+        let Some(path) = self.checkpoint_path() else {
+            return (queue, seen);
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return (queue, seen);
+        };
+        let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+            return (queue, seen);
+        };
         if let Some(q) = data.get("queue").and_then(|v| v.as_array()) {
             for item in q {
                 if let (Some(u), Some(d)) = (item[0].as_str(), item[1].as_u64()) {
@@ -454,16 +525,15 @@ impl SpiderEngine {
             return true; // relative URLs pass
         };
         if !self.allowed_domains.is_empty() {
-            return self.allowed_domains.iter().any(|d| host == d.as_str() || host.ends_with(&format!(".{d}")));
+            return self
+                .allowed_domains
+                .iter()
+                .any(|d| host == d.as_str() || host.ends_with(&format!(".{d}")));
         }
         host == seed_host || host.ends_with(&format!(".{seed_host}"))
     }
 
-    pub async fn crawl(
-        &self,
-        browser: &impl BrowserBackend,
-        seed_url: &str,
-    ) -> Vec<SpiderResult> {
+    pub async fn crawl(&self, browser: &impl BrowserBackend, seed_url: &str) -> Vec<SpiderResult> {
         use std::collections::{HashSet, VecDeque};
 
         let seed_host = url::Url::parse(seed_url)
@@ -510,7 +580,9 @@ impl SpiderEngine {
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
         let mut results: Vec<SpiderResult> = Vec::new();
-        let crawl_deadline = self.crawl_timeout_secs.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+        let crawl_deadline = self
+            .crawl_timeout_secs
+            .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
         // AutoThrottle per-domain delays (learned during this crawl, not persisted).
         let mut throttle: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
@@ -542,7 +614,11 @@ impl SpiderEngine {
             // fetching (floor = delay_ms; starts at autothrottle_start_delay_ms).
             let domain = url.split('/').nth(2).unwrap_or("").to_string();
             let pre_delay = if self.autothrottle {
-                throttle.get(&domain).copied().unwrap_or(self.autothrottle_start_delay_ms).max(self.delay_ms)
+                throttle
+                    .get(&domain)
+                    .copied()
+                    .unwrap_or(self.autothrottle_start_delay_ms)
+                    .max(self.delay_ms)
             } else {
                 self.delay_ms
             };
@@ -623,9 +699,7 @@ impl SpiderEngine {
                 // ponytail: SPA/VitePress render links after initial DOM — short settle.
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                 let links = match browser
-                    .evaluate(
-                        "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)",
-                    )
+                    .evaluate("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
                     .await
                 {
                     Ok(v) => {
@@ -666,7 +740,10 @@ impl SpiderEngine {
             // AutoThrottle: feed the finished request back. Blocked = the page
             // errored OR carried a challenge (non-2xx / gated) → double the delay.
             if self.autothrottle {
-                let blocked = results.last().map(|r| r.page.error.is_some()).unwrap_or(false);
+                let blocked = results
+                    .last()
+                    .map(|r| r.page.error.is_some())
+                    .unwrap_or(false);
                 let _ = self.throttle_tick(
                     &mut throttle,
                     &domain,
@@ -712,7 +789,12 @@ impl SpiderEngine {
     /// Enqueue a link. BestFirst keeps the frontier sorted by descending score
     /// (max at front via insertion); BFS/DFS append (front/back pop below).
     /// ponytail: O(n) insertion into a modest frontier, not a BinaryHeap.
-    fn push_link(&self, q: &mut std::collections::VecDeque<(String, usize)>, link: String, depth: usize) {
+    fn push_link(
+        &self,
+        q: &mut std::collections::VecDeque<(String, usize)>,
+        link: String,
+        depth: usize,
+    ) {
         match self.strategy {
             CrawlStrategy::BestFirst => {
                 let s = self.score(&link);
@@ -813,7 +895,11 @@ fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
                 )
             }
             "nested" => {
-                let nf = f.get("fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let nf = f
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut inner = String::new();
                 for (j, nff) in nf.iter().enumerate() {
                     let nj = js_name(&nff, j);
@@ -821,16 +907,27 @@ fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
                     let nt = nff.get("type").and_then(|v| v.as_str()).unwrap_or("text");
                     let na = nff.get("attr").and_then(|v| v.as_str()).unwrap_or("");
                     let nv = match nt {
-                        "attr" => format!("(c.querySelector('{}')?.getAttribute('{}')??null)", esc(ns), na.replace('\'', "\\'")),
+                        "attr" => format!(
+                            "(c.querySelector('{}')?.getAttribute('{}')??null)",
+                            esc(ns),
+                            na.replace('\'', "\\'")
+                        ),
                         "html" => format!("(c.querySelector('{}')?.innerHTML??null)", esc(ns)),
-                        _ => format!("(c.querySelector('{}')?.textContent?.trim()??null)", esc(ns)),
+                        _ => format!(
+                            "(c.querySelector('{}')?.textContent?.trim()??null)",
+                            esc(ns)
+                        ),
                     };
                     inner.push_str(&format!("{nj}: {nv}, "));
                 }
                 format!("(function(){{const c={tgt}; if(!c)return null; return {{ {inner} }};}})()")
             }
             "nested_list" => {
-                let nf = f.get("fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let nf = f
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut inner = String::new();
                 for (j, nff) in nf.iter().enumerate() {
                     let nj = js_name(&nff, j);
@@ -838,15 +935,23 @@ fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
                     let nt = nff.get("type").and_then(|v| v.as_str()).unwrap_or("text");
                     let na = nff.get("attr").and_then(|v| v.as_str()).unwrap_or("");
                     let nv = match nt {
-                        "attr" => format!("(c.querySelector('{}')?.getAttribute('{}')??null)", esc(ns), na.replace('\'', "\\'")),
+                        "attr" => format!(
+                            "(c.querySelector('{}')?.getAttribute('{}')??null)",
+                            esc(ns),
+                            na.replace('\'', "\\'")
+                        ),
                         "html" => format!("(c.querySelector('{}')?.innerHTML??null)", esc(ns)),
-                        _ => format!("(c.querySelector('{}')?.textContent?.trim()??null)", esc(ns)),
+                        _ => format!(
+                            "(c.querySelector('{}')?.textContent?.trim()??null)",
+                            esc(ns)
+                        ),
                     };
                     inner.push_str(&format!("{nj}: {nv}, "));
                 }
                 format!(
                     "Array.from(el.querySelectorAll('{}')).map(c=>({{ {} }}))",
-                    esc(sel), inner
+                    esc(sel),
+                    inner
                 )
             }
             "list" => format!(
@@ -873,7 +978,11 @@ pub fn build_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Va
 /// matches nothing (site redesigned/class renamed), relocate to elements that still contain >= 2 of
 /// the field selectors, keeping only the deepest (row-level) candidates.
 /// ponytail: zero-LLM structural re-anchoring in-page; opt-in via `adaptive: true` on extract_json.
-pub fn build_adaptive_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Value]) -> String {
+pub fn build_adaptive_extract_js(
+    base_selector: &str,
+    base_fields: &[Value],
+    fields: &[Value],
+) -> String {
     let field_js = build_field_js(base_fields, fields);
     let base = base_selector.replace('\'', "\\'");
     let sels: Vec<String> = fields
@@ -882,7 +991,11 @@ pub fn build_adaptive_extract_js(base_selector: &str, base_fields: &[Value], fie
         .filter(|s| !s.is_empty())
         .map(|s| s.replace('\'', "\\'"))
         .collect();
-    let sel_js = sels.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ");
+    let sel_js = sels
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         r#"(() => {{
   const FIELD_SELS = [{sel_js}];
@@ -913,19 +1026,37 @@ pub fn regex_patterns() -> Vec<(&'static str, &'static str)> {
     vec![
         ("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
         ("url", r#"https?://[^\s"'<>]+"#),
-        ("phone", r"(?:\+?\d{1,3}[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}"),
-        ("price", r"(?:[$£€]\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?\s?(?:USD|EUR|GBP))"),
-        ("date", r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b"),
+        (
+            "phone",
+            r"(?:\+?\d{1,3}[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}",
+        ),
+        (
+            "price",
+            r"(?:[$£€]\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?\s?(?:USD|EUR|GBP))",
+        ),
+        (
+            "date",
+            r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b",
+        ),
         ("time", r"\b\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?\b"),
         ("ip", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
-        ("uuid", r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),
-        ("currency", r"(?:[$£€]\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?\s?(?:USD|EUR|GBP))"),
+        (
+            "uuid",
+            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        ),
+        (
+            "currency",
+            r"(?:[$£€]\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?\s?(?:USD|EUR|GBP))",
+        ),
         ("percentage", r"\b\d+(?:\.\d+)?\s?%\b"),
         ("number", r"\b\d+(?:\.\d+)?\b"),
         ("date_iso", r"\b\d{4}-\d{2}-\d{2}\b"),
         ("date_us", r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"),
         ("time24h", r"\b[012]\d:[0-5]\d(?::[0-5]\d)?\b"),
-        ("ipv6", r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b::1\b"),
+        (
+            "ipv6",
+            r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b::1\b",
+        ),
         ("hex_color", r"#(?:[0-9a-fA-F]{3}){1,2}\b"),
         ("postal_us", r"\b\d{5}(?:-\d{4})?\b"),
         ("postal_uk", r"\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b"),
@@ -1032,14 +1163,23 @@ async fn run_on_tab<F, Fut>(
 ) -> BatchResult
 where
     F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
-    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>> + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>>
+        + Send
+        + 'static,
 {
     let t0 = std::time::Instant::now();
     let res = async {
         let sid = browser.tab_session(&id).await?;
         browser.navigate_session_opts(&sid, &url, &opts).await?;
         let (title, text, data) = per_url(browser.clone(), sid, url.clone()).await?;
-        Ok::<_, anyhow::Error>(BatchResult { url: url.clone(), title, text, data, error: None, ms: 0 })
+        Ok::<_, anyhow::Error>(BatchResult {
+            url: url.clone(),
+            title,
+            text,
+            data,
+            error: None,
+            ms: 0,
+        })
     }
     .await;
     let mut r = match res {
@@ -1069,7 +1209,9 @@ async fn batch_map<F, Fut>(
 ) -> Vec<BatchResult>
 where
     F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
-    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>> + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>>
+        + Send
+        + 'static,
 {
     // Capability probe (raw CDP — sees the real single-target behavior even
     // when a target already exists): lightpanda errors TargetAlreadyLoaded on
@@ -1091,7 +1233,16 @@ where
         };
         let mut out = Vec::with_capacity(urls.len());
         for url in urls {
-            out.push(run_on_tab(browser, id.clone(), url.clone(), opts.clone(), per_url.clone()).await);
+            out.push(
+                run_on_tab(
+                    browser,
+                    id.clone(),
+                    url.clone(),
+                    opts.clone(),
+                    per_url.clone(),
+                )
+                .await,
+            );
         }
         return out;
     }
@@ -1136,12 +1287,28 @@ pub async fn batch_fetch(
     concurrency: usize,
     opts: &crate::backends::cdp::NavOpts,
 ) -> Vec<BatchResult> {
-    batch_map(browser, urls, concurrency, opts, |b, sid, _url| async move {
-        let title = b.eval_session(&sid, "document.title").await?.as_str().unwrap_or("").to_string();
-        let text = b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
-            .as_str().unwrap_or("").to_string();
-        Ok((title, text.chars().take(3000).collect(), None))
-    }).await
+    batch_map(
+        browser,
+        urls,
+        concurrency,
+        opts,
+        |b, sid, _url| async move {
+            let title = b
+                .eval_session(&sid, "document.title")
+                .await?
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let text = b
+                .eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
+                .await?
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            Ok((title, text.chars().take(3000).collect(), None))
+        },
+    )
+    .await
 }
 
 /// Batch extraction: run a CSS/XPath schema over every URL concurrently
@@ -1160,14 +1327,18 @@ pub async fn batch_extract(
         let js = js.clone();
         async move {
             let v = b.eval_session(&sid, &js).await?;
-            let data = v.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
+            let data = v
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .unwrap_or(Value::Null);
             // ponytail: `data` already carries the parsed array — do NOT mirror it
             // into `text` as the same JSON string. That duplicated every extract
             // batch's payload ~2× (response bytes + LLM output tokens). text stays
             // empty for extract; tools/AGENT_GUIDE already say "read data".
             Ok((String::new(), String::new(), Some(data)))
         }
-    }).await
+    })
+    .await
 }
 
 /// Batch interaction: run an arbitrary async JS interaction (click "Load More"
@@ -1201,11 +1372,14 @@ pub async fn batch_interact(
             // Run the interaction; it does its own waits (load-more clicks etc).
             b.eval_session(&sid, &interaction).await?;
             let raw = if extract_js.is_empty() {
-                b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''").await?
+                b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
+                    .await?
             } else {
                 b.eval_session(&sid, &extract_js).await?
             };
-            let data = raw.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok());
+            let data = raw
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
             // ponytail: schema extract → `data` is the payload; don't duplicate it
             // into text. No schema → text carries the raw innerText, data stays None.
             let text = if data.is_some() {
@@ -1215,7 +1389,8 @@ pub async fn batch_interact(
             };
             Ok((String::new(), text, data))
         }
-    }).await
+    })
+    .await
 }
 
 /// Batch screenshots: save a full-page PNG per URL into `dir`, concurrently
@@ -1244,7 +1419,8 @@ pub async fn batch_screenshot(
             std::fs::write(&path, &png)?;
             Ok((path, format!("{} bytes", png.len()), None))
         }
-    }).await
+    })
+    .await
 }
 
 /// Chrome-identical HTTP layer for the no-browser fast path (obscura's
@@ -1256,13 +1432,17 @@ pub async fn batch_screenshot(
 /// HTTP-header/UA tells WAFs check first. Add BoringSSL only when a WAF
 /// starts failing past this layer.
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-const SEC_CH_UA: &str = "\"Google Chrome\";v=\"145\", \"Not)A;Brand\";v=\"24\", \"Chromium\";v=\"145\"";
+const SEC_CH_UA: &str =
+    "\"Google Chrome\";v=\"145\", \"Not)A;Brand\";v=\"24\", \"Chromium\";v=\"145\"";
 const BROWSER_HEADERS: &[(&str, &str)] = &[
     ("User-Agent", CHROME_UA),
     ("sec-ch-ua", SEC_CH_UA),
     ("sec-ch-ua-mobile", "?0"),
     ("sec-ch-ua-platform", "\"Windows\""),
-    ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+    (
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    ),
     ("Accept-Language", "en-US,en;q=0.9"),
     ("sec-fetch-site", "none"),
     ("sec-fetch-mode", "navigate"),
@@ -1325,7 +1505,11 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
     }
     let text = resp.into_body().read_to_string()?;
     let is_json = content_type.contains("json") || text.trim_start().starts_with(['{', '[']);
-    let out_text = if is_json { text } else { text.chars().take(3000).collect::<String>() };
+    let out_text = if is_json {
+        text
+    } else {
+        text.chars().take(3000).collect::<String>()
+    };
     let mut v = json!({
         "url": url,
         "status": status,
@@ -1425,7 +1609,8 @@ pub fn sitemap_urls(start_url: &str) -> anyhow::Result<Value> {
     urls.dedup();
     let mut v = json!({"urls": urls, "sources": sources, "count": urls.len()});
     if urls.is_empty() {
-        v["error"] = json!("no sitemap URLs found — site may not expose sitemap.xml/robots.txt Sitemap");
+        v["error"] =
+            json!("no sitemap URLs found — site may not expose sitemap.xml/robots.txt Sitemap");
     }
     Ok(v)
 }
@@ -1615,14 +1800,17 @@ pub fn build_clean_js(word_threshold: usize, exclude_social: bool) -> String {
 /// tables/bold-italic), per-page text with OCR-needs-flag, layout classification,
 /// and embedded images as base64 PNGs (DCTDecode JPEG + FlateDecode raw).
 pub fn pdf_extract(path: &str) -> anyhow::Result<Value> {
-    let result = pdf_inspector::process_pdf(path)
-        .map_err(|e| anyhow::anyhow!("pdf extract failed: {e}"))?;
+    let result =
+        pdf_inspector::process_pdf(path).map_err(|e| anyhow::anyhow!("pdf extract failed: {e}"))?;
 
     let pages_res = pdf_inspector::extract_pages_markdown(path, None)
         .map_err(|e| anyhow::anyhow!("pdf pages failed: {e}"))?;
     let mut texts = serde_json::Map::new();
     for p in &pages_res.pages {
-        texts.insert(p.page.to_string(), json!({"text": p.markdown, "needs_ocr": p.needs_ocr}));
+        texts.insert(
+            p.page.to_string(),
+            json!({"text": p.markdown, "needs_ocr": p.needs_ocr}),
+        );
     }
 
     // ponytail: extract images in the same pass. Errors are non-fatal — we
@@ -1651,9 +1839,14 @@ pub fn pdf_extract(path: &str) -> anyhow::Result<Value> {
 /// for more efficient vision-model processing. Without tiles, one full image
 /// per page. Requires `--features pdfium`.
 #[cfg(feature = "pdfium")]
-pub fn pdf_render(path: &str, pages: Option<&[u32]>, dpi: Option<f32>, tile_size: Option<u32>) -> anyhow::Result<Value> {
-    use pdfium_render::prelude::*;
+pub fn pdf_render(
+    path: &str,
+    pages: Option<&[u32]>,
+    dpi: Option<f32>,
+    tile_size: Option<u32>,
+) -> anyhow::Result<Value> {
     use image::GenericImageView;
+    use pdfium_render::prelude::*;
     let pdfium = Pdfium::default();
     let doc = pdfium.load_pdf_from_file(path, None)?;
     let scale = (dpi.unwrap_or(150.0) / 72.0) as f32;
@@ -1677,7 +1870,10 @@ pub fn pdf_render(path: &str, pages: Option<&[u32]>, dpi: Option<f32>, tile_size
                             let rh = ts.min(h - row);
                             let tile = image::imageops::crop_imm(&img, col, row, rw, rh).to_image();
                             let mut buf = Vec::new();
-                            tile.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)?;
+                            tile.write_to(
+                                &mut std::io::Cursor::new(&mut buf),
+                                image::ImageFormat::Png,
+                            )?;
                             use base64::Engine;
                             imgs.push(json!({"page": pn, "x": col, "y": row, "w": rw, "h": rh, "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
                         }
@@ -1730,7 +1926,10 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
         };
         // ponytail: direct Resources lookup — skip pages without /Resources
         // (inherited resources from parent nodes are rare in practice).
-        let resources = page_dict.get(b"Resources").ok().and_then(|r| r.as_dict().ok());
+        let resources = page_dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|r| r.as_dict().ok());
         if let Some(res) = resources {
             if let Some(xobj) = res.get(b"XObject").ok().and_then(|x| x.as_dict().ok()) {
                 let mut idx = 0u32;
@@ -1743,30 +1942,58 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                         Ok(lopdf::Object::Stream(s)) => (s.content.clone(), s.dict.clone()),
                         _ => continue,
                     };
-                    if dict_owned.get(b"Subtype").ok().and_then(|v| v.as_name().ok()).map(|n| n != b"Image").unwrap_or(true) {
+                    if dict_owned
+                        .get(b"Subtype")
+                        .ok()
+                        .and_then(|v| v.as_name().ok())
+                        .map(|n| n != b"Image")
+                        .unwrap_or(true)
+                    {
                         continue;
                     }
-                    let w = dict_owned.get(b"Width").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0) as u32;
-                    let h = dict_owned.get(b"Height").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0) as u32;
-                    if w == 0 || h == 0 { continue; }
-                    let filter = dict_owned.get(b"Filter").ok().and_then(|v| v.as_name().ok());
+                    let w = dict_owned
+                        .get(b"Width")
+                        .ok()
+                        .and_then(|v| v.as_i64().ok())
+                        .unwrap_or(0) as u32;
+                    let h = dict_owned
+                        .get(b"Height")
+                        .ok()
+                        .and_then(|v| v.as_i64().ok())
+                        .unwrap_or(0) as u32;
+                    if w == 0 || h == 0 {
+                        continue;
+                    }
+                    let filter = dict_owned
+                        .get(b"Filter")
+                        .ok()
+                        .and_then(|v| v.as_name().ok());
                     let data = &content;
 
                     let img: Option<image::DynamicImage> = match filter {
                         Some(b"DCTDecode") => image::load_from_memory(data).ok(),
                         Some(b"FlateDecode") => {
                             let mut dec = Vec::new();
-                            if ZlibDecoder::new(&data[..]).read_to_end(&mut dec).is_err() { continue; }
-                            let bpp = dict_owned.get(b"BitsPerComponent").ok().and_then(|v| v.as_i64().ok()).unwrap_or(8) as u8;
-                            if bpp != 8 { continue; }
-                            let cs = dict_owned.get(b"ColorSpace").ok().and_then(|v| v.as_name().ok());
+                            if ZlibDecoder::new(&data[..]).read_to_end(&mut dec).is_err() {
+                                continue;
+                            }
+                            let bpp = dict_owned
+                                .get(b"BitsPerComponent")
+                                .ok()
+                                .and_then(|v| v.as_i64().ok())
+                                .unwrap_or(8) as u8;
+                            if bpp != 8 {
+                                continue;
+                            }
+                            let cs = dict_owned
+                                .get(b"ColorSpace")
+                                .ok()
+                                .and_then(|v| v.as_name().ok());
                             match cs {
-                                Some(b"DeviceRGB") => {
-                                    image::RgbImage::from_raw(w, h, dec).map(image::DynamicImage::ImageRgb8)
-                                }
-                                _ => {
-                                    image::GrayImage::from_raw(w, h, dec).map(image::DynamicImage::ImageLuma8)
-                                }
+                                Some(b"DeviceRGB") => image::RgbImage::from_raw(w, h, dec)
+                                    .map(image::DynamicImage::ImageRgb8),
+                                _ => image::GrayImage::from_raw(w, h, dec)
+                                    .map(image::DynamicImage::ImageLuma8),
                             }
                         }
                         _ => None,
@@ -1775,7 +2002,10 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                     if let Some(img) = img {
                         let rgba = img.to_rgba8();
                         let mut buf = Vec::new();
-                        rgba.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)?;
+                        rgba.write_to(
+                            &mut std::io::Cursor::new(&mut buf),
+                            image::ImageFormat::Png,
+                        )?;
                         use base64::Engine;
                         out.push(json!({"page": pn, "index": idx, "width": w, "height": h,
                             "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
@@ -1793,7 +2023,9 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
 /// across cores — capped at `available_parallelism()` for massive batches.
 /// Returns one JSON object per file, input order preserved.
 pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
-    let n = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(4);
+    let n = std::thread::available_parallelism()
+        .map(|x| x.get())
+        .unwrap_or(4);
     let workers = n.min(paths.len()).max(1);
     // ponytail: fixed worker pool, one thread per chunk; per-file threads would
     // thrash on huge batches. Add a concurrency knob only if measured needs it.
@@ -1802,11 +2034,18 @@ pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
         for chunk in paths.chunks((paths.len() + workers - 1) / workers) {
             let chunk: Vec<String> = chunk.to_vec();
             handles.push(s.spawn(move || {
-                chunk.iter()
-                    .map(|p| pdf_extract(p).unwrap_or_else(|e| json!({"path": p, "error": e.to_string()})))
+                chunk
+                    .iter()
+                    .map(|p| {
+                        pdf_extract(p)
+                            .unwrap_or_else(|e| json!({"path": p, "error": e.to_string()}))
+                    })
                     .collect::<Vec<Value>>()
             }));
         }
-        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
     })
 }

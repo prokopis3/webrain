@@ -231,7 +231,8 @@ pub fn remove(service: &str, profile: &str) -> anyhow::Result<()> {
 type HmacSha1 = Hmac<sha1::Sha1>;
 
 fn totp_at(key: &[u8], counter: u64) -> String {
-    let mut mac = <HmacSha1 as hmac::Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha1 as hmac::Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(&counter.to_be_bytes());
     let out = mac.finalize().into_bytes();
     let offset = (out[out.len() - 1] & 0x0f) as usize;
@@ -290,8 +291,7 @@ const FILL_JS: &str = r#"(() => {
   return {ok:true};
 })()"#;
 
-const CLICK_JS: &str =
-    r#"(() => { const el = document.querySelector(SEL); if(!el) return {ok:false}; el.click(); return {ok:true}; })()"#;
+const CLICK_JS: &str = r#"(() => { const el = document.querySelector(SEL); if(!el) return {ok:false}; el.click(); return {ok:true}; })()"#;
 
 const OTP_JS: &str = r#"(() => {
   const el = (SEL && document.querySelector(SEL)) ||
@@ -302,7 +302,9 @@ const OTP_JS: &str = r#"(() => {
 })()"#;
 
 pub fn fill_js(sel: &str, val: &str) -> String {
-    FILL_JS.replace("SEL", &jstr(sel)).replace("VAL", &jstr(val))
+    FILL_JS
+        .replace("SEL", &jstr(sel))
+        .replace("VAL", &jstr(val))
 }
 
 pub fn click_js(sel: &str) -> String {
@@ -310,7 +312,11 @@ pub fn click_js(sel: &str) -> String {
 }
 
 pub fn otp_detect_js(sel: &str) -> String {
-    let s = if sel.is_empty() { "null".to_string() } else { jstr(sel) };
+    let s = if sel.is_empty() {
+        "null".to_string()
+    } else {
+        jstr(sel)
+    };
     OTP_JS.replace("SEL", &s)
 }
 
@@ -354,12 +360,23 @@ mod tests {
         unsafe { std::env::set_var("WEBRAIN_VAULT_DIR", &dir) };
         let _ = std::fs::remove_dir_all(&dir); // start clean
 
-        set("instagram", "me", "markosant45", "s3cr3t", Some("JBSWY3DPEHPK3PXP".into())).unwrap();
+        set(
+            "instagram",
+            "me",
+            "markosant45",
+            "s3cr3t",
+            Some("JBSWY3DPEHPK3PXP".into()),
+        )
+        .unwrap();
         set("github", "me", "markosant45", "gh-pat", None).unwrap();
 
         let metas = list().unwrap();
         assert_eq!(metas.len(), 2);
-        assert!(metas.iter().all(|m| !m.profile.is_empty() && !m.service.is_empty()));
+        assert!(
+            metas
+                .iter()
+                .all(|m| !m.profile.is_empty() && !m.service.is_empty())
+        );
 
         let cred = get("instagram", "me").unwrap();
         assert_eq!(cred.username, "markosant45");

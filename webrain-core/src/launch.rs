@@ -57,8 +57,13 @@ pub fn chrome_path() -> PathBuf {
         }
     }
     for name in [
-        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-        "microsoft-edge", "msedge", "brave-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+        "msedge",
+        "brave-browser",
     ] {
         if let Ok(p) = which(name) {
             return p;
@@ -77,7 +82,10 @@ pub(crate) fn which(name: &str) -> std::io::Result<PathBuf> {
             return Ok(p);
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "not found",
+    ))
 }
 
 /// Per-account profile root (platform-idiomatic data dirs). Override with
@@ -158,7 +166,12 @@ fn spawn_and_wait(
 /// Spawn real Chrome (headed by default) with a persistent per-account profile
 /// and stealth flags, wait for its CDP endpoint, and return a handle + CDP URL.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
-pub fn launch_chrome(service: &str, profile: &str, port: u16, headed: bool) -> anyhow::Result<Launched> {
+pub fn launch_chrome(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+) -> anyhow::Result<Launched> {
     if port_open(port) {
         anyhow::bail!("port {port} already has a CDP endpoint — another Chrome is running there");
     }

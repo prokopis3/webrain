@@ -25,13 +25,13 @@ pub fn close_launched(key: &str) -> bool {
         .unwrap_or_else(|p| p.into_inner());
     m.remove(key).is_some()
 }
+use serde_json::{Value, json};
 use webrain_core::engines::{
-    batch_extract, batch_fetch, batch_interact, batch_screenshot, bm25_filter, build_clean_js,
-    build_adaptive_extract_js, build_extract_js, download_files, http_fetch, regex_extract,
-    sitemap_urls, validate_urls, BatchResult, CrawlStrategy, SpiderEngine, TileEngine,
+    BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_extract, batch_fetch,
+    batch_interact, batch_screenshot, bm25_filter, build_adaptive_extract_js, build_clean_js,
+    build_extract_js, download_files, http_fetch, regex_extract, sitemap_urls, validate_urls,
 };
 use webrain_core::vision::{index_current_page, retrieve as vision_retrieve};
-use serde_json::{json, Value};
 
 /// Render the AX tree as compact `role "name"` lines for LLM reading.
 /// ponytail: flat walk, capped 200 nodes, no hierarchy (a11y gives JSON for depth).
@@ -39,8 +39,16 @@ fn semantic_tree_text(nodes: &Value) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(arr) = nodes.as_array() {
         for n in arr.iter().take(200) {
-            let role = n.get("role").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
-            let name = n.get("name").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+            let role = n
+                .get("role")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = n
+                .get("name")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !role.is_empty() || !name.is_empty() {
                 lines.push(format!("{role} \"{name}\""));
             }
@@ -681,7 +689,11 @@ fn filter_ax(nodes: &Value, role: Option<&str>, filter: Option<&str>, max: Optio
     let arr = nodes.as_array().cloned().unwrap_or_default();
     let mut out: Vec<Value> = Vec::new();
     for n in arr {
-        let nr = n.get("role").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        let nr = n
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
         if let Some(r) = role {
             let r = r.to_lowercase();
             // Exact or substring (e.g. "button" -> pushbutton/radiobutton). Forgiving
@@ -725,12 +737,31 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
         use webrain_core::backends::cdp::NavOpts;
         NavOpts {
-            disable_resources: args.get("disable_resources").and_then(|v| v.as_bool()).unwrap_or(false),
-            block_trackers: args.get("block_trackers").and_then(|v| v.as_bool()).unwrap_or(false),
-            network_idle: args.get("network_idle").and_then(|v| v.as_bool()).unwrap_or(false),
-            wait_selector: args.get("wait_selector").and_then(|v| v.as_str()).map(String::from),
-            wait_selector_state: args.get("wait_selector_state").and_then(|v| v.as_str()).unwrap_or("visible").to_string(),
-            css_selector: args.get("css_selector").and_then(|v| v.as_str()).map(String::from),
+            disable_resources: args
+                .get("disable_resources")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            block_trackers: args
+                .get("block_trackers")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            network_idle: args
+                .get("network_idle")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            wait_selector: args
+                .get("wait_selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            wait_selector_state: args
+                .get("wait_selector_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("visible")
+                .to_string(),
+            css_selector: args
+                .get("css_selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         }
     }
 
@@ -743,7 +774,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             let opts = nav_opts(args);
             match backend.navigate_opts(url, &opts).await {
-                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge}),
+                Ok(s) => {
+                    json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge})
+                }
                 Err(e) => err(e),
             }
         }
@@ -755,7 +788,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_screenshot" => {
-            let full = args.get("full_page").and_then(|v| v.as_bool()).unwrap_or(false);
+            let full = args
+                .get("full_page")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             match backend.screenshot(full).await {
                 Ok(png) => {
                     use base64::Engine;
@@ -786,31 +822,34 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_scroll" => {
-            let dir = args.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+            let dir = args
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("down");
             match backend.scroll(dir).await {
                 Ok(_) => json!({"status": "ok", "direction": dir}),
                 Err(e) => err(e),
             }
         }
-        "webrain_get_html" => {
-            match backend.get_html().await {
-                Ok(html) => json!({"status": "ok", "html": html}),
-                Err(e) => err(e),
-            }
-        }
+        "webrain_get_html" => match backend.get_html().await {
+            Ok(html) => json!({"status": "ok", "html": html}),
+            Err(e) => err(e),
+        },
         // Cross-browser session migration: read/write cookies ON THE SESSION
         // BACKEND. Set + batch on the same connection so per-connection
         // isolated browsers (obscura stealth) share the imported session.
         // Chrome login -> webrain_cookies -> webrain_setcookies -> webrain_batch
         // (no cdp_urls) keeps cookies on one connection end-to-end.
-        "webrain_cookies" => {
-            match backend.cookies().await {
-                Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
-                Err(e) => err(e),
-            }
-        }
+        "webrain_cookies" => match backend.cookies().await {
+            Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
+            Err(e) => err(e),
+        },
         "webrain_setcookies" => {
-            let cookies = args.get("cookies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let cookies = args
+                .get("cookies")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             if cookies.is_empty() {
                 return json!({"status": "error", "message": "cookies array required"});
             }
@@ -832,37 +871,93 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             let depth = args.get("max_depth").and_then(|v| v.as_i64()).unwrap_or(2) as usize;
             let pages = args.get("max_pages").and_then(|v| v.as_i64()).unwrap_or(20) as usize;
-            let strategy = match args.get("strategy").and_then(|v| v.as_str()).unwrap_or("bfs") {
+            let strategy = match args
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bfs")
+            {
                 "dfs" => CrawlStrategy::Dfs,
                 "bestfirst" => CrawlStrategy::BestFirst,
                 _ => CrawlStrategy::Bfs,
             };
-            let keywords: Vec<String> = args.get("keywords")
+            let keywords: Vec<String> = args
+                .get("keywords")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let same_domain = args.get("same_domain").and_then(|v| v.as_bool()).unwrap_or(true);
-            let discover_only = args.get("no_content").and_then(|v| v.as_bool()).unwrap_or(false);
-            let respect_robots = args.get("respect_robots").and_then(|v| v.as_bool()).unwrap_or(false);
-            let allowed: Vec<String> = args.get("allowed_domains")
+            let same_domain = args
+                .get("same_domain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let discover_only = args
+                .get("no_content")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let respect_robots = args
+                .get("respect_robots")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let allowed: Vec<String> = args
+                .get("allowed_domains")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let allow: Vec<String> = args.get("allow")
+            let allow: Vec<String> = args
+                .get("allow")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let deny: Vec<String> = args.get("deny")
+            let deny: Vec<String> = args
+                .get("deny")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let retry = args.get("retry").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-            let delay_ms = args.get("delay_ms").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
-            let crawl_timeout = args.get("crawl_timeout_secs").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
-            let autothrottle = args.get("autothrottle").and_then(|v| v.as_bool()).unwrap_or(false);
-            let autothrottle_max = args.get("autothrottle_max_ms").and_then(|v| v.as_i64()).unwrap_or(30_000).max(0) as u64;
-            let crawldir = args.get("crawldir").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let checkpoint_every = args.get("checkpoint_every").and_then(|v| v.as_i64()).unwrap_or(10).max(1) as usize;
+            let delay_ms = args
+                .get("delay_ms")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0) as u64;
+            let crawl_timeout = args
+                .get("crawl_timeout_secs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0) as u64;
+            let autothrottle = args
+                .get("autothrottle")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let autothrottle_max = args
+                .get("autothrottle_max_ms")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(30_000)
+                .max(0) as u64;
+            let crawldir = args
+                .get("crawldir")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let checkpoint_every = args
+                .get("checkpoint_every")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10)
+                .max(1) as usize;
             let spider = SpiderEngine::new(depth, pages)
                 .with_strategy(strategy)
                 .with_same_domain(same_domain)
@@ -899,15 +994,21 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => json!({"status": "error", "message": e.to_string()}),
             }
         }
-        "webrain_snapshot" => {
-            match backend.snapshot().await {
-                Ok(s) => json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge}),
-                Err(e) => err(e),
+        "webrain_snapshot" => match backend.snapshot().await {
+            Ok(s) => {
+                json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge})
             }
-        }
+            Err(e) => err(e),
+        },
         "webrain_pixel" => {
-            let tw = args.get("tile_width").and_then(|v| v.as_f64()).unwrap_or(800.0);
-            let th = args.get("tile_height").and_then(|v| v.as_f64()).unwrap_or(800.0);
+            let tw = args
+                .get("tile_width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
+            let th = args
+                .get("tile_height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
             let mt = args.get("max_tiles").and_then(|v| v.as_i64()).unwrap_or(16) as usize;
             let engine = TileEngine::new(tw, th, mt);
             match engine.tile(backend).await {
@@ -916,13 +1017,27 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_extract_json" => {
-            let base = args.get("base_selector").and_then(|v| v.as_str()).unwrap_or("");
+            let base = args
+                .get("base_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if base.is_empty() {
                 return json!({"status": "error", "message": "base_selector required"});
             }
-            let base_fields = args.get("base_fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let fields = args.get("fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let adaptive = args.get("adaptive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let base_fields = args
+                .get("base_fields")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let fields = args
+                .get("fields")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let adaptive = args
+                .get("adaptive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let js = if adaptive {
                 build_adaptive_extract_js(&base, &base_fields, &fields)
             } else {
@@ -980,7 +1095,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         "webrain_scan" => {
             // browsemind scan_full_page: auto-scroll to load infinite-scroll content.
-            let max_scrolls = args.get("max_scrolls").and_then(|v| v.as_i64()).unwrap_or(15) as usize;
+            let max_scrolls = args
+                .get("max_scrolls")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(15) as usize;
             let js = format!(
                 r#"(async()=>{{ const MAX={max_scrolls}; let last=document.body.scrollHeight; let done=0; for(let i=0;i<MAX;i++){{ window.scrollTo(0, document.body.scrollHeight); await new Promise(r=>setTimeout(r,250)); const h=document.body.scrollHeight; done=i+1; if(h===last && i>2) break; last=h; }} return JSON.stringify({{scrolls: done, height: document.body.scrollHeight}}); }})()"#
             );
@@ -998,7 +1116,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         "webrain_autoschema" => {
             // browsemind auto-detect CSS schema: find repeated container patterns.
             // Returns top candidate base-selectors for the LLM to build a full schema.
-            let min_occurrences = args.get("min_occurrences").and_then(|v| v.as_i64()).unwrap_or(3) as usize;
+            let min_occurrences = args
+                .get("min_occurrences")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3) as usize;
             let js = format!(
                 r#"(()=>{{ const c={{}}; document.querySelectorAll('div[class],li,tr,article,section').forEach(el=>{{ const cls = el.className ? '.'+String(el.className).trim().split(/\s+/).slice(0,2).join('.') : ''; const key=el.tagName.toLowerCase()+cls; c[key]=(c[key]||0)+1; }}); return JSON.stringify(Object.entries(c).filter(([k,n])=>n>={min_occurrences}).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([sel,count])=>({{selector:sel, count}}))); }})()"#
             );
@@ -1031,7 +1152,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let items: Vec<String> = args
                 .get("items")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let results = bm25_filter(&items, query, k);
             json!({"status": "ok", "count": results.len(), "results": results})
@@ -1041,7 +1166,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let urls: Vec<String> = args
                 .get("urls")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             if urls.is_empty() {
                 return json!({"status": "error", "message": "urls required"});
@@ -1053,20 +1182,24 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .count();
             json!({"status": "ok", "alive": alive, "dead": results.len() - alive, "results": results})
         }
-        "webrain_pdf" => {
-            match backend.pdf().await {
-                Ok(bytes) => {
-                    use base64::Engine;
-                    json!({"status": "ok", "pdf_b64": base64::engine::general_purpose::STANDARD.encode(bytes)})
-                }
-                Err(e) => err(e),
+        "webrain_pdf" => match backend.pdf().await {
+            Ok(bytes) => {
+                use base64::Engine;
+                json!({"status": "ok", "pdf_b64": base64::engine::general_purpose::STANDARD.encode(bytes)})
             }
-        }
+            Err(e) => err(e),
+        },
         "webrain_tab" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list");
             match action {
                 "new" => {
-                    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
+                    let url = args
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("about:blank");
                     // open_tab now starts blank (one load per URL in batch paths);
                     // here we navigate explicitly to keep "new tab at url" semantics.
                     match backend.open_tab("about:blank").await {
@@ -1104,7 +1237,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             Ok(nodes) => {
                 let role = args.get("role").and_then(|v| v.as_str());
                 let filter = args.get("filter").and_then(|v| v.as_str());
-                let max = args.get("max_nodes").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let max = args
+                    .get("max_nodes")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
                 json!({"status": "ok", "nodes": filter_ax(&nodes, role, filter, max)})
             }
             Err(e) => err(e),
@@ -1123,31 +1259,75 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let urls: Vec<String> = args
                 .get("urls")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             if urls.is_empty() {
                 return json!({"status": "error", "message": "urls required"});
             }
-            let concurrency = args.get("concurrency").and_then(|v| v.as_i64()).unwrap_or(4) as usize;
+            let concurrency = args
+                .get("concurrency")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(4) as usize;
             let opts = nav_opts(args);
 
             // The per-backend op dispatcher — shared by the single-backend path and
             // the multi-backend round-robin so a fix here covers every caller.
             async fn run_batch(
-                b: &CdpBackend, op: &str, urls: &[String], args: &Value,
-                opts: &webrain_core::backends::cdp::NavOpts, concurrency: usize,
+                b: &CdpBackend,
+                op: &str,
+                urls: &[String],
+                args: &Value,
+                opts: &webrain_core::backends::cdp::NavOpts,
+                concurrency: usize,
             ) -> Vec<BatchResult> {
-                let base = args.get("base_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let base_fields = args.get("base_fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                let fields = args.get("fields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let base = args
+                    .get("base_selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let base_fields = args
+                    .get("base_fields")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let fields = args
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 match op {
-                    "extract" => batch_extract(b, urls, &base, &base_fields, &fields, concurrency, opts).await,
+                    "extract" => {
+                        batch_extract(b, urls, &base, &base_fields, &fields, concurrency, opts)
+                            .await
+                    }
                     "interact" => {
-                        let interaction = args.get("interaction").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        batch_interact(b, urls, &interaction, &base, &base_fields, &fields, concurrency, opts).await
+                        let interaction = args
+                            .get("interaction")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        batch_interact(
+                            b,
+                            urls,
+                            &interaction,
+                            &base,
+                            &base_fields,
+                            &fields,
+                            concurrency,
+                            opts,
+                        )
+                        .await
                     }
                     "screenshot" => {
-                        let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or("screenshots").to_string();
+                        let dir = args
+                            .get("dir")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("screenshots")
+                            .to_string();
                         batch_screenshot(b, urls, &dir, concurrency, opts).await
                     }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
@@ -1160,7 +1340,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let cdp_urls: Vec<String> = args
                 .get("cdp_urls")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             // Per-backend memory cap: N backends × `concurrency` tabs = N× tabs total,
             // which OOMs on huge jobs. `per_backend_concurrency` bounds tabs per browser
@@ -1180,7 +1364,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     match CdpBackend::connect_with_url(u).await {
                         Ok(b) => backends.push(b),
                         Err(e) => all.push(BatchResult {
-                            url: u.clone(), title: String::new(), text: String::new(),
+                            url: u.clone(),
+                            title: String::new(),
+                            text: String::new(),
                             data: None,
                             error: Some(format!("cdp connect failed: {e}")),
                             ms: 0,
@@ -1193,12 +1379,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 // sequentially (connect cost dominates; true cross-backend
                 // concurrency is the agent's job).
                 for (bi, b) in backends.iter().enumerate() {
-                    let share: Vec<String> = urls.iter().enumerate()
+                    let share: Vec<String> = urls
+                        .iter()
+                        .enumerate()
                         .filter(|(i, _)| i % n == bi)
                         .map(|(_, u)| u.clone())
                         .collect();
                     if !share.is_empty() {
-                        all.extend(run_batch(b, &op, &share, args, &opts, per_backend_concurrency).await);
+                        all.extend(
+                            run_batch(b, &op, &share, args, &opts, per_backend_concurrency).await,
+                        );
                     }
                 }
                 all
@@ -1221,10 +1411,20 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             // ponytail: batch stats — the LLM sees total/ok/errors + total ms at a
             // glance for a heavy run, instead of counting results rows itself.
             if let Some(res) = payload.get("results").and_then(|v| v.as_array()) {
-                let ok = res.iter().filter(|r| r.get("error").is_none() || r["error"].is_null()).count();
-                let errs = res.iter().filter(|r| r.get("error").is_some() && !r["error"].is_null()).count();
-                let ms: u64 = res.iter().filter_map(|r| r.get("ms").and_then(|v| v.as_u64())).sum();
-                payload["stats"] = json!({"total": res.len(), "ok": ok, "errors": errs, "ms_total": ms});
+                let ok = res
+                    .iter()
+                    .filter(|r| r.get("error").is_none() || r["error"].is_null())
+                    .count();
+                let errs = res
+                    .iter()
+                    .filter(|r| r.get("error").is_some() && !r["error"].is_null())
+                    .count();
+                let ms: u64 = res
+                    .iter()
+                    .filter_map(|r| r.get("ms").and_then(|v| v.as_u64()))
+                    .sum();
+                payload["stats"] =
+                    json!({"total": res.len(), "ok": ok, "errors": errs, "ms_total": ms});
             }
             payload
         }
@@ -1235,7 +1435,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let mut urls: Vec<String> = args
                 .get("urls")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             if urls.is_empty() {
                 return json!({"status": "error", "message": "urls required"});
@@ -1245,15 +1449,38 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .unwrap_or("downloads")
                 .to_string();
-            if args.get("engine").and_then(|v| v.as_str()).unwrap_or("http") == "ytdlp" {
+            if args
+                .get("engine")
+                .and_then(|v| v.as_str())
+                .unwrap_or("http")
+                == "ytdlp"
+            {
                 // ponytail: single implementation lives in webrain_core::engines
                 // (same one the no-browser path in lib.rs uses) — no duplication.
-                let extra: Vec<String> = args.get("args").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                let extra: Vec<String> = args
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let audio_only = args.get("audio_only").and_then(|v| v.as_bool()).unwrap_or(false);
-                let format = args.get("format").and_then(|v| v.as_str()).map(String::from);
-                return webrain_core::engines::download_ytdlp(&urls, &dir, audio_only, format.as_deref(), &extra);
+                let audio_only = args
+                    .get("audio_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let format = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                return webrain_core::engines::download_ytdlp(
+                    &urls,
+                    &dir,
+                    audio_only,
+                    format.as_deref(),
+                    &extra,
+                );
             }
             // browsemind download_many: narrow to one file type (.mp4/.pdf/.js...).
             if let Some(ext) = args
@@ -1281,7 +1508,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if q.is_empty() {
                 return json!({"status": "error", "message": "q required"});
             }
-            let engine = args.get("engine").and_then(|v| v.as_str()).unwrap_or("duckduckgo");
+            let engine = args
+                .get("engine")
+                .and_then(|v| v.as_str())
+                .unwrap_or("duckduckgo");
             let encoded = q.replace(' ', "+");
             let url = match engine {
                 "bing" => format!("https://www.bing.com/search?q={encoded}"),
@@ -1426,9 +1656,19 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_vision_index" => {
-            let tag = args.get("tag").and_then(|v| v.as_str()).unwrap_or("default").to_string();
-            let tw = args.get("tile_width").and_then(|v| v.as_f64()).unwrap_or(800.0);
-            let th = args.get("tile_height").and_then(|v| v.as_f64()).unwrap_or(800.0);
+            let tag = args
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let tw = args
+                .get("tile_width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
+            let th = args
+                .get("tile_height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
             let mt = args.get("max_tiles").and_then(|v| v.as_i64()).unwrap_or(8) as usize;
             match index_current_page(backend, &tag, tw, th, mt).await {
                 Ok(v) => v,
@@ -1436,8 +1676,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_vision_retrieve" => {
-            let tag = args.get("tag").and_then(|v| v.as_str()).unwrap_or("default").to_string();
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tag = args
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if query.is_empty() {
                 return json!({"status": "error", "message": "query required"});
             }
@@ -1448,27 +1696,56 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_clean" => {
-            let wt = args.get("word_threshold").and_then(|v| v.as_i64()).unwrap_or(2) as usize;
-            let es = args.get("exclude_social").and_then(|v| v.as_bool()).unwrap_or(true);
+            let wt = args
+                .get("word_threshold")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(2) as usize;
+            let es = args
+                .get("exclude_social")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let js = build_clean_js(wt, es);
             match backend.evaluate(&js).await {
                 Ok(v) => json!({"status": "ok", "text": v}),
                 Err(e) => err(e),
             }
         }
-        "webrain_profiles" => {
-            match webrain_core::vault::list() {
-                Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
-                Err(e) => err(e),
-            }
-        }
+        "webrain_profiles" => match webrain_core::vault::list() {
+            Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
+            Err(e) => err(e),
+        },
         "webrain_login" => {
-            let service = args.get("service").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let profile = args.get("profile").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let user_sel = args.get("username_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let pass_sel = args.get("password_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let submit_sel = args.get("submit_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if service.is_empty() || profile.is_empty() || user_sel.is_empty() || pass_sel.is_empty() || submit_sel.is_empty() {
+            let service = args
+                .get("service")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let profile = args
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let user_sel = args
+                .get("username_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pass_sel = args
+                .get("password_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let submit_sel = args
+                .get("submit_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if service.is_empty()
+                || profile.is_empty()
+                || user_sel.is_empty()
+                || pass_sel.is_empty()
+                || submit_sel.is_empty()
+            {
                 return json!({"status": "error", "message": "service, profile, username_selector, password_selector, submit_selector required"});
             }
             // secret resolves in-process; the value never returns to the caller
@@ -1476,31 +1753,63 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Ok(c) => c,
                 Err(e) => return err(e),
             };
-            if let Some(url) = args.get("url").and_then(|v| v.as_str()).filter(|u| !u.is_empty()) {
-                if let Err(e) = backend.navigate_opts(url, &webrain_core::backends::cdp::NavOpts::default()).await {
+            if let Some(url) = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|u| !u.is_empty())
+            {
+                if let Err(e) = backend
+                    .navigate_opts(url, &webrain_core::backends::cdp::NavOpts::default())
+                    .await
+                {
                     return err(e);
                 }
             }
             for (sel, val) in [(&user_sel, &cred.username), (&pass_sel, &cred.password)] {
-                match backend.evaluate(&webrain_core::vault::fill_js(sel, val)).await {
+                match backend
+                    .evaluate(&webrain_core::vault::fill_js(sel, val))
+                    .await
+                {
                     Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {}
-                    Ok(_) => return json!({"status": "error", "message": format!("field not found for selector {sel}")}),
+                    Ok(_) => {
+                        return json!({"status": "error", "message": format!("field not found for selector {sel}")});
+                    }
                     Err(e) => return err(e),
                 }
             }
-            if let Err(e) = backend.evaluate(&webrain_core::vault::click_js(&submit_sel)).await {
+            if let Err(e) = backend
+                .evaluate(&webrain_core::vault::click_js(&submit_sel))
+                .await
+            {
                 return err(e);
             }
             let mut otp_used = false;
             if let Some(seed) = &cred.totp {
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                let otp_sel = args.get("otp_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                match backend.evaluate(&webrain_core::vault::otp_detect_js(&otp_sel)).await {
+                let otp_sel = args
+                    .get("otp_selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match backend
+                    .evaluate(&webrain_core::vault::otp_detect_js(&otp_sel))
+                    .await
+                {
                     Ok(v) if v.get("found").and_then(|x| x.as_bool()).unwrap_or(false) => {
-                        let fill_sel = if otp_sel.is_empty() { "input[autocomplete='one-time-code']".to_string() } else { otp_sel.clone() };
+                        let fill_sel = if otp_sel.is_empty() {
+                            "input[autocomplete='one-time-code']".to_string()
+                        } else {
+                            otp_sel.clone()
+                        };
                         if let Ok(code) = webrain_core::vault::totp_code(seed) {
-                            let _ = backend.evaluate(&webrain_core::vault::fill_js(&fill_sel, &code)).await;
-                            if let Some(ots) = args.get("otp_submit_selector").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                            let _ = backend
+                                .evaluate(&webrain_core::vault::fill_js(&fill_sel, &code))
+                                .await;
+                            if let Some(ots) = args
+                                .get("otp_submit_selector")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                            {
                                 let _ = backend.evaluate(&webrain_core::vault::click_js(ots)).await;
                             }
                             otp_used = true;
