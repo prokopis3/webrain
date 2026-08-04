@@ -143,9 +143,80 @@ fn main() -> anyhow::Result<()> {
             let result = rt.block_on(backend.evaluate(js))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Some("launch") => {
+            // webrain launch <service> <profile> [url] [--headless] [--port N]
+            // Native replacement for the Python stealth_solve.py launch path:
+            // spawns a stealth Chrome with a persistent per-account profile and
+            // opens the site so the human can log in (Channel A).
+            let service = args.get(2).cloned().unwrap_or_default();
+            let profile = args.get(3).cloned().unwrap_or_default();
+            let url = args.get(4).map(|s| s.as_str()).unwrap_or("https://accounts.google.com");
+            let headless = args.contains(&"--headless".to_string());
+            let port: u16 = args.iter().position(|a| a == "--port")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(9222);
+            if service.is_empty() || profile.is_empty() {
+                println!("usage: webrain launch <service> <profile> [url] [--headless] [--port N]");
+                return Ok(());
+            }
+            let launched = webrain_core::launch::launch_chrome(&service, &profile, port, !headless)?;
+            println!("profile: {}", launched.profile_dir.display());
+            println!("CDP_URL={}", launched.cdp_url);
+            // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
+            let backend = rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?;
+            rt.block_on(backend.navigate(url))?;
+            println!("opened: {url} — keeping alive; Ctrl-C to stop");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+        Some("vault") => {
+            match args.get(2).map(|s| s.as_str()).unwrap_or("") {
+                "set" => {
+                    let service = args.get(3).cloned().unwrap_or_default();
+                    let profile = args.get(4).cloned().unwrap_or_default();
+                    let username = args.iter().position(|a| a == "--username")
+                        .and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+                    if service.is_empty() || profile.is_empty() {
+                        println!("usage: webrain vault set <service> <profile> [--username <user>]");
+                        return Ok(());
+                    }
+                    // secrets come from hidden prompts — never argv, never chat, never logs
+                    let password = rpassword::prompt_password("Password: ")?;
+                    let totp_raw = rpassword::prompt_password("TOTP secret (base32, optional; Enter to skip): ")?;
+                    let totp = if totp_raw.trim().is_empty() { None } else { Some(totp_raw.trim().to_string()) };
+                    webrain_core::vault::set(&service, &profile, &username, &password, totp)?;
+                    println!("vault: {service}/{profile} stored");
+                }
+                "list" => {
+                    for m in webrain_core::vault::list()? {
+                        println!("{:<12} {:<20} {:<24} {}", m.service, m.profile, m.username, m.created_at);
+                    }
+                }
+                "rm" => {
+                    let service = args.get(3).cloned().unwrap_or_default();
+                    let profile = args.get(4).cloned().unwrap_or_default();
+                    webrain_core::vault::remove(&service, &profile)?;
+                    println!("vault: {service}/{profile} removed");
+                }
+                "user" => {
+                    let service = args.get(3).cloned().unwrap_or_default();
+                    let profile = args.get(4).cloned().unwrap_or_default();
+                    let username = args.get(5).cloned().unwrap_or_default();
+                    if service.is_empty() || profile.is_empty() || username.is_empty() {
+                        println!("usage: webrain vault user <service> <profile> <username>");
+                        return Ok(());
+                    }
+                    webrain_core::vault::set_username(&service, &profile, &username)?;
+                    println!("vault: {service}/{profile} username set to {username}");
+                }
+                other => println!("unknown vault subcommand: {other} (use: set|list|user|rm)"),
+            }
+        }
         Some(cmd) => {
             println!("Unknown command: {cmd}");
-            println!("Usage: webrain [mcp|fetch <url>|read <url>|markdown <url>|screenshot <url>|spider <seed_url>|click <i>|type <i> <text>|eval <js>]");
+            println!("Usage: webrain [mcp|launch|fetch <url>|read <url>|markdown <url>|screenshot <url>|spider <seed_url>|click <i>|type <i> <text>|eval <js>|vault <set|list|user|rm>]");
             println!();
             println!("Set CDP_URL to point to your browser:");
             println!("  Chrome:  --remote-debugging-port=9222");

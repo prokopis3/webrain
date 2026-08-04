@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core/mcp**: secure `webrain_login` — fully-automatic login from a local
+  encrypted vault. The server decrypts the secret in-process and injects it into
+  the browser via CDP; the value never passes through the model, chat, or logs.
+  `webrain_profiles` lists vault entries (names only). Optional TOTP (RFC 6238)
+  auto-injection when a site gates with 2FA.
+- **core/cli**: `webrain vault set|list|rm` — enroll credentials with hidden
+  prompts (never argv/chat). AES-256-GCM vault at `%APPDATA%/webrain` or
+  `~/.config/webrain` (`vault.json` index + 0600 `vault.key`), portable to any
+  OS, no daemon. Optional TOTP seed at enroll.
+- **core**: stealth hardening — `PluginArray`/`MimeTypeArray` rebuilt on the real
+  prototype (a plain array is the classic detectable leak) with the standard PDF
+  plugin names, `navigator.connection` (4g) stub, full `window.chrome`
+  (app/csi/loadTimes) stub, `permissions.query` notifications reflection, plus
+  CDP-level `Network.setUserAgentOverride` (real Windows Chrome 151 UA + Win32
+  platform) and `Emulation.setAutomationOverride` on attach. Element snapshot
+  redacts `input[type=password]` values.
+- **core/mcp**: `webrain_download engine="ytdlp"` now works in the no-browser
+  path too — it was silently forced onto the HTTP engine, so the advertised
+  yt-dlp engine was dead over HTTP. One shared `engines::download_ytdlp`
+  implementation serves both the stdio and HTTP transports.
 - **core/mcp**: `webrain_spider` gains Scrapling `AutoThrottle` — adaptive
   per-domain delay tuned from observed latency (speeds up on fast servers,
   doubles on a blocked/error page, capped at `autothrottle_max_ms`, floored at
@@ -76,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can reveal a JSON `total`. Captures pagination headers (`x-total-count`,
   `link`, `content-range`, `x-next-page`) into `headers` when the server sends
   them — one-call count discovery instead of boundary-probing.
+- **core/mcp**: `webrain_batch(op=extract|interact)` no longer mirrors the parsed
+  `data` array into `text` as the same JSON string. Every extract batch previously
+  carried the products TWICE (response bytes + LLM output tokens ~2×). `data` is
+  the payload now; `text` stays empty for schema extract (interact keeps raw
+  innerText in `text` only when no schema is set). Halves batch extract payloads.
+- **core**: `apply_blocking` is a no-op for default `NavOpts` — the base
+  `BLOCKED_URLS` is already set once at tab attach, so per-navigation re-sending
+  the same 28 patterns was a redundant CDP round-trip per page.
 
 ### Fixed
 - **core**: `webrain_type` index mismatch — the index now uses the SAME selector

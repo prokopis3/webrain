@@ -223,6 +223,20 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     }
                 });
             }
+            // ponytail: vault listing needs no browser — serve without a CDP backend.
+            if tool_name == "webrain_profiles" {
+                let result = match webrain_core::vault::list() {
+                    Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
+                    Err(e) => json!({"status": "error", "message": e.to_string()}),
+                };
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+                    }
+                });
+            }
 
             if backend.is_none() {
                 let res = if let Some(url) = cdp_url {

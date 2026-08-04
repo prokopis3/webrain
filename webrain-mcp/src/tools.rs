@@ -586,6 +586,32 @@ pub fn list_tools() -> Vec<Value> {
                 "properties": {}
             }
         }),
+        json!({
+            "name": "webrain_profiles",
+            "description": "List vault profiles (service, profile, username, created_at) — names only, never secrets. Secure-login companion to webrain_login.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_login",
+            "description": "Fully-automatic login from the local vault: the server decrypts the secret in-process and injects it into the browser via CDP — the value never passes through the model. Discover selectors with webrain_a11y first. Optional `url` navigates first; optional `otp_selector`/`otp_submit_selector` enable TOTP auto-injection when the site gates with 2FA. Reply is status-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service name, e.g. instagram"},
+                    "profile": {"type": "string", "description": "Profile name from webrain_profiles"},
+                    "url": {"type": "string", "description": "Optional: login page URL to navigate to first"},
+                    "username_selector": {"type": "string", "description": "CSS selector for the username input"},
+                    "password_selector": {"type": "string", "description": "CSS selector for the password input"},
+                    "submit_selector": {"type": "string", "description": "CSS selector for the submit button"},
+                    "otp_selector": {"type": "string", "description": "Optional: CSS selector for the 2FA/OTP input"},
+                    "otp_submit_selector": {"type": "string", "description": "Optional: CSS selector for the 2FA submit button"}
+                },
+                "required": ["service", "profile", "username_selector", "password_selector", "submit_selector"]
+            }
+        }),
     ]
 }
 
@@ -1297,6 +1323,61 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Ok(v) => json!({"status": "ok", "text": v}),
                 Err(e) => err(e),
             }
+        }
+        "webrain_profiles" => {
+            match webrain_core::vault::list() {
+                Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_login" => {
+            let service = args.get("service").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let profile = args.get("profile").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let user_sel = args.get("username_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let pass_sel = args.get("password_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let submit_sel = args.get("submit_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if service.is_empty() || profile.is_empty() || user_sel.is_empty() || pass_sel.is_empty() || submit_sel.is_empty() {
+                return json!({"status": "error", "message": "service, profile, username_selector, password_selector, submit_selector required"});
+            }
+            // secret resolves in-process; the value never returns to the caller
+            let cred = match webrain_core::vault::get(&service, &profile) {
+                Ok(c) => c,
+                Err(e) => return err(e),
+            };
+            if let Some(url) = args.get("url").and_then(|v| v.as_str()).filter(|u| !u.is_empty()) {
+                if let Err(e) = backend.navigate_opts(url, &webrain_core::backends::cdp::NavOpts::default()).await {
+                    return err(e);
+                }
+            }
+            for (sel, val) in [(&user_sel, &cred.username), (&pass_sel, &cred.password)] {
+                match backend.evaluate(&webrain_core::vault::fill_js(sel, val)).await {
+                    Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {}
+                    Ok(_) => return json!({"status": "error", "message": format!("field not found for selector {sel}")}),
+                    Err(e) => return err(e),
+                }
+            }
+            if let Err(e) = backend.evaluate(&webrain_core::vault::click_js(&submit_sel)).await {
+                return err(e);
+            }
+            let mut otp_used = false;
+            if let Some(seed) = &cred.totp {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let otp_sel = args.get("otp_selector").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                match backend.evaluate(&webrain_core::vault::otp_detect_js(&otp_sel)).await {
+                    Ok(v) if v.get("found").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                        let fill_sel = if otp_sel.is_empty() { "input[autocomplete='one-time-code']".to_string() } else { otp_sel.clone() };
+                        if let Ok(code) = webrain_core::vault::totp_code(seed) {
+                            let _ = backend.evaluate(&webrain_core::vault::fill_js(&fill_sel, &code)).await;
+                            if let Some(ots) = args.get("otp_submit_selector").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                                let _ = backend.evaluate(&webrain_core::vault::click_js(ots)).await;
+                            }
+                            otp_used = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            json!({"status": "ok", "service": service, "profile": profile, "logged_in": true, "otp_used": otp_used})
         }
         _ => json!({"error": format!("Unknown tool: {name}")}),
     }
