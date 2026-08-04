@@ -424,10 +424,13 @@ fn main() -> anyhow::Result<()> {
                 other => println!("unknown vault subcommand: {other} (use: set|list|user|rm)"),
             }
         }
+        Some("upgrade") => {
+            upgrade()?;
+        }
         Some(cmd) => {
             println!("Unknown command: {cmd}");
             println!(
-                "Usage: webrain [mcp|doctor|install|obscura|lightpanda|launch|login|cookies|setcookies|fetch <url>|screenshot <url>|spider <seed_url>|click <i>|type <i> <text>|eval <js>|vault <set|list|user|rm>]"
+                "Usage: webrain [mcp|doctor|install|obscura|lightpanda|launch|login|cookies|setcookies|fetch <url>|screenshot <url>|spider <seed_url>|click <i>|type <i> <text>|eval <js>|vault <set|list|user|rm>|upgrade]"
             );
             println!();
             println!("Set CDP_URL to point to your browser:");
@@ -436,6 +439,89 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── webrain upgrade ──────────────────────────────────────────────
+// Delegates to the package manager when installed through one (Homebrew /
+// Scoop), otherwise self-updates the running binary in place.
+fn upgrade() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if cmd_exists("brew") {
+        println!("webrain: installed via Homebrew \u{2014} running `brew upgrade webrain`");
+        return run_cmd("brew", &["upgrade", "webrain"]).map_err(Into::into);
+    }
+    #[cfg(target_os = "windows")]
+    if cmd_exists("scoop")
+        && std::path::Path::new(&std::env::var("USERPROFILE").unwrap_or_default())
+            .join("scoop/apps/webrain")
+            .exists()
+    {
+        println!("webrain: installed via Scoop \u{2014} running `scoop update webrain`");
+        // scoop is a .cmd/.ps1 shim, not scoop.exe — spawn it through cmd.exe
+        return run_cmd("cmd", &["/c", "scoop", "update", "webrain"]).map_err(Into::into);
+    }
+    self_update()
+}
+
+fn cmd_exists(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p)
+            .any(|d| d.join(name).exists() || d.join(format!("{name}.exe")).exists())
+    })
+}
+
+fn run_cmd(prog: &str, args: &[&str]) -> std::io::Result<()> {
+    let st = std::process::Command::new(prog).args(args).status()?;
+    if !st.success() {
+        return Err(std::io::Error::other(format!("{prog} exited with {st}")));
+    }
+    Ok(())
+}
+
+fn self_update() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let asset = if cfg!(target_os = "linux") {
+        "webrain-linux"
+    } else if cfg!(target_os = "macos") {
+        "webrain-macos"
+    } else {
+        "webrain-windows.exe"
+    };
+    let url = format!("https://github.com/prokopis3/webrain/releases/latest/download/{asset}");
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no parent directory for current binary"))?;
+    let tmp = dir.join(format!("webrain.new.{}", std::process::id()));
+    println!("webrain: downloading {url}");
+    let st = std::process::Command::new("curl")
+        .arg("-fsSL")
+        .arg("-o")
+        .arg(&tmp)
+        .arg(&url)
+        .status()?;
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::anyhow!("download failed (curl exit {st})"));
+    }
+    #[cfg(unix)]
+    {
+        std::fs::rename(&tmp, &exe)?;
+    }
+    #[cfg(windows)]
+    {
+        // A running .exe can be renamed but not overwritten: move the old
+        // one aside, put the new one in place, then drop the old.
+        let old = dir.join("webrain.old.exe");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old)?;
+        if std::fs::rename(&tmp, &exe).is_err() {
+            let _ = std::fs::rename(&old, &exe);
+            return Err(anyhow::anyhow!("could not replace webrain.exe"));
+        }
+        let _ = std::fs::remove_file(&old);
+    }
+    println!("webrain: updated to the latest release.");
     Ok(())
 }
 

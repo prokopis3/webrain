@@ -8,8 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
-_No unreleased changes yet._
+- **cli**: `webrain upgrade` — updates to the latest release. Delegates to
+  Homebrew/Scoop when installed through one (`brew upgrade webrain` /
+  `scoop update webrain`), otherwise self-updates the running binary in place
+  from the latest GitHub release.
+- **install**: one-line installers — `scripts/install.sh` (Linux/macOS) and
+  `scripts/install.ps1` (Windows) fetch the latest release binary per OS and
+  put `webrain` on PATH:
+  `curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash`.
+- **docs**: `CONTRIBUTING.md` (conventional commits + changelog-enforced PR
+  policy), README badges (release/license/platforms/last-commit/stars),
+  Quick Start + Traditional Selectors + Commands + Updating sections, and a
+  Homebrew tap (`prokopis3/homebrew-webrain`, `brew install webrain`).
 
 ## [0.1.1] - 2026-08-04
 

@@ -8,9 +8,12 @@
 
 Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. It is meant to be installed on any system and driven by **any LLM** (GitHub Copilot, Claude, Codex, Cursor, …). The LLM decides everything — search, crawl, scrape, browser-navigate, browser-interact — from a plain-language prompt, with no hardcoded intent detection.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)](https://github.com/prokopis3/webrain/releases)
+[![Last Commit](https://badgen.net/github/last-commit/prokopis3/webrain/main?icon=github)](https://github.com/prokopis3/webrain/commits/main)
+[![GitHub Stars](https://badgen.net/github/stars/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](Cargo.toml)
-![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
 </div>
 
@@ -34,6 +37,8 @@ Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. 
     - [Updating](#updating)
     - [OS Compatibility](#os-compatibility)
   - [Quick Start](#quick-start)
+    - [Traditional Selectors (also supported)](#traditional-selectors-also-supported)
+  - [Commands](#commands)
   - [Browser Engines](#browser-engines)
   - [MCP Tools](#mcp-tools)
   - [CLI Reference](#cli-reference)
@@ -85,7 +90,28 @@ Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. 
 
 ### Global Installation (recommended)
 
-One command per OS — downloads the release binary and puts `webrain` on PATH, then install a browser engine:
+One command installs `webrain` on your PATH:
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex
+```
+
+Then, in any terminal:
+
+```bash
+webrain install          # Download Chrome for Testing (first time only)
+webrain mcp --http 9223  # start the MCP server
+```
+
+> Prefer a manual download? The per-OS commands below do the same without a script.
 
 **Windows (PowerShell):**
 
@@ -127,7 +153,11 @@ webrain install   # Download Chrome (first time only)
 
 ### Homebrew (macOS)
 
-Coming soon — use the macOS curl install above for now.
+```bash
+brew tap prokopis3/webrain
+brew install webrain
+webrain install   # Download Chrome (first time only)
+```
 
 ### Scoop (Windows)
 
@@ -167,11 +197,25 @@ cargo build --release --bin webrain
 
 ### Updating
 
-```bash
-# If installed via cargo:
-cargo install --git https://github.com/prokopis3/webrain webrain-cli --force
+Upgrade to the latest version:
 
-# Re-download engines after an update (cache dir stays, versions are additive):
+```bash
+webrain upgrade
+```
+
+Detects your installation method (Homebrew, Scoop, or a manual install) and
+updates automatically — `brew upgrade webrain`, `scoop update webrain`, or
+self-updates the binary in place.
+
+If installed via cargo:
+
+```bash
+cargo install --git https://github.com/prokopis3/webrain webrain-cli --force
+```
+
+Re-download engines after an update (cache dir stays, versions are additive):
+
+```bash
 webrain install
 webrain install --engine obscura
 ```
@@ -214,6 +258,41 @@ webrain fetch <url>             # attach to CDP_URL and fetch
 webrain screenshot <url>
 webrain eval "document.title"
 ```
+
+### Traditional Selectors (also supported)
+
+The MCP tools take plain CSS selectors directly (e.g. `webrain_click` with
+`selector: "#submit"`), and the CLI works on snapshot refs — the same elements
+`snapshot` reports, 1-indexed:
+
+```bash
+webrain launch https://example.com
+webrain snapshot          # prints interactive elements, 1-indexed
+webrain click 3           # click element #3
+webrain type 5 "text"     # type into element #5
+webrain eval 'document.querySelector("#email").value'
+```
+
+## Commands
+
+```bash
+webrain mcp [--http <port>]                        # MCP server (stdio, or HTTP on a port)
+webrain doctor                                     # diagnose the install (engines, MCP, CDP, vault)
+webrain install [--engine chrome|obscura] [--stealth]  # download a browser engine
+webrain upgrade                                    # update to the latest release
+webrain launch <service> <profile> [url]           # stealth Chrome, persistent profile
+webrain login <service> <profile> [url]            # interactive login into a profile
+webrain vault set|list|user|rm                     # encrypted credential vault (AES-256-GCM + TOTP)
+webrain cookies / setcookies <file>                # export / import cookies
+webrain fetch <url>                                # attach to CDP_URL and fetch
+webrain screenshot <url>                           # screenshot (single or full page)
+webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
+webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
+webrain obscura / lightpanda [--port N]            # spawn a CDP server
+```
+
+The full ~45-tool MCP surface is discovered dynamically — `webrain_guide` lists
+it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## Browser Engines
 
