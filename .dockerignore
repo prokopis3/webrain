@@ -1,0 +1,12 @@
+# Keep the Docker build context small and reproducible.
+target
+.git
+.gitignore
+output
+vision
+assets
+docs
+scripts
+skills
+*.md
+.github
