@@ -247,10 +247,26 @@ fn resolve_ws(http_url: &str) -> anyhow::Result<String> {
         .context("CDP endpoint not reachable. Is a browser running?")?;
     let s = resp.into_body().read_to_string()?;
     let body: Value = serde_json::from_str(&s)?;
-    body["webSocketDebuggerUrl"]
+    let ws = body["webSocketDebuggerUrl"]
         .as_str()
         .map(|s| s.to_string())
-        .context("No webSocketDebuggerUrl in response")
+        .context("No webSocketDebuggerUrl in response")?;
+    // Docker/port-forward: the advertised ws URL can carry the container-INTERNAL
+    // host:port (obscura maps host 9224 -> container 9222, so /json/version says
+    // ws://127.0.0.1:9222/...). ws is served on the same endpoint we reached, so
+    // rewrite to http_url's host:port and keep the path.
+    let mut out = ws.clone();
+    if let (Ok(u), Ok(mut w)) = (url::Url::parse(http_url), url::Url::parse(&ws)) {
+        if let Some(host) = u.host_str() {
+            if w.set_host(Some(host)).is_ok() {
+                let _ = w.set_port(u.port());
+                let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
+                let _ = w.set_scheme(scheme);
+                out = w.to_string();
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Clone shares the same CDP connection + tab registry (all Arc internals), so
@@ -342,6 +358,43 @@ impl CdpBackend {
     async fn send_cmd(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         let session = self.active_session().await;
         self.send_cmd_with(session.as_deref(), method, params).await
+    }
+
+    /// All cookies for the browser context (includes HttpOnly, which
+    /// document.cookie can't see). Used for logged_in detection + export.
+    ///
+    /// `Network.getCookies` is deprecated and returns empty on recent Chrome
+    /// page sessions, so prefer browser-level `Storage.getCookies` first and
+    /// fall back to Network on the active page session.
+    pub async fn cookies(&self) -> anyhow::Result<Vec<Value>> {
+        if let Ok(r) = self.send_cmd_with(None, "Storage.getCookies", json!({})).await {
+            let c = r["cookies"].as_array().cloned().unwrap_or_default();
+            if !c.is_empty() {
+                return Ok(c);
+            }
+        }
+        let r = self.send_cmd("Network.getCookies", json!({})).await?;
+        Ok(r["cookies"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Set cookies (Network.setCookies) — cross-browser session migration:
+    /// log in in Chrome, export via `cookies()`, import into obscura/lightpanda
+    /// with this. Only the fields setCookies accepts are forwarded.
+    pub async fn set_cookies(&self, cookies: &[Value]) -> anyhow::Result<()> {
+        let clean: Vec<Value> = cookies
+            .iter()
+            .map(|c| {
+                let mut o = serde_json::Map::new();
+                for k in ["name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite", "priority"] {
+                    if let Some(v) = c.get(k) {
+                        o.insert(k.to_string(), v.clone());
+                    }
+                }
+                Value::Object(o)
+            })
+            .collect();
+        self.send_cmd("Network.setCookies", json!({ "cookies": clean })).await?;
+        Ok(())
     }
 
     /// Send a command, optionally scoped to a session id (None = browser-level).
