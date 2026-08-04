@@ -391,6 +391,40 @@ pub fn list_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "webrain_page_info",
+            "description": "Just-in-time page context (borrowed from alibaba/page-agent getPageInfo): viewport/page size, scroll position, pixels/pages above & below, position %. Tells you when to scroll before interacting. No DOM dump.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_save_state",
+            "description": "Export the current browser's auth state (cookies + localStorage) to <profiles_dir>/<service>/<profile>/state.json so a login follows you across machines (borrowed from agent-browser --state/--restore).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service name, e.g. instagram"},
+                    "profile": {"type": "string", "description": "Profile name, e.g. work"},
+                    "port": {"type": "integer", "description": "CDP port to read from (default 9222)"}
+                },
+                "required": ["service", "profile"]
+            }
+        }),
+        json!({
+            "name": "webrain_restore_state",
+            "description": "Import auth state from <profiles_dir>/<service>/<profile>/state.json (cookies + localStorage) into the current browser. Navigate to the target site first — localStorage is origin-scoped.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service name, e.g. instagram"},
+                    "profile": {"type": "string", "description": "Profile name, e.g. work"},
+                    "port": {"type": "integer", "description": "CDP port to write to (default 9222)"}
+                },
+                "required": ["service", "profile"]
+            }
+        }),
+        json!({
             "name": "webrain_a11y",
             "description": "Accessibility-tree snapshot of the current page: [{role, name, value, css_path}]. Read-only — understand page structure, then interact via webrain_navigate/webrain_snapshot elements[] indices (click/type). Optional filters return only what the LLM needs (just-in-time): `role`, `filter` (substring match on name OR value OR css_path, case-insensitive), `max_nodes` — omit all for the full tree. ARIA role cheat-sheet (Google/Material widgets are often NOT plain buttons): combobox (dropdown/select), option (menu item), menuitem, tab, radio (segmented control), checkbox, link, textbox, button. If role=<x> returns [], drop the role filter and use `filter` on the label text instead.",
             "inputSchema": {
@@ -682,6 +716,23 @@ pub fn list_tools() -> Vec<Value> {
         }),
     ]
 }
+
+/// Page-agent style page info + scroll hints (borrowed from alibaba/page-agent
+/// getPageInfo): viewport/page size, scroll position, how much is above/below.
+/// Just-in-time: tells the LLM when to scroll before interacting — no DOM dump.
+const PAGE_INFO_JS: &str = r#"(() => {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const pw = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth || 0);
+  const ph = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight || 0);
+  const sx = window.scrollX || document.documentElement.scrollLeft || 0;
+  const sy = window.scrollY || document.documentElement.scrollTop || 0;
+  const below = Math.max(0, ph - (vh + sy));
+  return { url: location.href, title: document.title, viewport: [vw, vh], page: [pw, ph],
+    scroll: [sx, sy], pixels_above: sy, pixels_below: below,
+    pages_above: vh > 0 ? +(sy / vh).toFixed(1) : 0, pages_below: vh > 0 ? +(below / vh).toFixed(1) : 0,
+    total_pages: vh > 0 ? +(ph / vh).toFixed(1) : 0,
+    position_pct: ph > vh ? Math.round((sy / (ph - vh)) * 100) : 0 };
+})()"#;
 
 /// Filter + cap an accessibility tree to what the LLM needs right now
 /// (just-in-time: don't dump 30KB of nodes when only buttons/links matter).
@@ -1233,6 +1284,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 },
             }
         }
+        "webrain_page_info" => match backend.evaluate(PAGE_INFO_JS).await {
+            Ok(v) => json!({"status": "ok", "page": v}),
+            Err(e) => err(e),
+        },
         "webrain_a11y" => match backend.a11y().await {
             Ok(nodes) => {
                 let role = args.get("role").and_then(|v| v.as_str());

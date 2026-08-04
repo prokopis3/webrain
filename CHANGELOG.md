@@ -9,7 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **tools** `webrain_page_info` —
+  just-in-time page context (viewport/page size, scroll position,
+  pixels/pages above & below, position %) so the LLM knows when to scroll.
+- **tools** `--state`/`--restore`):
+  `webrain_save_state` / `webrain_restore_state` — export/import a profile's
+  auth state (cookies + localStorage) to `state.json` so logins follow you
+  across machines.
+- **cli**: `webrain -v` / `--version` / `version` prints the version.
+
+### Fixed
+
+- **core**: `webrain install` failed with "the response body is larger than
+  request limit" — ureq's `read_to_vec()` caps bodies at 10 MB, too small for
+  the Chrome/Obscura engine zips. Now reads via the unlimited
+  `into_with_config()` reader.
 
 ### Changed
 

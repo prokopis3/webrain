@@ -26,6 +26,17 @@ use webrain_core::backends::cdp::CdpBackend;
 use webrain_core::browser::BrowserBackend;
 
 /// Compact error envelope for no-browser tool short-circuits.
+/// Current-origin localStorage dump (agent-browser --state borrow).
+const SAVE_LS_JS: &str = r#"(() => { const o = {}; for (let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); o[k]=localStorage.getItem(k); } return o; })()"#;
+
+/// Build JS to restore a saved localStorage object on the current origin.
+fn restore_ls_js(ls: &Value) -> String {
+    let obj = serde_json::to_string(ls).unwrap_or_else(|_| "{}".into());
+    format!(
+        r#"(() => {{ let n = 0; for (const [k,v] of Object.entries({obj})) {{ try {{ localStorage.setItem(k,v); n++; }} catch(e) {{}} }} return n; }})()"#
+    )
+}
+
 fn tool_error(id: Option<Value>, msg: &str) -> Value {
     let text = serde_json::to_string(&json!({ "status": "error", "message": msg }))
         .unwrap_or_else(|_| "{}".into());
@@ -451,6 +462,103 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     "result": {
                         "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
                         "isError": false
+                    }
+                });
+            }
+
+            // ── Portable auth state (agent-browser --state/--restore borrow) ──
+            // state.json per profile: cookies + localStorage, so a login follows
+            // you across machines. Restore assumes the page is already on the
+            // right origin (localStorage is origin-scoped).
+            if tool_name == "webrain_save_state" || tool_name == "webrain_restore_state" {
+                let service = arguments
+                    .get("service")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile = arguments
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if service.is_empty() || profile.is_empty() {
+                    return tool_error(id, "service and profile required");
+                }
+                let port: u16 = arguments
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u16)
+                    .unwrap_or(9222);
+                let dir = webrain_core::launch::profiles_dir()
+                    .join(service)
+                    .join(profile);
+                let path = dir.join("state.json");
+                let cdp = format!("http://127.0.0.1:{port}");
+                let result = if tool_name == "webrain_save_state" {
+                    match CdpBackend::connect_with_url(&cdp).await {
+                        Ok(b) => {
+                            let cookies = b.cookies().await.unwrap_or_default();
+                            let ls = b.evaluate(SAVE_LS_JS).await.unwrap_or_default();
+                            let payload = json!({"cookies": cookies, "localStorage": ls});
+                            match (
+                                std::fs::create_dir_all(&dir),
+                                std::fs::write(
+                                    &path,
+                                    serde_json::to_vec(&payload).unwrap_or_default(),
+                                ),
+                            ) {
+                                (Ok(_), Ok(_)) => json!({
+                                    "status": "ok",
+                                    "state": path.display().to_string(),
+                                    "cookies": cookies.len(),
+                                    "localStorage_keys": ls.as_object().map(|o| o.len()).unwrap_or(0)
+                                }),
+                                (Err(e), _) | (_, Err(e)) => json!({
+                                    "status": "error",
+                                    "message": format!("write failed: {e}")
+                                }),
+                            }
+                        }
+                        Err(e) => json!({
+                            "status": "error",
+                            "message": format!("cannot connect to {cdp}: {e}")
+                        }),
+                    }
+                } else {
+                    let payload: Value = match std::fs::read(&path) {
+                        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+                        Err(e) => {
+                            return tool_error(
+                                id,
+                                &format!("no state.json at {} ({e})", path.display()),
+                            );
+                        }
+                    };
+                    match CdpBackend::connect_with_url(&cdp).await {
+                        Ok(b) => {
+                            let cookies = payload
+                                .get("cookies")
+                                .and_then(|c| c.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let _ = b.set_cookies(&cookies).await;
+                            let ls = payload.get("localStorage").cloned().unwrap_or_default();
+                            let keys = b.evaluate(&restore_ls_js(&ls)).await.unwrap_or_default();
+                            json!({
+                                "status": "ok",
+                                "cookies_restored": cookies.len(),
+                                "localStorage_keys": keys.as_i64().unwrap_or(0)
+                            })
+                        }
+                        Err(e) => json!({
+                            "status": "error",
+                            "message": format!("cannot connect to {cdp}: {e}")
+                        }),
+                    }
+                };
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
                     }
                 });
             }

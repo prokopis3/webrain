@@ -427,6 +427,9 @@ fn main() -> anyhow::Result<()> {
         Some("upgrade") => {
             upgrade()?;
         }
+        Some("-v" | "--version" | "version") => {
+            println!("webrain {}", env!("CARGO_PKG_VERSION"));
+        }
         Some(cmd) => {
             println!("Unknown command: {cmd}");
             println!(

@@ -241,8 +241,9 @@ fn download_bytes(url: &str) -> Result<Vec<u8>> {
     let resp = ureq::get(url)
         .call()
         .with_context(|| format!("GET {url}"))?;
-    // ureq 3: read methods live on Body (resp.into_body()), not Response.
-    Ok(resp.into_body().read_to_vec()?)
+    // ureq 3: read_to_vec() caps at 10 MB, too small for the engine zips.
+    // into_with_config() defaults to unlimited (u64::MAX).
+    Ok(resp.into_body().into_with_config().read_to_vec()?)
 }
 
 fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
