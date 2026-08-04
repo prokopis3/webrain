@@ -8,12 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **core/mcp**: adaptive extraction (exact-selector path + relocation fallback),
-  `pdf_render` page rendering, and `capture_media`; spider builder options
-  (`allowed_domains`, strategy/retry/delay/discover-only).
-- **cli**: expanded command surface.
+
+_No unreleased changes yet._
+
+## [0.1.1] - 2026-08-04
+
+### Added
 - **docs**: real all-OS install one-liners (PowerShell + curl against release
   binaries) and the working scoop bucket (`prokopis3/scoop-webrain`).
+
+### Fixed
+- **ci**: the Linux release binary now builds on `ubuntu-22.04` (glibc 2.35) —
+  the previous `ubuntu-latest` build required glibc 2.39, so `webrain-linux`
+  failed with "GLIBC_2.39 not found" on Ubuntu 22.04 / Debian 12 and older.
 
 ## [0.1.0] - 2026-08-04
 
