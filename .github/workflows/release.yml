@@ -68,10 +68,50 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Release description comes from CHANGELOG.md. If the tagged version has no
+      # entry yet, generate it from [Unreleased] and commit it back.
+      - name: Ensure changelog entry for the tagged version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          if grep -q "^## \\[${VER}\\]" CHANGELOG.md; then
+            echo "changelog entry exists for ${VER}"
+          else
+            echo "No '## [${VER}]' entry — generating from [Unreleased]"
+            python3 - "$VER" "$(date +%F)" <<'PY'
+import sys, pathlib, re
+ver, date = sys.argv[1], sys.argv[2]
+p = pathlib.Path("CHANGELOG.md")
+t = p.read_text(encoding="utf-8")
+m = re.search(r"^## \[Unreleased\](.*?)(?=^## \[|\Z)", t, re.M | re.S)
+if not m:
+    sys.exit("no [Unreleased] section in CHANGELOG.md")
+released = f"## [{ver}] - {date}" + m.group(1)
+out = "## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n" + t[:m.start()] + released
+p.write_text(out, encoding="utf-8")
+PY
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore(release): changelog for ${VER}" || true
+            git push origin main || echo "changelog push skipped"
+          fi
+
+      - name: Extract release body from changelog
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v h="[$VER]" '
+            /^## \[/ { if (inblock) exit; if (index($0, h)) inblock = 1; next }
+            inblock { print }
+          ' CHANGELOG.md > body.md
+          test -s body.md || { echo "empty release body for ${VER}"; exit 1; }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,6 +11,8 @@ on:
   pull_request:
     types: [opened, synchronize]
     branches: [main]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -29,16 +31,21 @@ jobs:
       - name: Check for CHANGELOG changes
         id: changelog_check
         run: |
-          git fetch origin ${{ github.base_ref }}
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -c "CHANGELOG.md" || true)
+          # PR: diff against the base branch; push: last commit.
+          if [ "${{ github.base_ref }}" != "" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          else
+            RANGE="HEAD~1...HEAD"
+          fi
+          CHANGED=$(git diff --name-only $RANGE | grep -c "CHANGELOG.md" || true)
           echo "changelog_changed=$CHANGED" >> $GITHUB_OUTPUT
 
           # Check if Rust source files were changed (exclude docs, config)
-          SOURCE_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
+          SOURCE_CHANGED=$(git diff --name-only $RANGE | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
           echo "source_changed=$SOURCE_CHANGED" >> $GITHUB_OUTPUT
 
       - name: Comment if changelog missing
-        if: steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
+        if: github.event_name == 'pull_request' && steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: changelog

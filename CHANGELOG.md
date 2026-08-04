@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **core/mcp**: adaptive extraction (exact-selector path + relocation fallback),
+  `pdf_render` page rendering, and `capture_media`; spider builder options
+  (`allowed_domains`, strategy/retry/delay/discover-only).
+- **cli**: expanded command surface.
+- **docs**: real all-OS install one-liners (PowerShell + curl against release
+  binaries) and the working scoop bucket (`prokopis3/scoop-webrain`).
+
+## [0.1.0] - 2026-08-04
+
+### Added
 - **cli**: `webrain doctor` — full install diagnosis: version, MCP server, CDP
   ports (9222/9224/9225), engine discovery (chrome/lightpanda/obscura),
   encrypted vault, Python stealth sidecar, and a `recommend` line. Exit 0 when a

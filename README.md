@@ -380,10 +380,10 @@ The repo favors **one runnable self-check per non-trivial module** (assert-based
 
 GitHub Actions (`.github/workflows/`):
 
-- **`ci.yml`** — lint (ruff), tests, formatting on every push/PR to `main`.
-- **`release.yml`** — on merge to `main`: bump SemVer from conventional commits, update `CHANGELOG.md`, create a GitHub Release.
+- **`ci.yml`** — `cargo fmt --check` + `clippy` + `test` on every push/PR to `main`.
+- **`release.yml`** — on a `v*` tag push: builds the binary natively on Linux/Windows/macOS, generates the CHANGELOG entry for that version (if missing), and creates the GitHub Release with the changelog section as the body.
 - **`pr-lint.yml`** — enforce conventional-commit PR titles (`<type>(<scope>): <description>`).
-- **`changelog-enforce.yml`** — require the changelog to be updated when source changes.
+- **`changelog-enforce.yml`** — require the changelog to be updated when source changes (PRs and pushes to `main`).
 
 Commit convention: `<type>(<scope>): <description>` — types `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`, scopes `core|api|cli|handlers|tools|plugin|memory|cache|pipeline|extraction|login|navigation|antibot|llm|token|browser|serp|search|config|deps|docs|tests|ci`.
 
