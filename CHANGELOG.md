@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **cli**: `webrain doctor` — full install diagnosis: version, MCP server, CDP
+  ports (9222/9224/9225), engine discovery (chrome/lightpanda/obscura),
+  encrypted vault, Python stealth sidecar, and a `recommend` line. Exit 0 when a
+  browser is reachable. `--doctor` kept as an alias.
+- **core/cli**: agent-browser-style engine install — `webrain install` downloads
+  Chrome for Testing into a cache dir (`WEBRAIN_BROWSERS_DIR`) and that build
+  wins discovery over system Chrome; `webrain install --engine obscura` downloads
+  the latest Obscura release (`--stealth` picks the BoringSSL build).
+  `webrain lightpanda` / `webrain obscura` spawn the CDP servers
+  (`launch_lightpanda`/`launch_obscura`; binary from PATH / `~/.lightpanda` /
+  `~/.obscura` / `~/.local/bin` / `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA`).
+  Windows `.zip` via the `zip` crate; linux/macOS `.tar.gz` via system `tar`.
+- **docs**: `README.md` with all-OS install (cargo / homebrew / scoop /
+  from-source), engine + MCP tool guides, marketplace/MCP-client setup, and repo
+  logo (`assets/webrain-logo.png`).
 - **core/mcp**: secure `webrain_login` — fully-automatic login from a local
   encrypted vault. The server decrypts the secret in-process and injects it into
   the browser via CDP; the value never passes through the model, chat, or logs.
@@ -104,6 +119,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **core**: `apply_blocking` is a no-op for default `NavOpts` — the base
   `BLOCKED_URLS` is already set once at tab attach, so per-navigation re-sending
   the same 28 patterns was a redundant CDP round-trip per page.
+- **mcp**: `webrain_a11y` filter is forgiving — `role` is a substring match
+  (`button` finds `pushbutton`/`radiobutton`) and `filter` matches node name OR
+  value OR css_path, so Material/Google controls whose label lives in a
+  descendant are found. Description carries the ARIA role cheat-sheet
+  (combobox/option/tab/radio…).
+- **agent**: decision guides (`AGENTS.md` + `docs/AGENT_DECISION_GUIDE.md`)
+  codify the verified rules: Material/SPA interaction → real Chrome via
+  `cdp_urls` (never obscura/lightpanda — no layout/paint engine); lightpanda
+  `captureScreenshot` returns a fake placeholder PNG; extract from
+  container/card-level DOM, not bare `$` text nodes.
+- **core**: `launch_chrome`/`launch_lightpanda`/`launch_obscura` share one
+  `spawn_and_wait` helper (port-open bail + 20s CDP wait + kill-on-drop).
+
+### Removed
+- **core**: dead SHA-256 crawl disk cache (`cache_read`/`cache_write`) — zero
+  callers (ponytail-audit).
+- **core**: unused `PageResult.screenshot_b64` field and dead `lib.rs` re-exports
+  (`EmbedInput`, `VectorStore`).
+- **core**: unused in-process `obscura` git dependency + `obscura` feature —
+  replaced by the `webrain install --engine obscura` binary path.
+- **scripts**: one-off `scripts/merge_task2.ps1` data migration.
 
 ### Fixed
 - **core**: `webrain_type` index mismatch — the index now uses the SAME selector
