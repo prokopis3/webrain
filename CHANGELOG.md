@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.3.0] - 2026-08-05
+
+### Added
+
 - **tools** `webrain_page_info` —
   just-in-time page context (viewport/page size, scroll position,
   pixels/pages above & below, position %) so the LLM knows when to scroll.
