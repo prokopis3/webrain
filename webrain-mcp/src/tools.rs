@@ -1,5 +1,30 @@
 use webrain_core::backends::cdp::CdpBackend;
 use webrain_core::browser::BrowserBackend;
+
+// Launched Chrome sessions held alive across tool calls (MCP server lifetime),
+// keyed by "service:profile" so webrain_login/agents can re-attach.
+static LAUNCHED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, webrain_core::launch::Launched>>,
+> = std::sync::OnceLock::new();
+
+/// Keep a launched Chrome alive by moving it into the registry.
+pub fn store_launched(key: &str, l: webrain_core::launch::Launched) {
+    if let Ok(mut m) = LAUNCHED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+    {
+        m.insert(key.to_string(), l);
+    }
+}
+
+/// Stop a launched Chrome (dropping it kills the child). Returns whether it existed.
+pub fn close_launched(key: &str) -> bool {
+    let mut m = LAUNCHED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    m.remove(key).is_some()
+}
 use webrain_core::engines::{
     batch_extract, batch_fetch, batch_interact, batch_screenshot, bm25_filter, build_clean_js,
     build_adaptive_extract_js, build_extract_js, download_files, http_fetch, regex_extract,
@@ -359,10 +384,14 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_a11y",
-            "description": "Accessibility-tree snapshot of the current page: [{role, name, value}]. Read-only — understand page structure, then interact via webrain_navigate/webrain_snapshot elements[] indices (click/type).",
+            "description": "Accessibility-tree snapshot of the current page: [{role, name, value, css_path}]. Read-only — understand page structure, then interact via webrain_navigate/webrain_snapshot elements[] indices (click/type). Optional filters return only what the LLM needs (just-in-time): `role`, `filter` (substring match on name OR value OR css_path, case-insensitive), `max_nodes` — omit all for the full tree. ARIA role cheat-sheet (Google/Material widgets are often NOT plain buttons): combobox (dropdown/select), option (menu item), menuitem, tab, radio (segmented control), checkbox, link, textbox, button. If role=<x> returns [], drop the role filter and use `filter` on the label text instead.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "role": {"type": "string", "description": "Return nodes with this ARIA role (case-insensitive, substring match), e.g. button, combobox, option, tab, radio, link, textbox"},
+                    "filter": {"type": "string", "description": "Return nodes whose name/value/css_path contains this substring (case-insensitive)"},
+                    "max_nodes": {"type": "integer", "description": "Cap the number of nodes returned (e.g. 50). Omit for the full tree"}
+                }
             }
         }),
         json!({
@@ -596,23 +625,94 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_login",
-            "description": "Fully-automatic login from the local vault: the server decrypts the secret in-process and injects it into the browser via CDP — the value never passes through the model. Discover selectors with webrain_a11y first. Optional `url` navigates first; optional `otp_selector`/`otp_submit_selector` enable TOTP auto-injection when the site gates with 2FA. Reply is status-only.",
+            "description": "Fully-automatic login from the local vault (or WEBRAIN_USER/WEBRAIN_PASS): the server decrypts the secret in-process and injects it via CDP — the value never passes through the model. Auto-discovers the login fields and submits; on a 2FA/approval gate it TOTP-injects if a seed is stored and returns waiting_for_human:true (human acts in the headed browser, then call login again). Reply is status-only. Optional `url` navigates first; optional `port` targets a specific Chrome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "service": {"type": "string", "description": "Service name, e.g. instagram"},
                     "profile": {"type": "string", "description": "Profile name from webrain_profiles"},
                     "url": {"type": "string", "description": "Optional: login page URL to navigate to first"},
-                    "username_selector": {"type": "string", "description": "CSS selector for the username input"},
-                    "password_selector": {"type": "string", "description": "CSS selector for the password input"},
-                    "submit_selector": {"type": "string", "description": "CSS selector for the submit button"},
-                    "otp_selector": {"type": "string", "description": "Optional: CSS selector for the 2FA/OTP input"},
-                    "otp_submit_selector": {"type": "string", "description": "Optional: CSS selector for the 2FA submit button"}
+                    "port": {"type": "integer", "description": "Optional: CDP port of the launched Chrome (default 9222)"}
                 },
-                "required": ["service", "profile", "username_selector", "password_selector", "submit_selector"]
+                "required": ["service", "profile"]
+            }
+        }),
+        json!({
+            "name": "webrain_close_launch",
+            "description": "Stop a Chrome launched by webrain_launch (kills the browser process; the persistent profile + cookies remain for the next launch).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service name, e.g. instagram"},
+                    "profile": {"type": "string", "description": "Profile name"}
+                },
+                "required": ["service", "profile"]
+            }
+        }),
+        json!({
+            "name": "webrain_cookies",
+            "description": "Read all cookies (incl. HttpOnly) from the session backend. Use with webrain_setcookies for cross-browser session migration: log in in Chrome (webrain_login), export here, import into obscura/lightpanda, then webrain_batch on the SAME session (no cdp_urls) so per-connection isolated browsers keep the session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_setcookies",
+            "description": "Import cookies (output of webrain_cookies / `webrain cookies --out`) into the session backend for cross-browser auth. MUST be followed by webrain_batch WITHOUT cdp_urls so set + batch share one connection (obscura stealth isolates per-connection cookie contexts).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cookies": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Array of cookie objects (name, value, domain, path, expires, httpOnly, secure, sameSite, priority)."
+                    }
+                },
+                "required": ["cookies"]
             }
         }),
     ]
+}
+
+/// Filter + cap an accessibility tree to what the LLM needs right now
+/// (just-in-time: don't dump 30KB of nodes when only buttons/links matter).
+fn filter_ax(nodes: &Value, role: Option<&str>, filter: Option<&str>, max: Option<usize>) -> Value {
+    let arr = nodes.as_array().cloned().unwrap_or_default();
+    let mut out: Vec<Value> = Vec::new();
+    for n in arr {
+        let nr = n.get("role").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        if let Some(r) = role {
+            let r = r.to_lowercase();
+            // Exact or substring (e.g. "button" -> pushbutton/radiobutton). Forgiving
+            // on purpose: an exact-role miss silently returns [] and sends the LLM
+            // guessing (Google Material dropdowns are combobox/option, not button).
+            if nr != r && !nr.contains(&r) {
+                continue;
+            }
+        }
+        if let Some(f) = filter {
+            let f = f.to_lowercase();
+            let name = n.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let value = n.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let css = n.get("css_path").and_then(|v| v.as_str()).unwrap_or("");
+            // Name is not enough: Google/Material controls often put their label in a
+            // descendant (exposed as `value` or only reachable via css_path).
+            if !name.to_lowercase().contains(&f)
+                && !value.to_lowercase().contains(&f)
+                && !css.to_lowercase().contains(&f)
+            {
+                continue;
+            }
+        }
+        out.push(n);
+        if let Some(m) = max {
+            if out.len() >= m {
+                break;
+            }
+        }
+    }
+    json!(out)
 }
 
 /// Dispatch tool calls to the shared CDP backend.
@@ -695,6 +795,33 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         "webrain_get_html" => {
             match backend.get_html().await {
                 Ok(html) => json!({"status": "ok", "html": html}),
+                Err(e) => err(e),
+            }
+        }
+        // Cross-browser session migration: read/write cookies ON THE SESSION
+        // BACKEND. Set + batch on the same connection so per-connection
+        // isolated browsers (obscura stealth) share the imported session.
+        // Chrome login -> webrain_cookies -> webrain_setcookies -> webrain_batch
+        // (no cdp_urls) keeps cookies on one connection end-to-end.
+        "webrain_cookies" => {
+            match backend.cookies().await {
+                Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_setcookies" => {
+            let cookies = args.get("cookies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            if cookies.is_empty() {
+                return json!({"status": "error", "message": "cookies array required"});
+            }
+            match backend.set_cookies(&cookies).await {
+                Ok(_) => {
+                    let back = match backend.cookies().await {
+                        Ok(c) => c.len(),
+                        Err(_) => 0,
+                    };
+                    json!({"status": "ok", "set": cookies.len(), "readback": back})
+                }
                 Err(e) => err(e),
             }
         }
@@ -974,7 +1101,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_a11y" => match backend.a11y().await {
-            Ok(nodes) => json!({"status": "ok", "nodes": nodes}),
+            Ok(nodes) => {
+                let role = args.get("role").and_then(|v| v.as_str());
+                let filter = args.get("filter").and_then(|v| v.as_str());
+                let max = args.get("max_nodes").and_then(|v| v.as_u64()).map(|n| n as usize);
+                json!({"status": "ok", "nodes": filter_ax(&nodes, role, filter, max)})
+            }
             Err(e) => err(e),
         },
         "webrain_semantic_tree" => match backend.a11y().await {

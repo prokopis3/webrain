@@ -20,9 +20,21 @@
 mod tools;
 
 use webrain_core::backends::cdp::CdpBackend;
+use webrain_core::browser::BrowserBackend;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
+
+/// Compact error envelope for no-browser tool short-circuits.
+fn tool_error(id: Option<Value>, msg: &str) -> Value {
+    let text = serde_json::to_string(&json!({ "status": "error", "message": msg }))
+        .unwrap_or_else(|_| "{}".into());
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {"content": [{"type": "text", "text": text}], "isError": true}
+    })
+}
 
 /// Shared JSON-RPC dispatch: stdio and HTTP both route through here.
 async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Option<&str>) -> Value {
@@ -238,6 +250,99 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 });
             }
 
+            // ponytail: launch/login manage their own Chrome + backend — serve
+            // without the session backend (the launched Chrome lives in a registry).
+            if tool_name == "webrain_launch" {
+                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
+                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                if service.is_empty() || profile.is_empty() {
+                    return tool_error(id, "service and profile required");
+                }
+                let url = arguments.get("url").and_then(|v| v.as_str())
+                    .unwrap_or("https://accounts.google.com").to_string();
+                let headless = arguments.get("headless").and_then(|v| v.as_bool()).unwrap_or(false);
+                let port: u16 = arguments.get("port").and_then(|v| v.as_u64()).map(|n| n as u16).unwrap_or(9222);
+                let result = match webrain_core::launch::launch_chrome(&service, &profile, port, !headless) {
+                    Ok(l) => {
+                        let cdp_url = l.cdp_url.clone();
+                        let profile_dir = l.profile_dir.clone();
+                        tools::store_launched(&format!("{service}:{profile}"), l);
+                        // prime: attach applies stealth, navigate opens the login page
+                        let prime = async {
+                            let b = CdpBackend::connect_with_url(&cdp_url).await?;
+                            b.navigate(&url).await?;
+                            Ok::<_, anyhow::Error>(())
+                        }
+                        .await;
+                        match prime {
+                            Ok(_) => json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "opened": url}),
+                            Err(e) => json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "warning": format!("launched but attach failed: {e}")}),
+                        }
+                    }
+                    Err(e) => json!({"status": "error", "message": e.to_string()}),
+                };
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+                    }
+                });
+            }
+            if tool_name == "webrain_login" {
+                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
+                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                if service.is_empty() || profile.is_empty() {
+                    return tool_error(id, "service and profile required");
+                }
+                let url = arguments.get("url").and_then(|v| v.as_str()).map(String::from);
+                let port: u16 = arguments.get("port").and_then(|v| v.as_u64()).map(|n| n as u16).unwrap_or(9222);
+                // Creds: vault first (in-process decrypt), else env — never argv/logs.
+                let (user, pass, totp) = match webrain_core::vault::get(&service, &profile) {
+                    Ok(c) => (c.username, c.password, c.totp),
+                    Err(_) => (
+                        std::env::var("WEBRAIN_USER").unwrap_or_default(),
+                        std::env::var("WEBRAIN_PASS").unwrap_or_default(),
+                        None,
+                    ),
+                };
+                if user.is_empty() || pass.is_empty() {
+                    return tool_error(id, "no credentials for this profile — run `webrain vault set <service> <profile>`");
+                }
+                let cdp = format!("http://127.0.0.1:{port}");
+                let result = match CdpBackend::connect_with_url(&cdp).await {
+                    Ok(b) => match webrain_core::login::run_login(&b, &user, &pass, totp.as_deref(), url.as_deref()).await {
+                        Ok(r) => json!({"status": "ok", "result": r}),
+                        Err(e) => json!({"status": "error", "message": e.to_string()}),
+                    },
+                    Err(e) => json!({"status": "error", "message": format!("cannot connect to {cdp}: {e}")}),
+                };
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+                    }
+                });
+            }
+
+            if tool_name == "webrain_close_launch" {
+                let service = arguments.get("service").and_then(|v| v.as_str()).unwrap_or("");
+                let profile = arguments.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                if service.is_empty() || profile.is_empty() {
+                    return tool_error(id, "service and profile required");
+                }
+                let closed = tools::close_launched(&format!("{service}:{profile}"));
+                let result = json!({"status": "ok", "closed": closed});
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                        "isError": false
+                    }
+                });
+            }
+
             if backend.is_none() {
                 let res = if let Some(url) = cdp_url {
                     CdpBackend::connect_with_url(url).await
@@ -370,7 +475,15 @@ pub async fn run_http(addr: &str) -> anyhow::Result<()> {
     });
     tracing::info!("webrain-mcp HTTP listening on {addr}");
     loop {
-        let (socket, _) = listener.accept().await?;
+        // ponytail: one flaky accept (conn reset / transient) must NOT kill the
+        // whole server — log + keep serving. This `?` was the exit-1 crash.
+        let (socket, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("accept error: {e} — continuing");
+                continue;
+            }
+        };
         let state = state.clone();
         tokio::spawn(async move {
             let _ = handle_http_conn(socket, state).await;
