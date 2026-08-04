@@ -4,8 +4,6 @@ pub struct PageResult {
     pub url: String,
     pub title: Option<String>,
     pub content: Option<String>,
-    /// Base64-encoded PNG when screenshot was requested.
-    pub screenshot_b64: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
 }

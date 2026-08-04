@@ -559,7 +559,6 @@ impl SpiderEngine {
                             url: url.clone(),
                             title: None,
                             content: None,
-                            screenshot_b64: None,
                             error: None,
                             duration_ms: start.elapsed().as_millis() as u64,
                         },
@@ -571,7 +570,6 @@ impl SpiderEngine {
                                 url: url.clone(),
                                 title: None,
                                 content: None,
-                                screenshot_b64: None,
                                 error: Some(e.to_string()),
                                 duration_ms: start.elapsed().as_millis() as u64,
                             },
@@ -587,7 +585,6 @@ impl SpiderEngine {
                     url: url.clone(),
                     title: None,
                     content: None,
-                    screenshot_b64: None,
                     error: Some("unreached".into()),
                     duration_ms: 0,
                 };
@@ -599,7 +596,6 @@ impl SpiderEngine {
                                 url: url.clone(),
                                 title: Some(state.title.clone()),
                                 content: Some(state.text),
-                                screenshot_b64: None,
                                 error: None,
                                 duration_ms: start.elapsed().as_millis() as u64,
                             };
@@ -1588,36 +1584,6 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
         });
     }
     out
-}
-
-// ── Crawl cache ──────────────────────────────────────────────────────────────
-// ponytail: SHA-256(url) → {PageState, timestamp} on disk. Same URL re-crawled
-// costs the same prompt tokens — a direct token-cost win. Keyed on full URL
-// string (query params matter). Args: bypass | enabled | disabled.
-
-pub fn cache_key(url: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(url.as_bytes()))
-}
-
-pub fn cache_read(cache_dir: &str, url: &str) -> Option<Value> {
-    let path = format!("{cache_dir}/{}.json", cache_key(url));
-    let raw = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-pub fn cache_write(cache_dir: &str, url: &str, state: &Value) {
-    let _ = std::fs::create_dir_all(cache_dir);
-    let path = format!("{cache_dir}/{}.json", cache_key(url));
-    let payload = json!({"url": url, "state": state, "ts": chrono_now()});
-    let _ = std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default());
-}
-
-fn chrono_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 // ── Fit-text cleaning ────────────────────────────────────────────────────────
