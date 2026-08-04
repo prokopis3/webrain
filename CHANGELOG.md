@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **docs**: rewrote README — removed the table of contents and made it
+  install-first with a "Why webrain?" comparison and a use-case section;
+  added the Scoop **extras** install option.
+- **build**: moved the `Dockerfile` into `docker/` and added
+  `docker/docker-compose.yml` (webrain MCP server + persistent
+  vault/profile/cache volumes).
+
 ## [0.2.0] - 2026-08-05
 
 ### Added

@@ -6,7 +6,7 @@
 
 **A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.**
 
-Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. It is meant to be installed on any system and driven by **any LLM** (GitHub Copilot, Claude, Codex, Cursor, …). The LLM decides everything — search, crawl, scrape, browser-navigate, browser-interact — from a plain-language prompt, with no hardcoded intent detection.
+Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
 
 [![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -19,52 +19,29 @@ Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. 
 
 ---
 
-## Table of Contents
+## Why webrain?
 
-- [webrain](#webrain)
-  - [Table of Contents](#table-of-contents)
-  - [Key Features](#key-features)
-  - [Tech Stack](#tech-stack)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-    - [Global Installation (recommended)](#global-installation-recommended)
-    - [Project Installation](#project-installation)
-    - [Cargo (Rust)](#cargo-rust)
-    - [Homebrew (macOS)](#homebrew-macos)
-    - [Scoop (Windows)](#scoop-windows)
-    - [Linux Dependencies](#linux-dependencies)
-    - [From Source](#from-source)
-    - [Updating](#updating)
-    - [OS Compatibility](#os-compatibility)
-  - [Quick Start](#quick-start)
-    - [Traditional Selectors (also supported)](#traditional-selectors-also-supported)
-  - [Commands](#commands)
-  - [Browser Engines](#browser-engines)
-  - [MCP Tools](#mcp-tools)
-  - [CLI Reference](#cli-reference)
-  - [Environment Variables](#environment-variables)
-  - [Marketplace / IDE Plugins](#marketplace--ide-plugins)
-  - [Architecture](#architecture)
-  - [Agent Decision Guide](#agent-decision-guide)
-  - [Testing](#testing)
-  - [CI/CD \& Releases](#cicd--releases)
-  - [Deployment (Docker)](#deployment-docker)
-  - [Troubleshooting](#troubleshooting)
-  - [Changelog](#changelog)
-  - [Contributing](#contributing)
-  - [License](#license)
+Web automation shouldn't mean wiring up a driver, a browser download, and your own tool wrappers before an LLM can touch a page. Webrain collapses that into **one binary + one install command** and speaks MCP, so any LLM client drives it directly.
+
+| | **webrain** | Raw Playwright / Puppeteer |
+|---|---|---|
+| **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
+| **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
+| **LLM-ready** | MCP server, ~45 tools, built-in decision guide | you hand-roll tool functions |
+| **Anti-bot** | challenge detection + stealth sidecar | manual |
+| **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
+| **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
+
+## What you can do with it
+
+- **Scrape at scale** — batch pagination + spider with auto-throttle and checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
+- **Structured data without hand-written selectors** — `webrain_autoschema` probes the DOM, then JSON / regex / table extractors read container-level structure.
+- **Stealth login** — real-Chrome profiles with an encrypted local credential vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
+- **Get past challenges** — reads the `challenge` field on every navigate and solves Cloudflare/Turnstile via a real-Chrome stealth sidecar.
+- **See the page** — a11y / semantic tree, snapshots, and vision tiles (screenshot → vector store) for tables and charts.
+- **Read anything** — PDFs (extract + render), JSON-LD, media, plus `fetch_http` for static pages 10–100× faster than a browser.
 
 ---
-
-## Key Features
-
-- **Portable MCP server** — a single `webrain` binary. MCP over stdio *or* HTTP (`webrain mcp --http 9223`). No daemon, no Node.js.
-- **Three browser engines, one CDP backend** — real **Chrome** (full rendering, Material/SPA, screenshots), **lightpanda** (fast, real a11y tree), **obscura** (stealth, parallel tabs). All speak CDP; `CdpBackend` drives any of them. Plus `fetch_http` for static HTML (10–100× faster than a browser).
-- **Engine install like agent-browser** — `webrain install` downloads Chrome for Testing; `webrain install --engine obscura` downloads the latest Obscura release; `webrain lightpanda` / `webrain obscura` spawn the CDP servers.
-- **~45 scraping tools** — navigate, snapshot, a11y/semantic tree, autoschema + JSON/regex extraction, batch pagination, spider, sitemap, tables, JSON-LD, PDF extract/render, vision (screenshot tiles → vector store), cookie transfer, stealth login with an encrypted local vault (AES-256-GCM + optional TOTP).
-- **Anti-bot aware** — reads the `challenge` field on every navigate; real-Chrome stealth sidecar (`scripts/stealth_solve.py`) for Cloudflare/Turnstile/CAPTCHA.
-- **LLM-first decisions** — `webrain_guide` + `docs/AGENT_DECISION_GUIDE.md` encode when to use which engine/tool, so an agent knows exactly what to do.
-- **Cross-OS** — Windows, macOS, Linux. Docker image included.
 
 ## Tech Stack
 
@@ -76,13 +53,6 @@ Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. 
 - **Crypto**: AES-256-GCM vault, SHA-256/HMAC/SHA-1 (TOTP)
 - **PDF**: lopdf + pdf-inspector (pure Rust)
 - **Deployment**: Docker (multi-arch), GitHub Actions CI/CD
-
-## Prerequisites
-
-- **A browser engine.** Run `webrain install` to download Chrome for Testing (recommended), or point webrain at an existing Chrome/Edge/Chromium. Lightpanda and Obscura are optional engines (see [Browser Engines](#browser-engines)).
-- **Rust** — only to build from source (`cargo`). Download from [rustup.rs](https://rustup.rs).
-- **An LLM client** — VS Code + Copilot, Claude Desktop, Codex, Cursor, etc. (any MCP client).
-- Nothing else is required for the server itself. No Node.js, no Playwright, no daemon.
 
 ## Installation
 
@@ -161,6 +131,14 @@ webrain install   # Download Chrome (first time only)
 
 ### Scoop (Windows)
 
+From the official **extras** bucket (after [PR #18455](https://github.com/ScoopInstaller/Extras/pull/18455) merges):
+
+```powershell
+scoop install extras/webrain
+```
+
+Or from the project's own bucket:
+
 ```powershell
 scoop bucket add webrain https://github.com/prokopis3/scoop-webrain
 scoop install webrain
@@ -229,7 +207,7 @@ webrain install --engine obscura
 | **Chrome for Testing** (`webrain install`) | ✅ | ✅ | ✅ |
 | **Obscura** (`webrain install --engine obscura`) | ✅ x86_64 | ✅ x86_64 / arm64 | ✅ x86_64 / arm64 |
 | **Lightpanda** (`webrain lightpanda`, binary needed) | ⚠️ (needs a Windows build on PATH) | ✅ | ✅ |
-| **Docker** (`Dockerfile`) | via Docker Desktop | via Docker Desktop | ✅ |
+| **Docker** (`docker/Dockerfile`) | via Docker Desktop | via Docker Desktop | ✅ |
 
 Binary discovery is automatic on every OS: env override → PATH → `~/.lightpanda`, `~/.obscura`, `~/.local/bin` → the webrain engine cache.
 
@@ -468,17 +446,20 @@ Commit convention: `<type>(<scope>): <description>` — types `feat|fix|docs|sty
 
 ## Deployment (Docker)
 
-A self-contained image with Chromium bundled:
+A self-contained image with Chromium bundled lives in [`docker/`](docker/) with a `docker-compose.yml`:
 
 ```bash
-# build
-docker build -t webrain .
+# build (context is the repo root, so the workspace crates are visible)
+docker build -f docker/Dockerfile -t webrain .
 
 # run (HTTP MCP on 9223)
 docker run -p 9223:9223 webrain mcp --http 9223
 
+# or via compose — also mounts persistent volumes for the vault + profiles + engine cache
+docker compose -f docker/docker-compose.yml up -d
+
 # multi-arch
-docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webrain .
+docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webrain -f docker/Dockerfile .
 ```
 
 ## Troubleshooting

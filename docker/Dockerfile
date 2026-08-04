@@ -1,10 +1,15 @@
 # syntax=docker/dockerfile:1
 # webrain — self-contained MCP browser-automation server.
 #
-#   docker build -t webrain .
-#   docker run -p 9223:9223 webrain mcp --http 9223
+# Build from the repo root (the build context must be the repo root so the
+# workspace crates are visible):
 #
-# Multi-arch: docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webrain .
+#   docker build -f docker/Dockerfile -t webrain .
+#   docker run -p 9223:9223 webrain mcp --http 9223
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# Multi-arch:
+#   docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webrain -f docker/Dockerfile .
 
 # ── Build stage ─────────────────────────────────────────────────
 FROM rust:alpine AS builder

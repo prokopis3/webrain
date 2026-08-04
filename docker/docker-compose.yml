@@ -1,0 +1,25 @@
+# webrain MCP server (self-contained, Chromium bundled) + persistent data volumes.
+#
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml logs -f
+#
+# The build context is the repo root (`..`), so the workspace crates are visible.
+
+services:
+  webrain:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: webrain
+    container_name: webrain
+    ports:
+      - "9223:9223" # HTTP MCP transport (webrain mcp --http 9223)
+    volumes:
+      - webrain-config:/root/.config/webrain # encrypted vault + browser profiles
+      - webrain-cache:/root/.cache/webrain   # engine cache (Chrome for Testing / Obscura)
+    restart: unless-stopped
+    command: ["mcp", "--http", "9223"]
+
+volumes:
+  webrain-config:
+  webrain-cache:
