@@ -21,24 +21,10 @@ permissions:
   statuses: write
 
 jobs:
-  lint-commits:
-    name: Lint Commits
+  lint-title:
+    name: Lint PR Title
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-
-      - name: Install commitlint
-        run: |
-          npm install -g @commitlint/cli @commitlint/config-conventional
-
       - name: Lint PR title
         uses: amannn/action-semantic-pull-request@v6
         id: lint_pr_title
@@ -61,12 +47,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Lint all commits in PR
-        run: |
-          npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
-
       - name: Post lint result
-        if: failure() && steps.lint_pr_title.outputs.error_message != null
+        if: failure()
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: pr-lint
@@ -78,12 +60,12 @@ jobs:
             ### ✅ Examples of valid PR titles:
 
             ```
-            feat(core): add authentication middleware
-            fix(api): resolve timeout on large responses
-            refactor(pipeline): rewrite pagination with crawl4ai-native discovery
+            feat(core): add CDP browser backend
+            fix(cli): resolve install path detection on Windows
+            refactor(engines): unify lightpanda/obscura discovery
             docs: update README with architecture overview
-            test: add handler unit tests
-            chore(deps): update crawl4ai to v0.8.9
+            test: add engine unit tests
+            chore(deps): update tokio to v1.4x
             ```
 
             ---

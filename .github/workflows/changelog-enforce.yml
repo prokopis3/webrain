@@ -33,8 +33,8 @@ jobs:
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -c "CHANGELOG.md" || true)
           echo "changelog_changed=$CHANGED" >> $GITHUB_OUTPUT
 
-          # Check if source files were changed (exclude docs, config, tests)
-          SOURCE_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -cE "^(lib/|main\.py|run_api\.py)" || true)
+          # Check if Rust source files were changed (exclude docs, config)
+          SOURCE_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
           echo "source_changed=$SOURCE_CHANGED" >> $GITHUB_OUTPUT
 
       - name: Comment if changelog missing
@@ -45,8 +45,8 @@ jobs:
           message: |
             ## ⚠️ CHANGELOG.md not updated
 
-            Source code files in `lib/`, `main.py`, or `run_api.py` were changed,
-            but `CHANGELOG.md` was not updated.
+            Rust source files in `webrain-core/`, `webrain-mcp/`, or `webrain-cli/`
+            were changed, but `CHANGELOG.md` was not updated.
 
             Please add an entry under `[Unreleased]` describing your changes.
             See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format guidelines.
