@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **build**: moved the `Dockerfile` into `docker/` and added
   `docker/docker-compose.yml` (webrain MCP server + persistent
   vault/profile/cache volumes).
+- **tools**: deduped the repeated JS→JSON parse chain in `tools.rs` into
+  `parse_json_str` / `arr_len` helpers — no behavior change.
 
 ## [0.2.0] - 2026-08-05
 

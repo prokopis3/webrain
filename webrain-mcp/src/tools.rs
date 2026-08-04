@@ -778,6 +778,18 @@ fn filter_ax(nodes: &Value, role: Option<&str>, filter: Option<&str>, max: Optio
     json!(out)
 }
 
+/// Parse a JS `JSON.stringify(...)` result string into a Value (Null on bad JSON).
+fn parse_json_str(v: &Value) -> Value {
+    v.as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Length of a JSON array (0 for non-array).
+fn arr_len(v: &Value) -> usize {
+    v.as_array().map(|a| a.len()).unwrap_or(0)
+}
+
 /// Dispatch tool calls to the shared CDP backend.
 /// ponytail: match arm, no registry pattern.
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
@@ -1096,11 +1108,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             };
             match backend.evaluate(&js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
-                    json!({"status": "ok", "count": arr.as_array().map(|a| a.len()).unwrap_or(0), "data": arr})
+                    let arr = parse_json_str(&v);
+                    json!({"status": "ok", "count": arr_len(&arr), "data": arr})
                 }
                 Err(e) => err(e),
             }
@@ -1121,11 +1130,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let js = r#"JSON.stringify(Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => { try { return JSON.parse(s.textContent); } catch(e) { return null; } }).filter(Boolean))"#;
             match backend.evaluate(js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
-                    json!({"status": "ok", "count": arr.as_array().map(|a| a.len()).unwrap_or(0), "jsonld": arr})
+                    let arr = parse_json_str(&v);
+                    json!({"status": "ok", "count": arr_len(&arr), "jsonld": arr})
                 }
                 Err(e) => err(e),
             }
@@ -1135,11 +1141,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let js = r#"JSON.stringify(Array.from(document.querySelectorAll('table')).slice(0,20).map(t => { const headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim()); const rows = Array.from(t.querySelectorAll('tr')).slice(headers.length ? 1 : 0).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.textContent.trim())); return headers.length ? rows.map(r => Object.fromEntries(headers.map((h,i) => [h, r[i] ?? null]))) : rows; }))"#;
             match backend.evaluate(js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
-                    json!({"status": "ok", "count": arr.as_array().map(|a| a.len()).unwrap_or(0), "tables": arr})
+                    let arr = parse_json_str(&v);
+                    json!({"status": "ok", "count": arr_len(&arr), "tables": arr})
                 }
                 Err(e) => err(e),
             }
@@ -1155,10 +1158,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             );
             match backend.evaluate(&js).await {
                 Ok(v) => {
-                    let obj = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
+                    let obj = parse_json_str(&v);
                     json!({"status": "ok", "result": obj})
                 }
                 Err(e) => err(e),
@@ -1176,10 +1176,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             );
             match backend.evaluate(&js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
+                    let arr = parse_json_str(&v);
                     json!({"status": "ok", "candidates": arr})
                 }
                 Err(e) => err(e),
@@ -1619,11 +1616,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let js = r#"JSON.stringify(Array.from(document.images).map(img => ({src: img.currentSrc || img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight})).slice(0, 200))"#;
             match backend.evaluate(js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
-                    json!({"status": "ok", "count": arr.as_array().map(|a| a.len()).unwrap_or(0), "images": arr})
+                    let arr = parse_json_str(&v);
+                    json!({"status": "ok", "count": arr_len(&arr), "images": arr})
                 }
                 Err(e) => err(e),
             }
@@ -1652,13 +1646,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 );
                 match backend.evaluate(&js).await {
                     Ok(v) => {
-                        let obj = v
-                            .as_str()
-                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                            .unwrap_or(Value::Null);
+                        let obj = parse_json_str(&v);
                         let media = obj.get("media").cloned().unwrap_or(Value::Null);
                         let total = obj.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
-                        json!({"status": "ok", "mode": "performance", "total_resources": total, "count": media.as_array().map(|a| a.len()).unwrap_or(0), "media": media})
+                        json!({"status": "ok", "mode": "performance", "total_resources": total, "count": arr_len(&media), "media": media})
                     }
                     Err(e) => err(e),
                 }
@@ -1680,11 +1671,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             "#;
             match backend.evaluate(js).await {
                 Ok(v) => {
-                    let arr = v
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or(Value::Null);
-                    json!({"status": "ok", "count": arr.as_array().map(|a| a.len()).unwrap_or(0), "logs": arr})
+                    let arr = parse_json_str(&v);
+                    json!({"status": "ok", "count": arr_len(&arr), "logs": arr})
                 }
                 Err(e) => err(e),
             }
