@@ -8,6 +8,7 @@
 pub mod backends;
 pub mod browser;
 pub mod engines;
+pub mod launch;
 pub mod vision;
 
 pub use backends::cdp::CdpBackend;
