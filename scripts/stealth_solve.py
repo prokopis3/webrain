@@ -14,6 +14,7 @@ attach to the SAME authenticated session via CDP (CDP_URL=http://127.0.0.1:<port
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,67 @@ def challenge_pending(page) -> bool:
     return ("just a moment" in title) or ("performing security verification" in title)
 
 
+# Session-ish cookies: presence of any after a submit implies the account is
+# logged in (Instagram sessionid, Google SID, Facebook c_user, ...).
+SESSION_COOKIES = {"sessionid", "session", "SID", "SSID", "APISID", "SAPISID",
+                   "c_user", "datr", "dpr", "mid", "ig_did", "auth_token"}
+
+
+def logged_in(ctx) -> bool:
+    return any(c["name"] in SESSION_COOKIES for c in ctx.cookies())
+
+
+def submit_login(page, user, pwd):
+    """Fill the visible login form and submit it. Returns True if a submit fired."""
+    fields = page.locator('input[name="email"], input[name="username"], input[name="login"], input[type="email"]').first
+    if not fields.count():
+        return False
+    pw = page.locator('input[name="password"], input[type="password"]').first
+    if not pw.count():
+        return False
+    fields.fill(user)
+    pw.fill(pwd)
+    # Most sites: a real <button type=submit>. Instagram: a <div role=button>.
+    # Click by accessible name first, fall back to Enter on the password field.
+    for label in ("Log in", "Sign in", "Continue", "Submit", "Log In", "Sign In"):
+        try:
+            b = page.get_by_role("button", name=label, exact=True).first
+            if b.count():
+                b.click(timeout=5000)
+                return True
+        except Exception:
+            continue
+    try:
+        pw.press("Enter")
+        return True
+    except Exception:
+        return False
+
+
+def twofa_signal(page) -> bool:
+    """Detect a 2FA / approval / device-verification gate that needs the human."""
+    url = (page.url or "").lower()
+    if any(k in url for k in ("challenge", "two_factor", "checkpoint", "verify",
+                              "onetap", "login_required", "sms", "otp", "2fa")):
+        return True
+    try:
+        if page.locator('input[autocomplete="one-time-code"], input[name="code"], '
+                        'input[name="otp"], input[inputmode="numeric"][maxlength="6"]').first.count():
+            return True
+    except Exception:
+        pass
+    try:
+        body = (page.inner_text("body") or "")[:4000].lower()
+        if any(k in body for k in ("enter the code from your authenticator app",
+                                   "enter your verification code", "approve this device",
+                                   "confirm it's you", "check your phone",
+                                   "we've sent a code", "enter the 6-digit code")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
@@ -38,10 +100,15 @@ def main() -> int:
     ap.add_argument("--wait", type=int, default=60, help="max seconds to wait out the challenge")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--exit-after", action="store_true", help="export cookies then close Chrome")
+    ap.add_argument("--profile", default=None, help="persistent Chrome profile dir (per-account cookies); default: throwaway temp")
     args = ap.parse_args()
 
     user, _, pwd = args.creds.partition(":")
-    profile = tempfile.mkdtemp(prefix="stealth_")
+    if args.profile:
+        os.makedirs(args.profile, exist_ok=True)
+        profile = args.profile
+    else:
+        profile = tempfile.mkdtemp(prefix="stealth_")
 
     chrome_args = [
         CHROME,
@@ -97,16 +164,28 @@ def main() -> int:
             cleared = not challenge_pending(page)
             print(f"challenge_cleared={cleared} title={page.title()!r} url={page.url}", flush=True)
 
-            if cleared:
-                email = page.locator('input[name="email"], input#email, input[type="email"]').first
-                if email.count():
-                    email.fill(user)
-                    pw = page.locator('input[name="password"], input#password, input[type="password"]').first
-                    if pw.count():
-                        pw.fill(pwd)
-                    page.locator('button[type="submit"], #submit-button').first.click()
-                    page.wait_for_timeout(4000)
-                print(f"post_login url={page.url} title={page.title()!r}", flush=True)
+            # ponytail: only auto-login when real creds were given — the human-types
+            # path (empty creds, per the credentials skill) must leave the form alone.
+            if cleared and user and pwd:
+                submitted = submit_login(page, user, pwd)
+                print(f"post_login url={page.url} title={page.title()!r} submitted={submitted}", flush=True)
+                if submitted:
+                    # Wait for the session to land. If a 2FA/approval gate shows up,
+                    # park and let the HUMAN finish it in the headed browser.
+                    gate = twofa_signal(page)
+                    if gate:
+                        print("2fa: waiting for user in the browser (approve or enter code)", flush=True)
+                    t0 = time.time()
+                    while not logged_in(ctx):
+                        if not gate and time.time() - t0 > 15:
+                            break
+                        time.sleep(3)
+                        if twofa_signal(page) and not gate:
+                            gate = True
+                            print("2fa: waiting for user in the browser (approve or enter code)", flush=True)
+                print(f"logged_in={logged_in(ctx)}", flush=True)
+            else:
+                print("no_auto_login (human types in browser)", flush=True)
 
             cookies = ctx.cookies()
             names = {c["name"] for c in cookies}
