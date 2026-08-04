@@ -85,13 +85,29 @@ Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. 
 
 ### Global Installation (recommended)
 
-Install the native Rust binary, then download Chrome:
+One command per OS — downloads the release binary and puts `webrain` on PATH, then install a browser engine:
 
-```bash
-# from a release asset (Windows: webrain-x86_64-windows.zip, etc.)
+**Windows (PowerShell):**
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\webrain"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Invoke-WebRequest "https://github.com/prokopis3/webrain/releases/download/v0.1.0/webrain-windows.exe" -OutFile "$dir\webrain.exe"
+[Environment]::SetEnvironmentVariable("Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$dir", "User")
+# open a new terminal, then:
 webrain install          # Download Chrome for Testing (first time only)
 webrain mcp --http 9223  # start the MCP server
 ```
+
+**Linux / macOS:**
+
+```bash
+curl -L -o ~/.local/bin/webrain https://github.com/prokopis3/webrain/releases/download/v0.1.0/webrain-linux
+chmod +x ~/.local/bin/webrain
+webrain install          # Download Chrome for Testing (first time only)
+webrain mcp --http 9223  # start the MCP server
+```
+
+> macOS: swap `webrain-linux` for `webrain-macos` in the curl line.
 
 ### Project Installation
 
@@ -111,16 +127,12 @@ webrain install   # Download Chrome (first time only)
 
 ### Homebrew (macOS)
 
-```bash
-brew tap prokopis3/tap
-brew install webrain
-webrain install   # Download Chrome (first time only)
-```
+Coming soon — use the macOS curl install above for now.
 
 ### Scoop (Windows)
 
 ```powershell
-scoop bucket add webrain https://github.com/deepscrape/scoop-bucket
+scoop bucket add webrain https://github.com/prokopis3/scoop-webrain
 scoop install webrain
 webrain install   # Download Chrome (first time only)
 ```
