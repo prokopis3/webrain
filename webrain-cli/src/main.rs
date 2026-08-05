@@ -456,7 +456,12 @@ fn upgrade() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     if cmd_exists("brew") {
         println!("webrain: installed via Homebrew \u{2014} running `brew upgrade webrain`");
-        return run_cmd("brew", &["upgrade", "webrain"]).map_err(Into::into);
+        // ponytail: spawn detached + exit, never block-wait. If this process stays
+        // alive while the package manager runs, Scoop sees the upgrade command
+        // itself as a running instance of webrain and refuses to replace the exe.
+        // Detach so the binary is free when brew/scoop swap it.
+        std::process::Command::new("brew").args(["upgrade", "webrain"]).spawn()?;
+        return Ok(());
     }
     #[cfg(target_os = "windows")]
     if cmd_exists("scoop")
@@ -466,7 +471,10 @@ fn upgrade() -> anyhow::Result<()> {
     {
         println!("webrain: installed via Scoop \u{2014} running `scoop update webrain`");
         // scoop is a .cmd/.ps1 shim, not scoop.exe — spawn it through cmd.exe
-        return run_cmd("cmd", &["/c", "scoop", "update", "webrain"]).map_err(Into::into);
+        std::process::Command::new("cmd")
+            .args(["/c", "scoop", "update", "webrain"])
+            .spawn()?;
+        return Ok(());
     }
     self_update()
 }
@@ -476,14 +484,6 @@ fn cmd_exists(name: &str) -> bool {
         std::env::split_paths(&p)
             .any(|d| d.join(name).exists() || d.join(format!("{name}.exe")).exists())
     })
-}
-
-fn run_cmd(prog: &str, args: &[&str]) -> std::io::Result<()> {
-    let st = std::process::Command::new(prog).args(args).status()?;
-    if !st.success() {
-        return Err(std::io::Error::other(format!("{prog} exited with {st}")));
-    }
-    Ok(())
 }
 
 fn self_update() -> anyhow::Result<()> {
