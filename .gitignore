@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 vision/
 /build_err.txt
+.vscode/
+/dist_*
