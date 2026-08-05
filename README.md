@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/webrain-logo.png" alt="webrain" width="180" height="180">
+<img src="assets/webrain-logo-rounded.png" alt="webrain" width="180" height="180">
 
 # webrain
 

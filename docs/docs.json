@@ -69,8 +69,8 @@
     }
   },
   "logo": {
-    "light": "/images/webrain-logo-rounded.png",
-    "dark": "/images/webrain-logo-nobg.png"
+    "light": "/images/webrain-logo-nobg.png",
+    "dark": "/images/webrain-logo-rounded.png"
   },
   "navbar": {
     "links": [

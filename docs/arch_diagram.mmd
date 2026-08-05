@@ -1,0 +1,52 @@
+---
+references:
+  - "File: /webrain-cli/src/main.rs"
+generationTime: 2026-08-05T16:13:32.115Z
+---
+architecture-beta
+    group cli(server)[Command Line Interface]
+    group mcp(cloud)[MCP Server]
+    group core(server)[Core Library]
+    group engines(internet)[Browser Engines]
+    group ext(internet)[External Systems]
+
+    service dispatch(server)[Main Dispatcher] in cli
+
+    service stdio_srv(server)[Stdio Server] in mcp
+    service http_srv(server)[HTTP Server] in mcp
+
+    service cdp(server)[CDP Backend] in core
+    service spider(server)[Spider Engine] in core
+    service vault(database)[Credential Vault] in core
+    service login(server)[Login Automation] in core
+    service launch(server)[Engine Launcher] in core
+    service install(server)[Engine Installer] in core
+
+    service chrome(server)[Chrome] in engines
+    service obscura(server)[Obscura] in engines
+    service lightpanda(server)[Lightpanda] in engines
+
+    service github(cloud)[GitHub Releases] in ext
+    service python(server)[Python Sidecar] in ext
+
+    dispatch{group}:R --> L:stdio_srv{group}
+    dispatch{group}:R --> L:http_srv{group}
+    dispatch{group}:R --> L:python{group}
+
+    dispatch{group}:B --> T:cdp{group}
+    dispatch{group}:B --> T:spider{group}
+    dispatch{group}:B --> T:vault{group}
+    dispatch{group}:B --> T:login{group}
+    dispatch{group}:B --> T:launch{group}
+    dispatch{group}:B --> T:install{group}
+
+    cdp:R -- L:spider
+    vault:R --> L:login
+
+    cdp{group}:R --> L:chrome{group}
+
+    install{group}:R --> L:github{group}
+
+    align column stdio_srv http_srv
+    align column cdp spider vault login launch install
+    align column chrome obscura lightpanda
