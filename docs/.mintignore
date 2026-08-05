@@ -1,0 +1,7 @@
+# Files kept in the repo but NOT part of the Mintlify site.
+# (Legacy/internal docs — the site is the 14 mdx pages in docs.json nav.)
+adr/
+AGENT_DECISION_GUIDE.md
+ARCHITECTURE.md
+FEATURE_GAPS.md
+INTEGRATION_PLAN.md
