@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.3.2] - 2026-08-05
+
 ### Added
 
 - **docs**: new Mintlify docs site in `docs/` — overview, quickstart,
@@ -14,22 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scrape-at-scale / auth-and-login guides, full 51-tool reference, CLI + env
   reference, deployment, troubleshooting, contributing. Built with the Mintlify
   CLI (`docs/docs.json`); existing `docs/*.md` files left in place, untouched.
+- **docs**: changelog-map page (`docs/changelog.mdx`) — version-anchored
+  history, linked in the Project nav.
 
 ### Changed
 
-- **docs**: `quickstart.mdx` and README now show the full MCP client setup (stdio + HTTP
-  transports, VS Code / Claude Desktop / Cursor configs, `webrain_guide` verification);
-  new `docs/changelog.mdx` changelog-map page (version-anchored, linked in the Project nav).
-- **skills**: `skills/webrain/SKILL.md` upgraded to a full agent-skill contract - richer
-  frontmatter, `When to use`, `Recommended limits & token discipline`, and a 7-step
-  end-to-end `How to invoke` flow (parse → preflight → navigate → challenge branch →
-  browser → extract → report).
-- **docs**: new `Prerequisites` section in `README.md` and the docs site — OS,
-  browser engine (`webrain install`), Linux libs, optional Python 3 / Docker,
-  optional MCP client.
+- **docs**: `quickstart.mdx` and README now show the full MCP client setup
+  (stdio + HTTP transports, VS Code / Claude Desktop / Cursor configs,
+  `webrain_guide` verification).
+- **skills**: `skills/webrain/SKILL.md` upgraded to a full agent-skill contract -
+  richer frontmatter, `When to use`, `Recommended limits & token discipline`,
+  and a 7-step end-to-end `How to invoke` flow.
+- **docs**: new `Prerequisites` section in `README.md` and the docs site.
 - **docs**: ADR-001 graph note refreshed to 2026-08-05 state — 875 nodes /
   2287 edges, 3 entry points, new hotspots (`vault.get` fan-in 26,
   `ensure_page_attached`, `send_cmd_with`), 51 MCP tools (up from 34).
+- **style**: `cargo fmt` on the mcp session-routing match indent.
 
 ## [0.3.1] - 2026-08-05
 
