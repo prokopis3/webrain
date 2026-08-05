@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **docs**: `quickstart.mdx` and README now show the full MCP client setup (stdio + HTTP
+  transports, VS Code / Claude Desktop / Cursor configs, `webrain_guide` verification);
+  new `docs/changelog.mdx` changelog-map page (version-anchored, linked in the Project nav).
+- **skills**: `skills/webrain/SKILL.md` upgraded to a full agent-skill contract - richer
+  frontmatter, `When to use`, `Recommended limits & token discipline`, and a 7-step
+  end-to-end `How to invoke` flow (parse → preflight → navigate → challenge branch →
+  browser → extract → report).
 - **docs**: new `Prerequisites` section in `README.md` and the docs site — OS,
   browser engine (`webrain install`), Linux libs, optional Python 3 / Docker,
   optional MCP client.

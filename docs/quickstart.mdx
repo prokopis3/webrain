@@ -46,9 +46,14 @@ webrain mcp --http 9223 # HTTP transport on 127.0.0.1:9223
 Logs go to **stderr**; MCP speaks pure JSON on **stdout** — never redirect
 stderr into the stream.
 
-## 4. Point an LLM at it
+## 4. Connect an LLM client (MCP setup)
 
-In VS Code, register the server under `"mcp"` in your user `settings.json`:
+Webrain is an **MCP server** - register it in your client and the 51 `webrain_*`
+tools appear automatically. Two transports:
+
+- **stdio** - `webrain mcp` (default; simplest for local clients)
+- **HTTP** - `webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`
+
 
 ```jsonc
 {
@@ -64,6 +69,41 @@ In VS Code, register the server under `"mcp"` in your user `settings.json`:
   }
 }
 ```
+
+Or over HTTP (start `webrain mcp --http 9223` first):
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "webrain": { "type": "http", "url": "http://127.0.0.1:9223/mcp" }
+    }
+  }
+}
+```
+
+**Claude Desktop** - `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+**Cursor** - project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+Restart the client, then **verify the server is live**: ask the LLM to call
+`webrain_guide` - it returns the browser/challenge/extraction decision guide.
 
 Then ask the LLM something like:
 

@@ -1,8 +1,13 @@
 ---
 name: webrain
-version: "0.1.0"
-description: Guide + scripts for driving the webrain MCP scraping tools — browser selection (real Chrome vs obscura vs lightpanda), Cloudflare/CAPTCHA/Turnstile bypass via a real-Chrome stealth sidecar, and the extraction tool matrix. Use when scraping, browser automation, or hitting anti-bot challenges with the mcp_webrain-* tools.
+version: "0.2.0"
+description: Drive the webrain MCP scraping tools (mcp_webrain-*) like a pro — pick the right browser (real Chrome vs obscura vs lightpanda vs fetch_http), get past Cloudflare/CAPTCHA/Turnstile via a real-Chrome stealth sidecar, and choose the right extractor (autoschema → extract_json / regex / table / batch / spider). Use when scraping, browser automation, structured extraction, or hitting anti-bot challenges.
+argument-hint: "<what to scrape> [from <url>] [auth?] [whole site?]"
 allowed-tools: Bash, Read
+homepage: https://github.com/prokopis3/webrain
+repository: https://github.com/prokopis3/webrain
+author: prokopis3
+license: MIT
 user-invocable: true
 ---
 
@@ -36,6 +41,52 @@ python "${SKILL_DIR}/scripts/preflight.py"      # JSON: mcp_up, cdp[], recommend
 
 Branch: browser down → ask the user to start obscura (`docker start obscura`) or
 a real Chrome; MCP down → start `webrain.exe mcp --http 9223`.
+
+## When to use
+
+- The user asks to scrape, crawl, or extract structured data from a website.
+- The user asks to navigate/interact with a browser, log into a site, or get past an anti-bot challenge.
+- A page needs a real browser (SPA, Material UI, JS-rendered) and `webrain_fetch_http` is not enough.
+- A batch/spider crawl over many URLs, or a whole-site sitemap.
+
+## Recommended limits & token discipline
+
+- **Never dump raw HTML to the model.** `webrain_get_html` is the LAST resort - use
+  `webrain_snapshot` / `webrain_clean` / `webrain_eval` / the extractors for text/structure.
+  Return summaries, not page blobs.
+- **Batch before loop.** N pages 1..N in one `webrain_batch(op=extract, ...)` call, not N
+  sequential `webrain_navigate` calls. Batch concurrency 4-8.
+- **Zero-LLM extraction first.** `webrain_autoschema` → `webrain_extract_json` is free and
+  deterministic; only fall back to `webrain_eval` (JS) when a schema can't be expressed in CSS.
+- **Don't re-scrape what you have.** If the page state is unchanged, `webrain_snapshot` returns
+  the cached state and saves tokens.
+- **Filter before summarizing.** `webrain_bm25` keeps only the top-k relevant items.
+
+## How to invoke (end-to-end)
+
+**Step 1 - parse the task.** Separate: what to extract, from which URL(s), whether auth is
+needed, and whether it's one page or many. Example: `scrape all product titles + prices from
+https://example.com/products` → extract = title+price, urls = 1 page (probe for pagination), no auth.
+
+**Step 2 - preflight (first use per session).** Run `preflight.py`; if MCP or a browser is down,
+fix before scraping (start `webrain mcp --http 9223` or a Chrome/obscura).
+
+**Step 3 - navigate the seed.** `webrain_navigate(url)` → read `challenge` (null = ok) AND `links`
+(deduped same-origin links for crawl/pagination discovery in one call).
+
+**Step 4 - branch on the challenge field (EVERY navigate):**
+- `challenge: null` → proceed to extract.
+- `challenge: cloudflare_challenge|blocked|captcha` → real Chrome + `stealth_solve.py` (below).
+  obscura/lightpanda CANNOT pass interactive challenges.
+
+**Step 5 - choose the browser** (per the decision guide): real Chrome for Material/SPA/challenge,
+obscura for parallel batch, lightpanda for real a11y, `fetch_http` for static HTML.
+
+**Step 6 - extract** (per the extraction matrix): autoschema → extract_json for structured lists,
+regex/table/jsonld for patterns/tables/metadata, batch/spider for scale, eval for custom JS.
+
+**Step 7 - report.** Summarize: "Extracted N items across M pages" with a sample, not raw blobs.
+Write bulk results to `output/` JSON when the user wants a file.
 
 ## Decision guide (condensed)
 

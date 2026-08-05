@@ -230,8 +230,9 @@ webrain install
 webrain mcp                        # stdio
 webrain mcp --http 9223            # HTTP transport on 127.0.0.1:9223
 
-# 3. Point an LLM at it. In VS Code, add to settings.json "mcp" (see Marketplace):
-#    {"servers": {"webrain": {"command": "webrain", "args": ["mcp"]}}}
+# 3. Point an LLM at it. Register the MCP server in your client (see "Marketplace / IDE Plugins"):
+#    stdio:  {"servers": {"webrain": {"command": "webrain", "args": ["mcp"]}}}
+#    HTTP:   webrain mcp --http 9223  →  {"servers": {"webrain": {"type": "http", "url": "http://127.0.0.1:9223/mcp"}}}
 
 # 4. Ask the LLM to do something, e.g. "scrape all product titles + prices from URL X"
 ```
@@ -343,6 +344,9 @@ Full per-tool reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Tool/br
 ## Marketplace / IDE Plugins
 
 Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the ~45 tools appear.
+
+Both transports work in every client: **stdio** (`webrain mcp`) or **HTTP**
+(`webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`).
 
 **VS Code (GitHub Copilot)**
 

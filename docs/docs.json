@@ -50,7 +50,8 @@
             "pages": [
               "deployment",
               "troubleshooting",
-              "contributing"
+              "contributing",
+              "changelog"
             ]
           }
         ]
