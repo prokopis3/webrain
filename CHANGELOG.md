@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **docs**: new `concepts/runtime-flow.mdx` — source-grounded runtime flow and
+  architecture walkthrough (CLI entrypoint → MCP dispatcher → tool dispatch →
+  CDP backend → engines/login/vault), with a request-flow diagram and a
+  symptom→layer failure table.
+- **docs**: `reference/tools.mdx` gains a tool-to-code map (each tool family →
+  implementation file, browser vs no-browser, shared vs engine-specific).
+- **docs**: `concepts/browsers.mdx` gains an engine capability matrix
+  (Chrome / Obscura / Lightpanda / `fetch_http` across paint, screenshots,
+  SPA interaction, challenges, a11y, batch, static-HTML speed).
+
+### Fixed
+
+- **cli**: `webrain upgrade` now spawns the package-manager update (brew /
+  scoop) detached and exits, so Scoop no longer sees the upgrade command
+  itself as a running instance of webrain and refuses to replace the binary.
 
 ## [0.3.2] - 2026-08-05
 

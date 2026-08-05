@@ -26,7 +26,8 @@
             "group": "Concepts",
             "pages": [
               "concepts/browsers",
-              "concepts/challenges"
+              "concepts/challenges",
+              "concepts/runtime-flow"
             ]
           },
           {
@@ -68,8 +69,8 @@
     }
   },
   "logo": {
-    "light": "/images/webrain-logo.png",
-    "dark": "/images/webrain-logo.png"
+    "light": "/images/webrain-logo-rounded.png",
+    "dark": "/images/webrain-logo-nobg.png"
   },
   "navbar": {
     "links": [

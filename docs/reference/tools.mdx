@@ -10,6 +10,32 @@ LLM. This page is the authoritative reference; descriptions match
 `webrain-mcp/src/tools.rs`. Every browser tool also accepts an optional
 `session_id` to route to a `webrain_open_session` pool.
 
+## Tool-to-code map
+
+The schemas live in `webrain-mcp/src/tools.rs` (`list_tools`), and every call
+routes through `call_tool` — a `match` on the tool name. From there tools
+resolve into `webrain-core`. The execution model is simple: **browser tools
+run through `CdpBackend`** (one shared WebSocket to the engine); a handful of
+tools skip the browser entirely.
+
+| Tool group | Implementation | Browser? | Notes |
+|---|---|---|---|
+| Navigate & Observe (`navigate`, `snapshot`, `a11y`, `eval`, `screenshot`, …) | `webrain-core/src/backends/cdp.rs` + `browser.rs` | ✅ CDP | `BrowserBackend` trait gives every engine the same surface |
+| Interact (`click`, `type`, `press`, `scroll`, `nav`, `tab`, `dismiss_overlays`) | `webrain-core/src/backends/cdp.rs` | ✅ CDP | index/selector based; Material widgets need real Chrome |
+| Extract (`autoschema`, `extract_json`, `extract_regex`, `table`, `jsonld`, `bm25`, `clean`) | `webrain-core/src/engines.rs` + in-page JS | ✅ CDP (in-page) | zero-LLM, no `get_html` |
+| Crawl & Batch (`batch`, `spider`, `sitemap`, `scan`, `validate_urls`) | `webrain-core/src/engines.rs` + `backends/cdp.rs` | 🔶 mixed | `spider`/`sitemap`/`validate_urls` are HTTP or CDP; `batch` needs a backend |
+| Search (`search`) | `webrain-core/src/engines.rs` | ❌ no browser | pure HTTP (ddg/google/bing) |
+| Vision (`pixel`, `vision_index`, `vision_retrieve`) | `webrain-core/src/vision.rs` + `backends/cdp.rs` | ✅ CDP (screenshot) | cosine `VectorStore` |
+| PDF & Media (`pdf*`, `download`, `media`, `get_images`) | `webrain-core` pdf modules + `engines.rs` | 🔶 mixed | `download` (http + yt-dlp) and `pdf_extract` need no browser |
+| Auth & Sessions (`login`, `profiles`, `cookies`, `setcookies`, `save_state`, `restore_state`, `open/close/list_session`) | `webrain-core/src/login.rs` + `vault.rs` + `launch.rs` | ✅ CDP + vault | secrets decrypted in-process, never through the model |
+
+**Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
+lightpanda, and obscura alike — the differences are capability (screenshots,
+challenge solving, a11y fidelity), not protocol. Tools with **no** browser
+dependency (`webrain_fetch_http`, `webrain_search`, `webrain_sitemap`,
+`webrain_download`, `webrain_pdf_extract`) are intercepted in
+`webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
+
 ## Navigate & Observe
 
 <AccordionGroup>

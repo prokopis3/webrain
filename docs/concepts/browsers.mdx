@@ -22,6 +22,31 @@ working click and a silent no-op.
   `challenge` field — read it, then pick the browser for the next hop.
 </Warning>
 
+## Engine capability matrix
+
+| Capability | Chrome for Testing | Obscura | Lightpanda | `fetch_http` |
+|---|---|---|---|---|
+| Paint / layout engine | ✅ real | ❌ none | ❌ none | ❌ |
+| Real screenshots (`webrain_screenshot`, `webrain_pixel`) | ✅ | ❌ errors loudly | ⚠️ fake placeholder PNG | ❌ |
+| Interactive Material / SPA (dropdowns, calendars, segmented controls) | ✅ | ❌ | ❌ | ❌ |
+| Cloudflare / Turnstile / CAPTCHA (via `stealth_solve.py`) | ✅ | ❌ | ❌ | ❌ |
+| a11y tree (`webrain_a11y`) | ✅ | ⚠️ no `option` role | ✅ real AX tree | ❌ |
+| Parallel batch tabs | ✅ | ✅ N tabs | ⚠️ sequential (one context) | n/a |
+| Static HTML speed | slow | fast | fast | ✅ fastest (10-100×) |
+| Install | `webrain install` | `webrain install --engine obscura` | binary + `webrain lightpanda` | built-in |
+
+**What requires real Chrome:** screenshots, pixel/vision tiles, interactive
+Material/Google widgets, and any interactive anti-bot challenge. Obscura has
+no paint engine (screenshots error), lightpanda's screenshot is a silent
+placeholder, and `fetch_http` is a plain HTTP GET.
+
+**Fallbacks to expect:** `webrain_batch` auto-detects lightpanda's single
+context and runs URLs sequentially on one reused tab (same tool call, same
+schema — just no intra-call parallelism). Obscura's AX map has no `option`
+arm, so `role="option"` resolves as `generic` — drop the role filter and use
+`filter` on the label. If an a11y tree comes back empty, the page never
+rendered (consent/challenge gate) — check `challenge` and try real Chrome.
+
 ## Getting each engine
 
 | Engine | Command |
