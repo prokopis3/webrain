@@ -7,7 +7,12 @@
     "light": "#60A5FA",
     "dark": "#2563EB"
   },
-  "favicon": "/images/webrain-logo.png",
+  "favicon": "/images/webrain-logo-rounded.png",
+  "integrations": {
+    "customScript": {
+      "src": "https://cdn.jsdelivr.net/gh/prokopis3/webrain@main/docs/logo-nav.js"
+    }
+  },
   "navigation": {
     "anchors": [
       {
@@ -69,8 +74,8 @@
     }
   },
   "logo": {
-    "light": "/images/webrain-logo-nobg.png",
-    "dark": "/images/webrain-logo-rounded.png"
+    "light": "/images/spider-rounded.png",
+    "dark": "/images/spider-nobg.png"
   },
   "navbar": {
     "links": [
