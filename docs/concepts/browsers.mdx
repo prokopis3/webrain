@@ -1,0 +1,56 @@
+---
+title: Browser Engines
+description: Which browser to use for which job — and why.
+---
+
+# Browser Engines
+
+Webrain drives four engines through one CDP backend. Picking the right one is
+the difference between a 12-second page load and a 2-second one — or between a
+working click and a silent no-op.
+
+| Situation | Browser | Why |
+|---|---|---|
+| **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns, segmented controls) | **real Chrome** (`cdp_urls:["http://127.0.0.1:9222"]`) | Material widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda.** |
+| **Cloudflare / Turnstile / CAPTCHA**, or need **real** screenshots / pixel rendering | **real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. Obscura has no paint engine; its V8 crashes on challenge JS. |
+| JS pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab `webrain_batch` runs parallel tabs. No paint engine → no screenshots. |
+| Lightweight footprint, want a **real AX tree + semantic tree**, no rendering | **lightpanda** | Fastest, lightest, real a11y. Single-target CDP — `webrain_batch` falls back to sequential single-tab reuse. |
+| Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10–100× faster than a browser, zero memory. |
+
+<Warning>
+  **Golden rule: don't guess the browser.** `webrain_navigate` returns a
+  `challenge` field — read it, then pick the browser for the next hop.
+</Warning>
+
+## Getting each engine
+
+| Engine | Command |
+|---|---|
+| Chrome for Testing | `webrain install` |
+| Obscura | `webrain install --engine obscura` then `webrain obscura` |
+| Lightpanda | install the binary, then `webrain lightpanda` |
+| `fetch_http` | built-in — no install |
+
+To route a specific batch to real Chrome (e.g. for interactive SPAs), pass the
+CDP endpoint directly:
+
+```json
+{ "op": "extract", "urls": ["..."], "cdp_urls": ["http://127.0.0.1:9222"] }
+```
+
+## lightpanda vs obscura for batches
+
+- **obscura** opens N parallel tabs — `concurrency` is real overlap.
+- **lightpanda** `serve` holds ONE browser context; a 2nd `Target.createTarget`
+  errors `TargetAlreadyLoaded`, so `webrain_batch` detects it and runs all URLs
+  sequentially on one reused tab. Same tool call, same schema — just no
+  intra-call parallelism. Pick obscura for large parallel crawls, lightpanda
+  for footprint/velocity per page.
+
+## a11y notes
+
+Google/Material widgets are often **not** `button`: dropdowns are `combobox`,
+menu items `option`, segmented controls `radio`/`tab`. If `role=<x>` returns
+`[]`, drop the role filter and `filter` on the visible label text instead
+(`filter` matches name, value, or css_path, case-insensitive). If the whole tree
+is empty, the page never rendered — check `challenge`/consent.

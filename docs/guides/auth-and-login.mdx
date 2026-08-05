@@ -1,0 +1,80 @@
+---
+title: Auth & Login
+description: Encrypted credential vault, TOTP, and cross-browser cookie transfer.
+---
+
+# Auth & Login
+
+Webrain handles authenticated scraping with an encrypted local vault and a
+real-Chrome login flow. Secrets are decrypted in-process and injected via CDP —
+**the value never passes through the model**.
+
+## The credential vault
+
+Store credentials with hidden prompts (never typed into logs):
+
+```bash
+webrain vault set    # service, profile, username, password
+webrain vault list   # names only
+webrain vault user
+webrain vault rm
+```
+
+The vault is encrypted with **AES-256-GCM** and supports optional **TOTP**
+seeds for 2FA.
+
+## Automatic login
+
+`webrain_login` decrypts the secret in-process and injects it via CDP:
+
+```json
+{
+  "service": "instagram",
+  "profile": "work",
+  "url": "https://instagram.com/login"
+}
+```
+
+- Auto-discovers the login fields and submits.
+- On a 2FA/approval gate it TOTP-injects if a seed is stored and returns
+  `waiting_for_human: true` — the human acts in the headed browser, then call
+  login again.
+- Reply is status-only. Optional `port` targets a specific Chrome.
+- Fallback: `WEBRAIN_USER` / `WEBRAIN_PASS` env vars.
+
+List what's in the vault (names only, never secrets):
+
+```text
+webrain_profiles  → service, profile, username, created_at
+```
+
+## Persistent profiles
+
+`webrain launch <service> <profile> [url]` spawns a stealth Chrome with a
+persistent per-account profile, keyed by `"service:profile"` so
+`webrain_login` re-attaches. `webrain_close_launch` kills it (profile + cookies
+remain for the next launch).
+
+## Save / restore auth state
+
+Export cookies + localStorage to a state file so a login follows you across
+machines:
+
+```text
+webrain_save_state(service, profile)      → <profiles_dir>/<service>/<profile>/state.json
+webrain_restore_state(service, profile)   → import back (navigate to the site first — localStorage is origin-scoped)
+```
+
+## Cross-browser cookie transfer
+
+1. Log in in **real Chrome** (`webrain_login` / `webrain launch`).
+2. Export: `webrain_cookies` (includes HttpOnly) or
+   `webrain cookies --port 9222 --out file`.
+3. Import: `webrain_setcookies` on the session connection.
+4. `webrain_batch` **without** `cdp_urls` — set + batch must share one
+   connection (obscura isolates cookie contexts per CDP connection).
+
+<Warning>
+  Session cookies die on Chrome restart — export on the live authenticated
+  browser before closing it.
+</Warning>

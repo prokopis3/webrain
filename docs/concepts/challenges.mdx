@@ -1,0 +1,69 @@
+---
+title: Challenges & Anti-Bot
+description: Detect and get past Cloudflare, Turnstile, and CAPTCHA gates.
+---
+
+# Challenges & Anti-Bot
+
+Gated pages are the #1 reason scrapes fail. Webrain surfaces the gate
+explicitly and gives you a real-Chrome escape hatch.
+
+## Read `challenge` on every navigate
+
+After `webrain_navigate(url)`, check the `challenge` field in the response:
+
+- `challenge: null` → page loaded normally → extract.
+- `challenge: cloudflare_challenge` (title *"Just a moment…"*, `_cf_chl*`,
+  `cf-turnstile`) or `challenge: blocked` (403/forbidden) → the page is gated.
+
+<Warning>
+  **obscura CANNOT pass interactive challenges** — no layout engine means the
+  challenge iframe never renders, and its V8 watchdog kills the challenge
+  script. lightpanda is in the same boat. Only real Chrome works.
+</Warning>
+
+## The "chrome way" (verified on cf-antibot)
+
+1. Run the stealth sidecar:
+   ```bash
+   python scripts/stealth_solve.py <login_or_challenge_url> --cdp-port 9222 --headed
+   ```
+   It launches real Chrome + stealth, **waits out the challenge** (do NOT
+   reload-spam — that resets the proof), logs in with the page's demo creds (or
+   `--creds user:pass`), exports cookies, and keeps Chrome alive.
+2. Re-attach webrain to that Chrome:
+   ```bash
+   CDP_URL=http://127.0.0.1:9222
+   ```
+   Same browser profile → session/cookies shared.
+3. `webrain_navigate` the protected URL → `challenge: null`, authenticated →
+   extract normally.
+
+## Non-interactive Turnstile / basic bot detection
+
+Obscura with `--stealth` may pass these — always verify via the `challenge`
+field before trusting the result.
+
+## Consent gates (Google)
+
+Set the consent cookies once, then every tab skips the dialog:
+
+```bash
+webrain setcookies tmp/google_consent_cookies.json --port 9222
+```
+
+## Cross-browser cookie transfer
+
+Log in once in **real Chrome** (Turnstile/Cloudflare auto-solve), export, and
+replay into the batch browser:
+
+1. `webrain_cookies` / `webrain cookies --port 9222 --out` — export from the
+   live authenticated Chrome.
+2. `webrain_setcookies` on the session connection.
+3. `webrain_batch` **without** `cdp_urls` — set + batch must share one
+   connection, because obscura isolates cookie jars per CDP connection.
+
+<Note>
+  Session cookies die on Chrome restart — export on the **live authenticated**
+  browser, before closing it.
+</Note>

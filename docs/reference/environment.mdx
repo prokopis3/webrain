@@ -1,0 +1,23 @@
+---
+title: Environment Variables
+description: All configuration knobs.
+---
+
+# Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `CDP_URL` | CDP endpoint to attach to | `http://127.0.0.1:9222` |
+| `WEBRAIN_CHROME` | Explicit Chrome binary path | auto-discovered |
+| `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
+| `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
+| `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / `~/.config/webrain/profiles` |
+| `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
+| `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
+| `EMBED_URL` | `/embeddings` endpoint for `webrain_vision_index` | — |
+| `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
+
+## Discovery order
+
+Binaries are discovered automatically on every OS: **env override → PATH →
+`~/.lightpanda`, `~/.obscura`, `~/.local/bin` → the webrain engine cache**.

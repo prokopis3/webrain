@@ -1,0 +1,62 @@
+---
+title: Overview
+description: A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.
+---
+
+# What is webrain?
+
+**webrain** is a portable, LLM-driven browser-automation and web-scraping **MCP
+server** — one binary, three browser engines, any OS. It exposes **51 tools**
+over the Model Context Protocol. Install it on any system, point any LLM client
+(GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides
+everything — search, crawl, scrape, navigate, interact — from a plain-language
+prompt. No hardcoded intent detection, no daemon, no Node.js.
+
+## Why webrain?
+
+Web automation shouldn't mean wiring up a driver, a browser download, and your
+own tool wrappers before an LLM can touch a page. Webrain collapses that into
+**one binary + one install command** and speaks MCP, so any LLM client drives
+it directly.
+
+<Card
+  title="Quickstart"
+  icon="rocket"
+  href="/quickstart"
+>
+  Get a browser engine, start the MCP server, and drive it from a prompt in minutes.
+</Card>
+
+## What you can do with it
+
+- **Scrape at scale** — batch pagination + spider with auto-throttle and
+  checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
+- **Structured data without hand-written selectors** — `webrain_autoschema`
+  probes the DOM, then JSON / regex / table extractors read container-level
+  structure.
+- **Stealth login** — real-Chrome profiles with an encrypted local credential
+  vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
+- **Get past challenges** — reads the `challenge` field on every navigate and
+  solves Cloudflare/Turnstile via a real-Chrome stealth sidecar.
+- **See the page** — a11y / semantic tree, snapshots, and vision tiles
+  (screenshot → vector store) for tables and charts.
+- **Read anything** — PDFs (extract + render), JSON-LD, media, plus
+  `fetch_http` for static pages 10–100× faster than a browser.
+
+## How it's built
+
+| Layer | Crate | Responsibility |
+|---|---|---|
+| Core | `webrain-core` | CDP client, engines, vault, launch, install, vision |
+| Protocol | `webrain-mcp` | MCP server: `list_tools` / `call_tool`, tool schemas |
+| Entry | `webrain-cli` | Single binary — `mcp` \| `install` \| `launch` \| `login` \| … |
+
+Everything speaks **Chrome DevTools Protocol** over a raw WebSocket, so one
+backend drives Chrome, Lightpanda, and Obscura interchangeably.
+
+## Where to go next
+
+- [Installation](/installation) — every install path, one-liners included
+- [Agent Decision Guide](/concepts/browsers) — which browser, how to handle a challenge, which extractor
+- [Tools Reference](/reference/tools) — the full 51-tool surface
+- [CLI Reference](/reference/cli) — drive webrain by hand

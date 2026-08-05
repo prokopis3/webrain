@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **docs**: new Mintlify docs site in `docs/` — overview, quickstart,
+  installation, browsers/challenges concepts, structured-extraction /
+  scrape-at-scale / auth-and-login guides, full 51-tool reference, CLI + env
+  reference, deployment, troubleshooting, contributing. Built with the Mintlify
+  CLI (`docs/docs.json`); existing `docs/*.md` files left in place, untouched.
+
+### Changed
+
+- **docs**: ADR-001 graph note refreshed to 2026-08-05 state — 875 nodes /
+  2287 edges, 3 entry points, new hotspots (`vault.get` fan-in 26,
+  `ensure_page_attached`, `send_cmd_with`), 51 MCP tools (up from 34).
 
 ## [0.3.1] - 2026-08-05
 

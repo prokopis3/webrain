@@ -1,0 +1,51 @@
+---
+title: CLI Reference
+description: Every webrain subcommand and flag.
+---
+
+# CLI Reference
+
+Drive webrain by hand — every engine and tool has a CLI twin.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `webrain mcp [--http <port>]` | Start the MCP server (stdio, or HTTP on a port) |
+| `webrain install [--force] [--engine chrome\|obscura] [--stealth]` | Download a browser engine into the cache |
+| `webrain upgrade` | Update to the latest release |
+| `webrain obscura [--port N]` | Spawn the Obscura CDP server (default 9224) |
+| `webrain lightpanda [--port N]` | Spawn the Lightpanda CDP server (default 9225) |
+| `webrain launch <service> <profile> [url] [--headless] [--port N]` | Spawn a stealth Chrome with a persistent per-account profile |
+| `webrain login <service> <profile> [url] [--port N]` | Launch + attach for interactive login |
+| `webrain cookies [--port N] [--out file]` | Export cookies |
+| `webrain setcookies <file>` | Import cookies |
+| `webrain vault set\|list\|user\|rm` | Manage encrypted credentials (hidden prompts) |
+| `webrain fetch <url>` | Attach to `CDP_URL` and fetch |
+| `webrain screenshot <url>` | Screenshot (single or full page) |
+| `webrain spider <url> [--depth N --pages N --respect-robots --json-urls --dfs --bestfirst --keywords k1,k2 --no-same-domain --discover-only]` | Crawl |
+| `webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` | Drive the `CDP_URL` backend |
+| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, Python sidecar, `recommend` |
+
+## Snapshot-driven interaction
+
+The CLI works on **snapshot refs** — the same elements `webrain snapshot`
+reports, 1-indexed:
+
+```bash
+webrain launch https://example.com
+webrain snapshot          # prints interactive elements, 1-indexed
+webrain click 3           # click element #3
+webrain type 5 "text"     # type into element #5
+webrain eval 'document.querySelector("#email").value'
+```
+
+The MCP tools also accept plain CSS selectors directly (e.g. `webrain_click`
+with `selector: "#submit"`).
+
+## `webrain doctor`
+
+Exit codes: **0** healthy, **2** broken. Checks the install end to end —
+engines, MCP server, CDP ports, vault, Python sidecar — and prints a
+`recommend` line. The first step in any troubleshooting session. `--doctor`
+is an alias flag.

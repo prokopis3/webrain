@@ -1,0 +1,87 @@
+---
+title: Scraping at Scale
+description: Batch, spider, and sitemap crawling with checkpoint/resume.
+---
+
+# Scraping at Scale
+
+When one page isn't enough — pages 1..N, whole sites, media-heavy catalogs.
+
+## Batch — pages 1..N / many URLs
+
+`webrain_batch` runs one schema over many URLs using concurrent tabs
+(crawl4ai `arun_many` + MemoryAdaptiveDispatcher style):
+
+```json
+{
+  "op": "extract",
+  "urls": ["https://example.com/products?page=1", "...&page=2"],
+  "base_selector": ".product",
+  "fields": [{ "name": "title", "selector": "h3", "type": "text" }],
+  "concurrency": 8
+}
+```
+
+`op` variants:
+
+- `fetch` — read visible text
+- `extract` — run a CSS/XPath schema (zero-LLM)
+- `interact` — run an async JS `interaction` in parallel tabs (click
+  Load-More / infinite-scroll / form fill), then optionally extract a schema —
+  one call replaces N serial agent loops
+- `screenshot` — save full-page PNGs to `dir`
+
+Optional `cdp_urls` (list) fans the batch across N CDP backends round-robin —
+per-proxy isolation in one call, no subagents. Optional `output` persists the
+full payload to disk (survives temp-file GC between turns).
+
+<Note>
+  `webrain_batch` requires a browser backend — if no browser is running it
+  errors fast (5s timeout).
+</Note>
+
+## Spider — whole sites
+
+`webrain_spider` crawls from a seed URL with BFS (or DFS / BestFirst):
+
+```json
+{
+  "seed_url": "https://example.com",
+  "max_depth": 3,
+  "max_pages": 200,
+  "allow": ["/product/"],
+  "deny": ["/cart", "/login"],
+  "autothrottle": true,
+  "crawldir": "crawls/site-a"
+}
+```
+
+Highlights:
+
+- `allow` / `deny` URL-regex filters prune `/cart`, `/login`, images at crawl
+  time
+- `autothrottle` — adaptive per-domain delay: speeds up on fast servers,
+  doubles on a blocked/error page, capped by `autothrottle_max_ms`
+- `crawldir` — checkpoint/resume: persists `{queue, seen}` every
+  `checkpoint_every` pages; re-run with the same `crawldir` to continue.
+  Deleted on clean finish.
+- `crawl_timeout_secs` — hard wall-clock cap
+- `respect_robots`, `keywords` (BestFirst scoring), `no_content` (link-only
+  fast path)
+
+## Sitemap — discover everything first
+
+`webrain_sitemap` follows robots.txt `Sitemap:` → sitemap_index → leaf sitemaps
+→ every `<loc>`. Pure HTTP, no browser:
+
+```text
+webrain_sitemap("https://example.com")
+→ { urls: [...], count, sources }
+```
+
+Feed the URLs into `webrain_batch` for a full crawl.
+
+## Validation & filtering
+
+- `webrain_validate_urls` — HEAD-then-GET check; filters 404s/5xx before a batch
+- `webrain_bm25` — keep only top-k relevant items after extraction

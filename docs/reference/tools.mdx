@@ -1,0 +1,321 @@
+---
+title: Tools Reference
+description: The full 51-tool MCP surface, grouped and verbatim.
+---
+
+# Tools Reference
+
+All 51 tools are discovered dynamically — `webrain_guide` lists them for the
+LLM. This page is the authoritative reference; descriptions match
+`webrain-mcp/src/tools.rs`. Every browser tool also accepts an optional
+`session_id` to route to a `webrain_open_session` pool.
+
+## Navigate & Observe
+
+<AccordionGroup>
+
+<Accordion title="webrain_guide">
+Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run `scripts/stealth_solve.py` for gated pages), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.
+</Accordion>
+
+<Accordion title="webrain_navigate">
+Navigate to a URL and return page state (title, visible text, interactive elements, deduped same-origin `links`) plus a `challenge` field (`cloudflare_challenge` | `blocked` | `captcha`) when the page is gated. Use `links` for one-call crawl / internal-link discovery. If `challenge` is set, see the Agent Decision Guide for the real-Chrome bypass.
+
+Optional request-quality params: `disable_resources` (block fonts/images/media), `network_idle`, `wait_selector` + `wait_selector_state`, `css_selector` (narrow returned text), `block_trackers`.
+</Accordion>
+
+<Accordion title="webrain_snapshot">
+Re-capture current page state WITHOUT navigating. D1 DOM-fingerprint skip: returns the cached state unchanged when the page hasn't mutated, saving tokens.
+</Accordion>
+
+<Accordion title="webrain_eval">
+Run arbitrary JavaScript in the current page and return the JSON result. Use for precise structured extraction (e.g. product schemas).
+
+```json
+{ "js": "JSON.stringify([...document.querySelectorAll('h3')].map(e => e.innerText))" }
+```
+</Accordion>
+
+<Accordion title="webrain_page_info">
+Just-in-time page context: viewport/page size, scroll position, pixels/pages above & below, position %. Tells you when to scroll before interacting. No DOM dump.
+</Accordion>
+
+<Accordion title="webrain_a11y">
+Accessibility-tree snapshot: `[{role, name, value, css_path}]`. Read-only — understand structure, then interact via `webrain_navigate`/`webrain_snapshot` element indices. Filters: `role`, `filter` (substring on name OR value OR css_path), `max_nodes`.
+
+ARIA cheat-sheet: combobox (dropdown), option (menu item), tab, radio (segmented control), textbox, button. If `role=<x>` returns `[]`, drop the role filter and `filter` on the label text.
+</Accordion>
+
+<Accordion title="webrain_semantic_tree">
+Semantic-tree text snapshot of the current page: `role "name"` lines for the LLM, plus the raw AX JSON.
+</Accordion>
+
+<Accordion title="webrain_get_html">
+**LAST RESORT** — full raw HTML (token-heavy, unreadable). Never use for page text: `webrain_snapshot`/`clean`/`eval`/`extract_json` return text/structure cheaper. Only when the task explicitly asks for HTML markup.
+</Accordion>
+
+<Accordion title="webrain_console">
+Return captured page errors/warnings (uncaught errors + unhandled rejections) since the last call. Injects a listener on first call.
+</Accordion>
+
+<Accordion title="webrain_screenshot">
+Take a screenshot of the current page. Returns base64-encoded PNG. `full_page` captures the full scrollable page.
+
+<Note>
+  Requires a real paint engine — real Chrome only. Obscura errors; lightpanda returns a fake placeholder PNG.
+</Note>
+</Accordion>
+
+</AccordionGroup>
+
+## Interact
+
+<AccordionGroup>
+
+<Accordion title="webrain_click">
+Click an interactive element by its index (from `webrain_navigate` elements list).
+
+```json
+{ "index": 3 }
+```
+</Accordion>
+
+<Accordion title="webrain_type">
+Type text into an input element by its index.
+
+```json
+{ "index": 5, "text": "hello" }
+```
+</Accordion>
+
+<Accordion title="webrain_press">
+Press a key in the focused element (Enter, Tab, Escape, Backspace, ArrowDown...). Use after `webrain_type` to submit forms.
+</Accordion>
+
+<Accordion title="webrain_scroll">
+Scroll the page up or down. `direction`: `up` | `down`.
+</Accordion>
+
+<Accordion title="webrain_nav">
+Browser navigation: go `back`, `forward`, or `reload`.
+</Accordion>
+
+<Accordion title="webrain_tab">
+Manage browser tabs. `new` (url, returns id, becomes active) | `switch` (id) | `close` (id) | `list`.
+</Accordion>
+
+<Accordion title="webrain_dismiss_overlays">
+Remove visible fixed/sticky overlays (cookie banners, popups, modals) that block interaction.
+</Accordion>
+
+</AccordionGroup>
+
+## Extract
+
+<AccordionGroup>
+
+<Accordion title="webrain_autoschema">
+Detect repeated container patterns on the page. Returns candidate base-selectors with occurrence counts for building a `webrain_extract_json` schema. Zero LLM. `min_occurrences` (default 3).
+</Accordion>
+
+<Accordion title="webrain_extract_json">
+CSS-schema extraction: build a JSON array from a base selector + field selectors. Zero-LLM structured extraction.
+
+```json
+{
+  "base_selector": ".product",
+  "fields": [{ "name": "title", "selector": "h3 a", "type": "text" }],
+  "adaptive": true
+}
+```
+
+`type`: text | attr | html | xpath. `adaptive: true` auto-relocates the container when the base selector matches nothing (site redesigned).
+</Accordion>
+
+<Accordion title="webrain_extract_regex">
+Regex pattern extraction over the current page: built-ins email/url/phone/price/date/time/ip/uuid + custom `[{label, re}]`. Scans page HTML (catches href/mailto).
+</Accordion>
+
+<Accordion title="webrain_table">
+Extract all HTML tables on the current page to JSON. Returns arrays of `{header: cell}` row objects per `<table>`. Zero LLM.
+</Accordion>
+
+<Accordion title="webrain_get_jsonld">
+Extract JSON-LD / microdata from the current page. Returns parsed `<script type="application/ld+json">` blocks — schema.org product/article/organization data. Zero LLM, zero cost.
+</Accordion>
+
+<Accordion title="webrain_bm25">
+BM25 relevance filter: score a list of text items against a query, keep the top-k. Zero LLM. Use after extraction to keep only relevant results.
+
+```json
+{ "query": "prices", "items": ["..."], "top_k": 10 }
+```
+</Accordion>
+
+<Accordion title="webrain_clean">
+Clean page text: strip nav/footer/script/style/iframe, exclude social/ads links, filter by word length. Returns clean text blob (max 8KB). In-page JS, zero-LLM.
+</Accordion>
+
+</AccordionGroup>
+
+## Crawl & Batch
+
+<AccordionGroup>
+
+<Accordion title="webrain_batch">
+Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `extract` (CSS/XPath schema) | `interact` (async JS interaction, then optional extract) | `screenshot` (save PNGs to `dir`).
+
+```json
+{
+  "op": "extract",
+  "urls": ["https://example.com?page=1", "https://example.com?page=2"],
+  "base_selector": ".product",
+  "fields": [{ "name": "title", "selector": "h3", "type": "text" }],
+  "concurrency": 8
+}
+```
+
+`cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate.
+</Accordion>
+
+<Accordion title="webrain_spider">
+Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume, `crawl_timeout_secs`.
+</Accordion>
+
+<Accordion title="webrain_sitemap">
+Discover crawlable URLs from a site's sitemap. Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Returns `{urls, count, sources}`.
+</Accordion>
+
+<Accordion title="webrain_scan">
+Auto-scroll the page to trigger infinite-scroll / load-more content. Returns `{scrolls, height}`. Run before extraction on SPA feeds.
+</Accordion>
+
+<Accordion title="webrain_validate_urls">
+Validate a list of URLs — alive vs dead. Filters 404s/5xx/errors. HEAD first, GET fallback. Use before batch extraction.
+</Accordion>
+
+<Accordion title="webrain_fetch_http">
+No-browser HTTP fetch: GET a URL, return `{url, status, text}`. 10–100× faster than browser navigation, zero memory — but no JS/SPA/auth. Use for static pages.
+</Accordion>
+
+</AccordionGroup>
+
+## Search
+
+<AccordionGroup>
+
+<Accordion title="webrain_search">
+Search the web and navigate to the results page. `duckduckgo` is HTML-lite and scrape-friendly (default); `google` and `bing` return plain HTML via HTTP; `brave` returns an SPA shell — use `webrain_navigate` to Brave's URL instead for real results.
+
+```json
+{ "q": "product reviews", "engine": "duckduckgo" }
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Vision
+
+<AccordionGroup>
+
+<Accordion title="webrain_pixel">
+PixelRAG-style tile capture: split the current page into a grid of screenshot tiles (base64 PNGs) so a vision model can read regions — tables/charts/layout survive. `tile_width`/`tile_height` (800), `max_tiles` (16).
+</Accordion>
+
+<Accordion title="webrain_vision_index">
+Capture the current page as vision tiles, embed each via `EMBED_URL` (Qwen3-VL-Embedding-2B / vLLM), and add to a cosine index persisted to `vision/{tag}.jsonl`. Requires `EMBED_URL` set to a running `/embeddings` endpoint.
+</Accordion>
+
+<Accordion title="webrain_vision_retrieve">
+Embed a text query and return the cosine top-k stored tile ids from a vision index — semantic page retrieval. `tag`, `query`, `k` (5).
+</Accordion>
+
+</AccordionGroup>
+
+## PDF & Media
+
+<AccordionGroup>
+
+<Accordion title="webrain_pdf">
+Save the current page as PDF (base64-encoded).
+</Accordion>
+
+<Accordion title="webrain_pdf_extract">
+Convert a PDF to Markdown (pure Rust on lopdf). Returns page count, `pdf_type` (TextBased/Scanned/Mixed), confidence, layout (`is_complex`, pages with tables/columns), full `markdown`, and per-page `texts`. Proper ToUnicode CMap decoding fixes LaTeX/CID-font PDFs. Single `path` or batch `paths`.
+</Accordion>
+
+<Accordion title="webrain_pdf_render">
+Render PDF pages as base64 PNG images — the vision-model alternative to text extraction (bypasses font encoding issues). Requires `--features pdfium`. Optional `tile_size` splits pages into square tiles.
+</Accordion>
+
+<Accordion title="webrain_pdf_images">
+Extract embedded images/figures from a PDF as base64 PNGs — zero system deps. Handles DCTDecode (JPEG) and FlateDecode. Skips JPEG2000/CCITT/JBIG2 (use `webrain_pdf_render` for those). Works in the default build.
+</Accordion>
+
+<Accordion title="webrain_download">
+Download single or many files/video/audio. `engine` `http` (plain streaming, optional `filter_extension`) or `ytdlp` (HLS/DASH/.m3u8, playlists, age/cookie-bound media — full yt-dlp passthrough via `args`).
+
+```json
+{
+  "urls": ["https://example.com/video.m3u8"],
+  "engine": "ytdlp",
+  "audio_only": true
+}
+```
+</Accordion>
+
+<Accordion title="webrain_media">
+Discover media URLs the page loads. With a `url`: CDP Network capture of the full load — catches JS-loaded `.m3u8`/`.mp4`/manifest/player-API requests. Without: Performance API + `<video>`/`<audio>`/`<source>` scan of the current page.
+</Accordion>
+
+<Accordion title="webrain_get_images">
+List images on the current page: `[{src, alt, width, height}]`. Useful for product/photo URLs.
+</Accordion>
+
+</AccordionGroup>
+
+## Auth & Sessions
+
+<AccordionGroup>
+
+<Accordion title="webrain_login">
+Fully-automatic login from the local vault (or `WEBRAIN_USER`/`WEBRAIN_PASS`): the server decrypts the secret in-process and injects it via CDP — the value never passes through the model. Auto-discovers login fields; on a 2FA gate it TOTP-injects if a seed is stored and returns `waiting_for_human: true`. Reply is status-only.
+</Accordion>
+
+<Accordion title="webrain_profiles">
+List vault profiles (service, profile, username, created_at) — names only, never secrets.
+</Accordion>
+
+<Accordion title="webrain_cookies">
+Read all cookies (incl. HttpOnly) from the session backend. Use with `webrain_setcookies` for cross-browser session migration.
+</Accordion>
+
+<Accordion title="webrain_setcookies">
+Import cookies into the session backend for cross-browser auth. MUST be followed by `webrain_batch` WITHOUT `cdp_urls` so set + batch share one connection.
+</Accordion>
+
+<Accordion title="webrain_save_state">
+Export the current browser's auth state (cookies + localStorage) to `<profiles_dir>/<service>/<profile>/state.json` so a login follows you across machines.
+</Accordion>
+
+<Accordion title="webrain_restore_state">
+Import auth state from `<profiles_dir>/<service>/<profile>/state.json` into the current browser. Navigate to the target site first — localStorage is origin-scoped.
+</Accordion>
+
+<Accordion title="webrain_open_session">
+Create a named browser session pool. Direct `webrain_batch`/`webrain_navigate` calls to it via `session_id` — use different sessions to isolate tasks or browsers (e.g. one per CDP_URL for parallel subagents).
+</Accordion>
+
+<Accordion title="webrain_close_session">
+Destroy a named session pool and its browser backend. The `default` session cannot be closed.
+</Accordion>
+
+<Accordion title="webrain_list_sessions">
+List all active session pools with their session IDs and CDP URLs — discover sessions for subagent routing.
+</Accordion>
+
+<Accordion title="webrain_close_launch">
+Stop a Chrome launched by `webrain launch` (kills the browser process; the persistent profile + cookies remain for the next launch).
+</Accordion>
+
+</AccordionGroup>

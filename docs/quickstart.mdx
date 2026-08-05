@@ -1,0 +1,85 @@
+---
+title: Quickstart
+description: From zero to a working scrape in five minutes.
+---
+
+# Quickstart
+
+Get a browser engine, start the MCP server, and drive webrain from an LLM — in
+five minutes.
+
+## 1. Install webrain
+
+<CodeGroup>
+
+```bash Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash
+```
+
+```powershell Windows
+irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex
+```
+
+```bash Rust (cargo)
+cargo install --git https://github.com/prokopis3/webrain webrain-cli
+```
+
+</CodeGroup>
+
+## 2. Get a browser engine
+
+```bash
+webrain install   # downloads Chrome for Testing (first time only)
+```
+
+This downloads Chrome for Testing into a cache dir; that build then wins
+discovery over your system Chrome. See [Installation](/installation) for other
+engines (`--engine obscura`) and OS specifics.
+
+## 3. Start the MCP server
+
+```bash
+webrain mcp             # stdio transport (VS Code / Copilot / Claude)
+webrain mcp --http 9223 # HTTP transport on 127.0.0.1:9223
+```
+
+Logs go to **stderr**; MCP speaks pure JSON on **stdout** — never redirect
+stderr into the stream.
+
+## 4. Point an LLM at it
+
+In VS Code, register the server under `"mcp"` in your user `settings.json`:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "webrain": {
+        "type": "stdio",
+        "command": "webrain",
+        "args": ["mcp"],
+        "env": { "CDP_URL": "http://127.0.0.1:9222" }
+      }
+    }
+  }
+}
+```
+
+Then ask the LLM something like:
+
+> Scrape all product titles + prices from URL X
+
+The model calls `webrain_navigate` → `webrain_autoschema` →
+`webrain_extract_json` and returns structured data. No selectors on your part.
+
+## Drive it by hand instead?
+
+Every engine + tool has a CLI twin:
+
+```bash
+webrain doctor                # full diagnosis: engines, MCP, CDP, vault, sidecar
+webrain fetch https://example.com
+webrain screenshot https://example.com
+webrain eval "document.title"
+webrain launch scrapingcourse demo "https://example.com/login" --port 9222
+```

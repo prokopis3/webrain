@@ -1,0 +1,57 @@
+---
+title: Deployment
+description: Docker, CI/CD, and releases.
+---
+
+# Deployment
+
+Webrain ships as a single static binary and a Docker image — no runtime
+dependencies beyond the browser engines it manages itself.
+
+## Docker
+
+A multi-arch `docker/Dockerfile` is provided, plus `docker/docker-compose.yml`
+for the full stack. Build and run:
+
+```bash
+docker build -f docker/Dockerfile -t webrain .
+docker run --rm -it webrain mcp --http 9223
+```
+
+On Windows/macOS, run engines via Docker Desktop.
+
+## Releases & versioning
+
+- Semantic versioning with GitHub Releases; each release ships prebuilt
+  binaries for Linux, macOS, and Windows (`webrain-linux`, `webrain-macos`,
+  `webrain-windows.exe`).
+- `webrain upgrade` detects the install method (Homebrew, Scoop, manual) and
+  updates automatically.
+- `CHANGELOG.md` tracks changes under `[Unreleased]`.
+
+## IDE integration
+
+Webrain is an **MCP server** — there is no separate extension to publish. Any
+MCP-capable IDE works:
+
+**Claude Desktop** — `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+**Cursor** — project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+For VS Code, see [Quickstart](/quickstart).

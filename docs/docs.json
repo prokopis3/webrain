@@ -1,0 +1,91 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "webrain",
+  "colors": {
+    "primary": "#3B82F6",
+    "light": "#60A5FA",
+    "dark": "#2563EB"
+  },
+  "favicon": "/images/webrain-logo.png",
+  "navigation": {
+    "anchors": [
+      {
+        "anchor": "Documentation",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "overview",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/browsers",
+              "concepts/challenges"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/structured-extraction",
+              "guides/scrape-at-scale",
+              "guides/auth-and-login"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/tools",
+              "reference/cli",
+              "reference/environment"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "deployment",
+              "troubleshooting",
+              "contributing"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/prokopis3/webrain",
+          "icon": "github"
+        }
+      ]
+    }
+  },
+  "logo": {
+    "light": "/images/webrain-logo.png",
+    "dark": "/images/webrain-logo.png"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/prokopis3/webrain"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Quickstart",
+      "href": "/quickstart"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/prokopis3/webrain"
+    }
+  }
+}

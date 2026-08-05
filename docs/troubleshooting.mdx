@@ -1,0 +1,56 @@
+---
+title: Troubleshooting
+description: The project's hard-won gotchas, in one place.
+---
+
+# Troubleshooting
+
+Start every session with `webrain doctor` — it checks engines, MCP server, CDP
+ports (9222/9224/9225), vault, and the Python sidecar. Exit **0** healthy,
+**2** broken.
+
+## The big three
+
+<Warning>
+  **1. Read `challenge` on every `webrain_navigate`.** Obscura/lightpanda
+  cannot pass interactive challenges — only real Chrome + `stealth_solve.py`.
+</Warning>
+
+<Warning>
+  **2. Obscura has no paint engine.** `webrain_screenshot` errors loudly, and
+  Material dropdowns / Google widgets don't respond to synthetic clicks. Route
+  interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
+</Warning>
+
+<Warning>
+  **3. Lightpanda's screenshot is fake.** `captureScreenshot` returns a
+  placeholder PNG — silently wrong, not an error. And `webrain_batch` runs
+  sequentially on it (single browser context).
+</Warning>
+
+## Symptoms → fixes
+
+| Symptom | Fix |
+|---|---|
+| *"shared library"* errors running Chrome (Linux) | Install the missing system libs (see [Installation](/installation)) |
+| `challenge: cloudflare_challenge` / `blocked` | Run `python scripts/stealth_solve.py <url> --cdp-port 9222 --headed`, re-attach `CDP_URL=http://127.0.0.1:9222` |
+| Chrome won't launch / port busy | `webrain doctor`; check `port_blocklist.ps1` on Windows |
+| Batch returns nothing on lightpanda | Expected — single context. Use obscura for parallelism |
+| Google Flights / Material controls don't open | Real Chrome only, never obscura/lightpanda |
+| Wrong prices on Google Flights | Read from result **cards** (`li.pIav2d`), never bare `$` text nodes (spurious price grid) |
+| Auth lost after batch | `webrain_setcookies` then `webrain_batch` WITHOUT `cdp_urls` (obscura isolates per-connection cookie jars) |
+| Session cookies gone | They die on Chrome restart — export on the live authenticated browser |
+| `webrain_eval` returns null on obscura | Obscura doesn't reliably await async JS — use `webrain_batch(op=interact)` for async work |
+| `webrain_batch` errors fast (5s) | No browser backend running — start one or pass `cdp_urls` |
+| LLM getting huge HTML blobs | Stop calling `webrain_get_html` — use snapshot/clean/eval/extractors |
+
+## Rules of thumb
+
+- Logs go to **stderr**; MCP speaks JSON on **stdout** — never redirect stderr
+  into the stream.
+- `webrain_eval` doesn't reliably await async JS on obscura (returns null) —
+  use `webrain_batch(op=interact, ...)` for async work.
+- `webrain_fetch_http` needs NO browser (pure HTTP, 10–100× faster for static
+  pages).
+- Material widgets are `combobox`/`option`/`radio`, not `button` — check the
+  ARIA cheat-sheet in [webrain_a11y](/reference/tools#webrain_a11y).
