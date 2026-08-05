@@ -8,6 +8,30 @@ description: Version history for webrain.
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
+## v0.3.3
+
+<p className="text-[#888] text-sm">August 5, 2026</p>
+
+### New Features
+
+- Added a **runtime-flow** architecture page (`concepts/runtime-flow.mdx`) -
+  CLI entrypoint → MCP dispatcher → tool dispatch → CDP backend → engines,
+  with a request-flow diagram and a symptom→layer failure table.
+- **`reference/tools.mdx`** gains a **tool-to-code map** (each tool family →
+  implementation file, browser vs no-browser, shared vs engine-specific).
+- **`concepts/browsers.mdx`** gains an **engine capability matrix**
+  (Chrome / Obscura / Lightpanda / `fetch_http`).
+- Light/dark **logo variants** for the Mintlify theme + a GitHub icon in the
+  navbar.
+
+### Bug Fixes
+
+- **`webrain upgrade`** now spawns the package-manager update (brew / scoop)
+  detached and exits, so Scoop no longer sees the upgrade command itself as a
+  running instance of webrain and refuses to replace the binary.
+
+---
+
 ## v0.3.2
 
 <p className="text-[#888] text-sm">August 5, 2026</p>

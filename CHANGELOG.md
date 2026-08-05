@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.3.3] - 2026-08-05
+
+### Added
+
 - **docs**: new `concepts/runtime-flow.mdx` — source-grounded runtime flow and
   architecture walkthrough (CLI entrypoint → MCP dispatcher → tool dispatch →
   CDP backend → engines/login/vault), with a request-flow diagram and a
@@ -18,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs**: `concepts/browsers.mdx` gains an engine capability matrix
   (Chrome / Obscura / Lightpanda / `fetch_http` across paint, screenshots,
   SPA interaction, challenges, a11y, batch, static-HTML speed).
+- **docs**: light/dark logo variants (`webrain-logo-rounded` / `-nobg`) for the
+  Mintlify theme + a GitHub icon in the navbar.
 
 ### Fixed
 
