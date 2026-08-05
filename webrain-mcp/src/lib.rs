@@ -577,6 +577,13 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 }
             }
             let result = tools::call_tool(backend.as_ref().unwrap(), tool_name, &arguments).await;
+            // Reconnect: a browser kill/restart wedges the cached backend forever
+            // (dead socket → "os error 10054" on every write). Drop it on
+            // connection-level errors so the next call connects fresh. The rest
+            // of the error surface is tool-level and must NOT reset the session.
+            if is_connection_error(&result) {
+                *backend = None;
+            }
             // MCP spec: tools/call result must be {content: [{type:"text",text}], isError}.
             // ponytail: JSON-encode the tool payload into one text block; mark isError
             // when the tool returned status:"error". Without the content array the
@@ -598,6 +605,27 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             "error": {"code": -32601, "message": format!("Unknown method: {method}")}
         }),
     }
+}
+
+/// True when a tool result is a dead-socket error (browser killed/restarted),
+/// which warrants dropping the cached backend so the next call reconnects.
+/// Tool-level errors (element not found, CDP error, JS exception) are not.
+fn is_connection_error(result: &Value) -> bool {
+    result.get("status").and_then(|v| v.as_str()) == Some("error")
+        && result
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|m| {
+                let m = m.to_lowercase();
+                [
+                    "10054", "10053", "10058", "connection reset", "connection closed",
+                    "connection aborted", "broken pipe", "stream closed", "eof",
+                    "closed before message",
+                ]
+                .iter()
+                .any(|k| m.contains(k))
+            })
+            .unwrap_or(false)
 }
 
 /// Estimate output token cost at the serialization choke point — one place covers
@@ -769,32 +797,54 @@ async fn handle_http_conn(
                 session_id.unwrap_or_else(|| "default".to_string())
             };
 
-            // Grab the session Arc, drop the map lock, then await on the backend.
+            // ── session management tools (no CDP connect, operate on HttpState) ──
+            let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            let id = msg.get("id").cloned();
+            let t0 = std::time::Instant::now();
+            let (tool_name, args) = if method == "tools/call" {
+                (
+                    msg.pointer("/params/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    msg.pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+            } else {
+                ("", Value::Null)
+            };
+
+            // Tool-level session routing: an optional `session_id` in the call's
+            // arguments routes the backend to that session's cdp_url — so
+            // webrain_open_session(cdp_url=obscura) actually switches navigate/
+            // batch/setcookies to obscura, instead of everything hitting the
+            // header session's default (Chrome). Management tools operate on
+            // HttpState directly and stay on the header session.
+            let is_session_mgmt = matches!(
+                tool_name,
+                "webrain_open_session" | "webrain_close_session" | "webrain_list_sessions"
+            );
+            let route_key = if is_session_mgmt {
+                session_key.clone()
+            } else {
+                args.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| session_key.clone())
+            };
+
+            // Grab the (routed) session Arc, drop the map lock, then await on it.
             let session = {
                 let mut map = state.sessions.lock().await;
-                map.entry(session_key.clone())
+                map.entry(route_key.clone())
                     .or_insert_with(|| Arc::new(Default::default()))
                     .clone()
             };
             let mut backend = session.backend.lock().await;
 
-            // ── session management tools (no CDP connect, operate on HttpState) ──
-            let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-            let id = msg.get("id").cloned();
-            let t0 = std::time::Instant::now();
-
             let resp = match method {
-                "tools/call" => {
-                    let tool_name = msg
-                        .pointer("/params/name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let args = msg
-                        .pointer("/params/arguments")
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    match tool_name {
-                        "webrain_open_session" => {
+                "tools/call" => match tool_name {
+                    "webrain_open_session" => {
                             let sid = args
                                 .get("session_id")
                                 .and_then(|v| v.as_str())
@@ -848,7 +898,6 @@ async fn handle_http_conn(
                             }
                         }
                     }
-                }
                 _ => {
                     if msg.is_null() {
                         json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": "Parse error"}})
@@ -877,4 +926,28 @@ async fn handle_http_conn(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dead_socket_detection() {
+        // Socket death → drop the cached backend so the next call reconnects.
+        assert!(is_connection_error(&json!(
+            {"status":"error","message":"os error 10054: An existing connection was forcibly closed by the remote host"}
+        )));
+        assert!(is_connection_error(&json!(
+            {"status":"error","message":"connection reset by peer"}
+        )));
+        assert!(is_connection_error(&json!(
+            {"status":"error","message":"the stream closed before message completed"}
+        )));
+        // Tool-level errors / success → keep the session.
+        assert!(!is_connection_error(&json!(
+            {"status":"error","message":"no element at index 3"}
+        )));
+        assert!(!is_connection_error(&json!({"status":"ok","result":1})));
+    }
 }

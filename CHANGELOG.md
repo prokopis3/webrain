@@ -7,9 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.3.1] - 2026-08-05
+
 ### Added
 
-_No unreleased changes yet._
+- **cli**: `webrain install --engine lightpanda` now downloads the lightpanda
+  binary from the `lightpanda-io/browser` GitHub release (raw asset, no
+  archive) into the engine cache, mirroring `--engine obscura`.
+  `find_lightpanda()` also discovers the cached build, so `webrain lightpanda`
+  just works after install. Lightpanda publishes no Windows binary — on Windows
+  the install bails with the Docker fallback (`lightpanda/browser:nightly`)
+  instead of silently installing Chrome.
+
+### Changed
+
+- **cli**: `webrain install --engine <unknown>` now errors with a clear message
+  (`try chrome, obscura, or lightpanda`) instead of silently installing Chrome.
+
+### Fixed
+
+- **mcp**: `webrain_open_session(cdp_url=…)` now actually routes tools to that
+  session — every browser tool accepts an optional `session_id` argument.
+  Previously routing only worked via the `Mcp-Session-Id` HTTP header, so
+  `open_session(cdp_url=obscura)` never switched navigate/batch/setcookies and
+  everything kept hitting the default Chrome backend.
+- **mcp**: a browser kill/restart no longer wedges the cached backend forever —
+  dead-socket errors (`os error 10054` / connection reset / stream closed) now
+  drop the backend so the next call reconnects fresh.
+- **core**: the CDP WebSocket connect retries once with a longer budget (20s)
+  after the initial 5s fail-fast, tolerating obscura's slow cold-start
+  handshake.
 
 ## [0.3.0] - 2026-08-05
 

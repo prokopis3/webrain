@@ -117,7 +117,8 @@ pub fn find_cft_chrome() -> Option<PathBuf> {
 }
 
 /// lightpanda binary: WEBRAIN_LIGHTPANDA, then PATH, then agent-browser's
-/// home candidates (~/.lightpanda, ~/.local/bin).
+/// home candidates (~/.lightpanda, ~/.local/bin), then the
+/// `webrain install --engine lightpanda` cache (lightpanda-<tag>/).
 pub fn find_lightpanda() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("WEBRAIN_LIGHTPANDA") {
         let p = PathBuf::from(p);
@@ -136,6 +137,16 @@ pub fn find_lightpanda() -> Option<PathBuf> {
         ] {
             if cand.exists() {
                 return Some(cand);
+            }
+        }
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+    for e in entries {
+        let p = e.path();
+        if p.is_dir() && e.file_name().to_string_lossy().starts_with("lightpanda-") {
+            if let Some(b) = find_named(&p, &bin_name("lightpanda"), 1) {
+                return Some(b);
             }
         }
     }
@@ -235,6 +246,86 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
     extract_archive(&bytes, &dest, &fname)?;
     find_named(&dest, &bin_name("obscura"), 3)
         .with_context(|| format!("obscura binary not found in {}", dest.display()))
+}
+
+/// lightpanda asset suffix, e.g. "x86_64-linux". lightpanda ships NO Windows
+/// build — on Windows there is nothing to download (use the Docker image
+/// lightpanda/browser:nightly instead).
+fn lightpanda_asset_key() -> Option<&'static str> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    if cfg!(target_os = "linux") {
+        Some(match arch {
+            "aarch64" => "aarch64-linux",
+            _ => "x86_64-linux",
+        })
+    } else if cfg!(target_os = "macos") {
+        Some(match arch {
+            "aarch64" => "aarch64-macos",
+            _ => "x86_64-macos",
+        })
+    } else {
+        None
+    }
+}
+
+const LIGHTPANDA_RELEASES_URL: &str =
+    "https://api.github.com/repos/lightpanda-io/browser/releases/latest";
+
+/// Download the latest lightpanda binary (raw asset, no archive — unlike
+/// obscura). Mirrors install_obscura: cache under browsers_dir(), chmod +x on
+/// unix. On Windows it bails — lightpanda publishes no Windows asset.
+/// ponytail: find_named depth 1, the binary lands directly in the cache dir.
+pub fn install_lightpanda(force: bool) -> Result<PathBuf> {
+    if !force {
+        if let Some(bin) = find_lightpanda() {
+            println!("lightpanda already installed: {}", bin.display());
+            return Ok(bin);
+        }
+    }
+    let key = lightpanda_asset_key().ok_or_else(|| {
+        anyhow::anyhow!(
+            "lightpanda ships no {} binary — use the Docker image (lightpanda/browser:nightly) or a linux/macos host",
+            if cfg!(target_os = "windows") {
+                "Windows"
+            } else {
+                "this-platform"
+            }
+        )
+    })?;
+    let dir = browsers_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    let raw = String::from_utf8(download_bytes(LIGHTPANDA_RELEASES_URL)?)
+        .context("lightpanda releases JSON is not UTF-8")?;
+    let rel: Value = serde_json::from_str(&raw).context("parse lightpanda releases JSON")?;
+    let tag = rel["tag_name"]
+        .as_str()
+        .context("no tag_name in lightpanda release")?;
+    let want = format!("lightpanda-{key}");
+    let asset = rel["assets"]
+        .as_array()
+        .context("no assets in lightpanda release")?
+        .iter()
+        .find(|a| a["name"].as_str().unwrap_or("") == want)
+        .and_then(|a| a["browser_download_url"].as_str())
+        .context("no matching lightpanda asset for this platform")?;
+
+    println!("Downloading lightpanda {tag} ({key})...");
+    let bytes = download_bytes(asset)?;
+    let dest = dir.join(format!("lightpanda-{tag}"));
+    std::fs::create_dir_all(&dest)?;
+    let out = dest.join(bin_name("lightpanda"));
+    std::fs::write(&out, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(out)
 }
 
 fn download_bytes(url: &str) -> Result<Vec<u8>> {

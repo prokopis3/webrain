@@ -161,14 +161,18 @@ fn main() -> anyhow::Result<()> {
                     println!("engine ready: obscura at {}", bin.display());
                     println!("  start it: `webrain obscura`");
                 }
-                _ => {
+                "lightpanda" => {
+                    let bin = webrain_core::install::install_lightpanda(force)?;
+                    println!("engine ready: lightpanda at {}", bin.display());
+                    println!("  start it: `webrain lightpanda`");
+                }
+                "chrome" => {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());
-                    println!(
-                        "  lightpanda engine: `webrain lightpanda` (needs the binary on PATH)"
-                    );
-                    println!("  obscura engine:   `webrain install --engine obscura`");
                 }
+                other => anyhow::bail!(
+                    "unknown engine `{other}` — try chrome, obscura, or lightpanda"
+                ),
             }
         }
         Some("obscura") => {

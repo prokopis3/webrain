@@ -142,7 +142,7 @@ PARALLEL / MULTI-BROWSER EXECUTION
 "#;
 
 pub fn list_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "webrain_guide",
             "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run scripts/stealth_solve.py for gated pages), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.",
@@ -714,7 +714,22 @@ pub fn list_tools() -> Vec<Value> {
                 "required": ["cookies"]
             }
         }),
-    ]
+    ];
+    // ponytail: one injection instead of hand-editing every schema — all browser
+    // tools accept an optional session_id to route to a webrain_open_session
+    // (default: this connection's own session).
+    for t in &mut tools {
+        if let Some(props) = t
+            .pointer_mut("/inputSchema/properties")
+            .and_then(|p| p.as_object_mut())
+        {
+            props.insert(
+                "session_id".to_string(),
+                json!({"type": "string", "description": "Route this call to a specific webrain session (from webrain_open_session). Defaults to this connection's session."}),
+            );
+        }
+    }
+    tools
 }
 
 /// Page-agent style page info + scroll hints (borrowed from alibaba/page-agent

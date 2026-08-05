@@ -334,15 +334,24 @@ impl CdpBackend {
     /// Connect to a CDP browser at the given WebSocket URL.
     /// Example: `ws://127.0.0.1:9222/devtools/browser/...`
     pub async fn connect(ws_url: &str) -> anyhow::Result<Self> {
-        // ponytail: 5s timeout on the WS handshake — same half-open-port guard as
-        // resolve_ws. connect_async can hang indefinitely without it.
-        let (ws, _) = tokio::time::timeout(
+        // ponytail: 5s fail-fast on the WS handshake (half-open-port guard), but
+        // obscura's CDP server can finish its handshake slowly on a cold start —
+        // retry once with a longer budget before giving up.
+        let (ws, _) = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio_tungstenite::connect_async(ws_url),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("CDP connect timed out after 5s"))?
-        .context("CDP WebSocket connection failed. Is the browser running?")?;
+        {
+            Ok(r) => r.context("CDP WebSocket connection failed. Is the browser running?")?,
+            Err(_) => tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                tokio_tungstenite::connect_async(ws_url),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("CDP connect timed out after 20s (retry)"))?
+            .context("CDP WebSocket connection failed. Is the browser running?")?,
+        };
 
         let (write, read) = ws.split();
 
