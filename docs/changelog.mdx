@@ -8,75 +8,146 @@ description: Version history for webrain.
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
-## v0.3.1 - 2026-08-05
+## v0.3.2
 
-### Added
+<p className="text-[#888] text-sm">August 5, 2026</p>
 
-- **cli**: `webrain install --engine lightpanda` now downloads the lightpanda binary from the `lightpanda-io/browser` GitHub release into the engine cache, mirroring `--engine obscura`; `find_lightpanda()` also discovers the cached build. No Windows binary - the install bails with the Docker fallback instead of silently installing Chrome.
+### Documentation
 
-### Changed
+- Added a **full Mintlify docs site** in `docs/` - overview, quickstart,
+  installation, browsers/challenges concepts, extraction / scrape-at-scale /
+  auth-and-login guides, a full 51-tool reference, CLI + env reference,
+  deployment, troubleshooting, and contributing. Existing `docs/*.md` files
+  left in place, untouched.
+- Added the **`docs/changelog.mdx`** changelog map, linked in the Project nav.
+- **quickstart.mdx** and the README now show the **full MCP client setup**
+  (stdio + HTTP transports, VS Code / Claude Desktop / Cursor configs,
+  `webrain_guide` verification).
+- Added a **Prerequisites** section to the README and docs site.
+- Added **`.mintignore`** so the ADR / legacy markdown files stay on disk but
+  out of the Mintlify build (fixes the ADR MDX parse error).
+- Refreshed **ADR-001** graph note - 875 nodes / 2287 edges, 3 entry points,
+  51 MCP tools, new hotspots.
 
-- **cli**: `webrain install --engine <unknown>` now errors clearly instead of silently installing Chrome.
+### Improvements
 
-### Fixed
-
-- **mcp**: `webrain_open_session(cdp_url=…)` now actually routes tools to that session (every browser tool accepts an optional `session_id`).
-- **mcp**: a browser kill/restart no longer wedges the cached backend forever - dead-socket errors drop the backend so the next call reconnects.
-- **core**: the CDP WebSocket connect retries once with a longer budget (20s), tolerating obscura's slow cold-start handshake.
-
----
-
-## v0.3.0 - 2026-08-05
-
-### Added
-
-- **tools**: `webrain_page_info` - just-in-time page context (viewport/page size, scroll position, position %).
-- **tools**: `webrain_save_state` / `webrain_restore_state` - export/import auth state (cookies + localStorage) across machines.
-- **cli**: `webrain -v` / `--version` / `version`.
-
-### Fixed
-
-- **core**: `webrain install` failed with "response body is larger than request limit" - ureq's 10 MB cap was too small for the Chrome/Obscura engine zips; now reads via the unlimited reader.
-
-### Changed
-
-- **docs**: rewrote README (install-first, "Why webrain?", use-cases, Scoop extras).
-- **build**: moved `Dockerfile` into `docker/` + added `docker-compose.yml` (persistent vault/profile/cache volumes).
-- **tools**: deduped the JS→JSON parse chain in `tools.rs` into `parse_json_str` / `arr_len`.
+- Upgraded **`skills/webrain/SKILL.md`** to a full agent-skill contract -
+  richer frontmatter, `When to use`, recommended limits, and a 7-step
+  end-to-end invocation flow.
+- Ran `cargo fmt` on the mcp session-routing match indent.
 
 ---
 
-## v0.2.0 - 2026-08-05
+## v0.3.1
 
-### Added
+<p className="text-[#888] text-sm">August 5, 2026</p>
 
-- **cli**: `webrain upgrade` - updates to the latest release (Homebrew/Scoop-aware, else self-updates in place).
-- **install**: one-line installers - `scripts/install.sh` (Linux/macOS) and `scripts/install.ps1` (Windows).
-- **dist**: submitted to the official Scoop `extras` bucket and published a Homebrew tap (`prokopis3/homebrew-webrain`).
-- **docs**: `CONTRIBUTING.md`, README badges, Quick Start + Traditional Selectors + Commands + Updating.
+### New Features
+
+- **`webrain install --engine lightpanda`** now downloads the lightpanda binary
+  from the `lightpanda-io/browser` GitHub release into the engine cache,
+  mirroring `--engine obscura`; `find_lightpanda()` also discovers the cached
+  build. No Windows binary - the install bails with the Docker fallback
+  instead of silently installing Chrome.
+
+### Improvements
+
+- **`webrain install --engine <unknown>`** now errors clearly instead of
+  silently installing Chrome.
+
+### Bug Fixes
+
+- **`webrain_open_session(cdp_url=…)`** now actually routes tools to that
+  session - every browser tool accepts an optional `session_id`.
+- A browser kill/restart no longer wedges the cached backend forever -
+  dead-socket errors drop the backend so the next call reconnects.
+- The CDP WebSocket connect retries once with a longer budget (20s),
+  tolerating obscura's slow cold-start handshake.
 
 ---
 
-## v0.1.1 - 2026-08-04
+## v0.3.0
 
-### Added
+<p className="text-[#888] text-sm">August 5, 2026</p>
 
-- **docs**: all-OS install one-liners (PowerShell + curl) and the working scoop bucket (`prokopis3/scoop-webrain`).
+### New Features
 
-### Fixed
+- **`webrain_page_info`** - just-in-time page context (viewport/page size,
+  scroll position, position %).
+- **`webrain_save_state` / `webrain_restore_state`** - export/import a
+  profile's auth state (cookies + localStorage) across machines.
+- **`webrain -v` / `--version` / `version`**.
 
-- **ci**: the Linux release binary now builds on `ubuntu-22.04` (glibc 2.35) - the previous `ubuntu-latest` build required glibc 2.39.
+### Bug Fixes
+
+- **`webrain install`** failed with "response body is larger than request
+  limit" - ureq's 10 MB cap was too small for the Chrome/Obscura engine zips;
+  now reads via the unlimited reader.
+
+### Improvements
+
+- Rewrote the **README** - install-first, "Why webrain?", use-cases, Scoop
+  extras.
+- Moved the **Dockerfile** into `docker/` and added `docker-compose.yml`
+  (persistent vault/profile/cache volumes).
+- Deduped the **JS→JSON parse chain** in `tools.rs` into `parse_json_str` /
+  `arr_len`.
 
 ---
 
-## v0.1.0 - 2026-08-04
+## v0.2.0
 
-### Added
+<p className="text-[#888] text-sm">August 5, 2026</p>
 
-- **workspace**: Cargo workspace (`resolver 3`, `edition 2024`, Rust 1.85) with `webrain-core` / `webrain-mcp` / `webrain-cli`; MIT license; CI + release + changelog-enforce workflows.
-- **core**: Rust CDP browser-automation agent - one `BrowserBackend` trait over CDP WebSocket (`CdpBackend`) driving Chrome, Edge, Lightpanda, or Obscura; `SessionPool` isolation; `STEALTH_JS` anti-bot injection.
-- **mcp**: stdio JSON-RPC server owning the CDP connection, 25-tool dispatch table.
-- **cli**: single `webrain` binary, `match`-based subcommands (no clap) mirroring the MCP tool surface.
-- **core**: page interaction (navigate/eval/click/type/press/scroll/snapshot, multi-tab, a11y), capture (screenshot, PDF, PixelRAG vision tiles + cosine `VectorStore`), extraction (`extract_json` / `extract_regex` / `eval`), spider + web search, batch + download.
-- **cli**: `webrain doctor` - full install diagnosis (exit 0 when a browser is reachable).
-- **core/cli**: agent-browser-style engine install - `webrain install` downloads Chrome for Testing (and `--engine obscura`); `webrain lightpanda` / `webrain obscura` spawn CDP servers.
+### New Features
+
+- **`webrain upgrade`** - updates to the latest release (Homebrew/Scoop-aware,
+  else self-updates the binary in place).
+- **One-line installers** - `scripts/install.sh` (Linux/macOS) and
+  `scripts/install.ps1` (Windows).
+- Submitted to the official **Scoop `extras`** bucket and published a
+  **Homebrew tap** (`prokopis3/homebrew-webrain`).
+- Added **`CONTRIBUTING.md`**, README badges, and the Quick Start + Traditional
+  Selectors + Commands + Updating sections.
+
+---
+
+## v0.1.1
+
+<p className="text-[#888] text-sm">August 4, 2026</p>
+
+### New Features
+
+- **All-OS install one-liners** (PowerShell + curl) and the working **scoop
+  bucket** (`prokopis3/scoop-webrain`).
+
+### Bug Fixes
+
+- The **Linux release binary** now builds on `ubuntu-22.04` (glibc 2.35) - the
+  previous `ubuntu-latest` build required glibc 2.39.
+
+---
+
+## v0.1.0
+
+<p className="text-[#888] text-sm">August 4, 2026</p>
+
+### New Features
+
+- **Cargo workspace** (`resolver 3`, `edition 2024`, Rust 1.85) with
+  `webrain-core` / `webrain-mcp` / `webrain-cli`; MIT license; CI + release +
+  changelog-enforce workflows.
+- **Rust CDP browser-automation agent** - one `BrowserBackend` trait over CDP
+  WebSocket (`CdpBackend`) driving Chrome, Edge, Lightpanda, or Obscura;
+  `SessionPool` isolation; `STEALTH_JS` anti-bot injection.
+- **stdio MCP server** owning the CDP connection, 25-tool dispatch table.
+- **Single `webrain` binary**, `match`-based subcommands (no clap) mirroring
+  the MCP tool surface.
+- Page interaction (navigate/eval/click/type/press/scroll/snapshot, multi-tab,
+  a11y), capture (screenshot, PDF, PixelRAG vision tiles + cosine
+  `VectorStore`), extraction (`extract_json` / `extract_regex` / `eval`),
+  spider + web search, batch + download.
+- **`webrain doctor`** - full install diagnosis.
+- **agent-browser-style engine install** - `webrain install` downloads Chrome
+  for Testing (and `--engine obscura`); `webrain lightpanda` / `webrain
+  obscura` spawn CDP servers.
