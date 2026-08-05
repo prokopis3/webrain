@@ -54,6 +54,15 @@ it directly.
 Everything speaks **Chrome DevTools Protocol** over a raw WebSocket, so one
 backend drives Chrome, Lightpanda, and Obscura interchangeably.
 
+## Prerequisites
+
+- **OS**: Windows, macOS, or Linux (x86_64 / arm64).
+- **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
+- **Linux**: system libraries for Chrome — see [Installation](/installation).
+- **Python 3** — only for the stealth sidecar (`scripts/stealth_solve.py`) to bypass Cloudflare/Turnstile challenges.
+- **Docker** — only to run the obscura / lightpanda engines in containers.
+- **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
+
 ## Where to go next
 
 - [Installation](/installation) — every install path, one-liners included

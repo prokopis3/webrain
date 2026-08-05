@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **docs**: new `Prerequisites` section in `README.md` and the docs site — OS,
+  browser engine (`webrain install`), Linux libs, optional Python 3 / Docker,
+  optional MCP client.
 - **docs**: ADR-001 graph note refreshed to 2026-08-05 state — 875 nodes /
   2287 edges, 3 entry points, new hotspots (`vault.get` fan-in 26,
   `ensure_page_attached`, `send_cmd_with`), 51 MCP tools (up from 34).

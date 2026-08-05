@@ -54,6 +54,15 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **PDF**: lopdf + pdf-inspector (pure Rust)
 - **Deployment**: Docker (multi-arch), GitHub Actions CI/CD
 
+## Prerequisites
+
+- **OS**: Windows, macOS, or Linux (x86_64 / arm64).
+- **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
+- **Linux**: system libraries for Chrome (list below) before first run.
+- **Python 3** — only for the stealth sidecar (`scripts/stealth_solve.py`) to bypass Cloudflare/Turnstile challenges.
+- **Docker** — only to run the obscura / lightpanda engines in containers.
+- **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
+
 ## Installation
 
 > Install model mirrors [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser): a native binary plus an `install` command that downloads engines into a cache dir.
