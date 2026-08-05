@@ -460,7 +460,9 @@ fn upgrade() -> anyhow::Result<()> {
         // alive while the package manager runs, Scoop sees the upgrade command
         // itself as a running instance of webrain and refuses to replace the exe.
         // Detach so the binary is free when brew/scoop swap it.
-        std::process::Command::new("brew").args(["upgrade", "webrain"]).spawn()?;
+        std::process::Command::new("brew")
+            .args(["upgrade", "webrain"])
+            .spawn()?;
         return Ok(());
     }
     #[cfg(target_os = "windows")]
