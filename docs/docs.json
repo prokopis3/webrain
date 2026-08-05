@@ -76,7 +76,8 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/prokopis3/webrain"
+        "href": "https://github.com/prokopis3/webrain",
+        "icon": "github"
       }
     ],
     "primary": {
