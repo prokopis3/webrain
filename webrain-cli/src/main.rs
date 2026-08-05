@@ -170,9 +170,9 @@ fn main() -> anyhow::Result<()> {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());
                 }
-                other => anyhow::bail!(
-                    "unknown engine `{other}` — try chrome, obscura, or lightpanda"
-                ),
+                other => {
+                    anyhow::bail!("unknown engine `{other}` — try chrome, obscura, or lightpanda")
+                }
             }
         }
         Some("obscura") => {

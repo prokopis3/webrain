@@ -618,8 +618,15 @@ fn is_connection_error(result: &Value) -> bool {
             .map(|m| {
                 let m = m.to_lowercase();
                 [
-                    "10054", "10053", "10058", "connection reset", "connection closed",
-                    "connection aborted", "broken pipe", "stream closed", "eof",
+                    "10054",
+                    "10053",
+                    "10058",
+                    "connection reset",
+                    "connection closed",
+                    "connection aborted",
+                    "broken pipe",
+                    "stream closed",
+                    "eof",
                     "closed before message",
                 ]
                 .iter()
@@ -845,59 +852,59 @@ async fn handle_http_conn(
             let resp = match method {
                 "tools/call" => match tool_name {
                     "webrain_open_session" => {
-                            let sid = args
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "sess-{}",
-                                        state
-                                            .next_id
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                    )
-                                });
-                            let cdp = args
-                                .get("cdp_url")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            let meta = Arc::new(SessionMeta {
-                                backend: tokio::sync::Mutex::new(None),
-                                cdp_url: cdp.clone(),
+                        let sid = args
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "sess-{}",
+                                    state
+                                        .next_id
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                )
                             });
-                            let mut map = state.sessions.lock().await;
-                            let exists = map.contains_key(&sid);
-                            map.insert(sid.clone(), meta);
-                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"created":!exists})).unwrap_or_default()}],"isError":false}})
-                        }
-                        "webrain_close_session" => {
-                            let sid = args
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if sid.is_empty() || sid == "default" {
-                                json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"error":"cannot close default session"}"#}],"isError":true}})
-                            } else {
-                                let removed = state.sessions.lock().await.remove(sid).is_some();
-                                json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"closed":removed})).unwrap_or_default()}],"isError":false}})
-                            }
-                        }
-                        "webrain_list_sessions" => {
-                            let map = state.sessions.lock().await;
-                            let list: Vec<Value> = map
-                                .iter()
-                                .map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url}))
-                                .collect();
-                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"sessions":list})).unwrap_or_default()}],"isError":false}})
-                        }
-                        _ => {
-                            if msg.is_null() {
-                                json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": "Parse error"}})
-                            } else {
-                                handle_rpc(msg, &mut backend, session.cdp_url.as_deref()).await
-                            }
+                        let cdp = args
+                            .get("cdp_url")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let meta = Arc::new(SessionMeta {
+                            backend: tokio::sync::Mutex::new(None),
+                            cdp_url: cdp.clone(),
+                        });
+                        let mut map = state.sessions.lock().await;
+                        let exists = map.contains_key(&sid);
+                        map.insert(sid.clone(), meta);
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"created":!exists})).unwrap_or_default()}],"isError":false}})
+                    }
+                    "webrain_close_session" => {
+                        let sid = args
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if sid.is_empty() || sid == "default" {
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"error":"cannot close default session"}"#}],"isError":true}})
+                        } else {
+                            let removed = state.sessions.lock().await.remove(sid).is_some();
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"closed":removed})).unwrap_or_default()}],"isError":false}})
                         }
                     }
+                    "webrain_list_sessions" => {
+                        let map = state.sessions.lock().await;
+                        let list: Vec<Value> = map
+                            .iter()
+                            .map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url}))
+                            .collect();
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"sessions":list})).unwrap_or_default()}],"isError":false}})
+                    }
+                    _ => {
+                        if msg.is_null() {
+                            json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": "Parse error"}})
+                        } else {
+                            handle_rpc(msg, &mut backend, session.cdp_url.as_deref()).await
+                        }
+                    }
+                },
                 _ => {
                     if msg.is_null() {
                         json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": "Parse error"}})
