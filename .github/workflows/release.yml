@@ -116,3 +116,59 @@ jobs:
           body_path: body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-packages:
+    name: Bump Scoop + Homebrew manifests
+    needs: release
+    runs-on: ubuntu-latest
+    # ponytail: GITHUB_TOKEN can't write OTHER repos, so this needs a
+    # cross-repo PAT as the repo secret RELEASE_PAT (fine-grained,
+    # Contents:write on prokopis3/webrain + scoop-webrain + homebrew-webrain).
+    # No secret set -> job skips (release still succeeds).
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: webrain-*
+          path: dist
+          merge-multiple: true
+
+      - name: Bump scoop + homebrew manifests
+        if: env.GH_TOKEN != ''
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          WIN_SHA="$(sha256sum dist/webrain-windows.exe | awk '{print toupper($1)}')"
+          MAC_SHA="$(sha256sum dist/webrain-macos | awk '{print $1}')"
+
+          # fetch current manifests (they live in OTHER repos, not this checkout)
+          gh api "repos/prokopis3/scoop-webrain/contents/bucket/webrain.json" --jq .content | base64 -d > bucket.json
+          gh api "repos/prokopis3/homebrew-webrain/contents/Formula/webrain.rb" --jq .content | base64 -d > formula.rb
+
+          # scoop: jq-edit in place (keeps description/bin/checkver/autoupdate)
+          jq --arg v "$VER" --arg h "$WIN_SHA" \
+            '.version = $v
+             | .architecture."64bit".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows.exe")
+             | .architecture."64bit".hash = $h' \
+            bucket.json > /tmp/bucket.json && mv /tmp/bucket.json bucket.json
+
+          # homebrew: sed the version/url/sha256
+          sed -i -E "s|/v[0-9.]+/webrain-macos|/v${VER}/webrain-macos|; s|sha256 \"[a-f0-9]+\"|sha256 \"${MAC_SHA}\"|; s|version \"[0-9.]+\"|version \"${VER}\"|" formula.rb
+
+          put() {
+            local repo="$1" path="$2" file="$3"
+            local sha b64
+            sha="$(gh api "repos/${repo}/contents/${path}" --jq .sha)"
+            b64="$(base64 -w0 "${file}")"
+            gh api -X PUT "repos/${repo}/contents/${path}" \
+              -f "message=webrain ${VER}" \
+              -f "content=${b64}" \
+              -f "sha=${sha}" \
+              -f "branch=main" >/dev/null
+          }
+          put prokopis3/scoop-webrain bucket/webrain.json bucket.json
+          put prokopis3/homebrew-webrain Formula/webrain.rb formula.rb
