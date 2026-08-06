@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **build(deps)**: `Cargo.lock` synced to the 0.5.0 workspace crate versions
+  (`webrain-core`/`webrain-mcp`) — the v0.5.0 release commit bumped `Cargo.toml`
+  but dropped the lock update.
+
 ## [0.5.0] - 2026-08-06
 
 ### Added
