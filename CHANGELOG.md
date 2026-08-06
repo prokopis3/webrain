@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.5.0] - 2026-08-06
+
+### Added
+
 - **watch videos** (`webrain_core::video` + `webrain_watch` + `webrain watch`):
   transcript + frames for ANY video (URL or local file), no browser needed.
   Pipeline: yt-dlp captions → Whisper STT fallback (provider keys env-only,
