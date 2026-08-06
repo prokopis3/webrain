@@ -1739,7 +1739,10 @@ pub fn download_ytdlp(
     extra: &[String],
 ) -> Value {
     std::fs::create_dir_all(dir).ok();
-    let mut cmd = std::process::Command::new("yt-dlp");
+    // ponytail: reuse install::find_tool so the bundled yt-dlp (`webrain install
+    // watch`) wins before PATH — same resolution `webrain watch` uses.
+    let bin = crate::install::find_tool("yt-dlp").unwrap_or_else(|| "yt-dlp".into());
+    let mut cmd = std::process::Command::new(bin);
     cmd.arg("-o").arg(format!("{dir}/%(title)s_%(id)s.%(ext)s"));
     if audio_only {
         cmd.arg("-x").arg("--audio-format").arg("mp3");
@@ -1775,10 +1778,13 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
     for (i, url) in urls.iter().enumerate() {
         let res = (|| -> anyhow::Result<BatchResult> {
             let resp = browser_req(agent.get(url)).call()?;
+            // ponytail: CDN URLs carry ?sig&params — drop query/fragment or the
+            // derived filename is invalid on Windows (os error 123).
             let name = url
                 .rsplit('/')
                 .next()
                 .filter(|s| !s.is_empty())
+                .map(|s| s.split(['?', '#']).next().unwrap_or(s))
                 .unwrap_or("download");
             let path = format!("{dir}/{i}_{name}");
             let mut f = std::fs::File::create(&path)?;

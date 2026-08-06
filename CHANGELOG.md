@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `legacy_tool_schemas()` reference. AGENT_GUIDE + README rewritten for the
   new surface.
 
+### Fixed
+
+- **tools** (`webrain_download` http + ytdlp engines): the http
+  engine derived the output filename from the URL *including its query string*,
+  which is an invalid Windows filename (`os error 123`) on signed CDN URLs
+  (`...jpg?stp=...&sig=...`) — it now strips `?`/`#` before saving. The ytdlp
+  engine resolves its binary via `install::find_tool("yt-dlp")`, so the bundled
+  yt-dlp (`webrain install watch`) is used before PATH — no more
+  `yt-dlp: command not found` on systems without it installed.
+
 ## [0.5.0] - 2026-08-06
 
 ### Added
