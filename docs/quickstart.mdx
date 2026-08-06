@@ -109,8 +109,9 @@ Then ask the LLM something like:
 
 > Scrape all product titles + prices from URL X
 
-The model calls `webrain_navigate` → `webrain_autoschema` →
-`webrain_extract_json` and returns structured data. No selectors on your part.
+The model calls `webrain_navigate` → `webrain_extract` (mode=autoschema) →
+`webrain_extract` (mode=schema) and returns structured data. No selectors on
+your part.
 
 ## Drive it by hand instead?
 

@@ -67,18 +67,22 @@ Two transports, one dispatcher:
 Every message funnels into **`handle_rpc()`** (lib.rs:51-608). It routes
 `initialize` / notifications / `tools/list` / `tools/call`, and intercepts a
 handful of tools **before** the CDP backend is touched because they need no
-browser: `webrain_guide`, `webrain_fetch_http`, `webrain_search`,
-`webrain_download`, `webrain_pdf_render` / `webrain_pdf_images`.
+browser: `webrain_guide`, `webrain_scrape` (fetch_http), `webrain_search`,
+`webrain_download`, `webrain_pdf` (render / images ops). The consolidated
+15-tool surface (`observe`/`interact`/`extract`/`crawl`/`session`/…) is folded
+to these executors up front by `tools::map_surface()`.
 
 ### 3. Tool registration — `webrain-mcp/src/tools.rs`
 
-- **`list_tools()`** (tools.rs:144-733) — the 63 `webrain_*` schemas the LLM
-  sees, with the canonical descriptions.
-- **`call_tool()`** (tools.rs:810-1883) — the dispatch: `match tool_name` →
-  resolve a `BrowserBackend` (usually a `CdpBackend`), then invoke the core
-  logic. Tools are grouped around `webrain_core::engines`,
-  `webrain_core::backends::cdp`, `webrain_core::login`, and
-  `webrain_core::vision`.
+- **`list_tools()`** — the **15 consolidated `webrain_*` schemas** the LLM
+  sees, with canonical descriptions (63 legacy one-action schemas are kept as
+  `legacy_tool_schemas()`).
+- **`call_tool()`** — the dispatch: `map_surface(name, args)` folds a
+  consolidated `what`/`action`/`op`/`mode` selector into the legacy arm name,
+  then `match tool_name` resolves a `BrowserBackend` (usually a `CdpBackend`)
+  and invokes the core logic. Tools are grouped around
+  `webrain_core::engines`, `webrain_core::backends::cdp`, `webrain_core::login`,
+  and `webrain_core::vision`.
 - **`store_launched()` / `close_launched()`** — the launched-browser registry,
   keyed `"service:profile"`, so `webrain_login` can re-attach to a profile.
 
@@ -100,9 +104,9 @@ Shared behavior lives in the **`BrowserBackend` trait**
 (`webrain-core/src/browser.rs`) — every engine path implements the same
 navigate/eval/click/screenshot/a11y surface, so tools never care which browser
 is underneath. Extraction and crawling tools bypass the browser entirely:
-`webrain_extract_json` / `webrain_extract_regex` / `webrain_table` /
-`webrain_autoschema` / `webrain_bm25` run **in-page JS, zero-LLM**, and
-`webrain_fetch_http` / `webrain_search` / `webrain_sitemap` are pure HTTP.
+`webrain_extract` (schema / regex / table / autoschema / bm25 modes) runs
+**in-page JS, zero-LLM**, and `webrain_scrape` / `webrain_search` /
+`webrain_crawl` (sitemap mode) are pure HTTP.
 
 ## Browser & engine orchestration
 
@@ -154,7 +158,7 @@ Sessions pool browsers per `session_id` for parallel subagent isolation.
 | Engine install | `install.rs` | *"shared library"* / spawn failure → `webrain install` or missing Linux libs |
 | Stealth / challenge | `scripts/stealth_solve.py` + `backends/cdp.rs` | `challenge_cleared=False` → interactive gate, human or solver needed |
 | Login / vault | `login.rs` + `vault.rs` | `no session cookie after 15s` → check creds; 0 cookies on a logged-in browser → restart killed the session |
-| Extraction | `engines.rs` | 0 items → verify the page isn't a block page, re-run `webrain_autoschema` |
+| Extraction | `engines.rs` | 0 items → verify the page isn't a block page, re-run `webrain_extract` (mode=autoschema) |
 
 ## Relevant source files
 

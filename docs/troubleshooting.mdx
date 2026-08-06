@@ -42,7 +42,7 @@ ports (9222/9224/9225), vault, and the Python sidecar. Exit **0** healthy,
 | Session cookies gone | They die on Chrome restart — export on the live authenticated browser |
 | `webrain_eval` returns null on obscura | Obscura doesn't reliably await async JS — use `webrain_batch(op=interact)` for async work |
 | `webrain_batch` errors fast (5s) | No browser backend running — start one or pass `cdp_urls` |
-| LLM getting huge HTML blobs | Stop calling `webrain_get_html` — use snapshot/clean/eval/extractors |
+| LLM getting huge HTML blobs | Stop calling `webrain_observe` what=html — use what=state/clean/eval/extractors |
 
 ## Rules of thumb
 
@@ -50,7 +50,7 @@ ports (9222/9224/9225), vault, and the Python sidecar. Exit **0** healthy,
   into the stream.
 - `webrain_eval` doesn't reliably await async JS on obscura (returns null) —
   use `webrain_batch(op=interact, ...)` for async work.
-- `webrain_fetch_http` needs NO browser (pure HTTP, 10–100× faster for static
+- `webrain_scrape` needs NO browser (pure HTTP, 10–100× faster for static
   pages).
 - Material widgets are `combobox`/`option`/`radio`, not `button` — check the
-  ARIA cheat-sheet in [webrain_a11y](/reference/tools#webrain_a11y).
+  ARIA cheat-sheet in [observe (what=a11y)](/reference/tools#webrain_a11y).

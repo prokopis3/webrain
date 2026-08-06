@@ -11,11 +11,12 @@ selector. The zero-LLM discovery pipeline is:
 ## 1. Discover the container
 
 ```text
-webrain_autoschema   → candidate base-selectors with occurrence counts
+webrain_extract(mode=autoschema)   → candidate base-selectors + occurrence counts
 ```
 
-`webrain_autoschema` detects repeated container patterns on the page and
-returns candidate base-selectors — e.g. `.product`, `li.item`. Zero LLM.
+`webrain_extract` (mode: `autoschema`) detects repeated container patterns on
+the page and returns candidate base-selectors — e.g. `.product`, `li.item`.
+Zero LLM.
 
 ## 2. Probe the structure
 
@@ -28,8 +29,8 @@ declare fields.
 
 ## 3. Extract
 
-`webrain_extract_json` builds a JSON array from a base selector + field
-selectors:
+`webrain_extract` (mode: `schema`) builds a JSON array from a base selector +
+field selectors:
 
 ```json
 {
@@ -50,19 +51,19 @@ the field selectors.
 
 | Tool | Use for |
 |---|---|
-| `webrain_extract_regex` | emails, phones, prices, dates, IPs + custom patterns |
-| `webrain_table` | every HTML `<table>` on the page → JSON rows |
-| `webrain_get_jsonld` | schema.org JSON-LD / microdata — free, zero cost |
-| `webrain_bm25` | BM25 relevance filter — keep only the top-k relevant items |
-| `webrain_clean` | strip nav/footer/social noise → clean text blob |
+| `webrain_extract` (mode: `regex`) | emails, phones, prices, dates, IPs + custom patterns |
+| `webrain_extract` (mode: `table`) | every HTML `<table>` on the page → JSON rows |
+| `webrain_extract` (mode: `jsonld`) | schema.org JSON-LD / microdata — free, zero cost |
+| `webrain_extract` (mode: `bm25`) | BM25 relevance filter — keep only the top-k relevant items |
+| `webrain_observe` (what: `clean`) | strip nav/footer/social noise → clean text blob |
 
 ## Token discipline
 
 <Warning>
-  **Never reach for `webrain_get_html` for page text.** `webrain_snapshot`,
-  `webrain_clean`, `webrain_eval`, and the extractors return text/structure far
-  cheaper. `get_html` is the **LAST resort** — only when the task explicitly
-  asks for raw markup.
+  **Never reach for `webrain_observe` (what: `html`) for page text.**
+  `webrain_observe` (what: `state` / `clean`), `webrain_eval`, and the
+  extractors return text/structure far cheaper. `html` is the **LAST resort** —
+  only when the task explicitly asks for raw markup.
 </Warning>
 
 ## The full recipe for paginated catalogs
@@ -72,7 +73,7 @@ the field selectors.
 2. webrain_eval                   → discover pagination hrefs structurally
                                    (same-prefix numeric links + next/prev)
 3. derive urls (page range)
-4. webrain_autoschema             → container selector
+4. webrain_extract(mode=autoschema) → container selector
 5. webrain_eval                   → descendant tags/classes + samples → fields
 6. webrain_batch(op=extract, urls, base_selector, fields, concurrency=8)
 ```

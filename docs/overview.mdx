@@ -6,8 +6,9 @@ description: A portable, LLM-driven browser-automation & web-scraping MCP server
 # What is webrain?
 
 **webrain** is a portable, LLM-driven browser-automation and web-scraping **MCP
-server** — one binary, three browser engines, any OS. It exposes **63 tools**
-over the Model Context Protocol. Install it on any system, point any LLM client
+server** — one binary, three browser engines, any OS. It exposes **15
+intent-based tools** over the Model Context Protocol. Install it on any system,
+point any LLM client
 (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides
 everything — search, crawl, scrape, navigate, interact — from a plain-language
 prompt. No hardcoded intent detection, no daemon, no Node.js.
@@ -29,19 +30,20 @@ it directly.
 
 ## What you can do with it
 
-- **Scrape at scale** — batch pagination + spider with auto-throttle and
-  checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
-- **Structured data without hand-written selectors** — `webrain_autoschema`
-  probes the DOM, then JSON / regex / table extractors read container-level
-  structure.
+- **Scrape at scale** — `webrain_batch` pagination + `webrain_crawl` (spider)
+  with auto-throttle and checkpoint/resume; `webrain_crawl` (sitemap / scan)
+  to map a site first.
+- **Structured data without hand-written selectors** — `webrain_extract`
+  (autoschema) probes the DOM, then schema / regex / table modes read
+  container-level structure.
 - **Stealth login** — real-Chrome profiles with an encrypted local credential
   vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
 - **Get past challenges** — reads the `challenge` field on every navigate and
   solves Cloudflare/Turnstile via a real-Chrome stealth sidecar.
-- **See the page** — a11y / semantic tree, snapshots, and vision tiles
-  (screenshot → vector store) for tables and charts.
-- **Read anything** — PDFs (extract + render), JSON-LD, media, plus
-  `fetch_http` for static pages 10–100× faster than a browser.
+- **See the page** — `webrain_observe` (a11y / semantic / state), plus vision
+  tiles (screenshot → vector store) for tables and charts.
+- **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus
+  `webrain_scrape` for static pages 10–100× faster than a browser.
 
 ## How it's built
 
@@ -67,5 +69,6 @@ backend drives Chrome, Lightpanda, and Obscura interchangeably.
 
 - [Installation](/installation) — every install path, one-liners included
 - [Agent Decision Guide](/concepts/browsers) — which browser, how to handle a challenge, which extractor
-- [Tools Reference](/reference/tools) — the full 51-tool surface
+- [Tools Reference](/reference/tools) — the 15-tool intent-based surface
+  (each tool has a `what`/`action`/`op`/`mode` selector)
 - [CLI Reference](/reference/cli) — drive webrain by hand

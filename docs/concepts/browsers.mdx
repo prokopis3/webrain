@@ -15,7 +15,7 @@ working click and a silent no-op.
 | **Cloudflare / Turnstile / CAPTCHA**, or need **real** screenshots / pixel rendering | **real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. Obscura has no paint engine; its V8 crashes on challenge JS. |
 | JS pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab `webrain_batch` runs parallel tabs. No paint engine → no screenshots. |
 | Lightweight footprint, want a **real AX tree + semantic tree**, no rendering | **lightpanda** | Fastest, lightest, real a11y. Single-target CDP — `webrain_batch` falls back to sequential single-tab reuse. |
-| Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10–100× faster than a browser, zero memory. |
+| Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10–100× faster than a browser, zero memory. |
 
 <Warning>
   **Golden rule: don't guess the browser.** `webrain_navigate` returns a
@@ -24,13 +24,13 @@ working click and a silent no-op.
 
 ## Engine capability matrix
 
-| Capability | Chrome for Testing | Obscura | Lightpanda | `fetch_http` |
+| Capability | Chrome for Testing | Obscura | Lightpanda | `scrape` |
 |---|---|---|---|---|
 | Paint / layout engine | ✅ real | ❌ none | ❌ none | ❌ |
-| Real screenshots (`webrain_screenshot`, `webrain_pixel`) | ✅ | ❌ errors loudly | ⚠️ fake placeholder PNG | ❌ |
+| Real screenshots (`observe` what=screenshot/pixel) | ✅ | ❌ errors loudly | ⚠️ fake placeholder PNG | ❌ |
 | Interactive Material / SPA (dropdowns, calendars, segmented controls) | ✅ | ❌ | ❌ | ❌ |
 | Cloudflare / Turnstile / CAPTCHA (via `stealth_solve.py`) | ✅ | ❌ | ❌ | ❌ |
-| a11y tree (`webrain_a11y`) | ✅ | ⚠️ no `option` role | ✅ real AX tree | ❌ |
+| a11y tree (`observe` what=a11y) | ✅ | ⚠️ no `option` role | ✅ real AX tree | ❌ |
 | Parallel batch tabs | ✅ | ✅ N tabs | ⚠️ sequential (one context) | n/a |
 | Static HTML speed | slow | fast | fast | ✅ fastest (10-100×) |
 | Install | `webrain install` | `webrain install --engine obscura` | binary + `webrain lightpanda` | built-in |
@@ -38,7 +38,7 @@ working click and a silent no-op.
 **What requires real Chrome:** screenshots, pixel/vision tiles, interactive
 Material/Google widgets, and any interactive anti-bot challenge. Obscura has
 no paint engine (screenshots error), lightpanda's screenshot is a silent
-placeholder, and `fetch_http` is a plain HTTP GET.
+placeholder, and `webrain_scrape` is a plain HTTP GET.
 
 **Fallbacks to expect:** `webrain_batch` auto-detects lightpanda's single
 context and runs URLs sequentially on one reused tab (same tool call, same

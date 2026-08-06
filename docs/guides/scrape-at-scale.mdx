@@ -40,12 +40,14 @@ full payload to disk (survives temp-file GC between turns).
   errors fast (5s timeout).
 </Note>
 
-## Spider — whole sites
+## Crawl — whole sites
 
-`webrain_spider` crawls from a seed URL with BFS (or DFS / BestFirst):
+`webrain_crawl` (mode: `spider`) crawls from a seed URL with BFS (or DFS /
+BestFirst):
 
 ```json
 {
+  "mode": "spider",
   "seed_url": "https://example.com",
   "max_depth": 3,
   "max_pages": 200,
@@ -71,11 +73,12 @@ Highlights:
 
 ## Sitemap — discover everything first
 
-`webrain_sitemap` follows robots.txt `Sitemap:` → sitemap_index → leaf sitemaps
+`webrain_crawl` (mode: `sitemap`) follows robots.txt `Sitemap:` →
+sitemap_index → leaf sitemaps
 → every `<loc>`. Pure HTTP, no browser:
 
 ```text
-webrain_sitemap("https://example.com")
+webrain_crawl(mode="sitemap", url="https://example.com")
 → { urls: [...], count, sources }
 ```
 
@@ -83,5 +86,7 @@ Feed the URLs into `webrain_batch` for a full crawl.
 
 ## Validation & filtering
 
-- `webrain_validate_urls` — HEAD-then-GET check; filters 404s/5xx before a batch
-- `webrain_bm25` — keep only top-k relevant items after extraction
+- `webrain_crawl` (mode: `validate`) — HEAD-then-GET check; filters 404s/5xx
+  before a batch
+- `webrain_extract` (mode: `bm25`) — keep only top-k relevant items after
+  extraction
