@@ -144,6 +144,49 @@ fn main() -> anyhow::Result<()> {
             let result = rt.block_on(backend.evaluate(js))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Some("watch") => {
+            // webrain watch <video-url-or-path> [--detail transcript|efficient|balanced]
+            //   [--max-frames N] [--resolution W] [--start S] [--end E]
+            //   [--out-dir D] [--no-whisper] [--stt whisper|gemini] [--vision]
+            // No browser needed: yt-dlp captions -> Whisper fallback + ffmpeg frames.
+            let source = args.get(2).cloned().unwrap_or_default();
+            if source.is_empty() {
+                println!(
+                    "usage: webrain watch <video-url-or-path> [--detail transcript|efficient|balanced] [--max-frames N] [--resolution W] [--start S] [--end E] [--out-dir D] [--no-whisper] [--stt whisper|gemini] [--vision]"
+                );
+                println!(
+                    "  STT: local whisper-cli (whisper.cpp) when installed + model (`webrain install whisper`); cloud: GROQ_API_KEY | OPENAI_API_KEY | FIREWORKS_API_KEY (model: WEBRAIN_STT_MODEL)"
+                );
+                println!(
+                    "  Vision: [--vision] sends sampled frames to a vision LLM (GROQ_API_KEY | OPENAI_API_KEY) and prints text captions + visual summary"
+                );
+                return Ok(());
+            }
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            use webrain_core::video::{Detail, SttBackend, WatchOpts};
+            let opts = WatchOpts {
+                detail: Detail::parse(flag("--detail").as_deref().unwrap_or("balanced")),
+                max_frames: flag("--max-frames").and_then(|v| v.parse().ok()),
+                resolution: flag("--resolution")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(512),
+                start: flag("--start").and_then(|v| v.parse().ok()),
+                end: flag("--end").and_then(|v| v.parse().ok()),
+                out_dir: flag("--out-dir"),
+                no_whisper: args.contains(&"--no-whisper".to_string()),
+                stt_backend: SttBackend::parse(flag("--stt").as_deref().unwrap_or("whisper")),
+                vision: args.contains(&"--vision".to_string()),
+            };
+            let t0 = std::time::Instant::now();
+            let result = webrain_core::video::watch(&source, &opts)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            eprintln!("watch done in {} ms", t0.elapsed().as_millis());
+        }
         Some("install") => {
             // webrain install [--force] [--engine chrome|obscura] [--stealth]
             // agent-browser-style: download the engine into a cache dir.
@@ -154,7 +197,8 @@ fn main() -> anyhow::Result<()> {
                 .position(|a| a == "--engine")
                 .and_then(|i| args.get(i + 1))
                 .cloned()
-                .unwrap_or_else(|| "chrome".to_string());
+                // `webrain install whisper` → positional; bare `webrain install` → chrome
+                .unwrap_or_else(|| args.get(2).cloned().unwrap_or_else(|| "chrome".to_string()));
             match engine.as_str() {
                 "obscura" => {
                     let bin = webrain_core::install::install_obscura(force, stealth)?;
@@ -170,8 +214,49 @@ fn main() -> anyhow::Result<()> {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());
                 }
+                "whisper" => {
+                    // webrain install whisper [--model small.en] [--force]
+                    // Downloads the GGUF model for the LOCAL webrain watch
+                    // backend (the whisper-cli binary can come from
+                    // `webrain install watch` or PATH/WEBRAIN_WHISPER_BIN).
+                    let model = args
+                        .iter()
+                        .position(|a| a == "--model")
+                        .and_then(|i| args.get(i + 1))
+                        .cloned()
+                        .unwrap_or_else(|| "small.en".to_string());
+                    let dest = webrain_core::install::install_whisper_model(&model, force)?;
+                    println!(
+                        "whisper model ready: {} — whisper-cli via PATH, WEBRAIN_WHISPER_BIN, or `webrain install watch`.",
+                        dest.display()
+                    );
+                }
+                "watch" => {
+                    // webrain install watch [--model small.en] [--force]
+                    // Mono packages: bundles ffmpeg+ffprobe, yt-dlp, whisper-cli
+                    // and a GGUF model into the webrain cache so `webrain watch`
+                    // works offline, self-contained, on any OS (no PATH installs).
+                    let model = args
+                        .iter()
+                        .position(|a| a == "--model")
+                        .and_then(|i| args.get(i + 1))
+                        .cloned()
+                        .unwrap_or_else(|| "small.en".to_string());
+                    let status = webrain_core::install::install_watch(force, &model)?;
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                }
+                "vision" => {
+                    // webrain install vision [--force]
+                    // Local "hero" vision backend, the whisper analog: bundles
+                    // llama-server + Qwen3-VL-2B (GGUF + mmproj) into the cache
+                    // so `watch --vision` works with NO cloud key, offline.
+                    let status = webrain_core::install::install_vision(force)?;
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                }
                 other => {
-                    anyhow::bail!("unknown engine `{other}` — try chrome, obscura, or lightpanda")
+                    anyhow::bail!(
+                        "unknown engine `{other}` — try chrome, obscura, lightpanda, whisper, vision, or watch"
+                    )
                 }
             }
         }
@@ -291,8 +376,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("cookies") => {
-            // webrain cookies [--port N] [--out file] — export cookies (incl.
-            // HttpOnly) for cross-browser session migration.
+            // webrain cookies [--port N] [--out file] [--netscape] — export cookies
+            // (incl. HttpOnly) for cross-browser session migration.
             let port: u16 = args
                 .iter()
                 .position(|a| a == "--port")
@@ -304,6 +389,7 @@ fn main() -> anyhow::Result<()> {
                 .position(|a| a == "--out")
                 .and_then(|i| args.get(i + 1))
                 .cloned();
+            let netscape = args.contains(&"--netscape".to_string());
             let backend = rt.block_on(CdpBackend::connect_with_url(&format!(
                 "http://127.0.0.1:{port}"
             )))?;
@@ -313,7 +399,42 @@ fn main() -> anyhow::Result<()> {
             let cookies = rt.block_on(backend.cookies())?;
             match out {
                 Some(path) => {
-                    std::fs::write(&path, serde_json::to_string_pretty(&cookies)?)?;
+                    if netscape {
+                        // Netscape HTTP Cookie File — the format yt-dlp/curl --cookie
+                        // want, not the MCP JSON shape. (yt-dlp --cookies rejects JSON.)
+                        let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
+                        for c in &cookies {
+                            let dom = c.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                            if dom.is_empty() {
+                                continue;
+                            }
+                            let inc = if dom.starts_with('.') {
+                                "TRUE"
+                            } else {
+                                "FALSE"
+                            };
+                            let path_ = c.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+                            let sec = if c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false)
+                            {
+                                "TRUE"
+                            } else {
+                                "FALSE"
+                            };
+                            let exp = c
+                                .get("expires")
+                                .and_then(|v| v.as_f64())
+                                .map(|e| e as i64)
+                                .unwrap_or(0);
+                            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let val = c.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                            lines.push(format!(
+                                "{dom}\t{inc}\t{path_}\t{sec}\t{exp}\t{name}\t{val}"
+                            ));
+                        }
+                        std::fs::write(&path, lines.join("\n"))?;
+                    } else {
+                        std::fs::write(&path, serde_json::to_string_pretty(&cookies)?)?;
+                    }
                     println!("wrote {} cookies to {path}", cookies.len());
                 }
                 None => println!(
@@ -558,34 +679,54 @@ async fn check_tcp(host: &str, port: u16) -> bool {
     tokio::net::TcpStream::connect((host, port)).await.is_ok()
 }
 
-// ponytail: GET /json/version on a CDP port via raw TCP, extract Browser name.
-// Zero deps — one HTTP request, parse the JSON Browser field.
-async fn cdp_browser_name(port: u16) -> String {
+/// CDP `/json/version` facts: browser name, the `webSocketDebuggerUrl` port,
+/// and whether the UA reports `HeadlessChrome`. Zero deps (raw TCP + one GET).
+/// ponytail: a relay (wslrelay/docker) answers /json/version but its
+/// webSocketDebuggerUrl points at a DIFFERENT port — that mismatch is the relay
+/// tell; headless lives in the UA string. Both catch the "9224 looks like a
+/// local Chrome" trap that silently cost a login session.
+struct CdpInfo {
+    name: String,
+    ws_port: Option<u16>,
+    headless: bool,
+}
+
+async fn cdp_info(port: u16) -> CdpInfo {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-        Ok(mut s) => {
-            let req = format!("GET /json/version HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-            if s.write_all(req.as_bytes()).await.is_err() {
-                return "unknown".into();
-            }
+    let mut info = CdpInfo {
+        name: "unknown".into(),
+        ws_port: None,
+        headless: false,
+    };
+    if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+        let req = format!("GET /json/version HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        if s.write_all(req.as_bytes()).await.is_ok() {
             let mut buf = vec![0u8; 4096];
             let n = s.read(&mut buf).await.unwrap_or(0);
             let body = String::from_utf8_lossy(&buf[..n]);
             // find \r\n\r\n separator, take JSON after it
             if let Some(pos) = body.find("\r\n\r\n") {
-                let json_str = &body[pos + 4..];
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    return v
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body[pos + 4..]) {
+                    info.name = v
                         .get("Browser")
                         .and_then(|b| b.as_str())
                         .unwrap_or("unknown")
                         .to_string();
+                    if let Some(ws) = v.get("webSocketDebuggerUrl").and_then(|w| w.as_str()) {
+                        // ws://host:PORT/devtools/browser
+                        info.ws_port = ws
+                            .split(':')
+                            .nth(2)
+                            .and_then(|s| s.split('/').next())
+                            .and_then(|s| s.parse().ok());
+                    }
+                    let ua = v.get("User-Agent").and_then(|u| u.as_str()).unwrap_or("");
+                    info.headless = ua.contains("HeadlessChrome");
                 }
             }
-            "unknown".into()
         }
-        Err(_) => "unknown".into(),
     }
+    info
 }
 
 /// `webrain doctor` — diagnose the install: version, MCP server, CDP ports,
@@ -599,9 +740,9 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
     println!(
         "  mcp server       {}",
         if rt.block_on(async { check_tcp("127.0.0.1", 9223).await }) {
-            "✅ (http://127.0.0.1:9223)"
+            "✅ (http://127.0.0.1:9223)".to_string()
         } else {
-            "❌ (not running)"
+            "❌ not running — start it: `webrain mcp --http 9223`".into()
         }
     );
     for &port in &cdp_ports {
@@ -609,12 +750,20 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
         if up {
             any_cdp = true;
         }
-        let label = if up {
-            let browser = rt.block_on(async { cdp_browser_name(port).await });
-            format!("✅ ({browser})")
-        } else {
-            "❌ (no browser)".into()
-        };
+        if !up {
+            println!("  cdp port {port}      ❌ (no browser)");
+            continue;
+        }
+        let info = rt.block_on(async { cdp_info(port).await });
+        let mut label = format!("✅ ({})", info.name);
+        if let Some(ws) = info.ws_port {
+            if ws != port {
+                label.push_str(&format!(" ⚠️ relay/tunnel (ws→:{ws})"));
+            }
+        }
+        if info.headless {
+            label.push_str(" ⚠️ headless — cannot pass login challenges");
+        }
         println!("  cdp port {port}      {label}");
     }
     let ch = webrain_core::install::find_cft_chrome();
