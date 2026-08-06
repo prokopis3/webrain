@@ -1341,6 +1341,36 @@ pub async fn batch_extract(
     .await
 }
 
+/// Batch eval: run arbitrary JS per URL (one tab per URL, concurrent) and
+/// return each result as `data` (JSON string → parsed) or `text`. The
+/// game-changer for "extract N pages with custom DOM logic": the LLM writes
+/// ONE extractor and batch runs it — no fragile CSS schema, no per-URL loops.
+pub async fn batch_eval(
+    browser: &CdpBackend,
+    urls: &[String],
+    js: &str,
+    concurrency: usize,
+    opts: &crate::backends::cdp::NavOpts,
+) -> Vec<BatchResult> {
+    let js = js.to_string();
+    batch_map(browser, urls, concurrency, opts, move |b, sid, _url| {
+        let js = js.clone();
+        async move {
+            let v = b.eval_session(&sid, &js).await?;
+            let data = v
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            let text = if data.is_some() {
+                String::new()
+            } else {
+                v.as_str().unwrap_or("").to_string()
+            };
+            Ok((String::new(), text, data))
+        }
+    })
+    .await
+}
+
 /// Batch interaction: run an arbitrary async JS interaction (click "Load More"
 /// loop, infinite-scroll, form fill) in PARALLEL tabs, one per URL, then
 /// optionally extract a schema. The game-changer for "N independent interactive
@@ -1457,7 +1487,7 @@ const BROWSER_HEADERS: &[(&str, &str)] = &[
 /// ponytail: static OnceLock instead of a builder wrapper per call.
 static HTTP_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
 
-fn browser_agent() -> ureq::Agent {
+pub(crate) fn browser_agent() -> ureq::Agent {
     HTTP_AGENT
         .get_or_init(|| {
             ureq::Agent::new_with_config(
@@ -1710,7 +1740,7 @@ pub fn download_ytdlp(
 ) -> Value {
     std::fs::create_dir_all(dir).ok();
     let mut cmd = std::process::Command::new("yt-dlp");
-    cmd.arg("-o").arg(format!("{dir}/%(title)s.%(ext)s"));
+    cmd.arg("-o").arg(format!("{dir}/%(title)s_%(id)s.%(ext)s"));
     if audio_only {
         cmd.arg("-x").arg("--audio-format").arg("mp3");
     } else if let Some(f) = format.filter(|f| !f.is_empty()) {
