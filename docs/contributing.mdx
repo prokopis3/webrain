@@ -13,11 +13,14 @@ three crates: `webrain-core`, `webrain-mcp`, and `webrain-cli`.
 ```bash
 git clone https://github.com/prokopis3/webrain
 cd webrain
-cargo build --release --bin webrain
-cargo test
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets
 ```
 
-Rust edition 2024, MSRV 1.85.
+Rust edition 2024, MSRV 1.85. CI runs `fmt` + `clippy` + `test` on every
+push to `main`, so a green local run is the bar.
 
 ## Commit conventions
 
@@ -34,7 +37,21 @@ This project uses **Semantic Versioning** and **Conventional Commits**:
   `token`, `browser`, `serp`, `search`, `config`, `deps`, `docs`, `tests`, `ci`
 - See `commitlint.config.js` for the full rules
 
-When source code changes, update `CHANGELOG.md` under `[Unreleased]`.
+`CHANGELOG.md` follows **Keep a Changelog** + **SemVer**. When source code
+changes, add an entry under `[Unreleased]`, grouped by heading and prefixed
+with the commit scope:
+
+```markdown
+### Added      # feat — new tools / commands / features
+### Changed    # refactor, style, docs, build — behavior tweaks
+### Fixed      # fix — bug fixes
+### Removed    # deleting features
+```
+
+Each entry is prefixed `**<scope>**:` (e.g. `- **core**: …`). The **Changelog
+Enforce** CI check fails the run if source changes without a changelog entry,
+so this is mandatory, not optional. Full PR policy lives in
+[`CONTRIBUTING.md`](https://github.com/prokopis3/webrain/blob/main/CONTRIBUTING.md).
 
 ## Design notes
 
