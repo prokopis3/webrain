@@ -12,6 +12,7 @@ pub mod install;
 pub mod launch;
 pub mod login;
 pub mod vault;
+pub mod video;
 pub mod vision;
 
 pub use backends::cdp::CdpBackend;
