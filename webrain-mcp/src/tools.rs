@@ -1559,27 +1559,60 @@ mod surface_tests {
         assert_eq!(a["index"], 0);
         assert!(a.get("action").is_none());
         // nav renames its param to the legacy arm's `op` key.
-        let (n, a) = fold("webrain_interact", json!({"action": "nav", "nav": "forward"}));
+        let (n, a) = fold(
+            "webrain_interact",
+            json!({"action": "nav", "nav": "forward"}),
+        );
         assert_eq!(n, "webrain_nav");
         assert_eq!(a["op"], "forward");
     }
 
     #[test]
     fn folds_extract_and_crawl_modes() {
-        assert_eq!(fold("webrain_extract", json!({"mode": "schema"})).0, "webrain_extract_json");
-        assert_eq!(fold("webrain_extract", json!({"mode": "autoschema"})).0, "webrain_autoschema");
-        assert_eq!(fold("webrain_crawl", json!({"mode": "spider"})).0, "webrain_spider");
-        assert_eq!(fold("webrain_crawl", json!({"mode": "validate"})).0, "webrain_validate_urls");
+        assert_eq!(
+            fold("webrain_extract", json!({"mode": "schema"})).0,
+            "webrain_extract_json"
+        );
+        assert_eq!(
+            fold("webrain_extract", json!({"mode": "autoschema"})).0,
+            "webrain_autoschema"
+        );
+        assert_eq!(
+            fold("webrain_crawl", json!({"mode": "spider"})).0,
+            "webrain_spider"
+        );
+        assert_eq!(
+            fold("webrain_crawl", json!({"mode": "validate"})).0,
+            "webrain_validate_urls"
+        );
     }
 
     #[test]
     fn folds_session_and_pdf_ops() {
-        assert_eq!(fold("webrain_session", json!({"op": "open"})).0, "webrain_open_session");
-        assert_eq!(fold("webrain_session", json!({"op": "list"})).0, "webrain_list_sessions");
-        assert_eq!(fold("webrain_session", json!({"op": "cookies"})).0, "webrain_cookies");
-        assert_eq!(fold("webrain_pdf", json!({"op": "extract"})).0, "webrain_pdf_extract");
-        assert_eq!(fold("webrain_pdf", json!({"op": "render"})).0, "webrain_pdf_render");
-        assert_eq!(fold("webrain_vision", json!({"op": "retrieve"})).0, "webrain_vision_retrieve");
+        assert_eq!(
+            fold("webrain_session", json!({"op": "open"})).0,
+            "webrain_open_session"
+        );
+        assert_eq!(
+            fold("webrain_session", json!({"op": "list"})).0,
+            "webrain_list_sessions"
+        );
+        assert_eq!(
+            fold("webrain_session", json!({"op": "cookies"})).0,
+            "webrain_cookies"
+        );
+        assert_eq!(
+            fold("webrain_pdf", json!({"op": "extract"})).0,
+            "webrain_pdf_extract"
+        );
+        assert_eq!(
+            fold("webrain_pdf", json!({"op": "render"})).0,
+            "webrain_pdf_render"
+        );
+        assert_eq!(
+            fold("webrain_vision", json!({"op": "retrieve"})).0,
+            "webrain_vision_retrieve"
+        );
     }
 
     #[test]
@@ -1601,7 +1634,6 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     let mapped = map_surface(name, args);
     let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);
     let args: &Value = mapped.as_ref().map(|(_, a)| a).unwrap_or(args);
-
 
     // Parse Scrapling-style request-quality params from tool args (shared by
     // navigate + batch). All optional; defaults keep legacy behavior.
