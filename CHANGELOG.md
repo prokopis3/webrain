@@ -25,9 +25,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one batched chat call (`vision::describe_tiles`, reusing the watch llama-server
   spawn) and returns the page description as `vision`. Embeddings still power cosine
   retrieval; the local vision model supplies the real understanding.
+- **install progress** (`webrain install ...`): every package download now
+  prints a live `\r` progress line (`X / Y bytes (N%)` when the server sends
+  Content-Length, else MiB) — no more silent "Downloading …" hang. Both
+  `download_bytes` (in-memory) and `download_to_file` (to-disk, vision model)
+  stream through one shared `download_stream`; also lifts the old 10 MiB
+  `read_to_vec` cap. Verified live: `install watch` fetched yt-dlp with
+  percentage progress and completed.
 - **build(deps)**: `Cargo.lock` synced to the 0.5.0 workspace crate versions
   (`webrain-core`/`webrain-mcp`) — the v0.5.0 release commit bumped `Cargo.toml`
   but dropped the lock update.
+  - **tools**: compressed the MCP surface from **63 → 15 intent-based tools**
+  (firecrawl-style): `navigate / observe / interact / extract / scrape /
+  batch / crawl / search / pdf / download / watch / session / vision / eval /
+  guide`. Every capability is preserved as a `what` / `action` / `op` / `mode`
+  selector routed to the existing executor via `map_surface()`. Legacy tool
+  names still dispatch (backward compatible); legacy schemas kept as
+  `legacy_tool_schemas()` reference. AGENT_GUIDE + README rewritten for the
+  new surface.
 
 ## [0.5.0] - 2026-08-06
 

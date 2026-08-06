@@ -376,13 +376,66 @@ pub fn install_whisper_model(model: &str, force: bool) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn download_bytes(url: &str) -> Result<Vec<u8>> {
+/// Download `url` with live `\r` progress to the terminal (bytes + % when
+/// Content-Length is known, else MiB). `dest: Some` streams to that file and
+/// returns an empty vec; `None` buffers in memory (returning the bytes).
+/// ponytail: no tty detection — `webrain install` is interactive by nature.
+fn download_stream(url: &str, dest: Option<&Path>) -> Result<Vec<u8>> {
+    use std::io::{Read, Write};
     let resp = ureq::get(url)
+        .header("User-Agent", "webrain")
         .call()
         .with_context(|| format!("GET {url}"))?;
-    // ureq 3: read_to_vec() caps at 10 MB, too small for the engine zips.
-    // into_with_config() defaults to unlimited (u64::MAX).
-    Ok(resp.into_body().into_with_config().read_to_vec()?)
+    let total = resp
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let name = url.rsplit('/').next().unwrap_or(url).to_string();
+    let mut body = resp.into_body().into_reader();
+    let mut file = match dest {
+        Some(p) => Some(std::fs::File::create(p)?),
+        None => None,
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut done: u64 = 0;
+    let mut last: i64 = -1;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = body.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        match &mut file {
+            Some(f) => f.write_all(&buf[..n])?,
+            None => out.extend_from_slice(&buf[..n]),
+        }
+        let pct = total
+            .filter(|t| *t > 0)
+            .map(|t| ((done as f64 / t as f64) * 100.0) as i64)
+            .unwrap_or(-1);
+        if pct != last {
+            match total {
+                Some(t) if t > 0 => print!("\r  {done} / {t} bytes ({pct}%)   "),
+                _ => print!("\r  {:.1} MiB   ", done as f64 / 1048576.0),
+            }
+            let _ = std::io::stdout().flush();
+            last = pct;
+        }
+    }
+    print!(
+        "\r  {name}: {:.1} MiB                \n",
+        done as f64 / 1048576.0
+    );
+    let _ = std::io::stdout().flush();
+    Ok(out)
+}
+
+fn download_bytes(url: &str) -> Result<Vec<u8>> {
+    // ureq 3 read_to_vec() caps at 10 MB; we stream into a Vec instead, which
+    // also gives installs live progress (and the cap never bites).
+    download_stream(url, None)
 }
 
 fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
@@ -647,19 +700,10 @@ fn install_whisper_bin(force: bool) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Install the whole self-contained watch stack: ffmpeg + ffprobe, yt-dlp,
-/// whisper-cli, + a GGUF model. Per-tool status so the caller sees what landed.
-/// Stream a URL to disk (ureq `Body::into_reader` -> `io::copy`). The vision
-/// model is ~1.8 GiB — `download_bytes()` would buffer all of it in RAM.
+/// Stream a URL to disk with live progress (the vision model is ~1.8 GiB —
+/// never buffer it in RAM).
 fn download_to_file(url: &str, dest: &Path) -> Result<()> {
-    let resp = ureq::get(url)
-        .header("User-Agent", "webrain")
-        .call()
-        .with_context(|| format!("GET {url}"))?;
-    let mut body = resp.into_body().into_reader();
-    let mut f = std::fs::File::create(dest)?;
-    std::io::copy(&mut body, &mut f)?;
-    Ok(())
+    download_stream(url, Some(dest)).map(|_| ())
 }
 
 /// Latest llama.cpp CPU release (tag, asset name) per OS/arch — always
