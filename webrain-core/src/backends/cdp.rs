@@ -105,6 +105,18 @@ const STEALTH_JS: &str = r#"
       ? Promise.resolve({ state: Notification.permission, onchange: null })
       : q(p);
   } catch (e) {}
+  // Function.prototype.toString native spoof (uc): permissions.query and
+  // friends must read as `[native code]`, not a wrapped source.
+  try {
+    const oldCall = Function.prototype.call;
+    const oldToString = Function.prototype.toString;
+    const nativeStr = Error.toString().replace(/Error/g, 'toString');
+    Function.prototype.toString = function () {
+      if (this === Function.prototype.toString) return nativeStr;
+      if (this === navigator.permissions.query) return 'function query() { [native code] }';
+      return oldCall.call(oldToString, this);
+    };
+  } catch (e) {}
 })();
 "#;
 
@@ -623,6 +635,23 @@ impl CdpBackend {
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
                 "acceptLanguage": "en-US,en;q=0.9",
                 "platform": "Win32",
+                // Match Sec-CH-UA to the forged UA (rebrowser/nodriver): without
+                // userAgentMetadata, real Chrome emits a Sec-CH-UA header from its
+                // ACTUAL build, mismatching the forged 151 → detectable.
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Chromium", "version": "151"},
+                        {"brand": "Google Chrome", "version": "151"}
+                    ],
+                    "fullVersion": "151.0.0.0",
+                    "platform": "Windows",
+                    "platformVersion": "15.0.0",
+                    "architecture": "x86",
+                    "model": "",
+                    "mobile": false,
+                    "bitness": "64",
+                    "wow64": false
+                }
             }),
         )
         .await;
