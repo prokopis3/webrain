@@ -144,3 +144,13 @@ webrain install --engine obscura
 
 Binary discovery is automatic on every OS: env override → PATH → `~/.lightpanda`,
 `~/.obscura`, `~/.local/bin` → the webrain engine cache.
+
+### Optional bundles
+
+`webrain install` also supports two self-contained mono bundles (no PATH
+installs, any OS):
+
+```bash
+webrain install watch    # ffmpeg+ffprobe, yt-dlp, whisper-cli + GGUF model — powers webrain_watch
+webrain install vision   # local Qwen3-VL-2B (llama-server) — powers webrain_watch vision:true + webrain_vision_index
+```

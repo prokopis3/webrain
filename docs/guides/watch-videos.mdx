@@ -1,0 +1,93 @@
+---
+title: Watch Videos
+description: Give the LLM eyes and ears — timestamped transcript + frames from any video, no browser.
+---
+
+# Watch Videos
+
+`webrain_watch` turns any video (URL or local file) into a **timestamped
+transcript plus frame files** the LLM can read — so it can summarize, quote,
+or diagnose a video without a browser. No browser, no daemon, no PATH installs.
+
+## Install the runtime
+
+One command bundles everything as self-contained mono packages in the webrain
+cache (works on any OS, nothing touches your PATH):
+
+```bash
+webrain install watch    # ffmpeg+ffprobe, yt-dlp, whisper-cli + a GGUF model
+webrain install vision   # local Qwen3-VL-2B (llama-server) for vision:true
+```
+
+- **Transcription** works **locally/offline** when `whisper-cli` + a model are
+  present. Cloud fallback needs one of `GROQ_API_KEY`, `OPENAI_API_KEY`, or
+  `FIREWORKS_API_KEY` (`WEBRAIN_STT_MODEL` to override the model).
+- **Vision** (`vision:true`) needs no key at all when `webrain install vision`
+  ran — it falls back to the local Qwen3-VL-2B via bundled llama-server.
+
+## Basic use
+
+```json
+{ "source": "https://youtu.be/..." }
+```
+
+Returns `{ transcript: [{t, text}], transcript_source, frames: [paths], ... }`.
+Read each frame path with the Read tool (they're chronological, `t=MM:SS`) and
+combine with the transcript to answer.
+
+## Detail modes
+
+| `detail` | What you get | Frame cap |
+|---|---|---|
+| `transcript` | captions/transcript only — fastest, no frames (skips download when captions exist) | 0 |
+| `efficient` | fast keyframe pass (`-skip_frame nokey`) | 50 |
+| `balanced` (default) | scene-aware frames — best summarization signal | 100 |
+
+## Focus on a section
+
+Pass `start` / `end` (seconds) to trim to a range — denser, cheaper:
+
+```json
+{ "source": "video.mp4", "start": 50, "end": 60, "detail": "efficient" }
+```
+
+## Batch many videos
+
+`source` is one video; `sources` is many, processed in parallel — one result
+per video:
+
+```json
+{
+  "sources": ["https://youtu.be/aaa", "https://youtu.be/bbb"],
+  "detail": "transcript"
+}
+```
+
+## Vision fusion (text-only clients)
+
+`vision: true` samples up to 3 frames and sends them to a vision LLM — Groq
+`qwen3.6-27b` → OpenAI `gpt-4o-mini` → **local Qwen3-VL-2B** when no key is
+set — returning text captions plus a **fused visual summary** in `vision`.
+Use this when the client can't render the frame images.
+
+## Other knobs
+
+| Param | Default | Purpose |
+|---|---|---|
+| `max_frames` | by detail + duration | hard cap on frames |
+| `resolution` | 512 | frame width to scale to (height auto) |
+| `out_dir` | `watch_<pid>/` | work dir for download/frames/audio |
+| `no_whisper` | `false` | skip Whisper fallback when no captions |
+| `stt_backend` | `whisper` | `whisper` \| `gemini` (gemini is a stub) |
+
+## Under the hood
+
+The pipeline borrows from claude-video's `/watch`: **yt-dlp captions →
+(local whisper-cli → cloud Whisper) → ffmpeg frames**, implemented in Rust in
+`webrain-core/src/video.rs` with zero new dependencies — everything that does
+real work shells out to binaries already on PATH or bundled by
+`webrain install watch`. The only network call is the Whisper REST upload (and
+the optional vision request). STT keys come from env only and are never
+returned or logged.
+
+See [`webrain_watch`](/reference/tools#webrain_watch) in the tools reference.

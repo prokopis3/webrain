@@ -35,7 +35,8 @@
             "pages": [
               "guides/structured-extraction",
               "guides/scrape-at-scale",
-              "guides/auth-and-login"
+              "guides/auth-and-login",
+              "guides/watch-videos"
             ]
           },
           {

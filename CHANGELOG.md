@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **docs**: tool surface synced to **63 tools** — 11 newly-documented tools
+  (`fit`, `flatten`, `annotate`, `select`, `hover`, `check`, `dialog`, `wait`,
+  `upload`, `click_coords`, `add_init_script`), `webrain_batch` `op: eval`,
+  and a new **`webrain_watch`** guide page (`docs/guides/watch-videos.mdx` —
+  transcript + frames + vision fusion, `webrain install watch` / `install
+  vision` bundles, STT env vars).
 
 ### Changed
 
