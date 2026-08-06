@@ -62,6 +62,29 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
+15 TOOLS — match the request to a boundary:
+  webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
+  webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
+                     console|flatten|fit|clean|screenshot|pixel|page_info|annotate|media)
+  webrain_interact   drive the page (action: click|click_coords|type|press|scroll|
+                     nav|tab|select|hover|check|dialog|wait|upload|dismiss_overlays|
+                     add_init_script)
+  webrain_extract    structured data from the page (mode: schema|regex|jsonld|table|
+                     autoschema|bm25)
+  webrain_scrape     fast no-browser GET of one URL (static pages only)
+  webrain_batch      same op across many URLs in parallel tabs (op: fetch|extract|
+                     interact|eval|screenshot) + cdp_urls per-proxy fan-out
+  webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
+  webrain_search     web search (duckduckgo|google|bing|brave)
+  webrain_pdf        pdf work (op: page|extract|render|images)
+  webrain_download   files/media (engine: http|ytdlp)
+  webrain_watch      video → transcript + frames
+  webrain_session    browser/auth/session state (op: open|close|list|cookies|
+                     setcookies|save_state|restore_state|profiles|login|close_launch)
+  webrain_vision     screenshot-tile vision index (op: index|retrieve)
+  webrain_eval       arbitrary JS (the escape hatch)
+  webrain_guide      this guide
+
 BROWSER / CHALLENGE HANDLING
 - webrain_navigate returns a `challenge` field — read it on EVERY navigate.
 - challenge == null -> page OK, go extract.
@@ -75,87 +98,61 @@ BROWSER / CHALLENGE HANDLING
       authenticated session (cf_clearance) is shared with webrain.
     * Non-interactive Turnstile / basic bot detection may pass with obscura --stealth.
 - Need screenshots/rendering? Real Chrome. Fast no-challenge scraping? obscura.
-  Static HTML, no JS/auth? webrain_fetch_http.
+  Static HTML, no JS/auth? webrain_scrape.
 
 EXTRACTION MATRIX
-- structured list, schema known        -> webrain_extract_json(base_selector, fields)
-- schema unknown                       -> webrain_autoschema (container) + webrain_eval
-                                        (probe descendant tag/class/sample) then extract_json
-- paginated pages 1..N / many URLs     -> webrain_batch(op=extract, urls, base_selector,
-                                        fields, concurrency=8)
-- URLs unknown (discover pagination)   -> webrain_eval: links whose path = current + '/<N>'
-                                        plus next/prev labels (NO hardcoded classes), derive
-                                        range, then webrain_batch
-- whole site                           -> webrain_spider
-- emails/phones/prices/patterns        -> webrain_extract_regex
-- JSON-LD / microdata                  -> webrain_get_jsonld
-- tables                               -> webrain_table
-- infinite scroll / load-more          -> webrain_scan then extract; or webrain_click loop
-- search                               -> webrain_search (engine: duckduckgo|google|bing via plain
-                                        HTTP; brave returns an SPA shell -> use
-                                        webrain_navigate("https://search.brave.com/search?q=..."))
-- static, no browser                   -> webrain_fetch_http
-- relevance filter                     -> webrain_bm25
-- watch a video (URL or local file)    -> webrain_watch(source|sources[], detail) —
-                                        timestamped transcript (yt-dlp captions ->
-                                        local whisper-cli -> Whisper STT API) + frame
-                                        file paths; the LLM reads frames + transcript
-                                        to summarize. If the client can't render
-                                        frames, set vision:true -> text captions +
-                                        visual summary (vision LLM: cloud
-                                        GROQ/OPENAI key, or LOCAL Qwen3-VL-2B via
-                                        bundled llama-server when no key — run
-                                        `webrain install vision`). No browser
-                                        needed. First run:
-                                        `webrain install watch` bundles ffmpeg+ffprobe,
-                                        yt-dlp, whisper-cli + a GGUF model as mono
-                                        packages in the webrain cache (no PATH
-                                        installs, all OS); transcript is LOCAL/offline
-                                        when whisper-cli + model are present (env
-                                        overrides WEBRAIN_WHISPER_BIN/MODEL). Cloud
-                                        fallback key = GROQ_API_KEY | OPENAI_API_KEY |
-                                        FIREWORKS_API_KEY (model WEBRAIN_STT_MODEL).
-                                        Batch: sources[] = N videos in one call.
+- structured list, schema known    -> extract(mode=schema, base_selector, fields)
+- schema unknown                   -> extract(mode=autoschema) + eval, then mode=schema
+- paginated pages 1..N / many URLs -> webrain_batch(op=extract, urls, base_selector, fields)
+- URLs unknown (discover pages)    -> eval: links whose path = current + '/<N>'
+                                      + next/prev labels (NO hardcoded classes), derive
+                                      range, then webrain_batch
+- whole site                       -> crawl(mode=spider, seed_url)
+- emails/phones/prices/patterns    -> extract(mode=regex)
+- JSON-LD / microdata              -> extract(mode=jsonld)
+- tables                           -> extract(mode=table)
+- infinite scroll / load-more      -> crawl(mode=scan) then extract; or interact(scroll)
+- search                           -> webrain_search
+- relevance filter                 -> extract(mode=bm25)
+- watch a video (URL or local file)-> webrain_watch(url) — timestamped transcript
+                                      (yt-dlp captions -> local whisper-cli -> Whisper
+                                      STT API) + frame file paths; the LLM reads frames
+                                      + transcript to summarize. First run:
+                                      `webrain install watch` bundles ffmpeg/yt-dlp/
+                                      whisper-cli + a GGUF model (no PATH installs).
 
 FROM-SCRATCH DISCOVERY (schema + urls unknown)
   1. webrain_navigate(seed) — read `links` (same-origin) + `challenge`
-  2. derive urls from `links` (pagination/next via webrain_eval if needed) -> max page -> urls
-  3. webrain_autoschema -> container selector
-  4. webrain_eval -> descendant tags/classes + samples -> fields
+  2. derive urls from `links` (pagination/next via eval) -> max page -> urls
+  3. extract(mode=autoschema) -> container selector
+  4. eval -> descendant tags/classes + samples -> fields
   5. webrain_batch(op=extract, urls, base_selector, fields, concurrency=8) -> aggregate
-     (each result has parsed `data` array — no need to parse `text`)
+     (read the parsed `data` array — no need to parse `text`)
   6. done(summary="Extracted N items across M pages")
 
-LOAD-MORE / INFINITE-SCROLL SHORTCUT (fastest path, beats click/scroll loops)
+LOAD-MORE / INFINITE-SCROLL SHORTCUT (fastest path)
   These pages almost always back the button/observer with a plain JSON/HTML
   endpoint (scrapingcourse uses /ajax/products?offset=N). Find it in the page's
-  own script via webrain_eval (grep '/ajax/' in script tags), then
+  own script via eval (grep '/ajax/' in script tags), then
   webrain_batch(op=extract, urls=[...offset=0,10,20...], base_selector, fields)
   directly — one call, no interaction, no scroll. Dedupe overlapping offset
   windows by url/name if the endpoint returns a sliding window.
 
 RULES
-- NEVER return raw HTML. webrain_snapshot, webrain_clean, webrain_eval, and
-  webrain_extract_json/table/regex all give you page text/structure far cheaper
-  than webrain_get_html (token-heavy, unreadable). get_html is the LAST resort:
-  only when the task explicitly asks for HTML markup, and if you use it, remind
-  the user you're pulling HTML and why.
+- NEVER return raw HTML. observe(what=state|fit|clean) + extract give page
+  text/structure far cheaper. observe(what=html) is LAST RESORT — only when the
+  task explicitly asks for HTML markup, and if you use it, say why.
 - Media URLs (images/videos): extract meta[property='og:image'|'og:video'] as
   attr fields — NEVER `video.src`: for streamed media (reels/DASH) it's a blob:
   URL that can't be downloaded; og:video/og:image carry the real CDN file.
-- Watching a video: webrain_watch returns {transcript[{t,text}], transcript_source,
-  frames[{index,t,path}]}. Read the frame files at those paths + the transcript to
-  summarize. detail=transcript is fastest when captions exist; balanced (default)
-  adds scene-aware frames; efficient is a cheap keyframe pass.
 - Never guess selectors/browsers from memory — discover via autoschema/eval and
   read the `challenge` field on every navigate.
 - webrain_batch(op=extract) returns each result's products as a parsed `data`
   array (single-page extract_json shape) — read `data`, don't parse `text`.
-- webrain_eval does NOT reliably await async JS on obscura (returns null). For
-  async work use webrain_batch(op=interact, ...) — its interaction runs in a
-  session where awaits resolve.
-- webrain_fetch_http needs NO browser (pure HTTP, 10-100x faster for static pages).
-- webrain_tab manages tabs: new(url) | switch(id) | close(id) | list. Use tabs to
+- eval does NOT reliably await async JS on obscura (returns null). For async
+  work use webrain_batch(op=interact, ...) — its interaction runs in a session
+  where awaits resolve.
+- interact(action=tab): new(url) | switch(id) | close(id) | list. Use tabs to
   isolate parallel scrapes or pre-load login sessions in one tab while scraping
   in another.
 
@@ -164,17 +161,16 @@ MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
   subagents, give each its own browser via CDP_URL, and they run in parallel:
     Subagent A → CDP_URL=http://127.0.0.1:9222  (real Chrome — CF/SPA/interactive)
     Subagent B → CDP_URL=http://127.0.0.1:9224  (obscura — fast bulk batch)
-    Subagent C → (no CDP)                        (webrain_fetch_http — static)
+    Subagent C → (no CDP)                        (webrain_scrape — static)
 - DELEGATE when you hit ANY of these; otherwise stay single-threaded:
-    1. Many independent URLs/pages/sites → shard the URL list across subagents
-       (each webrain_batch/extract on its shard). One browser already
-       parallelizes in-process (webrain_batch concurrency=N); delegate ACROSS
-       browsers for more throughput or different engines.
+    1. Many independent URLs/pages/sites → shard the URL list across subagents.
+       One browser already parallelizes in-process (webrain_batch concurrency=N);
+       delegate ACROSS browsers for more throughput or different engines.
     2. Different engines/roles → challenges/SPAs to Chrome, bulk to obscura,
-       static to fetch_http.
+       static to webrain_scrape.
     3. Per-proxy / per-IP isolation → one CDP_URL per subagent = own
        proxy/cookies/fingerprint = N exit IPs at once.
-    4. Huge site-wide crawl → shard by subdomain/section, one webrain_spider
+    4. Huge site-wide crawl → shard by subdomain/section, one crawl(spider)
        per subagent (own crawldir for checkpoint/resume).
     5. Discovery overlaps extraction → one subagent finds schema/URLs on a new
        site while others extract from known sites.
@@ -185,26 +181,250 @@ MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
     catalog / "find all" / many urls -> links -> validate -> batch; >~100 urls
       or mixed engines -> shard urls across subagents
     specific pages (3,4,7)          -> single agent, NO delegation
-    infinite scroll / load more     -> webrain_batch(op=interact) per site-group;
-      many interactive sites        -> one subagent per site-group
-    whole site / huge               -> webrain_spider; shard by subdomain, one
+    infinite scroll / load more     -> webrain_batch(op=interact) per site-group
+    whole site / huge               -> crawl(spider); shard by subdomain, one
       spider subagent each (own crawldir)
-- SUBAGENT SELF-HEAL (give each a fallback chain so it returns data, not failure):
-    extraction: webrain_fit/flatten -> extract_json -> eval -> annotate
-    pagination: construct /page/N -> click Next -> scroll -> scan
+- SUBAGENT SELF-HEAL (fallback chains so it returns data, not failure):
+    extraction: observe(fit|flatten) -> extract -> eval -> observe(annotate)
+    pagination: construct /page/N -> interact(click Next) -> scroll -> crawl(scan)
     anti-bot:   on challenge, STOP + report — you re-route to the Chrome agent
 - SUBAGENT CONTRACT (give every subagent exact scope):
     * ONE browser (CDP_URL), ONE task, explicit URL list OR seed+budget.
     * Return COMPACT JSON only: {status, count, data[] | summary}. No raw HTML.
-    * On challenge/block: REPORT it (challenge field), don't fight it — you
-      re-route that URL to the Chrome subagent.
-- AGGREGATE yourself: dedupe by url/name (batch endpoints give sliding
-  windows), webrain_bm25 for relevance, merge into one answer with a count.
+    * On challenge/block: REPORT it (challenge field), don't fight it.
+- AGGREGATE yourself: dedupe by url/name (sliding windows), extract(mode=bm25)
+  for relevance, merge into one answer with a count.
 - Subagents are just other LLMs with webrain MCP — they can nest or use
   webrain_batch concurrency inside their own shard.
 "#;
 
+/// Consolidated MCP surface — 15 intent-based tools (firecrawl-style), each
+/// with a `what`/`action`/`op`/`mode` selector + when-to-use guidance so the
+/// LLM picks the right boundary. `call_tool` routes each call to the legacy
+/// per-primitive executor via `map_surface()`. Legacy schemas stay in
+/// `legacy_tool_schemas()` as the executor's reference (not advertised).
 pub fn list_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "webrain_guide",
+            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs webrain_scrape), challenge bypass, extraction matrix, delegation doctrine. Call FIRST when unsure which webrain tool to use.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
+            "name": "webrain_eval",
+            "description": "Run arbitrary JavaScript in the current page and return the JSON result. The escape hatch for anything a tool doesn't cover (probe DOM, read scripts, call APIs).",
+            "inputSchema": {"type": "object", "properties": {
+                "js": {"type": "string", "description": "JS expression. Return a JSON-serializable value (JSON.stringify(...))."}
+            }, "required": ["js"]}
+        }),
+        json!({
+            "name": "webrain_navigate",
+            "description": "Navigate to a URL and return page state (title, visible text, interactive elements, same-origin links) plus `challenge` (cloudflare_challenge|blocked|captcha) when gated. THE entry point. Optional request-quality params: disable_resources, block_trackers, network_idle, wait_selector(+state), css_selector. Use `links` for one-call crawl discovery.",
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string"},
+                "disable_resources": {"type": "boolean", "default": false},
+                "block_trackers": {"type": "boolean", "default": false},
+                "network_idle": {"type": "boolean", "default": false},
+                "wait_selector": {"type": "string"},
+                "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
+                "css_selector": {"type": "string", "description": "Narrow returned text to this element"}
+            }, "required": ["url"]}
+        }),
+        json!({
+            "name": "webrain_observe",
+            "description": "Read the CURRENT page without navigating. Pick `what` (required): state (page state), a11y (accessibility tree, role/filter/max_nodes), semantic (text tree), html (raw HTML — LAST RESORT), images, console (page errors), flatten (Shadow-DOM text), fit (dense content), clean (boiled text), screenshot (base64+file, full_page/dir), pixel (vision tiles), page_info (scroll/viewport), annotate (numbered-box overlay), media (media URLs, url/wait_ms).",
+            "inputSchema": {"type": "object", "properties": {
+                "what": {"type": "string", "enum": ["state","a11y","semantic","html","images","console","flatten","fit","clean","screenshot","pixel","page_info","annotate","media"]},
+                "role": {"type": "string", "description": "a11y: ARIA role filter"},
+                "filter": {"type": "string", "description": "a11y: name/value/css substring filter"},
+                "max_nodes": {"type": "integer", "description": "a11y: node cap"},
+                "selector": {"type": "string", "description": "html: CSS selector to narrow"},
+                "full_page": {"type": "boolean", "default": false, "description": "screenshot: full scrollable page"},
+                "dir": {"type": "string", "default": "screenshots", "description": "screenshot: output dir"},
+                "tile_width": {"type": "number", "default": 800, "description": "pixel: tile width px"},
+                "tile_height": {"type": "number", "default": 800, "description": "pixel: tile height px"},
+                "max_tiles": {"type": "integer", "default": 16, "description": "pixel: max tiles"},
+                "word_threshold": {"type": "integer", "default": 2, "description": "clean: min word length"},
+                "exclude_social": {"type": "boolean", "default": true, "description": "clean: drop social links"},
+                "url": {"type": "string", "description": "media: URL to load and capture network requests"},
+                "wait_ms": {"type": "integer", "default": 0, "description": "media: keep capturing after load"}
+            }, "required": ["what"]}
+        }),
+        json!({
+            "name": "webrain_interact",
+            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), type (index,text), press (key), scroll (direction), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["click","click_coords","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
+                "index": {"type": "integer", "description": "Element index from navigate/observe"},
+                "text": {"type": "string", "description": "type: text to type; wait: text substring to wait for"},
+                "key": {"type": "string", "description": "press: Enter|Tab|Escape|Backspace|ArrowDown|..."},
+                "direction": {"type": "string", "enum": ["up","down"], "default": "down", "description": "scroll"},
+                "x": {"type": "number", "description": "click_coords: viewport x"},
+                "y": {"type": "number", "description": "click_coords: viewport y"},
+                "nav": {"type": "string", "enum": ["back","forward","reload"], "default": "back"},
+                "tab": {"type": "string", "enum": ["new","switch","close","list"], "default": "list"},
+                "url": {"type": "string", "description": "tab new: URL"},
+                "id": {"type": "string", "description": "tab switch/close: tab id"},
+                "value": {"type": "string", "description": "select: option value or visible text"},
+                "checked": {"type": "boolean", "default": true, "description": "check: desired state"},
+                "dialog": {"type": "string", "enum": ["accept","dismiss"], "default": "accept"},
+                "prompt_text": {"type": "string", "description": "dialog prompt(): text to type"},
+                "ms": {"type": "integer", "description": "wait: fixed delay ms"},
+                "selector": {"type": "string", "description": "wait: CSS selector to poll for"},
+                "timeout_ms": {"type": "integer", "default": 15000, "description": "wait: max ms"},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "upload: absolute paths"},
+                "js": {"type": "string", "description": "add_init_script: JS to run on every new document"}
+            }, "required": ["action"]}
+        }),
+        json!({
+            "name": "webrain_extract",
+            "description": "Structured extraction from the CURRENT page. Pick `mode` (required): schema (CSS-schema → JSON rows: base_selector+fields, optional adaptive), regex (built-in email/url/phone/... + custom patterns), jsonld (schema.org blocks), table (HTML tables → JSON), autoschema (discover repeated containers), bm25 (relevance-filter texts: query+items+top_k). Zero-LLM.",
+            "inputSchema": {"type": "object", "properties": {
+                "mode": {"type": "string", "enum": ["schema","regex","jsonld","table","autoschema","bm25"]},
+                "base_selector": {"type": "string", "description": "schema: CSS selector per repeated item"},
+                "fields": {"type": "array", "items": {"type": "object"}, "description": "schema: [{name, selector, type: text|attr|html|xpath, attr?}]"},
+                "base_fields": {"type": "array", "items": {"type": "object"}, "description": "schema: container attrs [{name, attribute}]"},
+                "adaptive": {"type": "boolean", "default": false, "description": "schema: relocate container if 0 matches (site redesign)"},
+                "patterns": {"type": "array", "items": {"type": "object"}, "description": "regex: custom [{label, re}]"},
+                "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats"},
+                "query": {"type": "string", "description": "bm25: what the kept items should be about"},
+                "items": {"type": "array", "items": {"type": "string"}, "description": "bm25: texts to rank"},
+                "top_k": {"type": "integer", "default": 10, "description": "bm25: max results"}
+            }, "required": ["mode"]}
+        }),
+        json!({
+            "name": "webrain_scrape",
+            "description": "Fetch ONE URL's content over plain HTTP — no browser, 10-100x faster, zero memory. Returns {url, status, text, needs_js}. For static pages / quick probes / pagination probing. For JS/SPA pages use webrain_navigate.",
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string"}
+            }, "required": ["url"]}
+        }),
+        json!({
+            "name": "webrain_batch",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers (per-proxy isolation). The workhorse for at-scale scraping.",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["fetch","extract","interact","eval","screenshot"]},
+                "urls": {"type": "array", "items": {"type": "string"}},
+                "cdp_urls": {"type": "array", "items": {"type": "string"}, "description": "Round-robin URLs across these CDP backends (per-proxy isolation)"},
+                "interaction": {"type": "string", "description": "interact: async JS to run in each tab"},
+                "base_selector": {"type": "string", "description": "extract/interact: repeated-item selector"},
+                "fields": {"type": "array", "items": {"type": "object"}, "description": "extract/interact: schema"},
+                "concurrency": {"type": "integer", "default": 4},
+                "per_backend_concurrency": {"type": "integer", "default": 4, "description": "tabs per backend when cdp_urls set"},
+                "dir": {"type": "string", "default": "screenshots", "description": "screenshot: output dir"},
+                "output": {"type": "string", "description": "Persist the full payload to this file path"},
+                "disable_resources": {"type": "boolean", "default": false},
+                "block_trackers": {"type": "boolean", "default": false},
+                "network_idle": {"type": "boolean", "default": false},
+                "wait_selector": {"type": "string"},
+                "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"}
+            }, "required": ["op", "urls"]}
+        }),
+        json!({
+            "name": "webrain_crawl",
+            "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]).",
+            "inputSchema": {"type": "object", "properties": {
+                "mode": {"type": "string", "enum": ["spider","sitemap","scan","validate"]},
+                "seed_url": {"type": "string", "description": "spider: starting URL"},
+                "max_depth": {"type": "integer", "default": 2},
+                "max_pages": {"type": "integer", "default": 20},
+                "strategy": {"type": "string", "enum": ["bfs","dfs","bestfirst"], "default": "bfs"},
+                "same_domain": {"type": "boolean", "default": true},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}},
+                "no_content": {"type": "boolean", "default": false, "description": "spider: link-only fast path"},
+                "respect_robots": {"type": "boolean", "default": false},
+                "keywords": {"type": "array", "items": {"type": "string"}, "description": "spider bestfirst: relevance keywords"},
+                "allow": {"type": "array", "items": {"type": "string"}, "description": "spider: only follow URLs matching these regexes"},
+                "deny": {"type": "array", "items": {"type": "string"}, "description": "spider: skip URLs matching these regexes"},
+                "retry": {"type": "integer", "default": 0},
+                "delay_ms": {"type": "integer", "default": 0},
+                "crawl_timeout_secs": {"type": "integer", "default": 0, "description": "0 = no cap"},
+                "autothrottle": {"type": "boolean", "default": false},
+                "autothrottle_max_ms": {"type": "integer", "default": 30000},
+                "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir"},
+                "checkpoint_every": {"type": "integer", "default": 10},
+                "url": {"type": "string", "description": "sitemap: site root or sitemap URL"},
+                "max_scrolls": {"type": "integer", "default": 15, "description": "scan: max scroll steps"},
+                "urls": {"type": "array", "items": {"type": "string"}, "description": "validate: URLs to probe"}
+            }, "required": ["mode"]}
+        }),
+        json!({
+            "name": "webrain_search",
+            "description": "Search the web and navigate to the results page. engine: duckduckgo (default, scrape-friendly) | google | bing | brave (needs a browser — SPA). Returns the results page state.",
+            "inputSchema": {"type": "object", "properties": {
+                "q": {"type": "string"},
+                "engine": {"type": "string", "enum": ["duckduckgo","google","bing","brave"], "default": "duckduckgo"}
+            }, "required": ["q"]}
+        }),
+        json!({
+            "name": "webrain_pdf",
+            "description": "PDF work. Pick `op` (required): page (save current page as PDF) | extract (PDF → markdown/JSON: path or paths[]) | render (PDF pages → PNG tiles for vision: path + optional pages/dpi/tile_size) | images (extract embedded images: path + optional pages).",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["page","extract","render","images"]},
+                "path": {"type": "string", "description": "extract/render/images: PDF file path"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "extract: batch paths"},
+                "pages": {"type": "array", "items": {"type": "integer"}, "description": "render/images: page numbers (1-based), omit = all"},
+                "dpi": {"type": "number", "default": 150, "description": "render: DPI"},
+                "tile_size": {"type": "integer", "description": "render: split pages into square tiles of this px"}
+            }, "required": ["op"]}
+        }),
+        json!({
+            "name": "webrain_download",
+            "description": "Download files/media. engine: http (default — stream plain URLs, optional filter_extension narrows to one type) | ytdlp (video/audio via yt-dlp: HLS/DASH/playlists, audio_only, format, args[]). Batch via urls[].",
+            "inputSchema": {"type": "object", "properties": {
+                "urls": {"type": "array", "items": {"type": "string"}},
+                "dir": {"type": "string", "default": "downloads"},
+                "engine": {"type": "string", "enum": ["http","ytdlp"], "default": "http"},
+                "filter_extension": {"type": "string", "description": "http: only download URLs ending in this extension"},
+                "audio_only": {"type": "boolean", "default": false, "description": "ytdlp: extract mp3"},
+                "format": {"type": "string", "description": "ytdlp: -f value"},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "ytdlp: extra CLI flags"}
+            }, "required": ["urls"]}
+        }),
+        json!({
+            "name": "webrain_watch",
+            "description": "Watch a video (URL or local path): download with yt-dlp, extract a timestamped transcript + scene frames, hand them to the LLM to summarize or answer a question about the video. No browser needed.",
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "Video URL or local path"},
+                "prompt": {"type": "string", "description": "Optional question to answer from the transcript"}
+            }, "required": ["url"]}
+        }),
+        json!({
+            "name": "webrain_session",
+            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile+port), profiles (vault names), login (auto-login from vault: service+profile+url), close_launch (stop a launched Chrome: service+profile).",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["open","close","list","cookies","setcookies","save_state","restore_state","profiles","login","close_launch"]},
+                "session_id": {"type": "string", "description": "open/close: session name"},
+                "cdp_url": {"type": "string", "description": "open: CDP URL for this session"},
+                "cookies": {"type": "array", "items": {"type": "object"}, "description": "setcookies: cookie objects (name, value, domain, path, ...)"},
+                "service": {"type": "string", "description": "save/restore_state, login, close_launch: service"},
+                "profile": {"type": "string", "description": "save/restore_state, login, close_launch: profile"},
+                "port": {"type": "integer", "default": 9222, "description": "state/login: CDP port"},
+                "url": {"type": "string", "description": "login: login page to navigate first"}
+            }, "required": ["op"]}
+        }),
+        json!({
+            "name": "webrain_vision",
+            "description": "Vision index over screenshot tiles. op: index (embed current-page tiles into a named index: tag + tile params) | retrieve (cosine top-k tile ids for a text query: tag+query+k). Requires EMBED_URL.",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["index","retrieve"]},
+                "tag": {"type": "string", "default": "default", "description": "Index name"},
+                "max_tiles": {"type": "integer", "default": 8, "description": "index: max tiles to embed"},
+                "tile_width": {"type": "number", "default": 800},
+                "tile_height": {"type": "number", "default": 800},
+                "query": {"type": "string", "description": "retrieve: text query"},
+                "k": {"type": "integer", "default": 5, "description": "retrieve: top-k"}
+            }, "required": ["op"]}
+        }),
+    ]
+}
+
+/// The 63 legacy per-primitive tool schemas. NOT advertised — kept as the
+/// reference for the executor arms in call_tool (and old clients that call
+/// the legacy names directly).
+/// ponytail: delete once the consolidated surface is battle-tested.
+#[allow(dead_code)]
+pub fn legacy_tool_schemas() -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "webrain_guide",
@@ -1136,10 +1356,252 @@ fn arr_len(v: &Value) -> usize {
     v.as_array().map(|a| a.len()).unwrap_or(0)
 }
 
+/// Map the consolidated 15-tool surface to the legacy per-primitive executor.
+/// Each tool's `what`/`action`/`op`/`mode` selects the legacy arm; the rest of
+/// the args pass through unchanged (legacy arms read the same param names).
+/// Legacy tool names map to None → handled by their own arm (backward compat).
+pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str());
+    let mut a = args.clone();
+    let dropk = |a: &mut Value, k: &str| {
+        if let Some(o) = a.as_object_mut() {
+            o.remove(k);
+        }
+    };
+    let route = |a: &mut Value, k: &str, v: &str| {
+        if let Some(o) = a.as_object_mut() {
+            o.insert(k.to_string(), json!(v));
+        }
+    };
+    match name {
+        "webrain_observe" => {
+            let what = s("what")?;
+            dropk(&mut a, "what");
+            Some((
+                match what {
+                    "state" => "webrain_snapshot",
+                    "a11y" => "webrain_a11y",
+                    "semantic" => "webrain_semantic_tree",
+                    "html" => "webrain_get_html",
+                    "images" => "webrain_get_images",
+                    "console" => "webrain_console",
+                    "flatten" => "webrain_flatten",
+                    "fit" => "webrain_fit",
+                    "clean" => "webrain_clean",
+                    "screenshot" => "webrain_screenshot",
+                    "pixel" => "webrain_pixel",
+                    "page_info" => "webrain_page_info",
+                    "annotate" => "webrain_annotate",
+                    "media" => "webrain_media",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_interact" => {
+            let action = s("action")?;
+            dropk(&mut a, "action");
+            let legacy = match action {
+                "click" => "webrain_click",
+                "click_coords" => "webrain_click_coords",
+                "type" => "webrain_type",
+                "press" => "webrain_press",
+                "scroll" => "webrain_scroll",
+                "select" => "webrain_select",
+                "hover" => "webrain_hover",
+                "check" => "webrain_check",
+                "wait" => "webrain_wait",
+                "upload" => "webrain_upload",
+                "dismiss_overlays" => "webrain_dismiss_overlays",
+                "add_init_script" => "webrain_add_init_script",
+                // legacy arms that read their own action/op key — rename the param
+                "nav" => {
+                    let v = s("nav").unwrap_or("back");
+                    dropk(&mut a, "nav");
+                    route(&mut a, "op", v);
+                    "webrain_nav"
+                }
+                "tab" => {
+                    let v = s("tab").unwrap_or("list");
+                    dropk(&mut a, "tab");
+                    route(&mut a, "action", v);
+                    "webrain_tab"
+                }
+                "dialog" => {
+                    let v = s("dialog").unwrap_or("accept");
+                    dropk(&mut a, "dialog");
+                    route(&mut a, "action", v);
+                    "webrain_dialog"
+                }
+                _ => return None,
+            };
+            Some((legacy, a))
+        }
+        "webrain_extract" => {
+            let mode = s("mode")?;
+            dropk(&mut a, "mode");
+            Some((
+                match mode {
+                    "schema" => "webrain_extract_json",
+                    "regex" => "webrain_extract_regex",
+                    "jsonld" => "webrain_get_jsonld",
+                    "table" => "webrain_table",
+                    "autoschema" => "webrain_autoschema",
+                    "bm25" => "webrain_bm25",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_crawl" => {
+            let mode = s("mode")?;
+            dropk(&mut a, "mode");
+            Some((
+                match mode {
+                    "spider" => "webrain_spider",
+                    "sitemap" => "webrain_sitemap",
+                    "scan" => "webrain_scan",
+                    "validate" => "webrain_validate_urls",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_pdf" => {
+            let op = s("op")?;
+            dropk(&mut a, "op");
+            Some((
+                match op {
+                    "page" => "webrain_pdf",
+                    "extract" => "webrain_pdf_extract",
+                    "render" => "webrain_pdf_render",
+                    "images" => "webrain_pdf_images",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_session" => {
+            let op = s("op")?;
+            dropk(&mut a, "op");
+            Some((
+                match op {
+                    "open" => "webrain_open_session",
+                    "close" => "webrain_close_session",
+                    "list" => "webrain_list_sessions",
+                    "cookies" => "webrain_cookies",
+                    "setcookies" => "webrain_setcookies",
+                    "save_state" => "webrain_save_state",
+                    "restore_state" => "webrain_restore_state",
+                    "profiles" => "webrain_profiles",
+                    "login" => "webrain_login",
+                    "close_launch" => "webrain_close_launch",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_vision" => {
+            let op = s("op")?;
+            dropk(&mut a, "op");
+            Some((
+                match op {
+                    "index" => "webrain_vision_index",
+                    "retrieve" => "webrain_vision_retrieve",
+                    _ => return None,
+                },
+                a,
+            ))
+        }
+        "webrain_scrape" => Some(("webrain_fetch_http", a)),
+        // single-tool surface (navigate/eval/batch/search/download/watch/guide)
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fold(name: &str, args: Value) -> (&'static str, Value) {
+        map_surface(name, &args).expect("should fold")
+    }
+
+    #[test]
+    fn folds_observe_selectors() {
+        for (what, legacy) in [
+            ("state", "webrain_snapshot"),
+            ("a11y", "webrain_a11y"),
+            ("semantic", "webrain_semantic_tree"),
+            ("html", "webrain_get_html"),
+            ("images", "webrain_get_images"),
+            ("console", "webrain_console"),
+            ("flatten", "webrain_flatten"),
+            ("fit", "webrain_fit"),
+            ("clean", "webrain_clean"),
+            ("screenshot", "webrain_screenshot"),
+            ("pixel", "webrain_pixel"),
+            ("page_info", "webrain_page_info"),
+            ("annotate", "webrain_annotate"),
+            ("media", "webrain_media"),
+        ] {
+            let (n, a) = fold("webrain_observe", json!({"what": what}));
+            assert_eq!(n, legacy, "observe {what}");
+            assert!(a.get("what").is_none(), "selector dropped");
+        }
+    }
+
+    #[test]
+    fn folds_interact_actions() {
+        let (n, a) = fold("webrain_interact", json!({"action": "click", "index": 0}));
+        assert_eq!(n, "webrain_click");
+        assert_eq!(a["index"], 0);
+        assert!(a.get("action").is_none());
+        // nav renames its param to the legacy arm's `op` key.
+        let (n, a) = fold("webrain_interact", json!({"action": "nav", "nav": "forward"}));
+        assert_eq!(n, "webrain_nav");
+        assert_eq!(a["op"], "forward");
+    }
+
+    #[test]
+    fn folds_extract_and_crawl_modes() {
+        assert_eq!(fold("webrain_extract", json!({"mode": "schema"})).0, "webrain_extract_json");
+        assert_eq!(fold("webrain_extract", json!({"mode": "autoschema"})).0, "webrain_autoschema");
+        assert_eq!(fold("webrain_crawl", json!({"mode": "spider"})).0, "webrain_spider");
+        assert_eq!(fold("webrain_crawl", json!({"mode": "validate"})).0, "webrain_validate_urls");
+    }
+
+    #[test]
+    fn folds_session_and_pdf_ops() {
+        assert_eq!(fold("webrain_session", json!({"op": "open"})).0, "webrain_open_session");
+        assert_eq!(fold("webrain_session", json!({"op": "list"})).0, "webrain_list_sessions");
+        assert_eq!(fold("webrain_session", json!({"op": "cookies"})).0, "webrain_cookies");
+        assert_eq!(fold("webrain_pdf", json!({"op": "extract"})).0, "webrain_pdf_extract");
+        assert_eq!(fold("webrain_pdf", json!({"op": "render"})).0, "webrain_pdf_render");
+        assert_eq!(fold("webrain_vision", json!({"op": "retrieve"})).0, "webrain_vision_retrieve");
+    }
+
+    #[test]
+    fn single_tool_names_pass_through() {
+        assert!(map_surface("webrain_scrape", &json!({"url": "x"})).is_some());
+        assert!(map_surface("webrain_navigate", &json!({})).is_none());
+        assert!(map_surface("webrain_guide", &json!({})).is_none());
+        assert!(map_surface("webrain_observe", &json!({})).is_none()); // missing selector
+    }
+}
+
 /// Dispatch tool calls to the shared CDP backend.
 /// ponytail: match arm, no registry pattern.
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+
+    // Consolidated 15-tool surface → legacy executor. Legacy tool names pass
+    // through (their own arms still match) — old agents keep working.
+    let mapped = map_surface(name, args);
+    let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);
+    let args: &Value = mapped.as_ref().map(|(_, a)| a).unwrap_or(args);
+
 
     // Parse Scrapling-style request-quality params from tool args (shared by
     // navigate + batch). All optional; defaults keep legacy behavior.

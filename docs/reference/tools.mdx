@@ -1,39 +1,54 @@
 ---
 title: Tools Reference
-description: The full 63-tool MCP surface, grouped and verbatim.
+description: The 15-tool consolidated MCP surface (63 legacy capabilities folded via map_surface), grouped and verbatim.
 ---
 
 # Tools Reference
 
-All 63 tools are discovered dynamically — `webrain_guide` lists them for the
-LLM. This page is the authoritative reference; descriptions match
+All 15 tools are discovered dynamically — `webrain_guide` lists them for the
+LLM. The surface is **intent-based** (firecrawl-style): each tool has a `what`
+/ `action` / `op` / `mode` selector that routes to the legacy capability via
+`map_surface()`. This page is the authoritative reference; descriptions match
 `webrain-mcp/src/tools.rs`. Every browser tool also accepts an optional
 `session_id` to route to a `webrain_open_session` pool.
 
+> The accordions below document the **legacy one-action tool names** (e.g.
+> `webrain_click`, `webrain_snapshot`) that still dispatch — they are the
+> executors `map_surface()` routes the consolidated selectors to, so they
+> remain the precise reference for each capability.
+
 ## Tool-to-code map
 
-The schemas live in `webrain-mcp/src/tools.rs` (`list_tools`), and every call
-routes through `call_tool` — a `match` on the tool name. From there tools
-resolve into `webrain-core`. The execution model is simple: **browser tools
-run through `CdpBackend`** (one shared WebSocket to the engine); a handful of
-tools skip the browser entirely.
+The consolidated schemas live in `webrain-mcp/src/tools.rs` (`list_tools`), and
+every call routes through `call_tool` — `map_surface(name, args)` first folds a
+consolidated tool + selector into the legacy arm name, then the existing
+`match` runs. From there tools resolve into `webrain-core`. The execution
+model is simple: **browser tools run through `CdpBackend`** (one shared
+WebSocket to the engine); a handful of tools skip the browser entirely.
 
-| Tool group | Implementation | Browser? | Notes |
-|---|---|---|---|
-| Navigate & Observe (`navigate`, `snapshot`, `a11y`, `eval`, `screenshot`, …) | `webrain-core/src/backends/cdp.rs` + `browser.rs` | ✅ CDP | `BrowserBackend` trait gives every engine the same surface |
-| Interact (`click`, `type`, `press`, `select`, `hover`, `check`, `dialog`, `wait`, `upload`, `click_coords`, `add_init_script`, `dismiss_overlays`, …) | `webrain-core/src/backends/cdp.rs` | ✅ CDP | index/selector based; Material widgets need real Chrome |
-| Extract (`autoschema`, `extract_json`, `extract_regex`, `table`, `jsonld`, `bm25`, `clean`, `fit`, `flatten`) | `webrain-core/src/engines.rs` + in-page JS | ✅ CDP (in-page) | zero-LLM, no `get_html` |
-| Crawl & Batch (`batch`, `spider`, `sitemap`, `scan`, `validate_urls`) | `webrain-core/src/engines.rs` + `backends/cdp.rs` | 🔶 mixed | `spider`/`sitemap`/`validate_urls` are HTTP or CDP; `batch` needs a backend |
-| Search (`search`) | `webrain-core/src/engines.rs` | ❌ no browser | pure HTTP (ddg/google/bing) |
-| Vision (`pixel`, `vision_index`, `vision_retrieve`) | `webrain-core/src/vision.rs` + `backends/cdp.rs` | ✅ CDP (screenshot) | cosine `VectorStore` |
-| Media, PDF & Video (`watch`, `pdf*`, `download`, `media`, `get_images`) | `webrain-core/src/video.rs` + pdf modules + `engines.rs` | 🔶 mixed | `watch` (transcript + frames) and `download`/`pdf_extract` need no browser |
-| Auth & Sessions (`login`, `profiles`, `cookies`, `setcookies`, `save_state`, `restore_state`, `open/close/list_session`) | `webrain-core/src/login.rs` + `vault.rs` + `launch.rs` | ✅ CDP + vault | secrets decrypted in-process, never through the model |
+| Tool (selector) | Legacy capabilities folded in | Browser? |
+|---|---|---|
+| `webrain_navigate` | navigate, page state + challenge detection | ✅ CDP |
+| `webrain_observe` (`what=…`) | snapshot · a11y · semantic_tree · get_html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
+| `webrain_interact` (`action=…`) | click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
+| `webrain_extract` (`mode=…`) | autoschema · extract_json · extract_regex · table · jsonld · bm25 | ✅ CDP (in-page, zero-LLM) |
+| `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
+| `webrain_batch` (`op=…`) | batch fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
+| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate_urls | 🔶 mixed |
+| `webrain_search` | search (ddg/google/bing/brave) | ❌ no browser |
+| `webrain_pdf` (`op=…`) | pdf_page · pdf_extract · pdf_render · pdf_images | ❌ no browser |
+| `webrain_download` (`engine=…`) | download (http/ytdlp), media, get_images | 🔶 mixed |
+| `webrain_watch` | watch (transcript + frames) | ❌ no browser |
+| `webrain_session` (`op=…`) | open/close/list_session · cookies · setcookies · save/restore_state · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_vision` (`op=…`) | vision_index · vision_retrieve | ✅ CDP (screenshot) |
+| `webrain_eval` | eval (arbitrary JS) | ✅ CDP |
+| `webrain_guide` | agent decision guide | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
 lightpanda, and obscura alike — the differences are capability (screenshots,
 challenge solving, a11y fidelity), not protocol. Tools with **no** browser
-dependency (`webrain_fetch_http`, `webrain_search`, `webrain_sitemap`,
-`webrain_download`, `webrain_pdf_extract`, `webrain_watch`) are intercepted in
+dependency (`webrain_scrape`, `webrain_search`, `webrain_crawl` mode=sitemap,
+`webrain_download`, `webrain_pdf`, `webrain_watch`) are intercepted in
 `webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
 
 ## Navigate & Observe

@@ -22,7 +22,9 @@ Adopt a three-crate Cargo workspace with strict layering:
   `Endpoint`), and download/extract/batch/stealth JS.
 - **webrain-mcp** (lib): stdio JSON-RPC server + HTTP transport (per-`Mcp-Session-Id`
   backend map, mint on initialize / reuse via header). `tools.rs` owns the CDP connection
-  and dispatches 63 MCP tools.
+  and dispatches 15 consolidated intent-based MCP tools (`map_surface()` routes each
+  consolidated `what`/`action`/`op`/`mode` selector to the legacy executor; old names
+  still dispatch — backward compatible).
 - **webrain-cli** (bin): thin `match`-based subcommand entry point (no clap).
 
 Key properties: `CdpBackend` is `Clone` sharing one WS; batch = tokio semaphore + one tab
@@ -41,9 +43,9 @@ autoschema/BM25) is zero-LLM by design.
   `CdpBackend.ensure_page_attached` (20), `install.browsers_dir` (16), `CdpBackend.send_cmd` (16),
   `VectorStore.len` (15), `CdpBackend.send_cmd_with` (15), `BrowserBackend.evaluate` (12).
   Since the original record: `vault` module; `video` module + `webrain_watch` tool (now top
-  hotspot); 63 MCP tools (up from 34 — added sitemap/page_info/save|restore_state/pdf_*/
-  open|close_session/login/cookies/clean/vision_retrieve, then fit/flatten/annotate/select/
-  hover/check/dialog/wait/upload/add_init_script/click_coords, then watch);
+  hotspot); 63 MCP tools accumulated, then compressed to a 15-tool consolidated surface
+  (navigate/observe/interact/extract/scrape/batch/crawl/search/pdf/download/watch/session/
+  vision/eval/guide) with per-capability selectors routed via `map_surface()`;
   session routing via `session_id` arg; lightpanda engine; dead-socket reconnect.
   PixelRAG (`TileEngine`/`vision`) migrated its vision path from the old
   `Qwen3-VL-Embedding-2B` @ vLLM:8000 fallback to the bundled local vision model

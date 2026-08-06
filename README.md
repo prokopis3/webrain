@@ -6,7 +6,7 @@
 
 **A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.**
 
-Webrain exposes ~45 browser/scraping tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
+Webrain exposes 15 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
 
 [![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -27,7 +27,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 |---|---|---|
 | **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
 | **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
-| **LLM-ready** | MCP server, ~45 tools, built-in decision guide | you hand-roll tool functions |
+| **LLM-ready** | MCP server, 15 tools, built-in decision guide | you hand-roll tool functions |
 | **Anti-bot** | challenge detection + stealth sidecar | manual |
 | **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
 | **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
@@ -281,7 +281,7 @@ webrain watch <video-url-or-file> [--vision]       # transcript + frames (no bro
 webrain install watch|whisper|vision [--model]     # local AI stack (whisper + Qwen3-VL-2B)
 ```
 
-The full ~45-tool MCP surface is discovered dynamically — `webrain_guide` lists
+The 15-tool MCP surface is discovered dynamically — `webrain_guide` lists
 it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## Browser Engines
@@ -301,18 +301,27 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## MCP Tools
 
-All tools are discovered dynamically (`webrain_guide` lists them for the LLM). Highlights:
+The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 15 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
 
-| Category | Tools |
+| Tool | What it does |
 |---|---|
-| **Navigate / observe** | `webrain_navigate`, `webrain_snapshot`, `webrain_a11y`, `webrain_semantic_tree`, `webrain_get_html`, `webrain_console` |
-| **Interact** | `webrain_click`, `webrain_type`, `webrain_press`, `webrain_scroll`, `webrain_nav`, `webrain_tab`, `webrain_dismiss_overlays` |
-| **Extract** | `webrain_autoschema`, `webrain_extract_json`, `webrain_extract_regex`, `webrain_table`, `webrain_get_jsonld`, `webrain_pdf_extract`, `webrain_pdf_images` |
-| **Crawl** | `webrain_batch`, `webrain_spider` (AutoThrottle + checkpoint/resume), `webrain_sitemap`, `webrain_scan` |
-| **Video** | `webrain_watch` (transcript + frames, no browser; `vision:true` → text captions) |
-| **Vision** | `webrain_pixel`, `webrain_vision_index`, `webrain_vision_retrieve`, `webrain_screenshot` |
-| **Auth / state** | `webrain_login`, `webrain_profiles`, `webrain_cookies`, `webrain_setcookies`, `webrain_open_session`, `webrain_close_session` |
-| **Utility** | `webrain_fetch_http`, `webrain_download`, `webrain_search`, `webrain_validate_urls`, `webrain_clean`, `webrain_media`, `webrain_get_images`, `webrain_guide`, `webrain_eval` |
+| `webrain_navigate` | Go to a URL — page state + `challenge` / `crippled` detection. The entry point. |
+| `webrain_observe` | Read the current page: `what` = state · a11y · semantic · html · images · console · flatten (Shadow DOM) · fit · clean · screenshot · pixel · page_info · annotate · media |
+| `webrain_interact` | Drive the page: `action` = click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script |
+| `webrain_extract` | Structured data: `mode` = schema (CSS) · regex · jsonld · table · autoschema · bm25 |
+| `webrain_scrape` | No-browser HTTP fetch of one URL (10–100× faster, static only) |
+| `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
+| `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
+| `webrain_search` | Web search (duckduckgo · google · bing · brave) |
+| `webrain_pdf` | PDF work: `op` = page · extract (→ markdown) · render (→ vision tiles) · images |
+| `webrain_download` | Files/media: `engine` = http (stream) · ytdlp (HLS/playlists) |
+| `webrain_watch` | Video → timestamped transcript + frames (no browser; `vision:true` → text captions) |
+| `webrain_session` | Browser/auth/session: `op` = open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch |
+| `webrain_vision` | Screenshot-tile vision index: `op` = index · retrieve |
+| `webrain_eval` | Arbitrary JS (escape hatch) |
+| `webrain_guide` | Agent decision guide (browser/challenge/extraction/delegation) |
+
+Legacy one-action tool names still dispatch (backward compatible via `map_surface()`).
 
 Full per-tool reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Tool/browser/challenge decisions: [`docs/AGENT_DECISION_GUIDE.md`](docs/AGENT_DECISION_GUIDE.md).
 
@@ -369,7 +378,7 @@ anything's missing.
 
 ## Marketplace / IDE Plugins
 
-Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the ~45 tools appear.
+Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 15 tools appear.
 
 Both transports work in every client: **stdio** (`webrain mcp`) or **HTTP**
 (`webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`).
@@ -429,7 +438,7 @@ webrain (single binary)
 │   ├── launch.rs           spawn Chrome/lightpanda/obscura, wait for CDP
 │   ├── login.rs / vault.rs encrypted credential vault + CDP login injection (TOTP)
 │   └── vision.rs           screenshot-tile embedding + vector store
-├── webrain-mcp             MCP server: list_tools / call_tool, ~45 tool schemas
+├── webrain-mcp             MCP server: list_tools / call_tool, 15 consolidated tools (63 legacy via map_surface)
 └── webrain-cli             subcommand dispatch (mcp | install | launch | login | …)
 ```
 

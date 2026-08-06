@@ -73,7 +73,17 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or_default();
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            // Fold the consolidated intent-based surface (webrain_observe{what},
+            // webrain_interact{action}, webrain_session{op}, …) into the legacy
+            // executor name up front, so the no-browser short-circuits below
+            // (keyed on legacy names) and call_tool dispatch see the executor.
+            let tool_name: String = tools::map_surface(tool_name, &arguments)
+                .map(|(n, a)| {
+                    arguments = a;
+                    n.to_string()
+                })
+                .unwrap_or_else(|| tool_name.to_string());
 
             // No-browser tools: serve without a CDP backend, so they work
             // on a fresh install before any browser is up (any-LLM portability).
@@ -598,7 +608,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     }
                 }
             }
-            let result = tools::call_tool(backend.as_ref().unwrap(), tool_name, &arguments).await;
+            let result = tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
             // Reconnect: a browser kill/restart wedges the cached backend forever
             // (dead socket → "os error 10054" on every write). Drop it on
             // connection-level errors so the next call connects fresh. The rest
@@ -831,14 +841,22 @@ async fn handle_http_conn(
             let id = msg.get("id").cloned();
             let t0 = std::time::Instant::now();
             let (tool_name, args) = if method == "tools/call" {
-                (
-                    msg.pointer("/params/name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                    msg.pointer("/params/arguments")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                )
+                let mut name = msg
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let mut a = msg
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                // Fold the consolidated surface so session-mgmt detection below
+                // (webrain_session{op:open_session} → webrain_open_session, …)
+                // and the fall-through to handle_rpc both see the executor name.
+                if let Some((n, fa)) = tools::map_surface(name, &a) {
+                    name = n;
+                    a = fa;
+                }
+                (name, a)
             } else {
                 ("", Value::Null)
             };
