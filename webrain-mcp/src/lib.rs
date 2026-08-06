@@ -101,7 +101,15 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     });
                 }
                 let result = match webrain_core::engines::http_fetch(url) {
-                    Ok(v) => json!({"status": "ok", "result": v}),
+                    Ok(mut v) => {
+                        // spider-rs `smart` borrow (lazy slice): probe whether the
+                        // raw HTML is a JS shell so the LLM can upgrade to the
+                        // browser instead of scraping an empty page.
+                        let html = v["text"].as_str().unwrap_or("").to_string();
+                        v["visible_chars"] = json!(crate::tools::visible_text_len(&html));
+                        v["needs_js"] = json!(crate::tools::probe_needs_js(&html));
+                        json!({"status": "ok", "result": v})
+                    }
                     Err(e) => json!({"status": "error", "message": e.to_string()}),
                 };
                 return json!({

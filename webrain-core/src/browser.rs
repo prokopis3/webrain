@@ -21,6 +21,15 @@ pub struct PageState {
     pub links: Vec<String>,
     /// Anti-bot challenge/block kind (`cloudflare_challenge`, `blocked`, `captcha`) when detected.
     pub challenge: Option<String>,
+    /// Loaded but stripped to almost no interactivity (bot-limited shell).
+    /// Soft hint, not a block. `#[serde(default)]` so old serialized states load.
+    #[serde(default)]
+    pub crippled: bool,
+    /// Chrome error page (dead domain / cert / server error). spider-rs
+    /// `is_chrome_error_page` borrow — the `ERR_*` code, or "CHROME_ERROR" for a
+    /// generic interstitial. Lets the LLM stop scraping garbage error pages.
+    #[serde(default)]
+    pub chrome_error: Option<String>,
 }
 
 /// Classify a page as an anti-bot challenge/block page from its title+visible text.
@@ -47,6 +56,51 @@ pub fn detect_antibot(title: &str, text: &str) -> Option<String> {
         .map(|(kind, _)| kind.to_string())
 }
 
+/// A page Chrome rendered for a dead/cert/5xx URL (spider-rs
+/// `is_chrome_error_page`/`extract_chrome_error_code` borrow): the error page
+/// LOOKS like content, so the LLM scrapes garbage silently. Returns the `ERR_*`
+/// code when present, else "CHROME_ERROR" for a generic interstitial. Title+
+/// text only (no HTML/network), mirrors `detect_antibot`.
+pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
+    let hay = format!("{title}\n{text}");
+    // Chrome error pages carry a code — ERR_NAME_NOT_RESOLVED, DNS_PROBE_STARTED,
+    // NET::ERR_CERT_* … grab the first one.
+    for marker in ["ERR_", "DNS_"] {
+        if let Some(i) = hay.find(marker) {
+            let code: String = hay[i..]
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if !code.is_empty() {
+                return Some(code);
+            }
+        }
+    }
+    // Interstitials without a bare code (apostrophe may be curly — match both).
+    let l = hay.to_ascii_lowercase();
+    const PHRASES: &[&str] = &[
+        "this site can't be reached",
+        "this site can’t be reached",
+        "this page isn’t working",
+        "this page isn't working",
+        "your connection is not private",
+        "no internet",
+    ];
+    PHRASES
+        .iter()
+        .find(|p| l.contains(*p))
+        .map(|_| "CHROME_ERROR".to_string())
+}
+
+/// A loaded page with almost no interactive elements and no challenge is likely
+/// a bot-limited "crippled" shell (YouTube/Twitter/X serve stripped pages to
+/// automation). Soft hint, not a block.
+/// ponytail: naive count heuristic; a <5-element real page (login) trips it too —
+/// raise the threshold or scope per-site if it's noisy.
+pub fn detect_crippled(challenge: &Option<String>, element_count: usize) -> bool {
+    challenge.is_none() && element_count < 5
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InteractiveElement {
     pub index: usize,
@@ -66,7 +120,18 @@ pub trait BrowserBackend: Send + Sync {
     async fn click(&self, index: usize) -> anyhow::Result<()>;
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()>;
     async fn scroll(&self, direction: &str) -> anyhow::Result<()>;
+    /// Press a key (Enter, Tab, ArrowDown...) in the focused element. Trusted
+    /// CDP Input when supported, JS fallback (Enter -> form.submit) otherwise.
+    async fn press(&self, key: &str) -> anyhow::Result<()>;
+    /// Trusted click at raw viewport coords (cross-origin iframes / reCAPTCHA).
+    async fn click_coords(&self, x: i64, y: i64) -> anyhow::Result<()>;
     async fn get_html(&self) -> anyhow::Result<String>;
+
+    /// Register a JS init script (agent-browser `--init-script` borrow): runs
+    /// before every FUTURE navigation via Page.addScriptToEvaluateOnNewDocument.
+    async fn add_init_script(&self, _js: &str) -> anyhow::Result<()> {
+        anyhow::bail!("add_init_script not supported by this backend")
+    }
 
     /// Open a new tab at `url`; returns a tab id. Multi-page backends only.
     async fn open_tab(&self, _url: &str) -> anyhow::Result<String> {
@@ -151,6 +216,8 @@ pub trait BrowserBackend: Send + Sync {
             serde_json::from_value(self.evaluate(crate::backends::cdp::LINKS_JS).await?)
                 .unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
+        let crippled = detect_crippled(&challenge, elements.len());
+        let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url,
             title,
@@ -158,6 +225,8 @@ pub trait BrowserBackend: Send + Sync {
             elements,
             links,
             challenge,
+            crippled,
+            chrome_error,
         })
     }
 

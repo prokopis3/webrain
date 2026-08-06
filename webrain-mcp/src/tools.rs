@@ -132,20 +132,56 @@ RULES
   isolate parallel scrapes or pre-load login sessions in one tab while scraping
   in another.
 
-PARALLEL / MULTI-BROWSER EXECUTION
-- webrain's MCP server creates per-connection sessions. An orchestrator LLM can
-  spawn subagents with different CDP_URL values for true parallel execution:
-    Subagent A → CDP_URL=http://127.0.0.1:9222  (real Chrome, solving CF)
-    Subagent B → CDP_URL=http://127.0.0.1:9224  (obscura, batch scraping)
-    Subagent C → (no CDP) + webrain_fetch_http   (static pages, zero browser)
-- webrain_batch supports concurrency=N (parallel tabs within one browser).
+MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
+- webrain's MCP server makes a per-connection session per client. You can spawn
+  subagents, give each its own browser via CDP_URL, and they run in parallel:
+    Subagent A → CDP_URL=http://127.0.0.1:9222  (real Chrome — CF/SPA/interactive)
+    Subagent B → CDP_URL=http://127.0.0.1:9224  (obscura — fast bulk batch)
+    Subagent C → (no CDP)                        (webrain_fetch_http — static)
+- DELEGATE when you hit ANY of these; otherwise stay single-threaded:
+    1. Many independent URLs/pages/sites → shard the URL list across subagents
+       (each webrain_batch/extract on its shard). One browser already
+       parallelizes in-process (webrain_batch concurrency=N); delegate ACROSS
+       browsers for more throughput or different engines.
+    2. Different engines/roles → challenges/SPAs to Chrome, bulk to obscura,
+       static to fetch_http.
+    3. Per-proxy / per-IP isolation → one CDP_URL per subagent = own
+       proxy/cookies/fingerprint = N exit IPs at once.
+    4. Huge site-wide crawl → shard by subdomain/section, one webrain_spider
+       per subagent (own crawldir for checkpoint/resume).
+    5. Discovery overlaps extraction → one subagent finds schema/URLs on a new
+       site while others extract from known sites.
+- LAST PARALLEL LEVER: a single browser ALREADY parallelizes (webrain_batch
+  concurrency=N, cdp_urls round-robin). Delegate only when in-browser
+  parallelism is exhausted or you need DIFFERENT browsers/proxies.
+- DELEGATE BY PATTERN (shard the TASK, not the steps):
+    catalog / "find all" / many urls -> links -> validate -> batch; >~100 urls
+      or mixed engines -> shard urls across subagents
+    specific pages (3,4,7)          -> single agent, NO delegation
+    infinite scroll / load more     -> webrain_batch(op=interact) per site-group;
+      many interactive sites        -> one subagent per site-group
+    whole site / huge               -> webrain_spider; shard by subdomain, one
+      spider subagent each (own crawldir)
+- SUBAGENT SELF-HEAL (give each a fallback chain so it returns data, not failure):
+    extraction: webrain_fit/flatten -> extract_json -> eval -> annotate
+    pagination: construct /page/N -> click Next -> scroll -> scan
+    anti-bot:   on challenge, STOP + report — you re-route to the Chrome agent
+- SUBAGENT CONTRACT (give every subagent exact scope):
+    * ONE browser (CDP_URL), ONE task, explicit URL list OR seed+budget.
+    * Return COMPACT JSON only: {status, count, data[] | summary}. No raw HTML.
+    * On challenge/block: REPORT it (challenge field), don't fight it — you
+      re-route that URL to the Chrome subagent.
+- AGGREGATE yourself: dedupe by url/name (batch endpoints give sliding
+  windows), webrain_bm25 for relevance, merge into one answer with a count.
+- Subagents are just other LLMs with webrain MCP — they can nest or use
+  webrain_batch concurrency inside their own shard.
 "#;
 
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "webrain_guide",
-            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run scripts/stealth_solve.py for gated pages), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.",
+            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run scripts/stealth_solve.py for gated pages), the extraction tool matrix, and the multi-agent delegation doctrine (when/how to spawn parallel subagents by CDP_URL to optimize large or mixed-engine scrapes). Call FIRST when unsure which webrain tool/browser to use.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
@@ -361,6 +397,112 @@ pub fn list_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "webrain_fit",
+            "description": "Prune the current page to its dense content (crawl4ai PruningContentFilter borrow): strips nav/footer/aside/form/header boilerplate and returns the meaty text, scored by text-vs-link density + tag importance. No query needed. Use instead of raw innerText for LLM extraction — fewer tokens, denser signal.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_flatten",
+            "description": "Full composed page text including Shadow DOM (crawl4ai flatten_shadow_dom borrow). Web-Component sites (Lit/Stencil/Shoelace) render content in shadow roots that querySelectorAll/innerText miss. Resolves slots, recurses open shadow roots. Use when a page looks empty or extraction is missing content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_annotate",
+            "description": "Annotated viewport screenshot (agent-browser screenshot --annotate borrow): overlays numbered red boxes on interactive elements and returns a legend [{n, index, tag, text}]. The index maps to webrain_click/webrain_type indices. Built for vision models — read the labels, then click by index. Removes the overlay after capture.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "webrain_select",
+            "description": "Select an option in a native <select> dropdown by index (agent-browser select borrow): matches by option value OR visible text, fires a real change event. No-match is an error that lists available options so the LLM self-corrects. Index maps to the ELEMENTS_JS list from navigate/snapshot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Element index from navigate/snapshot (must be a <select>)"},
+                    "value": {"type": "string", "description": "Option value or visible text to select"}
+                },
+                "required": ["index", "value"]
+            }
+        }),
+        json!({
+            "name": "webrain_hover",
+            "description": "Hover an element by index (agent-browser hover borrow): moves the mouse over it via trusted CDP mouseMoved. Triggers CSS :hover menus, tooltips, and lazy hover-reveal content. Index maps to the ELEMENTS_JS list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Element index from navigate/snapshot"}
+                },
+                "required": ["index"]
+            }
+        }),
+        json!({
+            "name": "webrain_check",
+            "description": "Set a checkbox/radio to a state by index (agent-browser check/uncheck borrow): trusted click, verifies, falls back to JS label-retarget (native input -> label.control -> nested input). Returns the ACTUAL checked state so the LLM can verify. Index maps to the ELEMENTS_JS list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Element index from navigate/snapshot"},
+                    "checked": {"type": "boolean", "description": "Desired state", "default": true}
+                },
+                "required": ["index"]
+            }
+        }),
+        json!({
+            "name": "webrain_dialog",
+            "description": "Resolve a pending JavaScript dialog (alert/confirm/prompt) (agent-browser dialog borrow). A sync alert() pauses the page — every click/eval hangs until this resolves it. Call with action=accept or dismiss (optionally prompt_text for prompt()). Works even while the renderer is paused.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["accept", "dismiss"], "description": "Accept (ok) or dismiss (cancel) the dialog", "default": "accept"},
+                    "prompt_text": {"type": "string", "description": "Text to type into a prompt() dialog"}
+                }
+            }
+        }),
+        json!({
+            "name": "webrain_wait",
+            "description": "Standalone wait after an action (agent-browser wait borrow): wait a fixed ms, or poll until a CSS selector or visible-text substring appears (default timeout 15s). navigate already waits internally — this is for click->AJAX->render steps. Returns satisfied: bool.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ms": {"type": "integer", "description": "Fixed delay in ms"},
+                    "selector": {"type": "string", "description": "CSS selector to wait to exist"},
+                    "text": {"type": "string", "description": "Visible text substring to wait for"},
+                    "timeout_ms": {"type": "integer", "description": "Max wait in ms", "default": 15000}
+                }
+            }
+        }),
+        json!({
+            "name": "webrain_upload",
+            "description": "Upload files to a file input by index (agent-browser upload borrow): resolves the node and sets files via CDP DOM.setFileInputFiles. Index maps to the ELEMENTS_JS list (must be an <input type=file>).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Element index from navigate/snapshot (a file input)"},
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths to upload"}
+                },
+                "required": ["index", "files"]
+            }
+        }),
+        json!({
+            "name": "webrain_add_init_script",
+            "description": "Register a JS init script that runs before EVERY future navigation (agent-browser --init-script / addinitscript borrow) via Page.addScriptToEvaluateOnNewDocument. New documents only — already-loaded pages aren't rewritten. Use for closed-shadow-root piercing (attachShadow patch), API stubs, or route/UA overrides that must exist before page scripts run. Accumulates for the session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "js": { "type": "string", "description": "JavaScript source to run on each new document." }
+                },
+                "required": ["js"]
+            }
+        }),
+        json!({
             "name": "webrain_validate_urls",
             "description": "Validate a list of URLs — which are alive vs dead (browsemind seed(from_links, validate=True)). Filters 404s/5xx/errors. HEAD first, GET fallback. Use before batch extraction.",
             "inputSchema": {
@@ -510,12 +652,24 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_press",
-            "description": "Press a key in the focused element (Enter, Tab, Escape, Backspace, ArrowDown...). Use after webrain_type to submit forms.",
+            "description": "Press a key in the focused element (Enter, Tab, Escape, Backspace, ArrowDown...). Use after webrain_type to submit forms. Trusted CDP Input when supported, JS fallback (Enter dispatches form.submit).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "key": {"type": "string", "description": "Key to press", "default": "Enter"}
                 }
+            }
+        }),
+        json!({
+            "name": "webrain_click_coords",
+            "description": "Trusted click at raw viewport coordinates (borrowed from browsemind cdp_session_click_coords). For cross-origin iframe content and reCAPTCHA checkboxes where JS clicks only focus the element. Get coords from a screenshot or webrain_page_info.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "Viewport x"},
+                    "y": {"type": "integer", "description": "Viewport y"}
+                },
+                "required": ["x", "y"]
             }
         }),
         json!({
@@ -749,6 +903,134 @@ const PAGE_INFO_JS: &str = r#"(() => {
     position_pct: ph > vh ? Math.round((sy / (ph - vh)) * 100) : 0 };
 })()"#;
 
+/// crawl4ai `PruningContentFilter` borrow: no-query "fit" content extractor.
+/// Walks the DOM scoring blocks by text-vs-link density + tag importance, drops
+/// nav/footer/aside/form/header boilerplate, and returns the dense text — the
+/// meat of the page for the LLM, instead of raw innerText full of chrome.
+/// ponytail: block tags + score thresholds are a heuristic; tune if a page type
+/// over/under-prunes.
+const FIT_JS: &str = r#"(() => {
+  // Only leaf blocks emit. MAIN/ARTICLE/SECTION are containers — they wrap the
+  // whole page (e.g. Wikipedia <main class="mw-body">) and must always descend
+  // so a container can't dump the entire page + toolbar as one block.
+  const EMIT = new Set(['P','H1','H2','H3','H4','H5','H6','LI','TD','BLOCKQUOTE','PRE']);
+  const BONUS = { H1:60, H2:50, H3:40, P:20, LI:15, TD:15, PRE:10, BLOCKQUOTE:10 };
+  const skip = el => el.closest('nav,footer,aside,header,form,script,style,button,select,input');
+  const out = [];
+  let total = 0;
+  const CAP = 60000;
+  function walk(el) {
+    if (total >= CAP) return;
+    if (!el || el.nodeType !== 1) return;
+    if (skip(el)) return;
+    const text = (el.innerText || '').trim();
+    const wc = text ? text.split(/\s+/).length : 0;
+    if (EMIT.has(el.tagName) && wc >= 4) {
+      let linkChars = 0;
+      for (const a of el.querySelectorAll('a')) linkChars += (a.innerText || '').length;
+      const density = text.length > 0 ? 1 - (linkChars / text.length) : 1;
+      const score = wc * density + (BONUS[el.tagName] || 0);
+      if (score >= 12 && density >= 0.5) { out.push(text); total += text.length; return; }
+    }
+    for (const c of el.children) walk(c);
+  }
+  for (const c of document.body.children) walk(c);
+  return out.join('\n\n');
+})()"#;
+
+/// crawl4ai `flatten_shadow_dom` borrow, text-focused: walk light DOM + open
+/// shadow roots recursively (resolving <slot> projections) and return the full
+/// composed page text. Web-Component sites (Lit/Stencil/Shoelace) render content
+/// in shadow roots that querySelectorAll/innerText miss entirely.
+/// ponytail: open shadow roots only — closed roots need an attachShadow patch
+/// injected before component creation; add if a target site uses closed roots.
+const FLATTEN_JS: &str = r#"(() => {
+  function textOf(node) {
+    if (node.nodeType === 3) return node.textContent || '';
+    if (node.nodeType !== 1) return '';
+    const t = (node.tagName || '').toLowerCase();
+    if (t === 'script' || t === 'style' || t === 'noscript') return '';
+    if (t === 'slot') {
+      const assigned = node.assignedNodes({ flatten: true });
+      let s = '';
+      for (const a of assigned) s += textOf(a);
+      if (s) return s;
+      let fb = '';
+      for (const c of node.childNodes) fb += textOf(c);
+      return fb;
+    }
+    let s = '';
+    if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) s += textOf(c);
+    for (const c of node.childNodes) s += textOf(c);
+    return s;
+  }
+  return (textOf(document.body) || '').replace(/\n{3,}/g, '\n\n').trim();
+})()"#;
+
+/// agent-browser `screenshot --annotate` borrow: overlay numbered red boxes on
+/// interactive elements at VIEWPORT coords (position:fixed), matching webrain's
+/// click indices. Returns the legend [{n, index, tag, text}] so the vision LLM
+/// can read the labels and click by index. Viewport screenshot only.
+const ANNOTATE_JS: &str = r#"(() => {
+  const els = Array.from(document.querySelectorAll('a, button, input, select, textarea, [role="button"]'));
+  const existing = document.getElementById('__webrain_annotate__');
+  if (existing) existing.remove();
+  const c = document.createElement('div');
+  c.id = '__webrain_annotate__';
+  c.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647;';
+  const items = [];
+  for (let i = 0; i < els.length && items.length < 50; i++) {
+    const el = els[i];
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const n = items.length + 1;
+    const b = document.createElement('div');
+    b.style.cssText = 'position:fixed;left:' + r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px;border:2px solid rgba(255,0,0,0.85);box-sizing:border-box;';
+    const l = document.createElement('div');
+    l.textContent = String(n);
+    l.style.cssText = 'position:fixed;top:' + (r.top < 14 ? '0px' : (r.top - 15) + 'px') + ';left:' + r.left + 'px;background:rgba(255,0,0,0.9);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:2px;white-space:nowrap;';
+    b.appendChild(l);
+    c.appendChild(b);
+    items.push({ n: n, index: i, tag: el.tagName, text: (el.innerText || el.value || '').trim().slice(0, 50) });
+  }
+  document.documentElement.appendChild(c);
+  return items;
+})()"#;
+
+/// Crude visible-text length of raw HTML (tag-strip; no regex dep in webrain-mcp).
+pub(crate) fn visible_text_len(html: &str) -> usize {
+    let mut out = 0usize;
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out += 1,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// spider-rs `smart` borrow (lazy slice): is this raw HTML a JS shell the
+/// browser is needed for? True when the page says JS is required, or when
+/// there's almost no visible text AND script tags are present.
+pub(crate) fn probe_needs_js(html: &str) -> bool {
+    let l = html.to_ascii_lowercase();
+    const JS_MARKERS: &[&str] = &[
+        "enable javascript",
+        "javascript is required",
+        "javascript is disabled",
+        "enable js",
+    ];
+    if JS_MARKERS.iter().any(|m| l.contains(m)) {
+        return true;
+    }
+    // An HTML shell with almost no visible text is almost certainly JS-rendered.
+    // (script tags often sit past the 3000-char text cap, so don't require them.)
+    visible_text_len(html) < 100 && l.contains("<html")
+}
+
 /// Filter + cap an accessibility tree to what the LLM needs right now
 /// (just-in-time: don't dump 30KB of nodes when only buttons/links matter).
 fn filter_ax(nodes: &Value, role: Option<&str>, filter: Option<&str>, max: Option<usize>) -> Value {
@@ -845,6 +1127,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
 
     match name {
         "webrain_guide" => json!({"status": "ok", "guide": AGENT_GUIDE}),
+        "webrain_add_init_script" => {
+            let js = args.get("js").and_then(|v| v.as_str()).unwrap_or("");
+            if js.is_empty() {
+                return json!({"status": "error", "message": "js required"});
+            }
+            match backend.add_init_script(js).await {
+                Ok(_) => json!({"status": "ok"}),
+                Err(e) => err(e),
+            }
+        }
         "webrain_navigate" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if url.is_empty() {
@@ -853,7 +1145,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let opts = nav_opts(args);
             match backend.navigate_opts(url, &opts).await {
                 Ok(s) => {
-                    json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge})
+                    json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge, "crippled": s.crippled, "chrome_error": s.chrome_error})
                 }
                 Err(e) => err(e),
             }
@@ -896,6 +1188,17 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             match backend.type_text(idx as usize, text).await {
                 Ok(_) => json!({"status": "ok", "typed": idx}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_click_coords" => {
+            let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if x < 0 || y < 0 {
+                return json!({"status": "error", "message": "x and y required"});
+            }
+            match backend.click_coords(x, y).await {
+                Ok(_) => json!({"status": "ok", "x": x, "y": y}),
                 Err(e) => err(e),
             }
         }
@@ -1074,7 +1377,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         "webrain_snapshot" => match backend.snapshot().await {
             Ok(s) => {
-                json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge})
+                json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge, "crippled": s.crippled, "chrome_error": s.chrome_error})
             }
             Err(e) => err(e),
         },
@@ -1223,6 +1526,143 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .unwrap_or_default();
             let results = bm25_filter(&items, query, k);
             json!({"status": "ok", "count": results.len(), "results": results})
+        }
+        "webrain_fit" => {
+            // crawl4ai PruningContentFilter borrow: dense page text, no query.
+            match backend.evaluate(FIT_JS).await {
+                Ok(v) => {
+                    let text = v.as_str().unwrap_or("");
+                    let words = text.split_whitespace().count();
+                    json!({"status": "ok", "chars": text.chars().count(), "words": words, "text": text})
+                }
+                Err(e) => err(e),
+            }
+        }
+        "webrain_flatten" => {
+            // crawl4ai flatten_shadow_dom borrow: composed text incl. shadow DOM.
+            match backend.evaluate(FLATTEN_JS).await {
+                Ok(v) => {
+                    let text = v.as_str().unwrap_or("");
+                    let words = text.split_whitespace().count();
+                    json!({"status": "ok", "chars": text.chars().count(), "words": words, "text": text})
+                }
+                Err(e) => err(e),
+            }
+        }
+        "webrain_annotate" => {
+            // agent-browser screenshot --annotate borrow: numbered overlay + legend.
+            match backend.evaluate(ANNOTATE_JS).await {
+                Ok(legend) => {
+                    let shot = backend.screenshot(false).await;
+                    let _ = backend
+                        .evaluate("document.getElementById('__webrain_annotate__')?.remove()")
+                        .await;
+                    match shot {
+                        Ok(png) => {
+                            use base64::Engine;
+                            json!({"status": "ok", "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(png), "legend": legend})
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                Err(e) => err(e),
+            }
+        }
+        "webrain_select" => {
+            // agent-browser select_option borrow: value|text match, change event,
+            // error lists available options on no-match.
+            let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if idx < 0 {
+                return json!({"status": "error", "message": "index required"});
+            }
+            match backend.select_option(idx as usize, value).await {
+                Ok(v) => json!({"status": "ok", "matched": v["matched"]}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_hover" => {
+            let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if idx < 0 {
+                return json!({"status": "error", "message": "index required"});
+            }
+            match backend.hover(idx as usize).await {
+                Ok(_) => json!({"status": "ok", "hovered": idx}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_check" => {
+            // agent-browser check/uncheck borrow: click + verify + label retarget.
+            let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let want = args.get("checked").and_then(|v| v.as_bool()).unwrap_or(true);
+            if idx < 0 {
+                return json!({"status": "error", "message": "index required"});
+            }
+            match backend.set_checked(idx as usize, want).await {
+                Ok(state) => json!({"status": "ok", "index": idx, "checked": state}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_dialog" => {
+            // agent-browser handle_dialog borrow: unblocks a paused renderer.
+            let accept = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map(|a| a != "dismiss")
+                .unwrap_or(true);
+            let prompt = args.get("prompt_text").and_then(|v| v.as_str());
+            match backend.dialog(accept, prompt).await {
+                Ok(_) => json!({"status": "ok"}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_wait" => {
+            // agent-browser wait borrow: fixed ms or poll selector/text.
+            if let Some(ms) = args.get("ms").and_then(|v| v.as_u64()) {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                return json!({"status": "ok", "satisfied": true});
+            }
+            let timeout = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(15000);
+            let expr = if let Some(sel) = args.get("selector").and_then(|v| v.as_str()) {
+                format!("document.querySelector({sel:?}) !== null", sel = sel)
+            } else if let Some(t) = args.get("text").and_then(|v| v.as_str()) {
+                format!(
+                    "(document.body && document.body.innerText || '').includes({t:?})",
+                    t = t
+                )
+            } else {
+                return json!({"status": "error", "message": "one of ms, selector, text required"});
+            };
+            match backend.wait_for(&expr, timeout).await {
+                Ok(satisfied) => json!({"status": "ok", "satisfied": satisfied}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_upload" => {
+            // agent-browser upload borrow: DOM.setFileInputFiles via node id.
+            let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let files: Vec<String> = args
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if idx < 0 {
+                return json!({"status": "error", "message": "index required"});
+            }
+            if files.is_empty() {
+                return json!({"status": "error", "message": "files required"});
+            }
+            match backend.set_file_inputs(idx as usize, &files).await {
+                Ok(_) => json!({"status": "ok", "uploaded": files.len()}),
+                Err(e) => err(e),
+            }
         }
         "webrain_validate_urls" => {
             // browsemind seed(from_links, validate=True): which URLs are alive vs dead.
@@ -1590,7 +2030,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Ok(s) => json!({
                     "status": "ok", "engine": engine, "url": s.url, "title": s.title,
                     "text": s.text.chars().take(3000).collect::<String>(), "elements": s.elements,
-                    "links": s.links, "challenge": s.challenge
+                    "links": s.links, "challenge": s.challenge, "crippled": s.crippled,
+                    "chrome_error": s.chrome_error
                 }),
                 Err(e) => err(e),
             }
@@ -1609,21 +2050,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         "webrain_press" => {
             let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("Enter");
-            let js = format!(
-                r#"(function() {{
-                    const k = '{key}';
-                    const map = {{'Enter':'Enter','Tab':'Tab','Escape':'Escape','Backspace':'Backspace','ArrowDown':'ArrowDown','ArrowUp':'ArrowUp','Space':' '}};
-                    const key = map[k] || k;
-                    const el = document.activeElement || document.body;
-                    const opts = {{ key, code: key, bubbles: true, cancelable: true }};
-                    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-                    el.dispatchEvent(new KeyboardEvent('keyup', opts));
-                    if (el.form && k === 'Enter') {{ el.form.dispatchEvent(new Event('submit', {{ bubbles: true, cancelable: true }})); return 'form-submitted'; }}
-                    return 'pressed ' + k;
-                }})()"#
-            );
-            match backend.evaluate(&js).await {
-                Ok(v) => json!({"status": "ok", "result": v}),
+            // Trusted CDP Input.dispatchKeyEvent (browsemind cdp_session_press),
+            // JS fallback. Enter routes through the JS path to get form.submit().
+            match backend.press(&key).await {
+                Ok(_) => json!({"status": "ok", "pressed": key}),
                 Err(e) => err(e),
             }
         }

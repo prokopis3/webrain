@@ -3,7 +3,7 @@
 //
 // ponytail: single connection, one page, synchronous CDP command/response per call.
 
-use crate::browser::{BrowserBackend, InteractiveElement, PageState, detect_antibot};
+use crate::browser::{BrowserBackend, InteractiveElement, PageState, detect_antibot, detect_chrome_error, detect_crippled};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -306,6 +306,10 @@ pub struct CdpBackend {
     /// buffered in net_urls (browsemind NetworkCapture pattern).
     net_capture: Arc<Mutex<bool>>,
     net_urls: Arc<Mutex<Vec<String>>>,
+    /// User-registered init scripts (agent-browser `--init-script` borrow):
+    /// replayed via Page.addScriptToEvaluateOnNewDocument in attach_and_init so
+    /// they run before every new document on every tab.
+    init_scripts: Arc<Mutex<Vec<String>>>,
 }
 
 /// A single attached page target (one browser tab).
@@ -370,6 +374,7 @@ impl CdpBackend {
             snap: Arc::new(Mutex::new(None)),
             net_capture: Arc::new(Mutex::new(false)),
             net_urls: Arc::new(Mutex::new(Vec::new())),
+            init_scripts: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -635,7 +640,38 @@ impl CdpBackend {
             json!({"source": STEALTH_JS}),
         )
         .await?;
+        // User init scripts (agent-browser --init-script borrow): replay on every
+        // newly attached tab so they survive per-tab session creation. Best-effort
+        // (a bad user script must not kill the attach).
+        for js in self.init_scripts.lock().await.iter() {
+            let _ = self
+                .send_cmd_with(
+                    Some(&sid),
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({"source": js}),
+                )
+                .await;
+        }
         Ok(sid)
+    }
+
+    /// Register a page init script (agent-browser `--init-script` borrow): runs
+    /// via Page.addScriptToEvaluateOnNewDocument before every FUTURE navigation
+    /// (new documents only — already-loaded pages aren't rewritten). Push to the
+    /// shared list (replayed in attach_and_init for every new tab) + register on
+    /// the active session immediately.
+    pub async fn add_init_script(&self, js: &str) -> anyhow::Result<()> {
+        self.init_scripts.lock().await.push(js.to_string());
+        if let Some(sid) = self.active_session().await {
+            let _ = self
+                .send_cmd_with(
+                    Some(&sid),
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({"source": js}),
+                )
+                .await;
+        }
+        Ok(())
     }
 
     /// Id of the first registered tab, if any (single-target reuse).
@@ -1121,6 +1157,8 @@ impl CdpBackend {
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
+        let crippled = detect_crippled(&challenge, elements.len());
+        let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url: url.to_string(),
             title,
@@ -1128,7 +1166,381 @@ impl CdpBackend {
             elements,
             links,
             challenge,
+            crippled,
+            chrome_error,
         })
+    }
+}
+
+// ── Trusted-input helpers (browsemind cdp_session_* borrow) ──────────────
+// CDP Input.* produces isTrusted=true events React/Polymer/shadow-DOM respect,
+// unlike JS el.click()/.value= (synthetic, often swallowed). JS fallback keeps
+// engines without Input.* support (lightpanda) working.
+
+/// Scroll into view + viewport-center of element `index`. CDP Input uses
+/// VIEWPORT coords — do NOT add scrollX/scrollY. None when missing/invisible.
+async fn element_center(b: &CdpBackend, index: usize) -> anyhow::Result<Option<(i64, i64)>> {
+    let js = format!(
+        r#"(function() {{
+            const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+            if (!el) return null;
+            el.scrollIntoView({{ block: 'center', behavior: 'instant' }});
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return null;
+            return [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)];
+        }})()"#
+    );
+    let v = b.eval_js(&js).await?;
+    Ok(v.as_array().and_then(|a| Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))))
+}
+
+/// True when `elementFromPoint(x,y)` resolves to the element at `index` (or a
+/// descendant). Coordinate-less engines (obscura: no layout → elementFromPoint
+/// is null) return false so callers fall back to element-based JS activation.
+async fn click_landed(b: &CdpBackend, x: i64, y: i64, index: usize) -> anyhow::Result<bool> {
+    let js = format!(
+        r#"(function() {{
+            const els = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
+            const el = els[{index}];
+            if (!el) return false;
+            const hit = document.elementFromPoint({x}, {y});
+            if (!hit) return false;
+            return el === hit || el.contains(hit);
+        }})()"#
+    );
+    let v = b.eval_js(&js).await?;
+    Ok(v.as_bool().unwrap_or(false))
+}
+
+/// Focus + clear an input/textarea/contenteditable by index.
+async fn focus_clear(b: &CdpBackend, index: usize) -> anyhow::Result<()> {
+    let js = format!(
+        r#"(function() {{
+            const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+            if (!el) return false;
+            if (!/input|textarea|select/i.test(el.tagName) && !el.isContentEditable) return false;
+            el.focus();
+            if ('value' in el) el.value = '';
+            return true;
+        }})()"#
+    );
+    let v = b.eval_js(&js).await?;
+    if v.as_bool().unwrap_or(false) {
+        Ok(())
+    } else {
+        anyhow::bail!("element {index} is not an input")
+    }
+}
+
+/// Trusted click at viewport coords via CDP Input.dispatchMouseEvent
+/// (mousePressed + mouseReleased). Goes through the real browser input
+/// pipeline → isTrusted=true, crosses shadow-DOM + cross-origin iframe
+/// boundaries (reCAPTCHA). NO JS click here — CDP already fires the click, so
+/// adding el.click() would double-fire. Engines without Input.* (lightpanda)
+/// return Err; callers fall back to element-based el.click().
+async fn dispatch_click(b: &CdpBackend, x: i64, y: i64) -> anyhow::Result<()> {
+    // Bound the ack wait (agent-browser `dispatch_mouse_or_dialog` borrow): a
+    // synchronous alert()/confirm() in the click handler pauses the renderer,
+    // so the CDP input ack never arrives — without a timeout the click call
+    // AND every later eval hang forever. On timeout the click usually landed
+    // and a dialog is pending: return Ok and let webrain_dialog resolve it.
+    let press = b.send_cmd(
+        "Input.dispatchMouseEvent",
+        json!({"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1}),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(2), press).await {
+        Ok(inner) => inner.map(|_| ())?, // engine without Input.* → Err → JS fallback
+        Err(_) => return Ok(()),          // renderer paused on a dialog — treat as dispatched
+    }
+    let release = b.send_cmd(
+        "Input.dispatchMouseEvent",
+        json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 0}),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(2), release).await {
+        Ok(inner) => inner.map(|_| ()), // engine error → caller JS fallback
+        Err(_) => Ok(()),                // dialog pending — treated as dispatched
+    }
+}
+
+/// Stable backend-node click center (browsemind cdp_session_click_backend).
+/// Element at `index` → backend node → `DOM.getContentQuads` → first-quad
+/// center. `backend_node_id` survives incremental DOM mutations that stale
+/// getBoundingClientRect coords don't, so the click lands even after the page
+/// shifted. Chrome/Chromium (incl. Playwright chromium on Linux) implement it;
+/// obscura/lightpanda lack layout/quads → None and the caller falls back to
+/// the viewport-coord path.
+async fn backend_click_center(b: &CdpBackend, index: usize) -> Option<(i64, i64)> {
+    // Reuse webrain's own per-element CSS selector (ELEMENTS_JS) — the same one
+    // navigate/snapshot indices map to.
+    let elements: Value = b.eval_js(ELEMENTS_JS).await.ok()?;
+    let selector = elements.as_array()?.get(index)?.get("selector")?.as_str()?;
+    if selector.is_empty() {
+        return None;
+    }
+    // DOM.enable is idempotent; ignore failure — getDocument/querySelector
+    // below will also fail → None → caller falls back.
+    let _ = b.send_cmd("DOM.enable", json!({})).await;
+    let doc = b
+        .send_cmd("DOM.getDocument", json!({"depth": 0}))
+        .await
+        .ok()?;
+    let root = doc["root"]["nodeId"].as_i64()?;
+    // Resolve the selector to a backend node (stable across DOM mutations).
+    let q = b
+        .send_cmd(
+            "DOM.querySelector",
+            json!({"nodeId": root, "selector": selector}),
+        )
+        .await
+        .ok()?;
+    let node_id = q["nodeId"].as_i64()?;
+    if node_id == 0 {
+        return None;
+    }
+    // nodeId → layout quads.
+    let quads = b
+        .send_cmd("DOM.getContentQuads", json!({"nodeId": node_id}))
+        .await
+        .ok()?;
+    let first = quads["quads"].as_array()?.first()?;
+    // Quad = 8 numbers (x0,y0,x1,y1,x2,y2,x3,y3); center of the first quad.
+    let xs: Vec<f64> = (0..4)
+        .filter_map(|i| first.get(i * 2).and_then(|v| v.as_f64()))
+        .collect();
+    let ys: Vec<f64> = (0..4)
+        .filter_map(|i| first.get(i * 2 + 1).and_then(|v| v.as_f64()))
+        .collect();
+    if xs.len() != 4 || ys.len() != 4 {
+        return None;
+    }
+    let cx = ((xs[0] + xs[1] + xs[2] + xs[3]) / 4.0).round() as i64;
+    let cy = ((ys[0] + ys[1] + ys[2] + ys[3]) / 4.0).round() as i64;
+    if cx <= 0 || cy <= 0 {
+        return None;
+    }
+    Some((cx, cy))
+}
+
+/// Dispatch a trusted click at (x,y) IF it lands on the element at `index`.
+/// True when the trusted CDP click was actually dispatched (landed + engine
+/// accepted Input.dispatchMouseEvent).
+async fn try_click_at(b: &CdpBackend, x: i64, y: i64, index: usize) -> bool {
+    click_landed(b, x, y, index).await.unwrap_or(false) && dispatch_click(b, x, y).await.is_ok()
+}
+
+/// Resolve element `index` (ELEMENTS_JS selector) to a CDP DOM nodeId. Same
+/// getDocument→querySelector path backend_click_center uses — needed by upload
+/// (DOM.setFileInputFiles wants a node). None when missing/unresolvable.
+async fn resolve_node_id(b: &CdpBackend, index: usize) -> Option<i64> {
+    let elements: Value = b.eval_js(ELEMENTS_JS).await.ok()?;
+    let selector = elements.as_array()?.get(index)?.get("selector")?.as_str()?;
+    if selector.is_empty() {
+        return None;
+    }
+    let _ = b.send_cmd("DOM.enable", json!({})).await;
+    let doc = b
+        .send_cmd("DOM.getDocument", json!({"depth": 0}))
+        .await
+        .ok()?;
+    let root = doc["root"]["nodeId"].as_i64()?;
+    let q = b
+        .send_cmd(
+            "DOM.querySelector",
+            json!({"nodeId": root, "selector": selector}),
+        )
+        .await
+        .ok()?;
+    let node_id = q["nodeId"].as_i64()?;
+    if node_id == 0 {
+        return None;
+    }
+    Some(node_id)
+}
+
+// ── agent-browser borrows: select / hover / check / dialog / wait / upload ──
+impl CdpBackend {
+    /// Select a `<select>` option by value OR visible text (agent-browser
+    /// `select_option` borrow). No-match is an ERROR listing available options
+    /// so the LLM self-corrects instead of silently staying wrong.
+    pub async fn select_option(&self, index: usize, value: &str) -> anyhow::Result<Value> {
+        self.ensure_page_attached().await?;
+        let js = format!(
+            r#"(function() {{
+                const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+                if (!el) return {{ error: 'no element at index {index}' }};
+                if (el.tagName.toLowerCase() !== 'select') return {{ error: 'element {index} is not a <select>' }};
+                const options = Array.from(el.options);
+                const want = {value:?};
+                let matched = 0;
+                for (const opt of options) {{
+                    opt.selected = opt.value === want || opt.textContent.trim() === want;
+                    if (opt.selected) matched += 1;
+                }}
+                if (matched === 0) {{
+                    const avail = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+                    return {{ error: 'No option matched ' + JSON.stringify(want) + '. Available options: ' + avail }};
+                }}
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return {{ matched: matched }};
+            }})()"#,
+            value = value
+        );
+        let v = self.eval_js(&js).await?;
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!("{e}");
+        }
+        Ok(v)
+    }
+
+    /// Trusted hover (agent-browser `hover` borrow): Input.dispatchMouseEvent
+    /// mouseMoved to the element's center — triggers CSS :hover / JS
+    /// mouseenter / hover-reveal content. JS fallback for engines w/o Input.*.
+    pub async fn hover(&self, index: usize) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        if let Some((x, y)) = element_center(self, index).await? {
+            if self
+                .send_cmd(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseMoved", "x": x, "y": y}),
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        let js = format!(
+            r#"(function() {{
+                const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+                if (!el) return 'not found';
+                for (const t of ['mouseover', 'mouseenter', 'mousemove']) el.dispatchEvent(new MouseEvent(t, {{ bubbles: true }}));
+                return 'hovered';
+            }})()"#
+        );
+        self.eval_js(&js).await?;
+        Ok(())
+    }
+
+    /// Checked state by index (agent-browser `is_element_checked` borrow):
+    /// native .checked → aria-checked → label retarget → nested input.
+    pub async fn is_checked(&self, index: usize) -> anyhow::Result<bool> {
+        self.ensure_page_attached().await?;
+        let js = format!(
+            r#"(function() {{
+                const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+                if (!el) return false;
+                const tag = el.tagName.toUpperCase();
+                if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) return !!el.checked;
+                const role = el.getAttribute && el.getAttribute('role');
+                if (role && ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'].indexOf(role) !== -1) return el.getAttribute('aria-checked') === 'true';
+                const label = tag === 'LABEL' ? el : (el.closest ? el.closest('label') : null);
+                if (label && label.control && (label.control.type === 'checkbox' || label.control.type === 'radio')) return !!label.control.checked;
+                const nested = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                return nested ? !!nested.checked : false;
+            }})()"#
+        );
+        Ok(self.eval_js(&js).await?.as_bool().unwrap_or(false))
+    }
+
+    /// Drive a checkbox/radio to `want` by index (agent-browser `check`/
+    /// `uncheck` borrow). CDP click first; on state mismatch, JS retargets
+    /// (native input → label.control → nested input) and clicks that. Returns
+    /// the ACTUAL post-click state so the LLM can verify.
+    pub async fn set_checked(&self, index: usize, want: bool) -> anyhow::Result<bool> {
+        self.click(index).await?;
+        let mut state = self.is_checked(index).await.unwrap_or(false);
+        if state != want {
+            let js = format!(
+                r#"(function() {{
+                    const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+                    if (!el) return false;
+                    const tag = el.tagName.toUpperCase();
+                    let target = null;
+                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) target = el;
+                    else {{
+                        const label = tag === 'LABEL' ? el : (el.closest ? el.closest('label') : null);
+                        if (label && label.control && (label.control.type === 'checkbox' || label.control.type === 'radio')) target = label.control;
+                        else target = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                    }}
+                    if (target) target.click();
+                    return !!target;
+                }})()"#
+            );
+            let _ = self.eval_js(&js).await;
+            state = self.is_checked(index).await.unwrap_or(state);
+        }
+        Ok(state)
+    }
+
+    /// Resolve a pending JS dialog (agent-browser `handle_dialog` borrow).
+    /// Browser-served — works even when a sync alert() has paused the
+    /// renderer, unblocking a stuck session.
+    pub async fn dialog(&self, accept: bool, prompt_text: Option<&str>) -> anyhow::Result<()> {
+        let sid = self
+            .active_session()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("no active page"))?;
+        let mut params = json!({"accept": accept});
+        if let Some(t) = prompt_text {
+            params["promptText"] = json!(t);
+        }
+        self.send_cmd_with(Some(&sid), "Page.handleJavaScriptDialog", params)
+            .await?;
+        Ok(())
+    }
+
+    /// Upload files to a file input by index (agent-browser `upload_files`
+    /// borrow): DOM.getDocument → DOM.querySelector → DOM.setFileInputFiles.
+    pub async fn set_file_inputs(&self, index: usize, files: &[String]) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        let is_file: bool = self
+            .eval_js(&format!(
+                r#"(function() {{
+                    const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
+                    return !!(el && el.tagName === 'INPUT' && el.type === 'file');
+                }})()"#
+            ))
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if !is_file {
+            anyhow::bail!("element {index} is not an <input type=file>");
+        }
+        let node_id = resolve_node_id(self, index)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("could not resolve file input node at index {index}"))?;
+        self.send_cmd(
+            "DOM.setFileInputFiles",
+            json!({"nodeId": node_id, "files": files}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Standalone wait (agent-browser `wait` borrow): poll JS `expr` until
+    /// truthy or `timeout_ms`. The LLM's post-action wait primitive
+    /// (click→AJAX→render) — navigate already has an internal wait.
+    pub async fn wait_for(&self, expr: &str, timeout_ms: u64) -> anyhow::Result<bool> {
+        self.ensure_page_attached().await?;
+        let start = std::time::Instant::now();
+        loop {
+            let v = self.eval_js(expr).await?;
+            let truthy = match &v {
+                Value::Bool(b) => *b,
+                Value::String(s) => !s.is_empty(),
+                Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
+                Value::Array(a) => !a.is_empty(),
+                Value::Object(o) => !o.is_empty(),
+                _ => false,
+            };
+            if truthy {
+                return Ok(true);
+            }
+            if start.elapsed().as_millis() as u64 >= timeout_ms {
+                return Ok(false);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -1160,7 +1572,27 @@ impl BrowserBackend for CdpBackend {
 
     async fn click(&self, index: usize) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
-        // Click by index — uses the interactive elements array
+        // 1) Stable backend-node click (browsemind cdp_session_click_backend):
+        //    DOM.getContentQuads via the element's backend node — survives
+        //    incremental DOM mutations that stale viewport coords don't.
+        //    Chrome/Chromium (incl. Playwright chromium on Linux) implement it;
+        //    obscura/lightpanda return None → fall through.
+        if let Some((x, y)) = backend_click_center(self, index).await {
+            if try_click_at(self, x, y, index).await {
+                return Ok(());
+            }
+        }
+        // 2) Trusted CDP at the element's viewport center (browsemind
+        //    cdp_session_click). GATE on the click landing: coordinate-less
+        //    engines (obscura) report elementFromPoint()==null → fall through
+        //    to the element-based JS click, which fires reliably on every
+        //    engine.
+        if let Ok(Some((x, y))) = element_center(self, index).await {
+            if try_click_at(self, x, y, index).await {
+                return Ok(());
+            }
+        }
+        // 3) JS fallback: el.click() on the element directly (obscura/lightpanda).
         let js = format!(
             r#"(function() {{
                 const el = document.querySelectorAll('a, button, input, select, textarea, [role="button"]')[{index}];
@@ -1174,6 +1606,19 @@ impl BrowserBackend for CdpBackend {
 
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
+        // Trusted CDP path (browsemind cdp_session_type): focus+clear then
+        // Input.insertText — React/Vue detect isTrusted=true (JS .value= +
+        // synthetic Event is ignored by controlled inputs).
+        if focus_clear(self, index).await.is_ok() {
+            if self
+                .send_cmd("Input.insertText", json!({"text": text}))
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        // JS fallback
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
         // Same selector as ELEMENTS_JS/click so indices from navigate/snapshot
         // map 1:1 to type_text (was: input-only list — index mismatch bug).
@@ -1189,6 +1634,67 @@ impl BrowserBackend for CdpBackend {
             }})()"#
         );
         self.eval_js(&js).await?;
+        Ok(())
+    }
+
+    async fn press(&self, key: &str) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Trusted CDP path (browsemind cdp_session_press). NOTE: CDP
+        // dispatchKeyEvent does NOT trigger native form submission for Enter —
+        // Enter keeps the JS path which dispatches form.submit().
+        if key != "Enter" {
+            let (k, code) = match key {
+                "Tab" => ("Tab", "Tab"),
+                "Escape" => ("Escape", "Escape"),
+                "Backspace" => ("Backspace", "Backspace"),
+                "ArrowDown" => ("ArrowDown", "ArrowDown"),
+                "ArrowUp" => ("ArrowUp", "ArrowUp"),
+                "Space" => (" ", "Space"),
+                _ => (key, key),
+            };
+            let p = json!({"type": "keyDown", "key": k, "code": code});
+            if self.send_cmd("Input.dispatchKeyEvent", p).await.is_ok()
+                && self
+                    .send_cmd(
+                        "Input.dispatchKeyEvent",
+                        json!({"type": "keyUp", "key": k, "code": code}),
+                    )
+                    .await
+                    .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        // JS fallback (Enter here — dispatches form.submit; lightpanda too)
+        let js = format!(
+            r#"(function() {{
+                const k = '{key}';
+                const map = {{'Enter':'Enter','Tab':'Tab','Escape':'Escape','Backspace':'Backspace','ArrowDown':'ArrowDown','ArrowUp':'ArrowUp','Space':' '}};
+                const key = map[k] || k;
+                const el = document.activeElement || document.body;
+                const opts = {{ key, code: key, bubbles: true, cancelable: true }};
+                el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                if (el.form && k === 'Enter') {{ el.form.dispatchEvent(new Event('submit', {{ bubbles: true, cancelable: true }})); return 'form-submitted'; }}
+                return 'pressed ' + k;
+            }})()"#
+        );
+        self.eval_js(&js).await?;
+        Ok(())
+    }
+
+    async fn click_coords(&self, x: i64, y: i64) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Trusted coordinate click (browsemind cdp_session_click_coords):
+        // crosses cross-origin iframe boundaries (reCAPTCHA) where JS clicks
+        // only focus. dispatch_click already has a JS pointer fallback.
+        if dispatch_click(self, x, y).await.is_err() {
+            // JS fallback (lightpanda lacks Input.*)
+            self.eval_js(&format!(
+                r#"(function() {{ const el = document.elementFromPoint({x}, {y}); if (el) el.click(); return !!el; }})()"#
+            ))
+            .await?;
+        }
         Ok(())
     }
 
@@ -1296,6 +1802,8 @@ impl BrowserBackend for CdpBackend {
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
+        let crippled = detect_crippled(&challenge, elements.len());
+        let chrome_error = detect_chrome_error(&title, &text);
         let state = PageState {
             url,
             title,
@@ -1303,6 +1811,8 @@ impl BrowserBackend for CdpBackend {
             elements,
             links,
             challenge,
+            crippled,
+            chrome_error,
         };
         *self.snap.lock().await = Some(state.clone());
         Ok(state)
@@ -1314,6 +1824,10 @@ impl BrowserBackend for CdpBackend {
 
     async fn open_tab(&self, url: &str) -> anyhow::Result<String> {
         CdpBackend::open_tab(self, url).await
+    }
+
+    async fn add_init_script(&self, js: &str) -> anyhow::Result<()> {
+        CdpBackend::add_init_script(self, js).await
     }
     async fn activate_tab(&self, id: &str) -> anyhow::Result<()> {
         CdpBackend::activate_tab(self, id).await
