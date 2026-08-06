@@ -80,6 +80,8 @@ After `webrain_navigate(url)`, check `challenge` in the response:
 | **Site has a sitemap** (discover ALL urls first) | `webrain_sitemap(url)` → `{urls, count}` | Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Feed the urls into `webrain_batch` for a full crawl. |
 | **N interactive sites at once** (load-more / infinite-scroll / form fill) | `webrain_batch(op=interact, urls=[...], interaction=<async JS>, base_selector?, fields?, concurrency=N)` | One call replaces N serial agent loops: the interaction JS runs in PARALLEL tabs, each doing its own waits, then optionally extracts. See `interaction` examples in §4b. |
 | **Per-proxy isolation / spread across browsers** | `webrain_batch(op=extract|fetch|interact, urls=[...], cdp_urls=["http://127.0.0.1:9222","http://127.0.0.1:9224",...])` | Round-robins URLs across N CDP backends — each browser = own proxy/cookies/fingerprint = N exit IPs in one call, no subagents. |
+| **N independent sites / more throughput / different engines** | **delegate** — spawn one subagent per browser/site-group, each with its own `CDP_URL` (see §4c) | One browser already parallelizes inside via `webrain_batch concurrency=N`; delegate *across* browsers for scale. |
+| **Huge site-wide crawl** | **delegate** — shard by subdomain/section, one `webrain_spider` per subagent (each its own `crawldir` for checkpoint/resume) | See §4c. |
 | **Persist a batch to disk** | `webrain_batch(..., output="output/my_crawl.json")` | Writes the full payload before returning (`written_to` in response) — survives temp-file GC / dropped responses between turns. |
 | Faster/smaller reads on any browser call | `webrain_navigate`/`webrain_batch` args: `network_idle` (wait for no new network), `wait_selector` + `wait_selector_state` (attached/visible/hidden/detached), `disable_resources` (block fonts/images/media), `css_selector` (narrow returned text to one element) | Token + time savers; all default off. |
 | Emails, phones, prices, dates, IDs | `webrain_extract_regex` | Built-in patterns. |
@@ -155,6 +157,19 @@ STEP 6: done(summary="Extracted N items across M pages")
 **Never** hardcode site-specific selectors from memory — always discover via
 autoschema/eval unless the schema is already known/verified.
 
+### Pagination type decision tree (identify BEFORE picking a pipeline)
+
+```
+Page loaded → observe the pagination area:
+  A) Numbered links (1,2,3…)?       → discover links → webrain_validate_urls
+                                    → webrain_batch (State I/O pattern)
+  B) "Next" button only, no numbers?→ session click loop: click(Next) → extract → repeat
+  C) "Load More" / "Show More"?     → click loop (webrain_batch op=interact for many)
+  D) Infinite scroll / feed?        → webrain_scan (or op=interact scroll loop)
+  E) Direct URL pattern (/page/N)?  → construct URLs → webrain_batch
+  F) Unknown / complex?             → webrain_spider (auto-discovers)
+```
+
 ---
 
 ## 4b. `op=interact` — parallel interaction for N interactive sites
@@ -189,6 +204,69 @@ webrain_batch(
   with `webrain_open_session` per target + `Mcp-Session-Id` header routing.
 - Verified live on scrapingcourse.com: button-click → 132 products,
   infinite-scrolling → products, in a single parallel call.
+
+---
+
+## 4c. Multi-agent delegation (orchestrator pattern)
+
+webrain's MCP server creates a **per-connection session** per client — so you
+(the orchestrator) can spawn subagents, give each its own browser via
+`CDP_URL`, and they run fully in parallel. This is the scaling lever beyond a
+single browser's `webrain_batch concurrency=N`.
+
+**Delegate when you hit ANY of:**
+1. **Many independent URLs/pages/sites** — shard the URL list across subagents
+   (each runs `webrain_batch(op=extract, urls=<its shard>)`). One browser
+   already parallelizes in-process; delegate *across browsers* when you need
+   more throughput or different engines.
+2. **Different engines/roles** — challenge-heavy pages → Chrome subagent
+   (9222), bulk pages → obscura subagent (9224), static → `webrain_fetch_http`
+   subagent (no CDP). Matches the browser matrix (§1).
+3. **Per-proxy / per-IP isolation** — one `CDP_URL` per subagent = each
+   browser carries its own proxy/cookies/fingerprint = N exit IPs at once.
+4. **Huge site-wide crawl** — shard by subdomain/section; one `webrain_spider`
+   per subagent (each with its own `crawldir` for checkpoint/resume).
+5. **Discovery overlapping extraction** — one subagent discovers schema/URLs on
+   a new site while others extract from already-known sites.
+
+**Delegation is the LAST parallel lever.** A single browser ALREADY
+parallelizes in-process (`webrain_batch concurrency=N`, `cdp_urls` round-robin
+across N backends in one call). Spawn subagents only when in-browser
+parallelism is exhausted (e.g. >~100 URLs, each already batched) or you need
+DIFFERENT browsers/proxies. Delegating what one `webrain_batch` handles is
+wasted orchestration (browsemind Rule B: parallel over sequential; Rule E:
+reduce browser launches).
+
+**Delegate by PATTERN (shard the task, not the steps):**
+
+| Task pattern | Default (one agent) | Delegate when | Shard as |
+|---|---|---|---|
+| catalog / "find all" / many urls | links → validate → `webrain_batch` | >~100 urls or mixed engines | URLs across subagents |
+| specific pages (3, 4, 7) | navigate one-by-one | — (never) | — |
+| infinite scroll / load more | `webrain_batch(op=interact)` per site | many interactive sites | one subagent per site-group |
+| whole site | `webrain_spider` | huge / multi-subdomain | one spider subagent per subdomain (own `crawldir`) |
+| discovery + extraction overlap | sequential | new site needs schema while others extract | scout subagent + extract subagents |
+
+**Subagent self-heal (give each a fallback chain so it returns data, not
+failure):**
+- extraction: `webrain_fit`/`webrain_flatten` → `webrain_extract_json` →
+  `webrain_eval` → `webrain_annotate`
+- pagination: construct `/page/N` → click Next → scroll → `webrain_scan`
+- anti-bot: on `challenge`, **stop and report** — you re-route to the Chrome
+  subagent (the subagent must not burn calls fighting a block).
+
+**Subagent contract (give every subagent this exact scope):**
+- ONE browser (`CDP_URL`), ONE task, an explicit URL list OR seed + budget
+  (`max_pages`).
+- Return **compact JSON only**: `{status, count, data[] | summary}`. Never raw
+  HTML.
+- On `challenge`/block: **report it** (don't fight it) — the orchestrator
+  re-routes that URL to the Chrome subagent.
+
+**Aggregate yourself:** dedupe by url/name (batch endpoints return sliding
+windows), `webrain_bm25` to keep only relevant items, then emit one answer with
+a count. Subagents may nest (a subagent is just another LLM with webrain MCP)
+and may use `webrain_batch concurrency` inside their own shard.
 
 ---
 
@@ -249,6 +327,13 @@ Then `webrain_batch(op=extract, urls=[...offset=0,10,20...], base_selector,
 fields)` directly — no click/scroll loop, one call. The endpoint often returns
 a sliding window (offset=0→1-12, offset=10→11-22…): dedupe by url/name. This
 beat the interaction loop by ~3× and avoided observer/scroll races entirely.
+
+**SPA hydration wait.** Next.js/React/Vue sites return an HTML shell before
+content renders — extracting too early yields 0 items. Before extracting, wait
+for DOM growth: poll element count / text length rising with `webrain_wait`
+(a JS growth expression) or `wait_selector` on the data container.
+`webrain_fit`/`flatten`/`extract_json` on an unhydrated shell is the same as
+0 items (browsemind `_wait_for_js_hydration` borrow).
 
 **`webrain_eval` + async on obscura.** Browser-level `Runtime.evaluate` does not
 reliably await async JS on obscura — an async IIFE returns `null`. For async
