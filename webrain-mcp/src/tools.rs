@@ -1594,7 +1594,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         "webrain_check" => {
             // agent-browser check/uncheck borrow: click + verify + label retarget.
             let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let want = args.get("checked").and_then(|v| v.as_bool()).unwrap_or(true);
+            let want = args
+                .get("checked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             if idx < 0 {
                 return json!({"status": "error", "message": "index required"});
             }

@@ -3,7 +3,10 @@
 //
 // ponytail: single connection, one page, synchronous CDP command/response per call.
 
-use crate::browser::{BrowserBackend, InteractiveElement, PageState, detect_antibot, detect_chrome_error, detect_crippled};
+use crate::browser::{
+    BrowserBackend, InteractiveElement, PageState, detect_antibot, detect_chrome_error,
+    detect_crippled,
+};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -1191,7 +1194,8 @@ async fn element_center(b: &CdpBackend, index: usize) -> anyhow::Result<Option<(
         }})()"#
     );
     let v = b.eval_js(&js).await?;
-    Ok(v.as_array().and_then(|a| Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))))
+    Ok(v.as_array()
+        .and_then(|a| Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))))
 }
 
 /// True when `elementFromPoint(x,y)` resolves to the element at `index` (or a
@@ -1250,7 +1254,7 @@ async fn dispatch_click(b: &CdpBackend, x: i64, y: i64) -> anyhow::Result<()> {
     );
     match tokio::time::timeout(std::time::Duration::from_secs(2), press).await {
         Ok(inner) => inner.map(|_| ())?, // engine without Input.* → Err → JS fallback
-        Err(_) => return Ok(()),          // renderer paused on a dialog — treat as dispatched
+        Err(_) => return Ok(()),         // renderer paused on a dialog — treat as dispatched
     }
     let release = b.send_cmd(
         "Input.dispatchMouseEvent",
@@ -1258,7 +1262,7 @@ async fn dispatch_click(b: &CdpBackend, x: i64, y: i64) -> anyhow::Result<()> {
     );
     match tokio::time::timeout(std::time::Duration::from_secs(2), release).await {
         Ok(inner) => inner.map(|_| ()), // engine error → caller JS fallback
-        Err(_) => Ok(()),                // dialog pending — treated as dispatched
+        Err(_) => Ok(()),               // dialog pending — treated as dispatched
     }
 }
 
