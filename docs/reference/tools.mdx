@@ -256,6 +256,10 @@ Capture the current page as vision tiles, embed each via `EMBED_URL` (Qwen3-VL-E
 Embed a text query and return the cosine top-k stored tile ids from a vision index — semantic page retrieval. `tag`, `query`, `k` (5).
 </Accordion>
 
+<Accordion title="webrain_watch">
+Watch any video (URL or local file): timestamped transcript (yt-dlp captions → local whisper-cli → cloud Whisper API) + frame file paths, no browser needed. `detail` `transcript`/`efficient`/`balanced`; batch `sources[]` in parallel. `vision:true` sends up to 3 sampled frames to a vision LLM (Groq `qwen3.6-27b` → OpenAI `gpt-4o-mini` → **local Qwen3-VL-2B** when no key) and returns text captions + a fused visual summary in `vision`. First run: `webrain install watch` (mono bundle) + `webrain install vision` for the local hero.
+</Accordion>
+
 </AccordionGroup>
 
 ## PDF & Media

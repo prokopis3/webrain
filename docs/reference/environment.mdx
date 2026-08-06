@@ -14,8 +14,23 @@ description: All configuration knobs.
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / `~/.config/webrain/profiles` |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys; `GROQ`/`OPENAI` also power the vision chain | — |
+| `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
+| `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
 | `EMBED_URL` | `/embeddings` endpoint for `webrain_vision_index` | — |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
+
+## Local AI (watch & vision)
+
+`webrain_watch` transcribes locally via bundled whisper-cli + a GGUF model, and
+`vision:true` describes frames via a vision LLM — **local Qwen3-VL-2B** (bundled
+llama-server, `webrain install vision`) when no cloud key is set.
+
+| Install | What it bundles |
+|---|---|
+| `webrain install watch` | ffmpeg+ffprobe, yt-dlp, whisper-cli + a GGUF model |
+| `webrain install whisper` | a whisper GGUF model (`--model small.en`) |
+| `webrain install vision` | llama-server (latest CPU build) + Qwen3-VL-2B (GGUF + mmproj) |
 
 ## Discovery order
 

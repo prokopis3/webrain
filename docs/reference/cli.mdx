@@ -12,7 +12,7 @@ Drive webrain by hand — every engine and tool has a CLI twin.
 | Command | Description |
 |---|---|
 | `webrain mcp [--http <port>]` | Start the MCP server (stdio, or HTTP on a port) |
-| `webrain install [--force] [--engine chrome\|obscura] [--stealth]` | Download a browser engine into the cache |
+| `webrain install [--force] [--engine chrome\|obscura\|lightpanda\|whisper\|vision\|watch] [--stealth] [--model small.en]` | Download a browser engine, or the local AI stack: `watch` = ffmpeg+yt-dlp+whisper-cli+model, `whisper` = STT GGUF model, `vision` = llama-server + Qwen3-VL-2B |
 | `webrain upgrade` | Update to the latest release |
 | `webrain obscura [--port N]` | Spawn the Obscura CDP server (default 9224) |
 | `webrain lightpanda [--port N]` | Spawn the Lightpanda CDP server (default 9225) |
@@ -22,6 +22,7 @@ Drive webrain by hand — every engine and tool has a CLI twin.
 | `webrain setcookies <file>` | Import cookies |
 | `webrain vault set\|list\|user\|rm` | Manage encrypted credentials (hidden prompts) |
 | `webrain fetch <url>` | Attach to `CDP_URL` and fetch |
+| `webrain watch <url\|file> [--detail transcript\|efficient\|balanced] [--max-frames N] [--resolution W] [--start S] [--end E] [--out-dir D] [--no-whisper] [--stt whisper\|gemini] [--vision]` | Transcript + frames for any video (no browser); `--vision` adds text captions (cloud key or local Qwen3-VL-2B) |
 | `webrain screenshot <url>` | Screenshot (single or full page) |
 | `webrain spider <url> [--depth N --pages N --respect-robots --json-urls --dfs --bestfirst --keywords k1,k2 --no-same-domain --discover-only]` | Crawl |
 | `webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` | Drive the `CDP_URL` backend |

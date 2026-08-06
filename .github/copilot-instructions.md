@@ -17,13 +17,6 @@ When helping with commits:
 
 Before writing any code, making edits, or answering questions, **ALWAYS** use the codebase-memory-mcp tools to investigate the relevant code first. This reduces token usage and ensures context-aware decisions.
 
-### Indexed Projects (available via codebase-memory-mcp)
-
-| Project Name | Path | Description | Graph |
-|---|---|---|---|
-| `D-Windows-Documents-Programming-Projects-Python-pixelbrain` | `d:\...\pixelbrain` | **Current project** | **4,412 nodes** · 13,596 edges |
-| `D-Windows-Documents-Programming-Projects-Python-crawl4ai` | `d:\...\crawl4ai` | Crawl4AI library (dependency) | 12,382 nodes |
-| `D-Windows-Documents-Programming-Projects-Angular-deepscrape` | `d:\...\deepscrape` | Angular frontend (optional) | 10,700 nodes |
 
 > **Repo memory** at `/memories/repo/project-structure.md` has full handler maps, key file sizes, and action type lists.
 

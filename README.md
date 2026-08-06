@@ -277,6 +277,8 @@ webrain screenshot <url>                           # screenshot (single or full 
 webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
+webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
+webrain install watch|whisper|vision [--model]     # local AI stack (whisper + Qwen3-VL-2B)
 ```
 
 The full ~45-tool MCP surface is discovered dynamically — `webrain_guide` lists
@@ -307,11 +309,32 @@ All tools are discovered dynamically (`webrain_guide` lists them for the LLM). H
 | **Interact** | `webrain_click`, `webrain_type`, `webrain_press`, `webrain_scroll`, `webrain_nav`, `webrain_tab`, `webrain_dismiss_overlays` |
 | **Extract** | `webrain_autoschema`, `webrain_extract_json`, `webrain_extract_regex`, `webrain_table`, `webrain_get_jsonld`, `webrain_pdf_extract`, `webrain_pdf_images` |
 | **Crawl** | `webrain_batch`, `webrain_spider` (AutoThrottle + checkpoint/resume), `webrain_sitemap`, `webrain_scan` |
+| **Video** | `webrain_watch` (transcript + frames, no browser; `vision:true` → text captions) |
 | **Vision** | `webrain_pixel`, `webrain_vision_index`, `webrain_vision_retrieve`, `webrain_screenshot` |
 | **Auth / state** | `webrain_login`, `webrain_profiles`, `webrain_cookies`, `webrain_setcookies`, `webrain_open_session`, `webrain_close_session` |
 | **Utility** | `webrain_fetch_http`, `webrain_download`, `webrain_search`, `webrain_validate_urls`, `webrain_clean`, `webrain_media`, `webrain_get_images`, `webrain_guide`, `webrain_eval` |
 
 Full per-tool reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Tool/browser/challenge decisions: [`docs/AGENT_DECISION_GUIDE.md`](docs/AGENT_DECISION_GUIDE.md).
+
+## Watch videos (local AI, no browser)
+
+`webrain_watch` (MCP) / `webrain watch` (CLI) turns **any video** — URL or
+local file — into a timestamped transcript + frames, with **no browser**:
+
+```bash
+webrain install watch             # one command: bundles ffmpeg+ffprobe, yt-dlp,
+                                  # whisper-cli + a GGUF model (self-contained, any OS)
+webrain watch video.mp4           # transcript (captions → local whisper → cloud) + frames
+webrain watch video.mp4 --vision  # + text captions of the frames via a vision LLM
+webrain install vision            # local Qwen3-VL-2B (llama-server + GGUF + mmproj)
+```
+
+Vision chain (`--vision` / `vision:true`): **Groq `qwen3.6-27b` → OpenAI
+`gpt-4o-mini` → local Qwen3-VL-2B** — when no key is set, video understanding
+runs fully **offline** after `webrain install watch` + `webrain install vision`.
+Cloud keys (`GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY`) are optional
+if you run the local stack. `webrain install watch` prints a `warnings` block if
+anything's missing.
 
 ## CLI Reference
 
@@ -339,6 +362,9 @@ Full per-tool reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Tool/br
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / `~/.config/webrain/profiles` |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys; `GROQ`/`OPENAI` also power the vision chain | — |
+| `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
+| `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
 
 ## Marketplace / IDE Plugins

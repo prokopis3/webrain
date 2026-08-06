@@ -11,14 +11,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **watch videos** (`webrain_core::video` + `webrain_watch` + `webrain watch`):
   transcript + frames for ANY video (URL or local file), no browser needed.
-  Pipeline: yt-dlp captions → Whisper STT fallback (`GROQ_API_KEY` preferred,
-  `OPENAI_API_KEY` fallback, env only) → ffmpeg frames (keyframe / scene-aware /
+  Pipeline: yt-dlp captions → Whisper STT fallback (provider keys env-only,
+  first set wins: GROQ_API_KEY → OPENAI_API_KEY → FIREWORKS_API_KEY; model
+  override WEBRAIN_STT_MODEL) → ffmpeg frames (keyframe / scene-aware /
   none). `detail`: `transcript` (captions only), `efficient` (keyframe pass,
   cap 50), `balanced` (scene-aware, cap 100, default). Batch: `sources[]` →
   one parallel call, bounded worker pool, one result per video in input order.
   Single impl shared by the MCP dispatch + the lib.rs no-browser short-circuit
   (`tools::watch_from_args`), so it works on a fresh install before any browser.
   VTT parser + frame-budget unit tests.
+- **watch mono bundle** (`webrain install watch`): one command downloads the
+  whole self-contained `webrain watch` stack as mono packages into the webrain
+  cache — ffmpeg+ffprobe (BtbN builds), yt-dlp (single binary), whisper-cli
+  (whisper.cpp prebuilt), + a GGUF model. `watch` auto-resolves bundled → env →
+  PATH (`install::find_tool`), so it works on any OS with no system installs
+  (macOS: whisper-cli via PATH/brew, no prebuilt).
+- **local whisper backend** (`webrain_core::video` + `webrain install whisper`):
+  `watch` now transcribes **locally/offline** via whisper.cpp's `whisper-cli`
+  when it's installed (binary on PATH or `WEBRAIN_WHISPER_BIN`, GGUF model via
+  `WEBRAIN_WHISPER_MODEL`), falling back to the cloud Whisper API only when no
+  local binary/model is present. `webrain install whisper [--model small.en]`
+  downloads the GGUF model into the engine cache dir (reuses install.rs; model
+  whitelist, no arbitrary paths). Audio extracted as 16kHz mono s16le WAV (one
+  file, both backends). whisper-cli JSON parser unit-tested.
+- **watch vision fallback** (`webrain_watch vision:true` / `webrain watch --vision`):
+  after frames are extracted, up to 3 evenly-sampled frames are sent to a vision
+  LLM (Groq `qwen/qwen3.6-27b` → OpenAI `gpt-4o-mini` → **local Qwen3-VL-2B**
+  via bundled llama-server when no key is set; cloud env keys same as STT)
+  and the response is returned as `vision` — text captions + a fused
+  visual summary. Use when the client can't render frame images (text-only
+  model / MCP client). DeepSeek's hosted API is text-only — live-verified
+  2026-08-06 (`deepseek-v4-flash`/`deepseek-v4-pro` reject `image_url` content:
+  `unknown variant 'image_url', expected 'text'`), so it's excluded from the
+  chain despite a blog claiming vision support. Opt-in (API cost); failure
+  surfaces as `vision_error`, never fails the watch.
+- **local vision hero** (`webrain install vision` + `webrain_watch vision:true`
+  with NO key): when no GROQ/OPENAI key is set, `watch --vision` falls back to
+  a **local Qwen3-VL-2B** served by a bundled llama.cpp `llama-server` — the
+  whisper analog, cache-contained (no system installs, all OS). `webrain
+  install vision` downloads llama-server (CPU build, ~10-18MB, always the
+  latest release via the GitHub API) + the unsloth `Qwen3-VL-2B-Instruct-
+  Q4_K_M.gguf` + `mmproj-F16.gguf` (streamed to disk, ~1.8 GiB) into the
+  cache; `install watch` bundles the stack too. `watch` auto-resolves it
+  (`install::vision_local`), spawns llama-server on a free port, POSTs the 3
+  frames to its OpenAI-compatible `/v1/chat/completions`, and kills it after.
+  Model name comes from the gguf basename. Verified chain selection via unit
+  test; the 1.8 GiB model download + live local run is opt-in (run `webrain
+  install vision` once).
+- **install warnings** (`webrain install watch`): returns a `warnings` block
+  when the watch stack is unusable after install — no local whisper (binary +
+  model) AND no cloud STT key (GROQ/OPENAI/FIREWORKS) → caption-less videos
+  yield an empty transcript; no vision key (GROQ/OPENAI) → `watch --vision`
+  returns `vision_error`. One chokepoint covers the whole watch tool.
 - **batch eval** (`webrain_core::engines::batch_eval` + `webrain_batch`): new
   `op=eval` — run arbitrary JS in every tab, return the JSON per URL. The
   "custom extractor" op for hashed/SPA DOMs; no CSS schema needed. This is what

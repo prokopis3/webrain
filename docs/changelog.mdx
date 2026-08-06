@@ -8,6 +8,40 @@ description: Version history for webrain.
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+<p className="text-[#888] text-sm">August 6, 2026</p>
+
+### New Features
+
+- **Watch any video** (`webrain_watch` / `webrain watch`) — timestamped
+  transcript (yt-dlp captions → local whisper-cli → cloud Whisper API) +
+  ffmpeg frames, **no browser**. Batch `sources[]` in parallel.
+- **Local AI, whisper-style, all OS** — `webrain install watch` bundles
+  ffmpeg/yt-dlp/whisper-cli + a GGUF model as self-contained mono packages;
+  `webrain install whisper` pulls a model; **`webrain install vision`** bundles
+  llama-server + **Qwen3-VL-2B** (GGUF + mmproj) for local vision.
+- **Local vision hero** — `watch --vision` / `vision:true` falls back to the
+  bundled **Qwen3-VL-2B** when no GROQ/OPENAI key is set (chain: Groq
+  `qwen3.6-27b` → OpenAI `gpt-4o-mini` → local). Opt-in (API cost / model size);
+  failure surfaces as `vision_error`, never fails the watch. DeepSeek's hosted
+  API is text-only (live-verified), so it's excluded.
+- **Install warnings** — `webrain install watch` reports what's missing (STT
+  key / local model / vision key / local vision) so nothing fails silently.
+- **Batch eval** (`webrain_batch op=eval`), **cookies --netscape**, **doctor
+  hints** (relay/headless detection), **screenshot path**, **login truth** fix,
+  **antibot false-positive** fix.
+
+### Changed
+
+- Media guidance — extract media URLs from `meta[og:image|og:video]`, not
+  `video.src` (blob: URLs).
+
+### Fixed
+
+- Login no longer reports logged-in falsely; download collisions; captcha false
+  positives.
+
 ## v0.4.0
 
 <p className="text-[#888] text-sm">August 6, 2026</p>
