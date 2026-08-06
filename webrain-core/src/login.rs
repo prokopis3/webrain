@@ -16,18 +16,18 @@ fn jstr(s: &str) -> String {
 
 /// Session-ish cookie names: presence of any after submit implies logged in
 /// (Instagram sessionid, Google SID, Facebook c_user, ...).
+// ponytail: real session cookies only. datr/dpr/mid/ig_did are set on the
+// LOGIN page while logged OUT — including them made has_session() report
+// logged_in:true falsely (the session's false-positive).
 pub const SESSION_COOKIES: &[&str] = &[
     "sessionid",
+    "ds_user_id",
     "session",
     "SID",
     "SSID",
     "APISID",
     "SAPISID",
     "c_user",
-    "datr",
-    "dpr",
-    "mid",
-    "ig_did",
     "auth_token",
 ];
 
@@ -89,6 +89,23 @@ async fn gate_up(b: &CdpBackend) -> bool {
         .unwrap_or(false)
 }
 
+/// reCAPTCHA / anti-bot challenge — creds were accepted, a human must solve.
+/// Distinct from the 2FA gate: URL/iframe markers only, not the 2FA vocabulary.
+async fn captcha_up(b: &CdpBackend) -> bool {
+    b.evaluate(
+        r#"(() => {
+  const u = location.href.toLowerCase();
+  if (/recaptcha|captcha|auth_platform/.test(u)) return true;
+  if (document.getElementById('captcha-recaptcha')) return true;
+  const t = (document.body ? document.body.innerText : '').toLowerCase();
+  return /unusual traffic|verify you are human|complete the security check/.test(t);
+})()"#,
+    )
+    .await
+    .map(|v| v.as_bool().unwrap_or(false))
+    .unwrap_or(false)
+}
+
 /// One login attempt: fill+submit, poll briefly for a session cookie, and if a
 /// 2FA/approval gate appears return immediately with `waiting_for_human: true`
 /// (never blocks — the agent tells the user to act, then calls login again).
@@ -104,10 +121,29 @@ pub async fn run_login(
         backend.navigate(u).await?;
     }
     let submitted = backend.evaluate(&login_js(user, pass)).await?;
+    // no form found => page is a tablet/app interstitial or not the login form;
+    // waiting out the 15s would report a misleading "check creds".
+    if submitted.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        return Ok(json!({
+            "logged_in": false,
+            "waiting_for_human": false,
+            "message": "login form not found — the page is likely a tablet/app interstitial; click its 'Log in' button or use the real login URL, then call login again",
+            "submitted": submitted,
+        }));
+    }
     let t0 = std::time::Instant::now();
     loop {
         if has_session(backend).await? {
             return Ok(json!({ "logged_in": true, "submitted": submitted }));
+        }
+        if captcha_up(backend).await {
+            return Ok(json!({
+                "logged_in": false,
+                "waiting_for_human": true,
+                "challenge": "captcha",
+                "message": "reCAPTCHA/anti-bot challenge — solve it in the headed browser, then call login again",
+                "submitted": submitted,
+            }));
         }
         if gate_up(backend).await {
             // TOTP auto-fill if a seed is stored; the human still confirms submit.
@@ -134,5 +170,23 @@ pub async fn run_login(
             }));
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_cookies_exclude_login_page_only() {
+        // regression: datr/dpr/mid/ig_did are set on the login page while logged
+        // OUT; having them in SESSION_COOKIES made has_session() report
+        // logged_in:true falsely.
+        assert!(!SESSION_COOKIES.contains(&"datr"));
+        assert!(!SESSION_COOKIES.contains(&"dpr"));
+        assert!(!SESSION_COOKIES.contains(&"mid"));
+        assert!(!SESSION_COOKIES.contains(&"ig_did"));
+        assert!(SESSION_COOKIES.contains(&"sessionid"));
+        assert!(SESSION_COOKIES.contains(&"ds_user_id"));
     }
 }

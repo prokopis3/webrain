@@ -46,7 +46,6 @@ pub fn detect_antibot(title: &str, text: &str) -> Option<String> {
         ("blocked", "access denied"),
         ("blocked", "forbidden"),
         ("blocked", "cf-error-code"),
-        ("captcha", "captcha"),
         ("captcha", "h-captcha"),
         ("captcha", "g-recaptcha"),
     ];
