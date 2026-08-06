@@ -9,11 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **batch eval** (`webrain_core::engines::batch_eval` + `webrain_batch`): new
+  `op=eval` — run arbitrary JS in every tab, return the JSON per URL. The
+  "custom extractor" op for hashed/SPA DOMs; no CSS schema needed. This is what
+  the 20-post Instagram extraction should have used.
+- **cookies --netscape** (`webrain-cli`): `webrain cookies --out f --netscape`
+  writes Netscape HTTP Cookie File — the format yt-dlp/curl `--cookie` want
+  (yt-dlp rejects the JSON shape).
+- **doctor hints** (`webrain-cli`): `webrain doctor` now (a) prints the start
+  command when the MCP server (9223) is down, and (b) reads `/json/version` per
+  CDP port to flag **relay/tunnel** (websocket URL points at a different port —
+  the wslrelay/Docker case that looked like local Chrome) and **headless**
+  (`HeadlessChrome` in UA — cannot pass login challenges).
+- **screenshot path** (`webrain_screenshot`): still returns `screenshot_b64`,
+  but now ALSO writes the PNG to `dir` (default `screenshots/`) and returns
+  `path` so any client can view the file instead of decoding base64.
 
 ### Changed
 
 - **style**: cargo fmt on the agent-browser batch (CI `cargo fmt --check` gate).
+- **media guidance** (`AGENT_GUIDE` + `webrain_extract_json`): extract media
+  URLs from `meta[property='og:image'|'og:video']` — not `video.src`, which is a
+  blob: URL for streamed media (reels/DASH) and can't be downloaded.
+
+### Fixed
+
+- **login truth** (`webrain-core/src/login.rs` + `webrain-mcp`): `webrain_login`
+  stopped lying. `SESSION_COOKIES` no longer includes `datr`/`dpr`/`mid`/`ig_did`
+  — those are set on the login page while logged OUT, so `has_session()` reported
+  `logged_in:true` falsely; added `ds_user_id`. `run_login` now detects a
+  reCAPTCHA/anti-bot challenge (`challenge:"captcha"` + `waiting_for_human:true`
+  instead of a misleading "no session cookie — check creds") and early-outs on a
+  tablet/app interstitial when no login form is found. `webrain_login` MCP
+  dispatch wired to the native `login::run_login` (matching the schema + CLI)
+  instead of the stale selector path that always errored. Regression test:
+  `login::tests::session_cookies_exclude_login_page_only`.
+- **download collision** (`engines::download_ytdlp`): output template now
+  `%(title)s_%(id)s.%(ext)s` — two posts from the same uploader share yt-dlp's
+  `Video by <user>` title and silently overwrote each other; the media id makes
+  names unique.
+- **antibot false positive** (`browser::detect_antibot`): dropped the bare
+  `("captcha", "captcha")` marker — it flagged any page whose text merely
+  mentions "captcha" (every Instagram page). Kept the real widget markers
+  `h-captcha`/`g-recaptcha`.
 
 ## [0.4.0] - 2026-08-06
 
