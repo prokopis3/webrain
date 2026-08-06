@@ -57,6 +57,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unnecessary when bypass does its job. The attach now sends
   `userAgentMetadata` (Sec-CH-UA matches the forged UA) and a
   `Function.prototype.toString` native-code spoof (uc pattern).
+- **stealth**: fingerprint noise is now **opt-in** (`WEBRAIN_STEALTH_NOISE=1`).
+  The canvas/audio/WebGL spoofs + `hardwareConcurrency`/`deviceMemory`/
+  `connection` lies are OFF by default because Cloudflare Turnstile / Google
+  reCAPTCHA measure exactly those signals — a pristine real-Chrome fingerprint
+  is the CF/Google-trustworthy default (patchright-style). Core stealth
+  (webdriver→false, real plugins, `window.chrome`, `Function.prototype.toString`
+  spoof) stays always-on. Live test: the /cloudflare-challenge JS challenge
+  auto-passes; an invisible-managed Turnstile that silently withholds its token
+  is Cloudflare's risk decision (IP + automation), not a fingerprint fix.
 
 ### Fixed
 

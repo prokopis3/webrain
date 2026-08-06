@@ -18,8 +18,16 @@ use tokio_tungstenite::tungstenite::Message;
 /// Anti-bot JS injected before page scripts run (Page.addScriptToEvaluateOnNewDocument).
 /// Self-destructing by design: everything lives inside the IIFE, so no `window.setXxx`
 /// helper survives for page scripts to detect (camoufox addInitScript pattern).
-const STEALTH_JS: &str = r#"
-(() => {
+///
+/// CORE is always on (webdriver→false, real plugins, window.chrome, Function.toString
+/// spoof — the bits Cloudflare/Google don't punish). NOISE is OFF by default:
+/// ponytail: canvas/audio/WebGL spoofs + hardwareConcurrency/deviceMemory/connection
+/// lies are EXACTLY what Cloudflare Turnstile measures — lying there makes CF distrust
+/// us (empty turnstile token → "verification failed"). Real Chrome's real fingerprint
+/// is the CF-trustworthy default (patchright-style). Set WEBRAIN_STEALTH_NOISE=1 to opt
+/// back in when you specifically want to foil third-party hash fingerprinters (CreepJS).
+fn stealth_js() -> String {
+    const CORE: &str = r#"(() => {
   const apply = (obj, prop, val) => {
     try { Object.defineProperty(obj, prop, { get: () => val, configurable: true }); } catch (e) {}
   };
@@ -43,11 +51,44 @@ const STEALTH_JS: &str = r#"
     apply(Navigator.prototype, 'mimeTypes', arr);
   } catch (e) {}
   apply(Navigator.prototype, 'maxTouchPoints', 1);
-  apply(Navigator.prototype, 'hardwareConcurrency', 8);
-  apply(Navigator.prototype, 'deviceMemory', 8);
   apply(Navigator.prototype, 'platform', 'Win32');
   apply(Navigator.prototype, 'vendor', 'Google Inc.');
   apply(Navigator.prototype, 'oscpu', 'Windows NT 10.0; Win64; x64');
+  /*STEALTH_NOISE*/
+  // Full window.chrome stub (app/runtime/csi/loadTimes) — the `{runtime:{}}`
+  // one is detectable (chrome.app/csi/loadTimes missing).
+  try {
+    window.chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+      csi: () => {}, loadTimes: () => {},
+      runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} },
+    };
+  } catch (e) {}
+  // permissions.query: 'notifications' reflects Notification.permission.
+  try {
+    const q = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (p) => (p && p.name === 'notifications')
+      ? Promise.resolve({ state: Notification.permission, onchange: null })
+      : q(p);
+  } catch (e) {}
+  // Function.prototype.toString native spoof (uc): permissions.query and
+  // friends must read as `[native code]`, not a wrapped source.
+  try {
+    const oldCall = Function.prototype.call;
+    const oldToString = Function.prototype.toString;
+    const nativeStr = Error.toString().replace(/Error/g, 'toString');
+    Function.prototype.toString = function () {
+      if (this === Function.prototype.toString) return nativeStr;
+      if (this === navigator.permissions.query) return 'function query() { [native code] }';
+      return oldCall.call(oldToString, this);
+    };
+  } catch (e) {}
+})();"#;
+    // Opt-in fingerprint noise — only for foiling third-party hash fingerprinters.
+    // Turnstile + reCAPTCHA measure these exact signals; keep them REAL by default.
+    const NOISE: &str = r#"
+  apply(Navigator.prototype, 'hardwareConcurrency', 8);
+  apply(Navigator.prototype, 'deviceMemory', 8);
   apply(Navigator.prototype, 'connection', { effectiveType: '4g', rtt: 100, downlink: 10, saveData: false });
   // WebGL vendor/renderer — hook getParameter once, self-destruct inside the IIFE.
   try {
@@ -88,37 +129,19 @@ const STEALTH_JS: &str = r#"
     _hook(AudioBuffer.prototype, 'getChannelData', (buf) => {
       for (let i = 0; i < buf.length; i++) buf[i] *= 1 + (_det(i, 25) - 12) / 1000;
     });
-  } catch (e) {}
-  // Full window.chrome stub (app/runtime/csi/loadTimes) — the `{runtime:{}}`
-  // one is detectable (chrome.app/csi/loadTimes missing).
-  try {
-    window.chrome = {
-      app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
-      csi: () => {}, loadTimes: () => {},
-      runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} },
-    };
-  } catch (e) {}
-  // permissions.query: 'notifications' reflects Notification.permission.
-  try {
-    const q = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (p) => (p && p.name === 'notifications')
-      ? Promise.resolve({ state: Notification.permission, onchange: null })
-      : q(p);
-  } catch (e) {}
-  // Function.prototype.toString native spoof (uc): permissions.query and
-  // friends must read as `[native code]`, not a wrapped source.
-  try {
-    const oldCall = Function.prototype.call;
-    const oldToString = Function.prototype.toString;
-    const nativeStr = Error.toString().replace(/Error/g, 'toString');
-    Function.prototype.toString = function () {
-      if (this === Function.prototype.toString) return nativeStr;
-      if (this === navigator.permissions.query) return 'function query() { [native code] }';
-      return oldCall.call(oldToString, this);
-    };
-  } catch (e) {}
-})();
-"#;
+  } catch (e) {}"#;
+    static NOISE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *NOISE_ON.get_or_init(|| {
+        std::env::var("WEBRAIN_STEALTH_NOISE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    if on {
+        CORE.replace("/*STEALTH_NOISE*/", NOISE)
+    } else {
+        CORE.replace("/*STEALTH_NOISE*/", "")
+    }
+}
 
 /// Trackers/analytics/fingerprinting hosts blocked at the network layer before
 /// they load (obscura/camofox-browser pattern). CDP `Network.setBlockedURLs`
@@ -619,8 +642,11 @@ impl CdpBackend {
             .as_str()
             .context("No sessionId from attachToTarget")?
             .to_string();
-        self.send_cmd_with(Some(&sid), "Runtime.enable", json!({}))
-            .await?;
+        // ponytail: NO Runtime.enable — patchright's "biggest leak": Runtime.enable
+        // marks the debugger as attached (detectable; a real browser has none).
+        // Runtime.evaluate works without it (enable only subscribes to
+        // consoleAPICalled / executionContextCreated events, which we don't
+        // consume — eval already omits contextId). Keep Page.enable for page events.
         self.send_cmd_with(Some(&sid), "Page.enable", json!({}))
             .await?;
         // Stealth at the CDP level: real Windows-Chrome UA + clear the automation
@@ -669,7 +695,7 @@ impl CdpBackend {
         self.send_cmd_with(
             Some(&sid),
             "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": STEALTH_JS}),
+            json!({"source": stealth_js()}),
         )
         .await?;
         // User init scripts (agent-browser --init-script borrow): replay on every
