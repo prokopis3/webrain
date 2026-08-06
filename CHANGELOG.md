@@ -47,16 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names still dispatch (backward compatible); legacy schemas kept as
   `legacy_tool_schemas()` reference. AGENT_GUIDE + README rewritten for the
   new surface.
-- **login** + **stealth** (ADR `rust-stealth-browser-research`): automatic
-  anti-bot solve ladder — `webrain_login` no longer bails to the human on the
-  first checkbox challenge. The poll loop auto-clicks the
-  Cloudflare/Turnstile / reCAPTCHA / hCaptcha checkbox via a trusted
-  cross-origin CDP click (`click_coords`, max 2 attempts) and escalates to
-  `waiting_for_human` only for interactive image/audio/approval gates; 2FA
-  TOTP auto-fill unchanged. The attach now sends `userAgentMetadata`
-  (Sec-CH-UA matches the forged UA) and a `Function.prototype.toString`
-  native-code spoof (uc pattern). Pure `next_ladder` decision + unit test
-  (`ladder_auto_solves_then_escalates`).
+- **login** + **stealth**: bypass-first login — `webrain_login` keeps the
+  simple poll loop (fill+submit → session cookie, or 2FA/approval →
+  `waiting_for_human`), because the browser is built to **not trigger**
+  challenges in the first place: CDP-direct (no chromedriver `cdc_` marker),
+  `--disable-blink-features=AutomationControlled` with no automation flag,
+  per-profile `user-data-dir` so `cf_clearance` persists across logins. No
+  challenge-solving — the checkbox auto-click ladder was dropped as
+  unnecessary when bypass does its job. The attach now sends
+  `userAgentMetadata` (Sec-CH-UA matches the forged UA) and a
+  `Function.prototype.toString` native-code spoof (uc pattern).
 
 ### Fixed
 
