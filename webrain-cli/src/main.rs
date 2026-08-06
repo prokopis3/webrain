@@ -472,6 +472,17 @@ fn upgrade() -> anyhow::Result<()> {
             .exists()
     {
         println!("webrain: installed via Scoop \u{2014} running `scoop update webrain`");
+        // Windows locks a running exe, so Scoop refuses to replace webrain while
+        // ANY instance is up — the MCP server keeps one alive and blocks every
+        // upgrade. Close the other instances first (self exits right after
+        // spawning scoop, so it's never locked), then update detached.
+        let ps = format!(
+            "Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {} }} | Stop-Process -Force",
+            std::process::id()
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output();
         // scoop is a .cmd/.ps1 shim, not scoop.exe — spawn it through cmd.exe
         std::process::Command::new("cmd")
             .args(["/c", "scoop", "update", "webrain"])
