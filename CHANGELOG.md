@@ -11,6 +11,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.4.0] - 2026-08-06
+
+### Added
+
+- **tools** (`webrain_add_init_script`, agent-browser `--init-script`/
+  `addinitscript` borrow): register a JS init script that runs via
+  `Page.addScriptToEvaluateOnNewDocument` before EVERY future navigation (new
+  documents only — already-loaded pages aren't rewritten). `CdpBackend` keeps a
+  shared script list replayed in `attach_and_init` for every new tab, plus a
+  live register on the active session. Unblocks the `webrain_flatten` ceiling:
+  closed-shadow-root piercing via an `attachShadow` patch injected as an init
+  script. `ponytail:` no remove tool — scripts accumulate per session; add
+  `webrain_remove_init_script` when a real case needs it. Verified live: a
+  `window.__WBR` stub did NOT appear on the loaded page, but DID on the fresh
+  document after the next navigate.
+- **signal** (`PageState.chrome_error`, spider-rs `is_chrome_error_page`/
+  `extract_chrome_error_code` borrow): Chrome renders dead-domain/cert/5xx URLs
+  as an error page that LOOKS like content — the LLM scraped garbage silently.
+  New `detect_chrome_error(title,text)` returns the `ERR_*`/`DNS_*` code (e.g.
+  `DNS_PROBE_FINISHED_NXDOMAIN`) or `CHROME_ERROR` for a generic interstitial.
+  Computed in both `PageState` builders (navigate + snapshot), surfaced on
+  `webrain_navigate`/`webrain_snapshot`/`webrain_search`. Verified live: dead
+  domain → `DNS_PROBE_FINISHED_NXDOMAIN`, example.com → null.
+- **signal** (`webrain_fetch_http` → `needs_js` + `visible_chars`, spider-rs
+  `smart` mode lazy slice): the no-browser HTTP probe now reports whether the
+  raw HTML is a JS shell (`needs_js: true` when it says JS is required, or the
+  visible text is <100 chars of an HTML shell) so the LLM can upgrade to the
+  browser instead of scraping an empty page. Wired into the live no-browser
+  dispatch in lib.rs (the tools.rs arm is dead code for this tool). Verified:
+  example.com `needs_js:false` (285 visible chars), notion.so `needs_js:true`
+  (45 visible chars).
+- **tools** (`webrain_select`/`webrain_hover`/`webrain_check`/`webrain_dialog`/
+  `webrain_wait`/`webrain_upload`, agent-browser borrows): 6 form/interaction
+  primitives on the ELEMENTS_JS index model.
+  - `webrain_select {index, value}` — native `<select>` option by value OR
+    visible text, fires a real `change`; **no-match errors listing available
+    options** so the LLM self-corrects.
+  - `webrain_hover {index}` — trusted `Input.dispatchMouseEvent mouseMoved`
+    (JS mouseover fallback) — triggers :hover menus / hover-reveal content.
+  - `webrain_check {index, checked?}` — click + verify via agent-browser
+    `is_element_checked` (native .checked → aria-checked → label.control →
+    nested input); JS label-retarget fallback; returns ACTUAL state.
+  - `webrain_dialog {action, prompt_text?}` — `Page.handleJavaScriptDialog`;
+    unblocks a session paused by a sync `alert()`/`confirm()`/`prompt()`.
+  - `webrain_wait {ms | selector | text, timeout_ms?}` — standalone post-action
+    wait (click→AJAX→render); navigate already waits internally.
+  - `webrain_upload {index, files[]}` — `DOM.setFileInputFiles` via resolved
+    node id.
+  All verified live on real Chrome (scripts/test_agentbrowser_steals.ps1):
+  select sets value + change, no-match lists options; check toggles + reports;
+  upload lands the file; dialog resolves a paused alert and the page continues;
+  wait satisfied for selector/text and false for absent.
+- **fix** (click-hang on sync dialog): `dispatch_click` now bounds the CDP
+  input ack wait (agent-browser `dispatch_mouse_or_dialog` borrow). A sync
+  `alert()` in a click handler pauses the renderer so the ack never arrives —
+  previously `webrain_click` (and every later eval) hung forever. On timeout
+  the click is treated as dispatched and `webrain_dialog` resolves the dialog.
+  Engine errors (no `Input.*`) still propagate → JS fallback preserved.
+- **tools** (`webrain_flatten`): full
+  composed page text including **Shadow DOM**. Web-Component sites
+  (Lit/Stencil/Shoelace) render content in shadow roots invisible to
+  `querySelectorAll`/`innerText` — this walks light DOM + open shadow roots
+  (recursing nested roots, resolving `<slot>` projections) and returns the
+  dense composed text (`{status, chars, words, text}`). Verified live:
+  `document.body.innerText` returned `""` on a shadow-DOM test page while
+  `webrain_flatten` returned the shadow content. `ponytail:` open roots only —
+  closed roots need an `attachShadow` patch injected before component creation.
+- **tools** (`webrain_annotate`):
+  numbered red boxes overlaid on interactive elements at viewport coords +
+  a legend `[{n, index, tag, text}]` where `index` maps directly to
+  `webrain_click`/`webrain_type` indices. Returns `{status, screenshot_b64,
+  legend}` and removes the overlay after capture. Built for vision models —
+  read the labels, then click by index. Verified live on example.com: legend
+  `[{"index":0,"n":1,"tag":"A","text":"Learn more"}]`, red pixels confirmed
+  in the PNG, overlay removed afterward. Viewport screenshot only.
+- **tools** (`webrain_fit`): no-query
+  dense-content extractor. Walks the DOM, scores leaf blocks (`P`, `H*`, `LI`,
+  `TD`, `BLOCKQUOTE`, `PRE`) by text-vs-link density + tag importance, prunes
+  nav/footer/aside/form/header chrome, and returns the "fit" text — the meat of
+  the page for the LLM instead of raw `innerText`. Containers (`MAIN`/`ARTICLE`/
+  `SECTION`) always descend so a page wrapper can't dump everything (Wikipedia
+  `<main>` case). Verified live: pruned the Wikipedia toolbar + Categories,
+  returned the dense article.
+- **tools** (`cdp_session_*`): `click`,
+  `type_text` and `press` now use trusted CDP `Input.*` events
+  (`Input.dispatchMouseEvent` / `Input.insertText` / `Input.dispatchKeyEvent`)
+  with a JS fallback for engines without `Input.*` support (lightpanda).
+  New `webrain_click_coords` tool — trusted click at raw viewport coords for
+  cross-origin iframe content / reCAPTCHA. Verified live on real Chrome
+  (click fires handlers, Tab moves focus) and against the docker obscura
+  engine (runs clean, no regression).
+- **fix** (double-fire): `dispatch_click` no longer appends a JS
+  pointer/click dispatch after the CDP `Input.dispatchMouseEvent` — CDP already
+  fires the click, so the JS fallback double-fired handlers on every engine.
+  `webrain_click` / `webrain_click_coords` now fire exactly once (verified via a
+  click counter on both real Chrome and docker obscura).
+- **tools** (backend-node click, browsemind `cdp_session_click_backend`):
+  `webrain_click` now prefers a stable backend-node click —
+  `DOM.getDocument` → `DOM.querySelector` (webrain's own per-element selector)
+  → `DOM.getContentQuads` → trusted `Input.dispatchMouseEvent` at the quad
+  center. `backend_node_id` survives incremental DOM mutations that stale
+  viewport coords don't. Chrome/Chromium (incl. Playwright chromium on Linux)
+  engage it; obscura/lightpanda (no layout/quads) fall back to the viewport-
+  coord path then element-based `el.click()`. Verified: real quads returned on
+  Chrome (`getContentQuads` probe), single-fire on both real Chrome and docker
+  obscura.
+- **tools**: crippled-page detection — `webrain_navigate` / `webrain_snapshot`
+  return a `crippled` field (loaded page with <5 interactive elements and no
+  challenge → likely a bot-limited shell, e.g. YouTube/Twitter/X stripped
+  pages). Soft hint, not a block.
+- **docs**: obscura interaction notes — obscura implements
+  `Input.dispatchMouseEvent`/`dispatchKeyEvent` but NOT `Input.insertText`
+  (falls back to JS fill), has no layout engine so coordinate clicks rely on
+  its internal `elementFromPoint`, and does NOT parse inline `onclick=`
+  attributes (use addEventListener). Lightpanda lacks `Input.*` entirely
+  (JS fallback).
+
+### Docs
+
+- **multi-agent delegation doctrine** (enriched from browsemind
+  EXTRACTION_GUIDE + DYNAMIC_DATA_EXTRACTION_GUIDE): the in-binary
+  `AGENT_GUIDE` (returned by `webrain_guide`) and
+  `docs/AGENT_DECISION_GUIDE.md` now teach the LLM a first-class delegation
+  pattern — when to spawn parallel subagents, the subagent contract (one
+  browser/CDP_URL, one task, compact JSON only, report challenges), and how the
+  orchestrator aggregates (dedupe sliding windows, BM25, count). New §4c in the
+  doc + delegation rows in the extraction matrix. Second pass adds the browsemind
+  patterns: **delegation as the LAST parallel lever** (in-browser
+  `webrain_batch concurrency`/`cdp_urls` first — don't spawn subagents for what
+  one batch handles), a **delegate-by-pattern table** (catalog/specific-pages/
+  infinite-scroll/whole-site/discovery-vs-extraction → default vs delegate vs
+  shard), **subagent self-heal fallback chains** (extraction fit→flatten→
+  extract_json→eval→annotate; pagination construct→click→scroll→scan; anti-bot
+  stop+report), the **pagination type decision tree** (§4: A numbered links →
+  validate→batch, B Next-only → click loop, C Load More, D infinite scroll, E
+  /page/N → construct+batch, F unknown → spider), and an **SPA hydration wait**
+  tip (poll DOM growth with webrain_wait before extracting a JS shell).
+
+### Fixed
+
+- **cli**: `webrain upgrade` on Windows/Scoop now closes other running webrain
+  instances before `scoop update` — the MCP server kept the exe locked, so
+  Scoop refused to replace the binary and the upgrade never landed. It now
+  stops the siblings (self exits right after spawning scoop) and the update
+  completes.
+
 ## [0.3.3] - 2026-08-05
 
 ### Added

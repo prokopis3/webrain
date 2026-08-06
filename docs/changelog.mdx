@@ -8,6 +8,33 @@ description: Version history for webrain.
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
+## v0.4.0
+
+<p className="text-[#888] text-sm">August 6, 2026</p>
+
+### New Features
+
+- **Agent-browser interaction primitives** — `webrain_select`, `webrain_hover`,
+  `webrain_check`, `webrain_dialog`, `webrain_wait`, `webrain_upload` on the
+  element-index model.
+- **Trusted CDP input** — click/type/press via `Input.*` CDP events with a JS
+  fallback; `webrain_click_coords` for cross-origin/reCAPTCHA; stable
+  backend-node clicks; single-fire click; click-hang bounded on sync dialogs.
+- **Extraction** — `webrain_flatten` (Shadow DOM composed text),
+  `webrain_annotate` (numbered boxes for vision models), `webrain_fit`
+  (dense-content extractor).
+- **Signals** — `webrain_add_init_script`, Chrome error-page detection
+  (`chrome_error`), `needs_js`/`visible_chars` on the HTTP probe, `crippled`
+  bot-shell hint.
+- **Docs** — multi-agent delegation doctrine in the agent decision guide.
+
+### Bug Fixes
+
+- **`webrain upgrade`** closes other running webrain instances before
+  `scoop update`, so Scoop can replace the binary.
+
+---
+
 ## v0.3.3
 
 <p className="text-[#888] text-sm">August 5, 2026</p>
