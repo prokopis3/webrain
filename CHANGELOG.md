@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **watch videos** (`webrain_core::video` + `webrain_watch` + `webrain watch`):
+  transcript + frames for ANY video (URL or local file), no browser needed.
+  Pipeline: yt-dlp captions → Whisper STT fallback (`GROQ_API_KEY` preferred,
+  `OPENAI_API_KEY` fallback, env only) → ffmpeg frames (keyframe / scene-aware /
+  none). `detail`: `transcript` (captions only), `efficient` (keyframe pass,
+  cap 50), `balanced` (scene-aware, cap 100, default). Batch: `sources[]` →
+  one parallel call, bounded worker pool, one result per video in input order.
+  Single impl shared by the MCP dispatch + the lib.rs no-browser short-circuit
+  (`tools::watch_from_args`), so it works on a fresh install before any browser.
+  VTT parser + frame-budget unit tests.
 - **batch eval** (`webrain_core::engines::batch_eval` + `webrain_batch`): new
   `op=eval` — run arbitrary JS in every tab, return the JSON per URL. The
   "custom extractor" op for hashed/SPA DOMs; no CSS schema needed. This is what
@@ -31,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **media guidance** (`AGENT_GUIDE` + `webrain_extract_json`): extract media
   URLs from `meta[property='og:image'|'og:video']` — not `video.src`, which is a
   blob: URL for streamed media (reels/DASH) and can't be downloaded.
+- **config**: smart commit scope list — new `commitlint.config.js` (canonical),
+  enforced on PR titles by `pr-lint.yml`, and mirrored in CONTRIBUTING.md /
+  contributing.mdx / README / copilot-instructions. Scopes now reflect the
+  real crates + subsystems (drops the borrowed plugin/handlers/pipeline/serp
+  scopes).
 
 ### Fixed
 

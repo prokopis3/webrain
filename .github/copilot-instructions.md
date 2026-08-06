@@ -11,7 +11,7 @@ This project uses **Semantic Versioning** and **Conventional Commits**.
 When helping with commits:
 - Always use `<type>(<scope>): <description>` format
 - Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
-- Valid scopes: core, api, cli, handlers, tools, plugin, memory, cache, pipeline, extraction, login, navigation, antibot, llm, token, browser, serp, search, config, deps, docs, tests, ci
+- Valid scopes: core, engines, mcp, tools, cli, install, launch, login, vault, vision, pdf, download, cookies, batch, extraction, navigation, stealth, antibot, session, media, docs, build, ci, style, perf, dist, deps, config, test, skill, script, release
 - See `commitlint.config.js` for full rules
 - Update `CHANGELOG.md` under `[Unreleased]` when source code changes
 

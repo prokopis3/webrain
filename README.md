@@ -455,7 +455,7 @@ GitHub Actions (`.github/workflows/`):
 - **`pr-lint.yml`** — enforce conventional-commit PR titles (`<type>(<scope>): <description>`).
 - **`changelog-enforce.yml`** — require the changelog to be updated when source changes (PRs and pushes to `main`).
 
-Commit convention: `<type>(<scope>): <description>` — types `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`, scopes `core|api|cli|handlers|tools|plugin|memory|cache|pipeline|extraction|login|navigation|antibot|llm|token|browser|serp|search|config|deps|docs|tests|ci`.
+Commit convention: `<type>(<scope>): <description>` — types `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`, scopes `core|engines|mcp|tools|cli|install|launch|login|vault|vision|pdf|download|cookies|batch|extraction|navigation|stealth|antibot|session|media|docs|build|ci|style|perf|dist|deps|config|test|skill|script|release`.
 
 ## Deployment (Docker)
 

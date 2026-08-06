@@ -41,6 +41,39 @@ jobs:
             ci
             chore
             revert
+          scopes: |
+            core
+            engines
+            mcp
+            tools
+            cli
+            install
+            launch
+            login
+            vault
+            vision
+            pdf
+            download
+            cookies
+            batch
+            extraction
+            navigation
+            stealth
+            antibot
+            session
+            media
+            docs
+            build
+            ci
+            style
+            perf
+            dist
+            deps
+            config
+            test
+            skill
+            script
+            release
           requireScope: false
           wip: true
           validateSingleCommit: false
