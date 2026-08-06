@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **docs**: tool surface synced to **63 tools** — 11 newly-documented tools
-  (`fit`, `flatten`, `annotate`, `select`, `hover`, `check`, `dialog`, `wait`,
-  `upload`, `click_coords`, `add_init_script`), `webrain_batch` `op: eval`,
-  and a new **`webrain_watch`** guide page (`docs/guides/watch-videos.mdx` —
-  transcript + frames + vision fusion, `webrain install watch` / `install
-  vision` bundles, STT env vars).
+- **docs**: tool surface synced to the **15-tool intent-based surface** — the
+  Mintlify site (overview, quickstart, browsers, runtime-flow, scrape-at-scale,
+  structured-extraction, troubleshooting, CLI reference) now teaches the
+  consolidated `observe` / `interact` / `extract` / `crawl` / `scrape` / `pdf`
+  tools, plus a new **`webrain_watch`** guide page
+  (`docs/guides/watch-videos.mdx` — transcript + frames + vision fusion,
+  `webrain install watch` / `install vision` bundles, STT env vars) and
+  `webrain_batch` `op: eval`.
 
 ### Changed
 
@@ -37,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **build(deps)**: `Cargo.lock` synced to the 0.5.0 workspace crate versions
   (`webrain-core`/`webrain-mcp`) — the v0.5.0 release commit bumped `Cargo.toml`
   but dropped the lock update.
-  - **tools**: compressed the MCP surface from **63 → 15 intent-based tools**
+- **tools**: compressed the MCP surface from **63 → 15 intent-based tools**
   (firecrawl-style): `navigate / observe / interact / extract / scrape /
   batch / crawl / search / pdf / download / watch / session / vision / eval /
   guide`. Every capability is preserved as a `what` / `action` / `op` / `mode`
