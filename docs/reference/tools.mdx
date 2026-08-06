@@ -1,11 +1,11 @@
 ---
 title: Tools Reference
-description: The full 51-tool MCP surface, grouped and verbatim.
+description: The full 63-tool MCP surface, grouped and verbatim.
 ---
 
 # Tools Reference
 
-All 51 tools are discovered dynamically — `webrain_guide` lists them for the
+All 63 tools are discovered dynamically — `webrain_guide` lists them for the
 LLM. This page is the authoritative reference; descriptions match
 `webrain-mcp/src/tools.rs`. Every browser tool also accepts an optional
 `session_id` to route to a `webrain_open_session` pool.
@@ -21,19 +21,19 @@ tools skip the browser entirely.
 | Tool group | Implementation | Browser? | Notes |
 |---|---|---|---|
 | Navigate & Observe (`navigate`, `snapshot`, `a11y`, `eval`, `screenshot`, …) | `webrain-core/src/backends/cdp.rs` + `browser.rs` | ✅ CDP | `BrowserBackend` trait gives every engine the same surface |
-| Interact (`click`, `type`, `press`, `scroll`, `nav`, `tab`, `dismiss_overlays`) | `webrain-core/src/backends/cdp.rs` | ✅ CDP | index/selector based; Material widgets need real Chrome |
-| Extract (`autoschema`, `extract_json`, `extract_regex`, `table`, `jsonld`, `bm25`, `clean`) | `webrain-core/src/engines.rs` + in-page JS | ✅ CDP (in-page) | zero-LLM, no `get_html` |
+| Interact (`click`, `type`, `press`, `select`, `hover`, `check`, `dialog`, `wait`, `upload`, `click_coords`, `add_init_script`, `dismiss_overlays`, …) | `webrain-core/src/backends/cdp.rs` | ✅ CDP | index/selector based; Material widgets need real Chrome |
+| Extract (`autoschema`, `extract_json`, `extract_regex`, `table`, `jsonld`, `bm25`, `clean`, `fit`, `flatten`) | `webrain-core/src/engines.rs` + in-page JS | ✅ CDP (in-page) | zero-LLM, no `get_html` |
 | Crawl & Batch (`batch`, `spider`, `sitemap`, `scan`, `validate_urls`) | `webrain-core/src/engines.rs` + `backends/cdp.rs` | 🔶 mixed | `spider`/`sitemap`/`validate_urls` are HTTP or CDP; `batch` needs a backend |
 | Search (`search`) | `webrain-core/src/engines.rs` | ❌ no browser | pure HTTP (ddg/google/bing) |
 | Vision (`pixel`, `vision_index`, `vision_retrieve`) | `webrain-core/src/vision.rs` + `backends/cdp.rs` | ✅ CDP (screenshot) | cosine `VectorStore` |
-| PDF & Media (`pdf*`, `download`, `media`, `get_images`) | `webrain-core` pdf modules + `engines.rs` | 🔶 mixed | `download` (http + yt-dlp) and `pdf_extract` need no browser |
+| Media, PDF & Video (`watch`, `pdf*`, `download`, `media`, `get_images`) | `webrain-core/src/video.rs` + pdf modules + `engines.rs` | 🔶 mixed | `watch` (transcript + frames) and `download`/`pdf_extract` need no browser |
 | Auth & Sessions (`login`, `profiles`, `cookies`, `setcookies`, `save_state`, `restore_state`, `open/close/list_session`) | `webrain-core/src/login.rs` + `vault.rs` + `launch.rs` | ✅ CDP + vault | secrets decrypted in-process, never through the model |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
 lightpanda, and obscura alike — the differences are capability (screenshots,
 challenge solving, a11y fidelity), not protocol. Tools with **no** browser
 dependency (`webrain_fetch_http`, `webrain_search`, `webrain_sitemap`,
-`webrain_download`, `webrain_pdf_extract`) are intercepted in
+`webrain_download`, `webrain_pdf_extract`, `webrain_watch`) are intercepted in
 `webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
 
 ## Navigate & Observe
@@ -92,6 +92,10 @@ Take a screenshot of the current page. Returns base64-encoded PNG. `full_page` c
 </Note>
 </Accordion>
 
+<Accordion title="webrain_annotate">
+Annotated viewport screenshot: overlays numbered red boxes on interactive elements and returns a legend `[{n, index, tag, text}]`. The `index` maps to `webrain_click`/`webrain_type` indices. Built for vision models — read the labels, then click by index. Removes the overlay after capture.
+</Accordion>
+
 </AccordionGroup>
 
 ## Interact
@@ -132,6 +136,38 @@ Manage browser tabs. `new` (url, returns id, becomes active) | `switch` (id) | `
 
 <Accordion title="webrain_dismiss_overlays">
 Remove visible fixed/sticky overlays (cookie banners, popups, modals) that block interaction.
+</Accordion>
+
+<Accordion title="webrain_select">
+Select an option in a native `<select>` dropdown by index: matches by option value OR visible text, fires a real change event. No-match errors and lists the available options so the LLM self-corrects.
+</Accordion>
+
+<Accordion title="webrain_hover">
+Hover an element by index via trusted CDP `mouseMoved`. Triggers CSS `:hover` menus, tooltips, and lazy hover-reveal content.
+</Accordion>
+
+<Accordion title="webrain_check">
+Set a checkbox/radio to a state by index: trusted click, verifies, falls back to JS label-retarget. Returns the ACTUAL checked state so the LLM can verify.
+</Accordion>
+
+<Accordion title="webrain_dialog">
+Resolve a pending JavaScript dialog (`alert`/`confirm`/`prompt`). A sync `alert()` pauses the page — every click/eval hangs until this resolves it. `action`: `accept` | `dismiss` (optional `prompt_text`). Works even while the renderer is paused.
+</Accordion>
+
+<Accordion title="webrain_wait">
+Standalone wait after an action: wait a fixed `ms`, or poll until a `selector` or visible-`text` substring appears (default timeout 15s). `navigate` already waits internally — this is for click→AJAX→render steps. Returns `satisfied: bool`.
+</Accordion>
+
+<Accordion title="webrain_upload">
+Upload files to a file input by index via CDP `DOM.setFileInputFiles`. Index must be an `<input type=file>`.
+</Accordion>
+
+<Accordion title="webrain_click_coords">
+Trusted click at raw viewport coordinates. For cross-origin iframe content and reCAPTCHA checkboxes where JS clicks only focus the element. Get coords from a screenshot or `webrain_page_info`.
+</Accordion>
+
+<Accordion title="webrain_add_init_script">
+Register a JS init script that runs before EVERY future navigation (`Page.addScriptToEvaluateOnNewDocument`). Use for closed-shadow-root piercing, API stubs, or route/UA overrides. Accumulates for the session.
 </Accordion>
 
 </AccordionGroup>
@@ -182,6 +218,14 @@ BM25 relevance filter: score a list of text items against a query, keep the top-
 Clean page text: strip nav/footer/script/style/iframe, exclude social/ads links, filter by word length. Returns clean text blob (max 8KB). In-page JS, zero-LLM.
 </Accordion>
 
+<Accordion title="webrain_fit">
+Prune the current page to its dense content (crawl4ai PruningContentFilter): strips nav/footer/aside/form/header boilerplate and returns the meaty text, scored by text-vs-link density + tag importance. Use instead of raw innerText — fewer tokens, denser signal.
+</Accordion>
+
+<Accordion title="webrain_flatten">
+Full composed page text including Shadow DOM (crawl4ai flatten_shadow_dom). Web-component sites (Lit/Stencil/Shoelace) render content in shadow roots that `querySelectorAll`/`innerText` miss. Resolves slots, recurses open shadow roots. Use when a page looks empty.
+</Accordion>
+
 </AccordionGroup>
 
 ## Crawl & Batch
@@ -189,7 +233,7 @@ Clean page text: strip nav/footer/script/style/iframe, exclude social/ads links,
 <AccordionGroup>
 
 <Accordion title="webrain_batch">
-Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `extract` (CSS/XPath schema) | `interact` (async JS interaction, then optional extract) | `screenshot` (save PNGs to `dir`).
+Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `extract` (CSS/XPath schema) | `interact` (async JS interaction, then optional extract) | `eval` (run JS in each tab) | `screenshot` (save PNGs to `dir`).
 
 ```json
 {
@@ -249,7 +293,7 @@ PixelRAG-style tile capture: split the current page into a grid of screenshot ti
 </Accordion>
 
 <Accordion title="webrain_vision_index">
-Capture the current page as vision tiles, embed each via `EMBED_URL` (Qwen3-VL-Embedding-2B / vLLM), and add to a cosine index persisted to `vision/{tag}.jsonl`. Requires `EMBED_URL` set to a running `/embeddings` endpoint.
+Capture the current page as vision tiles, embed each via `EMBED_URL` (OpenAI-compatible `/embeddings`), and add to a cosine index persisted to `vision/{tag}.jsonl`. With the bundled local vision model (`webrain install vision`), the response also includes `vision` — a Qwen3-VL-2B page caption via llama-server (real understanding).
 </Accordion>
 
 <Accordion title="webrain_vision_retrieve">

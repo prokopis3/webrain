@@ -1,8 +1,11 @@
 //! PixelRAG-style vision-embedding index.
 //!
 //! Tiles (`webrain_pixel` / `TileEngine`) → embed via an OpenAI-compatible
-//! `/embeddings` endpoint (vLLM serving `Qwen/Qwen3-VL-Embedding-2B`, TEI,
-//! Ollama, …) → cosine index → retrieve top-k by a text/image query.
+//! `/v1/embeddings` endpoint (`EMBED_*`) → cosine index → retrieve top-k by a
+//! text/image query. Embeddings power RETRIEVAL; real tile understanding uses
+//! the bundled LOCAL vision model (`Qwen3-VL-2B` via llama-server, `webrain
+//! install vision`) — `describe_tiles` captions tiles in one batched chat call
+//! (replacing the old `Qwen3-VL-Embedding-2B` @ vLLM:8000 vision fallback).
 //!
 //! Config via env (primary = OpenAI-compatible embedder, secondary = Qwen3-VL):
 //! - `EMBED_URL`   (default `https://api.openai.com/v1/embeddings`; any
@@ -10,14 +13,10 @@
 //!   SiliconFlow `https://api.siliconflow.cn/v1/embeddings`, local vLLM)
 //! - `EMBED_MODEL` (default `text-embedding-3-small`)
 //! - `EMBED_API_KEY` (Bearer token; required for hosted providers)
-//! - `EMBED_FALLBACK_URL`/`EMBED_FALLBACK_MODEL`/`EMBED_FALLBACK_API_KEY`
-//!   (default local vLLM `http://127.0.0.1:8000/v1/embeddings` +
-//!   `Qwen/Qwen3-VL-Embedding-2B`) — tried only when the primary endpoint fails.
 //!
 //! Verified end-to-end against a local Ollama endpoint (nomic-embed-text): tiles
 //! captured via Chrome CDP → data URLs → real HTTP embed → JSONL store → cosine
-//! top-k. Real image semantics need the vision model (vLLM/GPU or SiliconFlow);
-//! OpenRouter has no embedding models.
+//! top-k.
 //!
 //! ponytail: flat JSONL append store + in-memory cosine, zero new deps. Swap for
 //! sqlite-vec (same shape) when one index exceeds ~a few thousand vectors.
@@ -228,7 +227,47 @@ impl VectorStore {
     }
 }
 
+/// Caption a batch of base64 tile PNGs with the bundled LOCAL vision model
+/// (Qwen3-VL-2B via llama-server, `webrain install vision`) — the PixelRAG
+/// "vision model" path (embeddings can't read pixels). One batched chat call,
+/// capped at 8 evenly-sampled tiles; returns the model's page description.
+pub fn describe_tiles(b64: &[String]) -> anyhow::Result<String> {
+    let (server, model, mmproj) = crate::install::vision_local()
+        .ok_or_else(|| anyhow::anyhow!("no local vision stack — run `webrain install vision`"))?;
+    let step = (b64.len() as f64 / 8.0).ceil().max(1.0) as usize;
+    let mut content: Vec<Value> = vec![json!(
+        {"type":"text","text":"These are PNG tiles captured from a web page in reading order. Describe the page's visible content in 2-3 sentences."}
+    )];
+    for b in b64.iter().step_by(step).take(8) {
+        content.push(
+            json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b}")}}),
+        );
+    }
+    let model_name = model
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "qwen3-vl-2b".to_string());
+    let body = json!({
+        "model": model_name,
+        "messages": [{"role":"user","content": content}],
+        "max_tokens": 512
+    });
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build(),
+    );
+    let (mut child, endpoint) = crate::video::spawn_llama_server(&server, &model, &mmproj)?;
+    let out = crate::video::post_vision(&agent, &endpoint, None, &body);
+    let _ = child.kill();
+    let _ = child.wait();
+    out.map_err(|e| anyhow::anyhow!("local vision: {e:#}"))
+}
+
 /// Index the current page: capture PixelRAG tiles, embed them as images, store.
+/// When the bundled local vision model is installed, also captions the tiles
+/// (returned as `vision`) — real understanding the embeddings can't provide.
 pub async fn index_current_page(
     backend: &impl BrowserBackend,
     tag: &str,
@@ -263,11 +302,18 @@ pub async fn index_current_page(
     }
     let total = store.len();
     store.save()?;
+    let vision = crate::install::vision_local()
+        .is_some()
+        .then(|| {
+            let tiles: Vec<String> = tiles.iter().map(|t| t.png_b64.clone()).collect();
+            describe_tiles(&tiles).ok()
+        })
+        .flatten();
     Ok(json!({
         "status": "ok", "tag": tag, "indexed": tiles.len(), "total": total,
         "url": url, "dim": vecs.first().map(|v| v.len()).unwrap_or(0),
         "model": client.model(),
-        "fallback": client.fallback.as_ref().map(|f| f.model.clone())
+        "vision": vision
     }))
 }
 

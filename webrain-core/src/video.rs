@@ -804,7 +804,7 @@ fn vision_target(
 /// OpenAI-compatible chat/completions POST, surfacing the API's own error
 /// body on non-2xx (status-as-error off — a bare "http status: 400" hid a
 /// decommissioned-model cause before). `auth: None` = local server (no key).
-fn post_vision(
+pub(crate) fn post_vision(
     agent: &ureq::Agent,
     endpoint: &str,
     auth: Option<&str>,
@@ -831,7 +831,7 @@ fn post_vision(
 
 /// Spawn the bundled llama-server with Qwen3-VL-2B (model + mmproj) on a free
 /// port, wait for /health, return (child, OpenAI-compat endpoint). Caller kills.
-fn spawn_llama_server(
+pub(crate) fn spawn_llama_server(
     exe: &Path,
     model: &Path,
     mmproj: &Path,

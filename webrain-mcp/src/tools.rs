@@ -758,7 +758,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_vision_index",
-            "description": "PixelRAG: capture the CURRENT page as vision tiles, embed each tile via EMBED_URL (Qwen3-VL-Embedding-2B / vLLM), and add them to a cosine index (persisted to vision/{tag}.jsonl). Requires EMBED_URL set to a running /embeddings endpoint.",
+            "description": "PixelRAG: capture the CURRENT page as vision tiles, embed each tile via EMBED_URL (OpenAI-compatible /embeddings) into a cosine index (persisted to vision/{tag}.jsonl). When the bundled local vision model is installed (`webrain install vision`), the response also carries `vision` — a page caption from Qwen3-VL-2B via llama-server (real understanding, embeddings can't read pixels).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

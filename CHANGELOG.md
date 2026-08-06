@@ -13,6 +13,13 @@ _No unreleased changes yet._
 
 ### Changed
 
+- **PixelRAG vision model migration** (`webrain_core::vision` + `webrain_vision_index`):
+  the vision-embedding fallback (`Qwen3-VL-Embedding-2B` @ local vLLM:8000, GPU-only)
+  is replaced by the **bundled local vision model** (`Qwen3-VL-2B` via llama-server,
+  `webrain install vision`). `index_current_page` now captions the captured tiles in
+  one batched chat call (`vision::describe_tiles`, reusing the watch llama-server
+  spawn) and returns the page description as `vision`. Embeddings still power cosine
+  retrieval; the local vision model supplies the real understanding.
 - **build(deps)**: `Cargo.lock` synced to the 0.5.0 workspace crate versions
   (`webrain-core`/`webrain-mcp`) — the v0.5.0 release commit bumped `Cargo.toml`
   but dropped the lock update.
