@@ -187,6 +187,20 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     }
                 });
             }
+            // ponytail: webrain_watch shells out to yt-dlp/ffmpeg/ffprobe (no
+            // browser), so skip CDP connect too — same shared helper as the tool
+            // dispatch (tools::watch_from_args), one implementation, two callers.
+            if tool_name == "webrain_watch" {
+                let result = crate::tools::watch_from_args(&arguments);
+                let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                        "isError": is_err
+                    }
+                });
+            }
             // ponytail: webrain_search uses ureq (no browser), so skip CDP connect too.
             if tool_name == "webrain_search" {
                 let q = arguments.get("q").and_then(|v| v.as_str()).unwrap_or("");

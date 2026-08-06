@@ -27,7 +27,7 @@ pub fn close_launched(key: &str) -> bool {
 }
 use serde_json::{Value, json};
 use webrain_core::engines::{
-    BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_extract, batch_fetch,
+    BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_eval, batch_extract, batch_fetch,
     batch_interact, batch_screenshot, bm25_filter, build_adaptive_extract_js, build_clean_js,
     build_extract_js, download_files, http_fetch, regex_extract, sitemap_urls, validate_urls,
 };
@@ -96,6 +96,26 @@ EXTRACTION MATRIX
                                         webrain_navigate("https://search.brave.com/search?q=..."))
 - static, no browser                   -> webrain_fetch_http
 - relevance filter                     -> webrain_bm25
+- watch a video (URL or local file)    -> webrain_watch(source|sources[], detail) —
+                                        timestamped transcript (yt-dlp captions ->
+                                        local whisper-cli -> Whisper STT API) + frame
+                                        file paths; the LLM reads frames + transcript
+                                        to summarize. If the client can't render
+                                        frames, set vision:true -> text captions +
+                                        visual summary (vision LLM: cloud
+                                        GROQ/OPENAI key, or LOCAL Qwen3-VL-2B via
+                                        bundled llama-server when no key — run
+                                        `webrain install vision`). No browser
+                                        needed. First run:
+                                        `webrain install watch` bundles ffmpeg+ffprobe,
+                                        yt-dlp, whisper-cli + a GGUF model as mono
+                                        packages in the webrain cache (no PATH
+                                        installs, all OS); transcript is LOCAL/offline
+                                        when whisper-cli + model are present (env
+                                        overrides WEBRAIN_WHISPER_BIN/MODEL). Cloud
+                                        fallback key = GROQ_API_KEY | OPENAI_API_KEY |
+                                        FIREWORKS_API_KEY (model WEBRAIN_STT_MODEL).
+                                        Batch: sources[] = N videos in one call.
 
 FROM-SCRATCH DISCOVERY (schema + urls unknown)
   1. webrain_navigate(seed) — read `links` (same-origin) + `challenge`
@@ -120,6 +140,13 @@ RULES
   than webrain_get_html (token-heavy, unreadable). get_html is the LAST resort:
   only when the task explicitly asks for HTML markup, and if you use it, remind
   the user you're pulling HTML and why.
+- Media URLs (images/videos): extract meta[property='og:image'|'og:video'] as
+  attr fields — NEVER `video.src`: for streamed media (reels/DASH) it's a blob:
+  URL that can't be downloaded; og:video/og:image carry the real CDN file.
+- Watching a video: webrain_watch returns {transcript[{t,text}], transcript_source,
+  frames[{index,t,path}]}. Read the frame files at those paths + the transcript to
+  summarize. detail=transcript is fastest when captions exist; balanced (default)
+  adds scene-aware frames; efficient is a cheap keyframe pass.
 - Never guess selectors/browsers from memory — discover via autoschema/eval and
   read the `challenge` field on every navigate.
 - webrain_batch(op=extract) returns each result's products as a parsed `data`
@@ -214,11 +241,12 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_screenshot",
-            "description": "Take a screenshot of the current page. Returns base64-encoded PNG.",
+            "description": "Take a screenshot of the current page. Returns the PNG as base64 (screenshot_b64) AND writes it to disk (returns `path`) so any client can view the file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "full_page": {"type": "boolean", "description": "Capture full scrollable page", "default": false}
+                    "full_page": {"type": "boolean", "description": "Capture full scrollable page", "default": false},
+                    "dir": {"type": "string", "description": "Output dir for the PNG file (default: screenshots)", "default": "screenshots"}
                 }
             }
         }),
@@ -326,7 +354,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_extract_json",
-            "description": "CSS-schema extraction: build a JSON array from a base selector + field selectors. Zero-LLM structured extraction (crawl4ai JsonCssExtractionStrategy style). Set adaptive:true to auto-relocate the container when the base selector matches nothing (site redesigned) — finds elements still containing >=2 of the field selectors.",
+            "description": "CSS-schema extraction: build a JSON array from a base selector + field selectors. Zero-LLM structured extraction (crawl4ai JsonCssExtractionStrategy style). Set adaptive:true to auto-relocate the container when the base selector matches nothing (site redesigned) — finds elements still containing >=2 of the field selectors. Media gotcha: for image/video URLs extract meta[property='og:image'|'og:video'] as attr — `video.src` is a blob: URL for streamed media and won't download.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -588,14 +616,15 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Batch over many URLs using concurrent tabs (crawl4ai arun_many + MemoryAdaptiveDispatcher). REQUIRES a browser backend (CDP) — if no browser is running it errors fast (5s timeout). op 'fetch': read visible text. 'extract': run a CSS/XPath schema (needs base_selector + fields, zero-LLM). 'interact': run an async JS `interaction` in parallel tabs (click Load More loop / infinite-scroll / form fill), then optionally extract a schema — one call replaces N serial agent loops for N interactive sites. 'screenshot': save full-page PNGs to dir. Returns one result per URL. `concurrency` bounds in-flight tabs (default 4); pages load in parallel. Optional request-quality params shared with navigate (all ops incl. screenshot): disable_resources, network_idle, wait_selector, wait_selector_state. Optional `cdp_urls` (list) fans the batch out across N CDP backends round-robin — per-proxy isolation (each browser = own proxy/cookies/fingerprint) in one call, no subagents needed. Optional `output` path persists the full payload to disk (survives temp-file GC between turns).",
+            "description": "Batch over many URLs using concurrent tabs (crawl4ai arun_many + MemoryAdaptiveDispatcher). REQUIRES a browser backend (CDP) — if no browser is running it errors fast (5s timeout). op 'fetch': read visible text. 'extract': run a CSS/XPath schema (needs base_selector + fields, zero-LLM). 'interact': run an async JS `interaction` in parallel tabs (click Load More loop / infinite-scroll / form fill), then optionally extract a schema — one call replaces N serial agent loops for N interactive sites. 'eval': run arbitrary JS `js` in every tab and return the JSON per URL — the \"custom extractor\" op for hashed/spa DOMs (no schema needed). 'screenshot': save full-page PNGs to dir. Returns one result per URL. `concurrency` bounds in-flight tabs (default 4); pages load in parallel. Optional request-quality params shared with navigate (all ops incl. screenshot): disable_resources, network_idle, wait_selector, wait_selector_state. Optional `cdp_urls` (list) fans the batch out across N CDP backends round-robin — per-proxy isolation (each browser = own proxy/cookies/fingerprint) in one call, no subagents needed. Optional `output` path persists the full payload to disk (survives temp-file GC between turns).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["fetch", "extract", "interact", "screenshot"]},
+                    "op": {"type": "string", "enum": ["fetch", "extract", "interact", "eval", "screenshot"]},
                     "urls": {"type": "array", "items": {"type": "string"}},
                     "cdp_urls": {"type": "array", "items": {"type": "string"}, "description": "Optional CDP backends to round-robin URLs across (per-proxy isolation). Default: the session backend."},
                     "interaction": {"type": "string", "description": "Async JS interaction to run in each tab (op=interact), e.g. click '#load-more-btn' N times / scroll loop. Does its own waits."},
+                    "js": {"type": "string", "description": "Arbitrary JS extractor to run in each tab (op=eval). Return a JSON string to get `data`; otherwise the raw string lands in `text`."},
                     "base_selector": {"type": "string", "description": "CSS selector for repeated items (op=extract / interact)"},
                     "fields": {"type": "array", "items": {"type": "object"}, "description": "[{name, selector, type: text|attr|html|xpath, attr?}] (op=extract / interact)"},
                     "concurrency": {"type": "integer", "description": "Max in-flight tabs (parallel loads)", "default": 4},
@@ -626,6 +655,26 @@ pub fn list_tools() -> Vec<Value> {
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Extra yt-dlp CLI flags, e.g. ['--write-subs', '--embed-thumbnail'] (engine=ytdlp)"}
                 },
                 "required": ["urls"]
+            }
+        }),
+        json!({
+            "name": "webrain_watch",
+            "description": "Watch any video (URL or local file): returns a timestamped transcript (yt-dlp captions -> local whisper-cli -> Whisper STT API fallback) plus frame file paths so the LLM can read frames + transcript to summarize. Works with NO browser. First run `webrain install watch` to bundle ffmpeg+ffprobe, yt-dlp, whisper-cli + a GGUF model as self-contained mono packages in the webrain cache (no PATH installs, works on any OS). Transcribes LOCALLY/offline when whisper-cli + model are present (env overrides WEBRAIN_WHISPER_BIN / WEBRAIN_WHISPER_MODEL); cloud fallback needs GROQ_API_KEY, OPENAI_API_KEY, or FIREWORKS_API_KEY (model WEBRAIN_STT_MODEL). Batch: pass sources[] and get one result per video, in parallel. Detail: 'transcript' (fastest, captions only), 'efficient' (keyframe pass, cap 50), 'balanced' (scene-aware, cap 100, default). vision:true sends up to 3 sampled frames to a vision LLM (Groq qwen/qwen3.6-27b -> OpenAI gpt-4o-mini -> LOCAL Qwen3-VL-2B via bundled llama-server when NO key is set; `webrain install vision` bundles it, whisper-style) and returns text captions + a fused visual summary in `vision` — use when the client can't render the frame images (text-only model).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "Video URL or local file path (single)"},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Many video URLs/paths — one result per source, processed in parallel (batch)"},
+                    "detail": {"type": "string", "enum": ["transcript", "efficient", "balanced"], "default": "balanced", "description": "transcript = captions/transcript only (no frames); efficient = keyframe pass (fast); balanced = scene-aware frames (default)"},
+                    "max_frames": {"type": "integer", "description": "Hard cap on frames (default: by detail + duration budget)"},
+                    "resolution": {"type": "integer", "default": 512, "description": "Frame width to scale to (height auto)"},
+                    "start": {"type": "number", "description": "Trim start (seconds)"},
+                    "end": {"type": "number", "description": "Trim end (seconds)"},
+                    "out_dir": {"type": "string", "description": "Work dir for download/frames/audio (default: watch_<pid>/)"},
+                    "no_whisper": {"type": "boolean", "default": false, "description": "Skip Whisper fallback when no captions exist"},
+                    "stt_backend": {"type": "string", "enum": ["whisper", "gemini"], "default": "whisper", "description": "Speech-to-text backend (gemini is a stub)"},
+                    "vision": {"type": "boolean", "default": false, "description": "Send sampled frames to a vision LLM and return text captions + a fused visual summary — chain: Groq qwen/qwen3.6-27b -> OpenAI gpt-4o-mini -> LOCAL Qwen3-VL-2B via bundled llama-server when no key is set (`webrain install vision` bundles it, like whisper). Use when the client can't render the frame images"}
+                }
             }
         }),
         json!({
@@ -1162,10 +1211,34 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .get("full_page")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let dir = args
+                .get("dir")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("screenshots");
             match backend.screenshot(full).await {
                 Ok(png) => {
                     use base64::Engine;
-                    json!({"status": "ok", "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(png)})
+                    let mut out = json!({
+                        "status": "ok",
+                        "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(&png),
+                    });
+                    // also write to disk so any client can VIEW the file, not just
+                    // round-trip the base64 blob (chat sessions decode awkwardly)
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        out["path_error"] = json!(e.to_string());
+                    } else {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let path = format!("{dir}/shot_{ts}.png");
+                        match std::fs::write(&path, &png) {
+                            Ok(()) => out["path"] = json!(path),
+                            Err(e) => out["path_error"] = json!(e.to_string()),
+                        }
+                    }
+                    out
                 }
                 Err(e) => err(e),
             }
@@ -1840,6 +1913,24 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             .to_string();
                         batch_screenshot(b, urls, &dir, concurrency, opts).await
                     }
+                    "eval" => {
+                        let js = args
+                            .get("js")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if js.is_empty() {
+                            return vec![BatchResult {
+                                url: urls[0].clone(),
+                                title: String::new(),
+                                text: String::new(),
+                                data: None,
+                                error: Some("js required (op=eval)".to_string()),
+                                ms: 0,
+                            }];
+                        }
+                        batch_eval(b, urls, &js, concurrency, opts).await
+                    }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
             }
@@ -2013,6 +2104,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let results = download_files(&urls, &dir);
             json!({"status": "ok", "count": results.len(), "results": results})
         }
+        // Watch any video (URL or local file) — no browser needed, so it lives
+        // in the shared helper both this dispatch AND the lib.rs no-browser
+        // short-circuit call (one implementation, two callers).
+        "webrain_watch" => watch_from_args(args),
         "webrain_search" => {
             let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("");
             if q.is_empty() {
@@ -2216,101 +2311,127 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let user_sel = args
-                .get("username_selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let pass_sel = args
-                .get("password_selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let submit_sel = args
-                .get("submit_selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if service.is_empty()
-                || profile.is_empty()
-                || user_sel.is_empty()
-                || pass_sel.is_empty()
-                || submit_sel.is_empty()
-            {
-                return json!({"status": "error", "message": "service, profile, username_selector, password_selector, submit_selector required"});
+            if service.is_empty() || profile.is_empty() {
+                return json!({"status": "error", "message": "service and profile required"});
             }
+            let url = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let port = args.get("port").and_then(|v| v.as_u64()).map(|p| p as u16);
             // secret resolves in-process; the value never returns to the caller
             let cred = match webrain_core::vault::get(&service, &profile) {
                 Ok(c) => c,
                 Err(e) => return err(e),
             };
-            if let Some(url) = args
-                .get("url")
-                .and_then(|v| v.as_str())
-                .filter(|u| !u.is_empty())
-            {
-                if let Err(e) = backend
-                    .navigate_opts(url, &webrain_core::backends::cdp::NavOpts::default())
-                    .await
-                {
-                    return err(e);
-                }
-            }
-            for (sel, val) in [(&user_sel, &cred.username), (&pass_sel, &cred.password)] {
-                match backend
-                    .evaluate(&webrain_core::vault::fill_js(sel, val))
-                    .await
-                {
-                    Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {}
-                    Ok(_) => {
-                        return json!({"status": "error", "message": format!("field not found for selector {sel}")});
-                    }
-                    Err(e) => return err(e),
-                }
-            }
-            if let Err(e) = backend
-                .evaluate(&webrain_core::vault::click_js(&submit_sel))
-                .await
-            {
-                return err(e);
-            }
-            let mut otp_used = false;
-            if let Some(seed) = &cred.totp {
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                let otp_sel = args
-                    .get("otp_selector")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                match backend
-                    .evaluate(&webrain_core::vault::otp_detect_js(&otp_sel))
-                    .await
-                {
-                    Ok(v) if v.get("found").and_then(|x| x.as_bool()).unwrap_or(false) => {
-                        let fill_sel = if otp_sel.is_empty() {
-                            "input[autocomplete='one-time-code']".to_string()
-                        } else {
-                            otp_sel.clone()
-                        };
-                        if let Ok(code) = webrain_core::vault::totp_code(seed) {
-                            let _ = backend
-                                .evaluate(&webrain_core::vault::fill_js(&fill_sel, &code))
-                                .await;
-                            if let Some(ots) = args
-                                .get("otp_submit_selector")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                            {
-                                let _ = backend.evaluate(&webrain_core::vault::click_js(ots)).await;
-                            }
-                            otp_used = true;
+            // native auto-discovery login (same as `webrain login` CLI);
+            // `port` targets a specific Chrome, else the session's shared backend
+            let out = match port {
+                Some(p) => {
+                    match CdpBackend::connect_with_url(&format!("http://127.0.0.1:{p}")).await {
+                        Ok(b) => {
+                            webrain_core::login::run_login(
+                                &b,
+                                &cred.username,
+                                &cred.password,
+                                cred.totp.as_deref(),
+                                url.as_deref(),
+                            )
+                            .await
                         }
+                        Err(e) => return err(e),
                     }
-                    _ => {}
                 }
+                None => {
+                    webrain_core::login::run_login(
+                        backend,
+                        &cred.username,
+                        &cred.password,
+                        cred.totp.as_deref(),
+                        url.as_deref(),
+                    )
+                    .await
+                }
+            };
+            match out {
+                Ok(v) => json!({"status": "ok", "result": v}),
+                Err(e) => err(e),
             }
-            json!({"status": "ok", "service": service, "profile": profile, "logged_in": true, "otp_used": otp_used})
         }
         _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+/// Shared webrain_watch implementation (single | batch). Called from the tool
+/// dispatch and from lib.rs's no-browser short-circuit, so the MCP server can
+/// watch videos before any browser is up.
+pub fn watch_from_args(args: &Value) -> Value {
+    use webrain_core::video::{Detail, SttBackend, WatchOpts};
+    let opts = WatchOpts {
+        detail: Detail::parse(
+            args.get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("balanced"),
+        ),
+        max_frames: args
+            .get("max_frames")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        resolution: args
+            .get("resolution")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(512) as u32,
+        start: args.get("start").and_then(|v| v.as_f64()),
+        end: args.get("end").and_then(|v| v.as_f64()),
+        out_dir: args
+            .get("out_dir")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        no_whisper: args
+            .get("no_whisper")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        stt_backend: SttBackend::parse(
+            args.get("stt_backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("whisper"),
+        ),
+        vision: args
+            .get("vision")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+    let single = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sources: Vec<String> = args
+        .get("sources")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(src) = single {
+        match webrain_core::video::watch(&src, &opts) {
+            Ok(v) => json!({"status": "ok", "result": v}),
+            Err(e) => json!({"status": "error", "message": e.to_string()}),
+        }
+    } else if !sources.is_empty() {
+        let results = webrain_core::video::watch_batch(&sources, &opts);
+        let ok = results.iter().filter(|r| r.get("error").is_none()).count();
+        let errs = results.iter().filter(|r| r.get("error").is_some()).count();
+        json!({
+            "status": "ok",
+            "count": results.len(),
+            "ok": ok,
+            "errors": errs,
+            "results": results
+        })
+    } else {
+        json!({"status": "error", "message": "source or sources required"})
     }
 }
