@@ -24,11 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminology in overview/quickstart; stronger page descriptions; `llms-full`
   enabled in `docs.json`; `.mintignore` hygiene (audit file + `arch_diagram.mmd`).
 - **docs (landing page)**: custom **landing page** for the docs site
-  (`docs/landing.mdx` — `mode: custom`, dark OLED, hairline borders, bento of
-  the 15 tools + engines, terminal mockup; styles in `docs/styles/global.css`
-  scoped under `.landing`). Served at `/` by making it the first page in
-  navigation — the hosted build ignores the `landingPage` config key because
-  the Mintlify dashboard re-serializes `docs.json` and drops unknown keys.
+  (`docs/landing.mdx` — `mode: custom`, dark-tech taste design, asymmetric
+  hero, 15-tool bento, engines, terminal + pipeline visuals as SVG in
+  `docs/images/landing/`; styles in `docs/styles/global.css` scoped under
+  `.landing`). Served at `/` by making it the first page in navigation — the
+  hosted build ignores the `landingPage` config key because the Mintlify
+  dashboard re-serializes `docs.json` and drops unknown keys.
 
 ### Changed
 

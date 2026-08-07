@@ -8,45 +8,47 @@ mode: custom
 <div className="landing">
   <div className="mesh"><div className="grid-overlay" /></div>
 
-  {/* Hero */}
+  {/* Hero — asymmetric split, anti-center */}
   <div className="wrap">
     <div className="hero">
-      <span className="eyebrow"><span className="dot" />Open source · MIT · Rust</span>
-      <h1>Browser automation<br /><span className="grad">for AI agents.</span></h1>
-      <p className="lede">webrain is an MCP server for LLM-driven browser automation and web scraping. One static binary, three browser engines, and 15 intent-based tools any LLM client can call.</p>
-      <div className="cta-row">
-        <a className="btn btn-primary" href="/quickstart">Read the quickstart</a>
-        <a className="btn btn-ghost" href="/overview">Explore the docs</a>
-      </div>
-
-      <div className="terminal">
-        <div className="bar"><i /><i /><i /><span>webrain mcp</span></div>
-        <div className="body">
-          <span className="t-prompt">$</span> <span className="t-cmd">webrain mcp</span><br />
-          webrain: Starting MCP server on stdio... 15 tools loaded<br />
-          <span className="t-prompt">agent&gt;</span> <span className="t-cmd">scrape product prices from URL X</span><br />
-          &nbsp;&nbsp;<span className="t-grey">webrain_navigate</span> <span className="t-ok">→ ok</span><br />
-          &nbsp;&nbsp;<span className="t-grey">webrain_extract (mode=autoschema)</span> <span className="t-ok">→ schema</span><br />
-          &nbsp;&nbsp;<span className="t-grey">webrain_extract (mode=schema)</span> <span className="t-ok">→ 42 rows JSON</span><br />
-          <span className="t-prompt">$</span><span className="cursor" />
+      <div>
+        <span className="eyebrow"><span className="dot" />Open source · MIT · Rust</span>
+        <h1>Browser automation <em>for AI agents.</em></h1>
+        <p className="lede">An MCP server that gives any LLM a real browser — scrape, crawl, and extract with 15 intent-based tools.</p>
+        <div className="cta-row">
+          <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
+          <a className="btn btn-ghost" href="/overview">Read the docs<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15Z" /><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" /></svg></span></a>
         </div>
+      </div>
+      <div className="hero-visual">
+        <img src="/images/landing/hero-terminal.svg" alt="webrain MCP terminal: navigate, observe, interact, extract to JSON" />
       </div>
     </div>
   </div>
 
-  {/* Capabilities */}
+  {/* Trust strip */}
+  <div className="wrap">
+    <div className="logos">
+      <div className="cap">Works with any MCP client</div>
+      <div className="row">
+        <span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span>
+      </div>
+    </div>
+  </div>
+
+  {/* Capabilities — asymmetric bento */}
   <div className="wrap">
     <div className="section">
       <div className="section-head">
         <div className="kicker">Capabilities</div>
         <h2>Everything an agent needs to read the web.</h2>
-        <p>Fifteen intent-based tools cover the full job — navigate, observe, interact, extract, crawl, and read any file. No selectors to hand-write, no driver plumbing.</p>
+        <p>Fifteen intent-based tools cover the full job — no selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
         <div className="shell card-2">
           <div className="core">
-            <h3><span className="chip-ico">▦</span>15 intent-based tools</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>15 intent-based tools</h3>
             <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Legacy one-action names still dispatch.</p>
             <div className="tool-chips">
               <span className="tool-chip">navigate</span><span className="tool-chip">observe</span><span className="tool-chip">interact</span><span className="tool-chip">extract</span><span className="tool-chip">scrape</span><span className="tool-chip">batch</span><span className="tool-chip">crawl</span><span className="tool-chip">search</span><span className="tool-chip">pdf</span><span className="tool-chip">download</span><span className="tool-chip">watch</span><span className="tool-chip">session</span><span className="tool-chip">vision</span><span className="tool-chip">eval</span><span className="tool-chip">guide</span>
@@ -56,42 +58,42 @@ mode: custom
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico">≡</span>Structured extraction</h3>
-            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data. Zero hand-written selectors.</p>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg></span>Structured extraction</h3>
+            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico">⌁</span>Stealth login</h3>
-            <p>Real-Chrome profiles with an encrypted local vault (AES-256-GCM) and optional TOTP. Transfer cookies across engines.</p>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Stealth login</h3>
+            <p>Real-Chrome profiles with an encrypted local vault (AES-256-GCM) and optional TOTP. Cookies transfer across engines.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico">✓</span>Challenge bypass</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
             <p>Every navigate reports a <code>challenge</code> field; a real-Chrome stealth sidecar solves Cloudflare and Turnstile gates.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico">✕</span>Crawl at scale</h3>
-            <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume. Map a site, then harvest it.</p>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>Crawl at scale</h3>
+            <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico">↻</span>Read anything</h3>
-            <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path for static pages.</p>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="m12 7 5 5-5 5M7 12h10" /></svg></span>Read anything</h3>
+            <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path.</p>
           </div>
         </div>
 
         <div className="shell card-2">
           <div className="core">
-            <h3><span className="chip-ico">◇</span>Local AI, all OS</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3V5a3 3 0 0 0-3-3Z" /><circle cx="12" cy="15" r="2.4" /></svg></span>Local AI, all OS</h3>
             <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision — no cloud key required. Runs fully on your machine.</p>
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
@@ -105,7 +107,7 @@ mode: custom
     </div>
   </div>
 
-  {/* Engines */}
+  {/* Engines — 2x2 */}
   <div className="wrap">
     <div className="section">
       <div className="section-head">
@@ -114,15 +116,15 @@ mode: custom
         <p>Pick the right engine for the job — from a full Chrome for interactive SPAs to a no-browser HTTP fetch for static pages.</p>
       </div>
       <div className="engines">
-        <div className="shell"><div className="core"><h3>Chrome</h3><p>Interactive SPAs, challenges, screenshots. The default for anything real Chrome can do.</p></div></div>
-        <div className="shell"><div className="core"><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div></div>
-        <div className="shell"><div className="core"><h3>Lightpanda</h3><p>Real accessibility tree, lightweight. Screenshot returns a placeholder frame.</p></div></div>
-        <div className="shell"><div className="core"><h3>fetch_http</h3><p>Static HTML, no JS, no auth — 10–100× faster than a browser. No engine at all.</p></div></div>
+        <div className="engine"><span className="tag">Default</span><div><h3>Chrome</h3><p>Interactive SPAs, challenges, screenshots. Anything real Chrome can do.</p></div></div>
+        <div className="engine"><span className="tag">Fast</span><div><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div></div>
+        <div className="engine"><span className="tag">Light</span><div><h3>Lightpanda</h3><p>Real accessibility tree, lightweight. Screenshot returns a placeholder frame.</p></div></div>
+        <div className="engine"><span className="tag">No browser</span><div><h3>fetch_http</h3><p>Static HTML, no JS, no auth — 10–100× faster. No engine at all.</p></div></div>
       </div>
     </div>
   </div>
 
-  {/* Why */}
+  {/* Why — split with pipeline visual */}
   <div className="wrap">
     <div className="section">
       <div className="split">
@@ -133,24 +135,13 @@ mode: custom
             <p>No driver wiring, no browser download dance, no tool wrappers. Install once, and your agent drives a real browser.</p>
           </div>
           <div className="check-list">
-            <div className="check"><span className="tick">✓</span><div><b>MCP native</b><p>stdio or HTTP. Works with Claude, Cursor, Copilot, Codex, Gemini.</p></div></div>
-            <div className="check"><span className="tick">✓</span><div><b>Local first</b><p>Everything runs on your machine. No cloud, no API key, no data leaves.</p></div></div>
-            <div className="check"><span className="tick">✓</span><div><b>Stealth and auth built in</b><p>Challenge bypass, encrypted vault, TOTP, and cookie transfer across engines.</p></div></div>
+            <div className="check"><span className="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 12 5 5L20 6" /></svg></span><div><b>MCP native</b><p>stdio or HTTP. Works with Claude, Cursor, Copilot, Codex, Gemini.</p></div></div>
+            <div className="check"><span className="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 12 5 5L20 6" /></svg></span><div><b>Local first</b><p>Everything runs on your machine. No cloud, no API key, no data leaves.</p></div></div>
+            <div className="check"><span className="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 12 5 5L20 6" /></svg></span><div><b>Stealth and auth built in</b><p>Challenge bypass, encrypted vault, TOTP, and cookie transfer across engines.</p></div></div>
           </div>
         </div>
-        <div>
-          <div className="mini-card">
-            <div className="mono">
-              <span style={{ color: '#60a5fa' }}>#</span> engines, one protocol<br />
-              CdpBackend — Chrome / Lightpanda / Obscura<br />
-              <span style={{ color: '#60a5fa' }}>#</span> one tool router<br />
-              map_surface() → 15 intents, 63 legacy names<br />
-              <span style={{ color: '#60a5fa' }}>#</span> credentials stay local<br />
-              vault — AES-256-GCM + TOTP<br />
-              <span style={{ color: '#60a5fa' }}>#</span> vision &amp; video, offline<br />
-              Qwen3-VL-2B · whisper-cli
-            </div>
-          </div>
+        <div className="why-visual">
+          <img src="/images/landing/tool-flow.svg" alt="webrain tool flow: navigate, observe, interact, extract to JSON" />
         </div>
       </div>
     </div>
@@ -163,8 +154,7 @@ mode: custom
         <h2>Give your agent a browser in five minutes.</h2>
         <p>Install webrain, start the MCP server, and ask your LLM to scrape — no selectors, no wrappers.</p>
         <div className="cta-row">
-          <a className="btn btn-primary" href="/quickstart">Get started</a>
-          <a className="btn btn-ghost" href="https://github.com/prokopis3/webrain">Star on GitHub</a>
+          <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
       </div>
     </div>

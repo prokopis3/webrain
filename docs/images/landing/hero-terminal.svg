@@ -1,0 +1,84 @@
+<svg width="680" height="500" viewBox="0 0 680 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="win" x1="0" y1="0" x2="680" y2="500">
+      <stop stop-color="#0e0e11"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(120 40) rotate(0) scale(360)">
+      <stop stop-color="#3B82F6" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ambient glow -->
+  <rect x="40" y="30" width="600" height="440" rx="24" fill="url(#glow)"/>
+
+  <!-- window -->
+  <rect x="40" y="30" width="600" height="440" rx="22" fill="url(#win)" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+  <rect x="40" y="30" width="600" height="48" rx="22" fill="rgba(255,255,255,0.03)"/>
+  <rect x="40" y="55" width="600" height="23" fill="rgba(255,255,255,0.03)"/>
+
+  <!-- title dots -->
+  <circle cx="66" cy="54" r="6" fill="#FF5F57"/>
+  <circle cx="88" cy="54" r="6" fill="#FEBC2E"/>
+  <circle cx="110" cy="54" r="6" fill="#28C840"/>
+  <text x="140" y="59" font-family="ui-monospace, 'Geist Mono', monospace" font-size="13" fill="#71717a">webrain mcp</text>
+
+  <!-- sidebar -->
+  <rect x="40" y="78" width="168" height="392" fill="rgba(255,255,255,0.02)"/>
+  <text x="60" y="104" font-family="ui-monospace, 'Geist Mono', monospace" font-size="11" letter-spacing="2" fill="#52525b">TOOLS</text>
+  <g font-family="ui-monospace, 'Geist Mono', monospace" font-size="12">
+    <rect x="56" y="118" width="136" height="26" rx="7" fill="rgba(59,130,246,0.16)" stroke="rgba(59,130,246,0.4)"/>
+    <text x="70" y="135" fill="#60a5fa">navigate</text>
+    <rect x="56" y="152" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="169" fill="#a1a1aa">observe</text>
+    <rect x="56" y="186" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="203" fill="#a1a1aa">interact</text>
+    <rect x="56" y="220" width="136" height="26" rx="7" fill="rgba(59,130,246,0.16)" stroke="rgba(59,130,246,0.4)"/>
+    <text x="70" y="237" fill="#60a5fa">extract</text>
+    <rect x="56" y="254" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="271" fill="#a1a1aa">crawl</text>
+    <rect x="56" y="288" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="305" fill="#a1a1aa">watch</text>
+    <rect x="56" y="322" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="339" fill="#a1a1aa">session</text>
+    <rect x="56" y="356" width="136" height="26" rx="7" fill="rgba(255,255,255,0.03)"/>
+    <text x="70" y="373" fill="#a1a1aa">vision</text>
+  </g>
+
+  <!-- terminal -->
+  <g font-family="ui-monospace, 'Geist Mono', monospace" font-size="13">
+    <text x="236" y="120" fill="#60a5fa">$</text>
+    <text x="252" y="120" fill="#f5f5f4">webrain mcp</text>
+    <text x="236" y="146" fill="#52525b">Starting MCP server on stdio... 15 tools loaded</text>
+    <text x="236" y="180" fill="#60a5fa">agent&gt;</text>
+    <text x="300" y="180" fill="#f5f5f4">scrape product prices from URL X</text>
+    <text x="236" y="210" fill="#71717a">  webrain_navigate</text>
+    <text x="392" y="210" fill="#34d399">→ ok</text>
+    <text x="236" y="234" fill="#71717a">  webrain_extract (mode=autoschema)</text>
+    <text x="500" y="234" fill="#34d399">→ schema</text>
+    <text x="236" y="258" fill="#71717a">  webrain_extract (mode=schema)</text>
+    <text x="468" y="258" fill="#34d399">→ 42 rows</text>
+
+    <!-- JSON result card -->
+    <rect x="236" y="290" width="352" height="128" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <text x="258" y="318" fill="#34d399">[</text>
+    <text x="276" y="318" fill="#a1a1aa">{"title":</text>
+    <text x="392" y="318" fill="#f5f5f4">"USB-C Hub",</text>
+    <text x="276" y="342" fill="#a1a1aa">"price":</text>
+    <text x="392" y="342" fill="#f5f5f4">$42.90,</text>
+    <text x="276" y="366" fill="#a1a1aa">"in_stock":</text>
+    <text x="392" y="366" fill="#34d399">true</text>
+    <text x="258" y="398" fill="#34d399">]</text>
+
+    <!-- cursor -->
+    <rect x="236" y="432" width="8" height="16" fill="#60a5fa"/>
+  </g>
+
+  <!-- footer line -->
+  <text x="236" y="466" font-family="ui-monospace, 'Geist Mono', monospace" font-size="11" fill="#52525b">local-first · no cloud · AES-256-GCM vault</text>
+</svg>
