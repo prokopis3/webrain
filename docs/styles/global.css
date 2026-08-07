@@ -66,9 +66,8 @@
 /* ===== trust strip ===== */
 .landing .logos { padding: 4rem 0 1rem; text-align: center; }
 .landing .logos .cap { font-size: 0.76rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); margin-bottom: 1.4rem; }
-.landing .logos .row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 1.2rem 2.4rem; }
-.landing .logos .row span { font-size: 1.02rem; font-weight: 500; letter-spacing: -0.01em; color: var(--muted); opacity: 0.75; transition: opacity 0.3s var(--ease), color 0.3s var(--ease); }
-.landing .logos .row span:hover { opacity: 1; color: var(--text); }
+.landing .logos .marquee-row span { font-size: 1.02rem; font-weight: 500; letter-spacing: -0.01em; color: var(--muted); opacity: 0.8; white-space: nowrap; transition: opacity 0.3s var(--ease), color 0.3s var(--ease); }
+.landing .logos .marquee-row span:hover { opacity: 1; color: var(--text); }
 
 /* ===== sections ===== */
 .landing .section { padding: 7rem 0; }
@@ -126,6 +125,54 @@
 .landing .foot .links a:hover { color: var(--text); }
 .landing .foot .legal { width: 100%; margin-top: 1.75rem; font-size: 0.78rem; color: var(--faint); }
 
+/* ===== motion — motivated, GPU-safe, SEO/AI-safe (additive only, content never hidden) ===== */
+@keyframes rise { from { opacity: 0; transform: translateY(1.25rem); } to { opacity: 1; transform: none; } }
+@keyframes drift { 0%, 100% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(28px,18px,0) scale(1.05); } }
+@keyframes marquee { from { transform: translate3d(0,0,0); } to { transform: translate3d(-50%,0,0); } }
+
+/* entrance — tight stagger, no hidden-from-crawler state (runs on load, short delays protect LCP) */
+@media (prefers-reduced-motion: no-preference) {
+  .landing .hero > div { animation: rise 0.7s var(--ease) both; }
+  .landing .hero > div:nth-child(2) { animation-delay: 0.14s; }
+  .landing .logos, .landing .section-head, .landing .cta-band { animation: rise 0.7s var(--ease) both; }
+  .landing .bento .shell { animation: rise 0.6s var(--ease) both; }
+  .landing .bento .shell:nth-child(2) { animation-delay: 0.05s; }
+  .landing .bento .shell:nth-child(3) { animation-delay: 0.1s; }
+  .landing .bento .shell:nth-child(4) { animation-delay: 0.15s; }
+  .landing .bento .shell:nth-child(5) { animation-delay: 0.2s; }
+  .landing .bento .shell:nth-child(6) { animation-delay: 0.25s; }
+  .landing .bento .shell:nth-child(7) { animation-delay: 0.3s; }
+  .landing .engines .engine { animation: rise 0.6s var(--ease) both; }
+  .landing .engines .engine:nth-child(2) { animation-delay: 0.06s; }
+  .landing .engines .engine:nth-child(3) { animation-delay: 0.12s; }
+  .landing .engines .engine:nth-child(4) { animation-delay: 0.18s; }
+  /* ambient mesh drift — transform-only, fixed backdrop */
+  .landing .mesh::before { animation: drift 26s ease-in-out infinite; }
+  .landing .mesh::after { animation: drift 32s ease-in-out infinite reverse; }
+}
+
+/* hover physics — feedback, transform/opacity only */
+.landing .shell { transition: transform 0.5s var(--ease), background 0.4s var(--ease); }
+.landing .shell:hover { transform: translateY(-3px); }
+.landing .engine { transition: transform 0.5s var(--ease), background 0.4s var(--ease); }
+.landing .engine:hover { transform: translateY(-3px); background: rgba(255,255,255,0.045); }
+.landing .hero-visual { transition: transform 0.6s var(--ease), box-shadow 0.6s var(--ease); will-change: transform; }
+.landing .hero-visual:hover { transform: translateY(-4px) scale(1.01); box-shadow: 0 80px 150px -60px rgba(0,0,0,0.9), inset 0 1px 1px rgba(255,255,255,0.06); }
+.landing .check .tick { transition: transform 0.3s var(--ease); }
+.landing .check:hover .tick { transform: scale(1.12); }
+
+/* marquee — the single allowed marquee (trust strip), edge-faded */
+.landing .marquee { overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
+.landing .marquee-track { display: flex; width: max-content; }
+@media (prefers-reduced-motion: no-preference) {
+  .landing .marquee-track { animation: marquee 32s linear infinite; }
+}
+.landing .marquee-track:hover { animation-play-state: paused; }
+.landing .marquee-row { display: flex; align-items: center; gap: 2.4rem; padding-right: 2.4rem; }
+
+/* focus-visible (a11y) */
+.landing a:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; border-radius: 6px; }
+
 /* ===== responsive ===== */
 @media (max-width: 1024px) {
   .landing .engines { grid-template-columns: repeat(2, 1fr); }
@@ -140,4 +187,6 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .landing *, .landing *::before, .landing *::after { animation: none !important; transition: none !important; }
+  .landing .marquee-track { animation: none !important; }
+  .landing .shell:hover, .landing .engine:hover, .landing .hero-visual:hover { transform: none; }
 }

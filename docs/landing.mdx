@@ -26,12 +26,15 @@ mode: custom
     </div>
   </div>
 
-  {/* Trust strip */}
+  {/* Trust strip — the one marquee (motivated: conveys any-MCP-client breadth) */}
   <div className="wrap">
     <div className="logos">
       <div className="cap">Works with any MCP client</div>
-      <div className="row">
-        <span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span>
+      <div className="marquee">
+        <div className="marquee-track">
+          <div className="marquee-row"><span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span></div>
+          <div className="marquee-row" aria-hidden="true"><span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span></div>
+        </div>
       </div>
     </div>
   </div>
