@@ -2916,6 +2916,7 @@ pub fn watch_from_args(args: &Value) -> Value {
     };
     let single = args
         .get("source")
+        .or_else(|| args.get("url"))
         .and_then(|v| v.as_str())
         .map(String::from);
     let sources: Vec<String> = args
