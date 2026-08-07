@@ -875,6 +875,9 @@ pub(crate) fn spawn_llama_server(
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr().map(|a| a.port()))
         .unwrap_or(8080);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get().to_string())
+        .unwrap_or_else(|_| "4".to_string());
     let mut child = std::process::Command::new(exe)
         .arg("-m")
         .arg(model)
@@ -886,6 +889,9 @@ pub(crate) fn spawn_llama_server(
         .arg(port.to_string())
         .arg("-c")
         .arg("4096")
+        .arg("-t")
+        .arg(&threads)
+        .arg("--mlock")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -924,12 +930,11 @@ pub(crate) fn spawn_llama_server(
     ))
 }
 
-/// Send up to 3 evenly-sampled frames to a vision LLM and return per-frame
-/// captions + an overall visual summary as text.
-/// ponytail: 3 frames = qwen3.6-27b's hard image cap AND fits the free-tier
-/// 8000 TPM budget (~2.9K tokens); a longer video stays a coarse gist — the
-/// full frame set is still available to vision-capable clients. Upgrade path
-/// for long videos: chunk 3-frame requests + a higher-tier key.
+/// Send evenly-sampled frames to a vision LLM and return per-frame captions
+/// + an overall visual summary as text.
+/// ponytail: cloud targets (Groq qwen3.6-27b) cap at 3 frames (hard limit).
+/// Local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage;
+/// ~256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
 fn describe_frames(frames: &[Frame]) -> Result<String> {
     let groq = std::env::var("GROQ_API_KEY").ok();
     let openai = std::env::var("OPENAI_API_KEY").ok();
@@ -943,6 +948,8 @@ fn describe_frames(frames: &[Frame]) -> Result<String> {
     .ok_or_else(|| {
         anyhow!("frame vision needs GROQ_API_KEY/OPENAI_API_KEY or the local Qwen3-VL (run `webrain install vision`)")
     })?;
+    let is_local = matches!(&target, VisionTarget::Local { .. });
+    let max_frames = if is_local { 10 } else { 3 };
     // ureq 3 defaults to http_status_as_error(true), which DROPS the response
     // body on 4xx/5xx. One-shot agent (vision is opt-in/rare) with status-as-
     // error off so non-2xx returns Ok and we surface the API's own message;
@@ -954,11 +961,11 @@ fn describe_frames(frames: &[Frame]) -> Result<String> {
             .build(),
     );
     use base64::Engine;
-    let step = (frames.len() as f64 / 3.0).ceil().max(1.0) as usize;
+    let step = (frames.len() as f64 / max_frames as f64).ceil().max(1.0) as usize;
     let mut content: Vec<Value> = vec![
         json!({"type":"text","text":"These are frames sampled at even intervals from a video, in chronological order. For each frame, describe in one short line what is visually happening. Then give a 1-2 sentence overall summary of the video's visual content."}),
     ];
-    for f in frames.iter().step_by(step).take(3) {
+    for f in frames.iter().step_by(step).take(max_frames) {
         let bytes = std::fs::read(&f.path)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         content.push(json!({"type":"image_url","image_url":{"url": format!("data:image/jpeg;base64,{b64}")}}));
@@ -1068,31 +1075,65 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
 
     let probe = ffprobe(&video).unwrap_or_default();
 
-    // 3) Frames (skip for transcript detail).
+    // 3+4) Frames + transcript in parallel — independent I/O, halves wall-clock.
     let mut frame_list: Vec<Frame> = Vec::new();
+    let mut whisper_segments: Vec<Segment> = Vec::new();
+    let mut whisper_source: &str = "none";
     if opts.detail != Detail::Transcript && probe.duration > 0.0 {
+        std::thread::scope(|s| {
+            let frames_thread = s.spawn(|| frames(&video, wd, &probe, opts).unwrap_or_default());
+            let whisper_thread = s.spawn(|| {
+                if segments.is_empty() && !opts.no_whisper && probe.has_audio {
+                    if let Ok(audio) = extract_audio(&video, wd) {
+                        if let Ok(segs) = whisper_local(&audio, wd)
+                            && !segs.is_empty()
+                        {
+                            return (segs, "local".to_string());
+                        } else if opts.stt_backend == SttBackend::Whisper {
+                            if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
+                                && !segs.is_empty()
+                            {
+                                return (segs, "whisper".to_string());
+                            }
+                        }
+                    }
+                }
+                (vec![], "none".to_string())
+            });
+            frame_list = frames_thread.join().unwrap_or_default();
+            let (segs, src) = whisper_thread.join().unwrap_or_else(|_| (vec![], "none".to_string()));
+            whisper_segments = segs;
+            whisper_source = if src == "local" { "local" } else if src == "whisper" { "whisper" } else { "none" };
+        });
+    } else {
         frame_list = frames(&video, wd, &probe, opts).unwrap_or_default();
     }
 
-    // 4) Transcript: captions, else local whisper-cli, else cloud Whisper API.
-    if segments.is_empty() && !opts.no_whisper && probe.has_audio {
+    // If whisper didn't run in parallel (no frames path), run it now.
+    if whisper_source == "none" && segments.is_empty() && !opts.no_whisper && probe.has_audio {
         if let Ok(audio) = extract_audio(&video, wd) {
             // Local first — offline/private/free, GPU when present. A missing
             // binary/model falls through to the cloud API (if a key is set).
             if let Ok(segs) = whisper_local(&audio, wd)
                 && !segs.is_empty()
             {
-                segments = segs;
-                transcript_source = "local";
+                whisper_segments = segs;
+                whisper_source = "local";
             } else if opts.stt_backend == SttBackend::Whisper {
                 if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
                     && !segs.is_empty()
                 {
-                    segments = segs;
-                    transcript_source = "whisper";
+                    whisper_segments = segs;
+                    whisper_source = "whisper";
                 }
             }
         }
+    }
+
+    // Merge parallel whisper results if they ran.
+    if !whisper_segments.is_empty() {
+        segments = whisper_segments;
+        transcript_source = whisper_source;
     }
 
     let mut out = finish_json(
