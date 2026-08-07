@@ -1,0 +1,33 @@
+---
+title: Cursor
+description: Connect webrain to Cursor — add a project .mcp.json or use Cursor Settings, then drive the 15 browser/scraping tools from the agent.
+---
+
+# Cursor
+
+Cursor supports MCP servers via a project `.mcp.json`.
+
+## Setup
+
+Create `.mcp.json` at your project root:
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+Cursor picks it up automatically; enable **webrain** in Settings → MCP. Restart
+if the tools don't appear.
+
+## Example
+
+> Use webrain to open https://example.com, wait for results, and extract the
+> table into JSON.
+
+## Related
+
+- [MCP Server](/mcp/server)
+- [Agent Decision Guide](/guides/agent-decision-guide)

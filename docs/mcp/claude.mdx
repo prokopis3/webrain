@@ -1,0 +1,49 @@
+---
+title: Claude (Desktop & Code)
+description: Connect webrain to Claude Desktop or Claude Code — claude_desktop_config.json setup, stdio/HTTP config, and example prompts.
+---
+
+# Claude
+
+Connect webrain to **Claude Desktop** or **Claude Code** as an MCP server.
+
+## Claude Desktop
+
+Add to `claude_desktop_config.json` (Claude → Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+Restart Claude Desktop. The webrain tools appear automatically.
+
+## Claude Code
+
+Add to `.mcp.json` in your project (or use `claude mcp add`):
+
+```json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+```bash
+claude mcp add webrain -- webrain mcp
+```
+
+## Example prompts
+
+- "Scrape the product prices from https://example.com and return JSON"
+- "Which browser should I use for this page?" (calls `webrain_guide`)
+- "Log into this site and keep the session" (`webrain_session` + `webrain_login`)
+
+## Related
+
+- [MCP Server](/mcp/server) — transports and generic config
+- [Agent Decision Guide](/guides/agent-decision-guide)

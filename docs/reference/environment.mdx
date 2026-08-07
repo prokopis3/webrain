@@ -1,6 +1,6 @@
 ---
 title: Environment Variables
-description: All configuration knobs.
+description: Every webrain environment variable — engine paths, browser cache and profile roots, encrypted vault, credentials, STT/vision keys, and local AI (whisper + Qwen3-VL-2B).
 ---
 
 # Environment Variables
@@ -18,9 +18,6 @@ description: All configuration knobs.
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
 | `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
 | `EMBED_URL` | `/embeddings` endpoint for `webrain_vision_index` | — |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud Whisper STT fallback + vision LLM for `webrain_watch` / `webrain_vision_index` | — |
-| `WEBRAIN_STT_MODEL` | Override the STT model for `webrain_watch` | auto |
-| `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths (`webrain install watch`) | bundled |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
 
 ## Local AI (watch & vision)

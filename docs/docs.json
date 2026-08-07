@@ -8,6 +8,9 @@
     "dark": "#2563EB"
   },
   "favicon": "/images/webrain-logo-rounded.png",
+  "llms": {
+    "full": true
+  },
   "navigation": {
     "anchors": [
       {
@@ -23,6 +26,15 @@
             ]
           },
           {
+            "group": "MCP Clients",
+            "pages": [
+              "mcp/server",
+              "mcp/claude",
+              "mcp/cursor",
+              "mcp/copilot"
+            ]
+          },
+          {
             "group": "Concepts",
             "pages": [
               "concepts/browsers",
@@ -33,10 +45,20 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/agent-decision-guide",
               "guides/structured-extraction",
               "guides/scrape-at-scale",
               "guides/auth-and-login",
               "guides/watch-videos"
+            ]
+          },
+          {
+            "group": "Comparisons",
+            "pages": [
+              "comparisons/playwright",
+              "comparisons/browser-use",
+              "comparisons/firecrawl",
+              "comparisons/crawl4ai"
             ]
           },
           {

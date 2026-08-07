@@ -1,0 +1,32 @@
+---
+title: webrain vs Firecrawl
+description: Honest comparison of webrain and Firecrawl — a local open-source MCP scraping server vs a commercial scraping API and SDK platform.
+---
+
+# webrain vs Firecrawl
+
+**Firecrawl** is a **commercial scraping platform** — a hosted API plus
+Python/Node SDKs, with an open-source self-host option and an MCP server.
+**webrain** is an open-source **local MCP server** — install one binary, no API
+key, no cloud.
+
+| Dimension | webrain | Firecrawl |
+|---|---|---|
+| Model | Open source, local, free | Commercial API (+ self-host) |
+| MCP | Native server | MCP server available |
+| Browser engines | Chrome, Lightpanda, Obscura + no-browser HTTP | Managed headless browsers |
+| Extraction | Autoschema/schema/regex/table/JSON-LD/BM25 | Markdown/structured extract |
+| Auth sessions | Vault + TOTP, cookie transfer | Supported |
+| Cost | Free (your machine) | Usage-based / credits |
+| Video/PDF | `watch`, PDF extract/render | PDF (limited) |
+
+**Pick Firecrawl** when you want a **managed API** — no infra, per-request
+billing, high-scale crawling as a service.
+
+**Pick webrain** when you want **free, local, MCP-native** scraping with full
+control (engines, stealth login, sessions) and no data leaving your machine.
+
+## Related
+
+- [Overview](/overview) · [Scrape at Scale](/guides/scrape-at-scale)
+- [webrain vs Playwright](/comparisons/playwright) · [webrain vs Browser Use](/comparisons/browser-use)

@@ -48,8 +48,9 @@ stderr into the stream.
 
 ## 4. Connect an LLM client (MCP setup)
 
-Webrain is an **MCP server** - register it in your client and the 63 `webrain_*`
-tools appear automatically. Two transports:
+Webrain is an **MCP server** — register it in your client and its **15
+intent-based tools** appear automatically (63 legacy one-action names still
+dispatch for backward compatibility). Two transports:
 
 - **stdio** - `webrain mcp` (default; simplest for local clients)
 - **HTTP** - `webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`
@@ -101,6 +102,9 @@ Or over HTTP (start `webrain mcp --http 9223` first):
   }
 }
 ```
+
+Full per-client walkthroughs: [Claude](/mcp/claude) · [Cursor](/mcp/cursor) ·
+[GitHub Copilot](/mcp/copilot) · [MCP Server](/mcp/server).
 
 Restart the client, then **verify the server is live**: ask the LLM to call
 `webrain_guide` - it returns the browser/challenge/extraction decision guide.

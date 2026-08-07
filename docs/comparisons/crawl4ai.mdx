@@ -1,0 +1,30 @@
+---
+title: webrain vs Crawl4AI
+description: Honest comparison of webrain and Crawl4AI — a Rust MCP scraping server vs an open-source Python async crawler built for LLM-friendly output.
+---
+
+# webrain vs Crawl4AI
+
+**Crawl4AI** is an open-source **Python** async crawler designed for
+LLM-friendly output (markdown + LLM extraction), built on Playwright.
+**webrain** is an open-source **Rust MCP server** — the same LLM-friendly goal,
+delivered as a protocol any client can use.
+
+| Dimension | webrain | Crawl4AI |
+|---|---|---|
+| Form factor | Single Rust binary, MCP server + CLI | Python library (`pip install crawl4ai`) |
+| LLM integration | Any MCP client | In-process, LLM extraction calls |
+| Engines | Chrome, Lightpanda, Obscura, no-browser HTTP | Playwright (Chromium) |
+| Sessions/auth | Vault + TOTP, cookie transfer | Sessions supported |
+| Video/PDF | `watch`, PDF extract/render | — |
+
+**Pick Crawl4AI** when you're already writing **Python** and want an async
+crawler library with in-process LLM extraction.
+
+**Pick webrain** when you want **MCP-native** tools callable from any LLM
+client or language, with multiple engines and a single static binary.
+
+## Related
+
+- [Overview](/overview) · [Tools](/reference/tools)
+- [webrain vs Playwright](/comparisons/playwright) · [webrain vs Firecrawl](/comparisons/firecrawl)

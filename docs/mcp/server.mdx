@@ -1,0 +1,91 @@
+---
+title: MCP Server
+description: Run webrain as a Model Context Protocol server — stdio or HTTP transport, JSON-RPC on stdout, and the exact configuration for any MCP client.
+---
+
+# MCP Server
+
+webrain is a **Model Context Protocol (MCP) server**. Start it and any
+MCP-capable client (Claude, Claude Code, Cursor, GitHub Copilot, Codex, …)
+discovers its **15 tools** automatically — no wrappers, no daemon.
+
+## Transports
+
+**stdio** — the default; the client spawns `webrain mcp` and speaks JSON-RPC on
+stdout.
+
+```bash
+webrain mcp
+```
+
+Logs go to **stderr** — never redirect stderr into the MCP stream.
+
+**HTTP** — for remote or streamable-http clients:
+
+```bash
+webrain mcp --http 9223   # endpoint: http://127.0.0.1:9223/mcp
+```
+
+## Register it in a client
+
+```jsonc
+// VS Code (GitHub Copilot) — .vscode/mcp.json
+{
+  "servers": {
+    "webrain": {
+      "type": "stdio",
+      "command": "webrain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```jsonc
+// Cursor — .mcp.json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+```json
+// Claude Desktop — claude_desktop_config.json
+{
+  "mcpServers": {
+    "webrain": { "command": "webrain", "args": ["mcp"] }
+  }
+}
+```
+
+Point `CDP_URL` at a running engine to reuse an already-open browser:
+
+```jsonc
+{
+  "servers": {
+    "webrain": {
+      "type": "stdio",
+      "command": "webrain",
+      "args": ["mcp"],
+      "env": { "CDP_URL": "http://127.0.0.1:9222" }
+    }
+  }
+}
+```
+
+## Verify it's live
+
+Ask the LLM to call `webrain_guide` — it returns the browser / challenge /
+extraction decision guide. Then try:
+
+> Scrape all product titles + prices from URL X
+
+The model calls `webrain_navigate` → `webrain_extract` (mode=autoschema) →
+`webrain_extract` (mode=schema).
+
+## Client guides
+
+- [Claude](/mcp/claude) · [Cursor](/mcp/cursor) · [GitHub Copilot](/mcp/copilot)
+- [Tools Reference](/reference/tools) — the 15 tools
+- [Agent Decision Guide](/guides/agent-decision-guide) — which tool for which task

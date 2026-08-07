@@ -1,0 +1,37 @@
+---
+title: webrain vs Playwright
+description: Honest comparison of webrain and Playwright — a purpose-built MCP scraping/automation server vs Microsoft's browser automation and testing library.
+---
+
+# webrain vs Playwright
+
+**Playwright** is Microsoft's open-source browser-automation **library and
+testing framework** (Node, Python, .NET, Java) with a first-party MCP server
+(`@playwright/mcp`). **webrain** is a purpose-built, open-source **MCP server**
+for LLM-driven scraping and automation. Both drive Chromium over CDP.
+
+| Dimension | webrain | Playwright |
+|---|---|---|
+| Form factor | Single Rust binary (MCP server + CLI) | Library in Node/Python/.NET/Java |
+| MCP | Native — 15 tools, first class | Via `@playwright/mcp` server |
+| Engines | Chrome, Lightpanda, Obscura + no-browser HTTP | Chromium, Firefox, WebKit |
+| Extraction | Autoschema/schema/regex/table/JSON-LD/BM25 | Manual selectors |
+| Crawling | Spider, sitemap, scan, batch | Library (manual) |
+| Auth | Encrypted vault + TOTP, cookie transfer | Manual |
+| Video/PDF | `watch` (transcript+frames), PDF extract/render | — |
+| Runtime | No Node/Python runtime | Requires Node/Python |
+
+**Pick Playwright** when you're writing a browser **test suite** in your
+existing language and want WebKit/Firefox coverage.
+
+**Pick webrain** when an **LLM/agent** (Claude, Cursor, Copilot) must scrape,
+navigate, extract, and authenticate as a service — no code, no runtime, MCP
+out of the box.
+
+Puppeteer sits alongside Playwright in the same category — Chrome-only and
+lower-level — so the same "library vs MCP server" trade-off applies.
+
+## Related
+
+- [Overview](/overview) · [Browser Engines](/concepts/browsers) · [Tools](/reference/tools)
+- [webrain vs Browser Use](/comparisons/browser-use) · [webrain vs Firecrawl](/comparisons/firecrawl)

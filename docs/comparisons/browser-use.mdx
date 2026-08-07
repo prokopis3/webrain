@@ -1,0 +1,33 @@
+---
+title: webrain vs Browser Use
+description: Honest comparison of webrain and Browser Use — an MCP-native scraping server in Rust vs a Python AI browser-agent library that controls Playwright.
+---
+
+# webrain vs Browser Use
+
+**Browser Use** is an open-source **Python library** for AI browser agents — an
+agent loop drives a Playwright-controlled browser with a chosen LLM; a cloud
+service and an MCP server also exist. **webrain** is an open-source **Rust MCP
+server** that exposes browser/scrape capabilities to any LLM client.
+
+| Dimension | webrain | Browser Use |
+|---|---|---|
+| Core | Rust MCP server, single binary | Python library (agent loop) |
+| LLM integration | Any MCP client (Claude, Cursor, Copilot…) | Bring your own LLM key + agent loop |
+| Engines | Chrome, Lightpanda, Obscura, no-browser HTTP | Playwright (Chromium/Firefox/WebKit) |
+| Extraction | Autoschema/schema/regex/table/JSON-LD/BM25 | DOM-centric, LLM extraction |
+| Crawling | Spider, sitemap, batch | Library-level |
+| Deployment | Local, no cloud, no key required | Cloud tier available |
+| Video/PDF/watch | Built-in | — |
+
+**Pick Browser Use** when you want an **agent framework in Python** with a
+tight LLM loop and are comfortable owning the runtime.
+
+**Pick webrain** when you want **MCP-native browser/scraping tools** any
+client can drive — one binary, no Python runtime, local-first, with
+extraction, crawling, auth, PDF, and video built in.
+
+## Related
+
+- [Overview](/overview) · [Agent Decision Guide](/guides/agent-decision-guide)
+- [webrain vs Playwright](/comparisons/playwright) · [webrain vs Firecrawl](/comparisons/firecrawl)

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`docs/guides/watch-videos.mdx` — transcript + frames + vision fusion,
   `webrain install watch` / `install vision` bundles, STT env vars) and
   `webrain_batch` `op: eval`.
+- **docs (SEO/AI discoverability)**: new **Agent Decision Guide**
+  (`docs/guides/agent-decision-guide.mdx`), **MCP client guides** (`mcp/server`,
+  `mcp/claude`, `mcp/cursor`, `mcp/copilot`), and honest **comparison pages**
+  (vs Playwright, Browser Use, Firecrawl, Crawl4AI); canonical **15-tool**
+  terminology in overview/quickstart; stronger page descriptions; `llms-full`
+  enabled in `docs.json`; `.mintignore` hygiene (audit file + `arch_diagram.mmd`).
 
 ### Changed
 

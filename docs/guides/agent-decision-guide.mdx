@@ -1,0 +1,90 @@
+---
+title: Agent Decision Guide
+description: Which webrain MCP tool should your AI agent use? Decision table mapping every task — navigate, observe, interact, extract, crawl, batch, PDF, video, sessions — to the 15 webrain tools.
+---
+
+# Agent Decision Guide
+
+webrain exposes **15 intent-based MCP tools**. This page is a decision table:
+given a task, which tool (and which `what` / `action` / `mode` / `op`
+selector) should your agent call? The same rules are served to the LLM at
+runtime by `webrain_guide`.
+
+## The 15 tools at a glance
+
+| Need | Tool | Selector |
+|---|---|---|
+| Move to a URL, read page state + challenge | `webrain_navigate` | — |
+| Read the page (a11y, semantic tree, HTML, images, screenshot, pixel) | `webrain_observe` | `what=…` |
+| Click, type, press, scroll, select, hover, upload, dialogs | `webrain_interact` | `action=…` |
+| Extract structured data (autoschema, schema, regex, table, JSON-LD, BM25) | `webrain_extract` | `mode=…` |
+| Fast no-browser HTTP fetch of static pages | `webrain_scrape` | — |
+| Run many URLs (fetch/extract/interact/eval/screenshot) | `webrain_batch` | `op=…` |
+| Crawl a site (spider, sitemap, scan, validate) | `webrain_crawl` | `mode=…` |
+| Search the web (DDG/Google/Bing/Brave) | `webrain_search` | — |
+| PDF page / extract / render / images | `webrain_pdf` | `op=…` |
+| Download files (HTTP / yt-dlp), media | `webrain_download` | `engine=…` |
+| Transcribe + describe a video (no browser) | `webrain_watch` | — |
+| Sessions, cookies, profiles, login (vault + TOTP) | `webrain_session` | `op=…` |
+| Vision index / retrieve (screenshots → embeddings) | `webrain_vision` | `op=…` |
+| Run arbitrary JavaScript in the page | `webrain_eval` | — |
+| Get this guide from the LLM at runtime | `webrain_guide` | — |
+
+## Decision tree
+
+**I need to reach a page** → `webrain_navigate`. Read the returned `challenge`
+field — if non-null, the page is gated (see [Challenges](/concepts/challenges)).
+
+**I need to see what's on the page** → `webrain_observe`:
+
+- `what=state` / `a11y` / `semantic` — DOM structure for reasoning
+- `what=html` / `images` — raw content
+- `what=screenshot` — visual, or `what=pixel` to inspect coordinates
+
+**I need to click / type / scroll** → `webrain_interact` (`action=click`,
+`type`, `press`, `scroll`, `select`, `hover`, `check`, `upload`, `wait`,
+`dismiss_overlays`, …).
+
+**I need data from the page** → `webrain_extract`:
+
+- `mode=autoschema` — no selectors; probes the DOM and proposes a schema
+- `mode=schema` — extract with your JSON schema
+- `mode=regex` / `table` / `jsonld` / `bm25` — targeted modes
+
+**Static HTML, no JS?** → `webrain_scrape` (10–100× faster than a browser).
+
+**One URL → many pages** → `webrain_crawl` (`mode=spider`, `sitemap`, `scan`).
+
+**A fixed list of URLs** → `webrain_batch` (`op=fetch | extract | interact |
+eval | screenshot`, optional `cdp_urls` fan-out).
+
+**Logged-in / gated content** → `webrain_session` (`op=open` → login →
+`op=cookies` / `setcookies`, profile save/restore). See
+[Auth & Login](/guides/auth-and-login).
+
+**A PDF, a video, a file** → `webrain_pdf` / `webrain_watch` / `webrain_download`.
+
+**Screenshots or visual QA at scale** → `webrain_vision` (`op=index` /
+`retrieve`).
+
+## Task → tool quick map
+
+| Task | Tool | Notes |
+|---|---|---|
+| "Go to example.com" | `webrain_navigate` | check `challenge` |
+| "What's on this page?" | `webrain_observe` | `what=a11y` for reasoning |
+| "Click 'Sign in' and type the email" | `webrain_interact` | `action=click`, `action=type` |
+| "Extract prices as JSON" | `webrain_extract` | `mode=autoschema` first |
+| "Crawl the whole docs site" | `webrain_crawl` | `mode=spider` |
+| "Scrape these 50 URLs" | `webrain_batch` | `op=extract` |
+| "Read the PDF" | `webrain_pdf` | `op=extract` |
+| "Get a transcript + frames of this video" | `webrain_watch` | no browser |
+| "Log in and keep the session" | `webrain_session` | vault + TOTP |
+
+## Related
+
+- [Tools Reference](/reference/tools) — exact schemas and legacy aliases
+- [Browser Engines](/concepts/browsers) — which browser for which job
+- [Structured Extraction](/guides/structured-extraction)
+- [Scraping at Scale](/guides/scrape-at-scale)
+- [Auth & Login](/guides/auth-and-login)

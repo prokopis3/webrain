@@ -1,0 +1,34 @@
+---
+title: GitHub Copilot
+description: Connect webrain to GitHub Copilot in VS Code — add the MCP server to .vscode/mcp.json and drive browser automation from Copilot Chat.
+---
+
+# GitHub Copilot (VS Code)
+
+VS Code's Copilot Chat supports MCP servers declared in `.vscode/mcp.json`.
+
+## Setup
+
+Create `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "webrain": {
+      "type": "stdio",
+      "command": "webrain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Reload the window, then in Copilot Chat pick the **webrain** tool set (the
+tool icon / "@" menu). Verify with a prompt like:
+
+> Call webrain_guide to pick a browser, then scrape the headlines from URL X.
+
+## Related
+
+- [MCP Server](/mcp/server)
+- [Agent Decision Guide](/guides/agent-decision-guide)
