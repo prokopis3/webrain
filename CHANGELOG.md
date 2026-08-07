@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local model installed. Cloud whisper STT likewise tries every configured
   provider in order (Groq → OpenAI → Fireworks) on error, not just the first
   key set (`stt_providers`; `stt_provider` narrowed to a `#[cfg(test)]` helper).
+- **watch perf** (`webrain_core::video`): frames + whisper now run in parallel;
+  local vision gets **10 frames** (was 3); the bundled llama-server stays alive
+  across calls on Unix (static keepalive), saving ~3s of model load per watch;
+  `webrain_watch` carries per-step `ms` timing. Compiler warnings fixed.
 - **install progress** (`webrain install ...`): every package download now
   prints a live `\r` progress line (`X / Y bytes (N%)` when the server sends
   Content-Length, else MiB) — no more silent "Downloading …" hang. Both
@@ -114,6 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honest per-chunk completion, not just the vision model. Servers that ignore
   `Range` (GitHub API JSON etc.) fall back to a plain single-stream copy via
   `download_plain`, so release-metadata fetches keep working.
+- **watch** (`webrain_watch`): accepts `url` as a fallback when `source` is
+  absent — one less argument to get right for a single-video watch.
 
 ### Changed
 
