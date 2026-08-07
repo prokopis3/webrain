@@ -61,7 +61,9 @@
 .landing .btn-ghost .ico { background: rgba(255,255,255,0.08); }
 .landing .btn svg { width: 15px; height: 15px; }
 
-.landing .hero-visual { border-radius: 1.75rem; overflow: hidden; box-shadow: 0 60px 120px -50px rgba(0,0,0,0.85), inset 0 1px 1px rgba(255,255,255,0.06); border: 1px solid var(--hairline); background: var(--bg-soft); }
+.landing .hero-visual { position: relative; aspect-ratio: 16 / 10; border-radius: 1.75rem; overflow: hidden; box-shadow: 0 60px 120px -50px rgba(0,0,0,0.85), inset 0 1px 1px rgba(255,255,255,0.06); border: 1px solid var(--hairline); background: var(--bg-soft); }
+.landing .hero-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.landing .hero-terminal { position: absolute; left: 50%; bottom: -2.5rem; transform: translateX(-50%); width: 86%; border-radius: 1.25rem; overflow: hidden; border: 1px solid var(--hairline-strong); box-shadow: 0 50px 100px -40px rgba(0,0,0,0.9); background: var(--bg-soft); }
 
 /* ===== trust strip ===== */
 .landing .logos { padding: 4rem 0 1rem; text-align: center; }
@@ -95,7 +97,9 @@
 .landing .stat span { font-size: 0.8rem; color: var(--faint); }
 
 /* ===== engines — 2x2, not 3-equal ===== */
-.landing .engines { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+.landing .engines { position: relative; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+.landing .engines::before { content: ""; position: absolute; inset: 0; border-radius: 1.75rem; background-image: url('/images/landing/engines-art.png'); background-size: cover; background-position: center; opacity: 0.28; pointer-events: none; -webkit-mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); }
+.landing .engines .engine { position: relative; }
 .landing .engine { display: flex; gap: 1rem; align-items: flex-start; padding: 1.6rem; border: 1px solid var(--hairline); border-radius: 1.5rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); }
 .landing .engine .tag { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent-2); background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.22); padding: 0.2rem 0.55rem; border-radius: 9999px; flex: none; margin-top: 2px; }
 .landing .engine h3 { font-size: 1.05rem; font-weight: 600; }
@@ -129,6 +133,7 @@
 @keyframes rise { from { opacity: 0; transform: translateY(1.25rem); } to { opacity: 1; transform: none; } }
 @keyframes drift { 0%, 100% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(28px,18px,0) scale(1.05); } }
 @keyframes marquee { from { transform: translate3d(0,0,0); } to { transform: translate3d(-50%,0,0); } }
+@keyframes heroZoom { from { transform: scale(1.07); } to { transform: scale(1); } }
 
 /* entrance — tight stagger, no hidden-from-crawler state (runs on load, short delays protect LCP) */
 @media (prefers-reduced-motion: no-preference) {
@@ -149,6 +154,8 @@
   /* ambient mesh drift — transform-only, fixed backdrop */
   .landing .mesh::before { animation: drift 26s ease-in-out infinite; }
   .landing .mesh::after { animation: drift 32s ease-in-out infinite reverse; }
+  /* hero art settle-zoom (transform-only) */
+  .landing .hero-art { animation: heroZoom 18s var(--ease) both; }
 }
 
 /* hover physics — feedback, transform/opacity only */
@@ -184,6 +191,8 @@
   .landing .section { padding: 5rem 0; }
   .landing h1 { max-width: 100%; }
   .landing .btn { width: 100%; justify-content: center; }
+  .landing .hero-visual { aspect-ratio: auto; }
+  .landing .hero-terminal { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .landing *, .landing *::before, .landing *::after { animation: none !important; transition: none !important; }
