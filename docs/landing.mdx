@@ -1,5 +1,5 @@
 ---
-title: webrain — MCP browser automation & web scraping server
+title: "webrain: MCP browser automation & web scraping server"
 description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 15 intent-based tools, any MCP client.
 sidebarTitle: Home
 mode: custom
@@ -14,23 +14,35 @@ mode: custom
       <div>
         <span className="eyebrow"><span className="dot" />Open source · MIT · Rust</span>
         <h1>Browser automation <em>for AI agents.</em></h1>
-        <p className="lede">An MCP server that gives any LLM a real browser — scrape, crawl, and extract with 15 intent-based tools.</p>
+        <p className="lede">An MCP server that gives any LLM a real browser. Scrape, crawl, and extract with 15 intent-based tools.</p>
         <div className="cta-row">
           <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
-        <div className="mini-card" style={{ marginTop: '2rem', maxWidth: '34ch' }}>
-            <div className="mono" style={{ fontSize: '0.85rem' }}>
-                <span style={{ color: '#60a5fa' }}>#</span> Install (PowerShell)<br />
-                irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex<br />
-                <span style={{ color: '#60a5fa' }}>#</span> Setup browsers<br />
-                webrain install<br />
-                <span style={{ color: '#60a5fa' }}>#</span> Start MCP server<br />
-                webrain mcp
+        <div className="install-block">
+          <div className="install-tabs" role="tablist" aria-label="Install by OS">
+            <button className="install-os active" data-os="macos" role="tab" aria-selected="true" onClick={(e)=>{const blk=e.currentTarget.closest('.install-block');const code=blk.querySelector('.term-cmd');const os=e.currentTarget.getAttribute('data-os');code.setAttribute('data-cmd',code.getAttribute('data-cmd-'+os));code.textContent=code.getAttribute('data-cmd-'+os);blk.querySelectorAll('.install-os').forEach(t=>{const on=t===e.currentTarget;t.classList.toggle('active',on);t.setAttribute('aria-selected',on);});}}>macOS</button>
+            <button className="install-os" data-os="linux" role="tab" aria-selected="false" onClick={(e)=>{const blk=e.currentTarget.closest('.install-block');const code=blk.querySelector('.term-cmd');const os=e.currentTarget.getAttribute('data-os');code.setAttribute('data-cmd',code.getAttribute('data-cmd-'+os));code.textContent=code.getAttribute('data-cmd-'+os);blk.querySelectorAll('.install-os').forEach(t=>{const on=t===e.currentTarget;t.classList.toggle('active',on);t.setAttribute('aria-selected',on);});}}>Linux</button>
+            <button className="install-os" data-os="windows" role="tab" aria-selected="false" onClick={(e)=>{const blk=e.currentTarget.closest('.install-block');const code=blk.querySelector('.term-cmd');const os=e.currentTarget.getAttribute('data-os');code.setAttribute('data-cmd',code.getAttribute('data-cmd-'+os));code.textContent=code.getAttribute('data-cmd-'+os);blk.querySelectorAll('.install-os').forEach(t=>{const on=t===e.currentTarget;t.classList.toggle('active',on);t.setAttribute('aria-selected',on);});}}>Windows</button>
+          </div>
+          <div className="term">
+            <div className="term-bar">
+              <span className="term-dots"><i /><i /><i /></span>
+              <span className="term-title">install webrain</span>
+              <button className="copy-btn" aria-label="Copy install command" onClick={(e)=>{const btn=e.currentTarget;const blk=btn.closest('.install-block');const t=blk.querySelector('.term-cmd').getAttribute('data-cmd');if(navigator.clipboard&&t){navigator.clipboard.writeText(t).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1600);});}}}>
+                <svg className="copy-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <svg className="copy-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 12 5 5L20 6"/></svg>
+              </button>
             </div>
+            <div className="term-body">
+              <div className="term-line"><span className="term-prompt">❯</span><code className="term-cmd" data-cmd="curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash" data-cmd-macos="curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash" data-cmd-linux="curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash" data-cmd-windows="irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex">curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.sh | bash</code></div>
+              <div className="term-line term-out"><span className="term-ok">✓</span><span>webrain installed · one binary, three engines</span></div>
+            </div>
+          </div>
+          <p className="install-sub">No Node, no Python, no Docker. Runs on macOS, Linux, and Windows.</p>
         </div>
       </div>
       <div className="hero-visual">
-        <img src="/images/landing/mcp-browser-demo.gif" alt="webrain MCP terminal: navigate, observe, interact, extract to JSON" />
+        <img src="/images/landing/hero-terminal.svg" alt="webrain MCP terminal: navigate, observe, interact, extract to JSON" />
       </div>
     </div>
   </div>
@@ -41,8 +53,38 @@ mode: custom
       <div className="cap">Works with any MCP client</div>
       <div className="marquee">
         <div className="marquee-track">
-          <div className="marquee-row"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude Code" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="Cursor" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="GitHub Copilot" /></span><span className="logo"><img src="https://cdn.simpleicons.org/openai/ffffff" alt="Codex" /></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="Gemini" /></span></div>
-          <div className="marquee-row" aria-hidden="true"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/openai/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="" /></span></div>
+          <div className="marquee-row"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude Code" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="Cursor" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="GitHub Copilot" /></span><span className="logo" style={{ color: '#f5f5f4' }}><svg fill="currentColor" height="22" viewBox="0 0 91 24" xmlns="http://www.w3.org/2000/svg" aria-label="Codex"><path d="M79.915 14.964l-5.53-7.548h3.33l3.88 5.256 3.88-5.256h3.24l-5.5 7.486 5.683 7.792h-3.361l-4.003-5.5-4.064 5.5H74.2l5.715-7.73zM66.368 23c-1.345 0-2.567-.326-3.667-.978-1.08-.652-1.935-1.579-2.567-2.78-.631-1.203-.947-2.608-.947-4.217 0-1.59.316-2.974.947-4.156.652-1.202 1.518-2.129 2.597-2.78 1.08-.652 2.272-.978 3.575-.978 1.813 0 3.33.55 4.553 1.65 1.222 1.1 1.956 2.597 2.2 4.491.082.693.112 1.477.092 2.353H62.09c.06 1.548.489 2.76 1.283 3.636.815.876 1.793 1.314 2.933 1.314h.184c.855 0 1.599-.224 2.23-.672.632-.448 1.06-1.06 1.284-1.833h2.933a6.147 6.147 0 01-2.322 3.575C69.433 22.54 68.018 23 66.368 23zm3.819-9.687c-.082-1.16-.469-2.077-1.161-2.75-.693-.692-1.558-1.038-2.597-1.038h-.214c-.978 0-1.844.315-2.597.947-.734.611-1.212 1.558-1.437 2.841h8.006zM47.834 23c-1.324 0-2.516-.326-3.575-.978-1.039-.652-1.854-1.579-2.444-2.78-.591-1.202-.887-2.598-.887-4.187 0-1.588.306-2.984.917-4.186.611-1.201 1.446-2.128 2.506-2.78 1.08-.652 2.281-.978 3.605-.978 1.08 0 2.047.224 2.903.672.855.449 1.497 1.019 1.925 1.711V1.306h2.903v21.388h-2.903v-2.108c-.408.672-1.06 1.242-1.956 1.711-.896.469-1.894.703-2.994.703zm.58-2.475c.856 0 1.62-.234 2.292-.703.672-.468 1.192-1.11 1.558-1.925.387-.835.58-1.782.58-2.841 0-1.06-.193-1.997-.58-2.812-.366-.835-.886-1.487-1.558-1.955a3.911 3.911 0 00-2.292-.703h-.183c-1.304 0-2.363.51-3.178 1.528-.794 1.018-1.191 2.332-1.191 3.941 0 1.61.397 2.924 1.191 3.942.815 1.019 1.874 1.528 3.178 1.528h.183zM31.022 23c-1.406 0-2.679-.337-3.82-1.009a7.367 7.367 0 01-2.688-2.841c-.652-1.223-.978-2.587-.978-4.095 0-1.507.326-2.862.978-4.064.651-1.222 1.548-2.17 2.688-2.841 1.141-.693 2.414-1.04 3.82-1.04 1.405 0 2.668.347 3.789 1.04 1.14.672 2.037 1.62 2.688 2.841.652 1.202.978 2.557.978 4.064 0 1.508-.326 2.872-.977 4.095a7.367 7.367 0 01-2.69 2.841C33.69 22.663 32.428 23 31.023 23zm.06-2.476c.857 0 1.62-.224 2.293-.672.672-.468 1.201-1.11 1.589-1.925.386-.835.58-1.792.58-2.872 0-1.08-.194-2.027-.58-2.841-.388-.836-.917-1.477-1.59-1.925a3.911 3.911 0 00-2.291-.703H30.9c-1.304 0-2.373.51-3.209 1.528-.814.998-1.222 2.312-1.222 3.941 0 1.63.407 2.954 1.222 3.972.835.998 1.905 1.497 3.209 1.497h.183zM12.053 23c-2.037 0-3.82-.469-5.348-1.406-1.507-.957-2.668-2.271-3.483-3.941S2 14.098 2 12c0-2.098.407-3.982 1.222-5.653.835-1.67 2.017-2.974 3.545-3.91C8.294 1.478 10.057 1 12.053 1c1.609 0 3.055.316 4.338.947 1.304.611 2.363 1.477 3.178 2.597.815 1.1 1.304 2.374 1.467 3.82h-3.117c-.244-1.365-.876-2.465-1.894-3.3-1.019-.856-2.302-1.283-3.85-1.283h-.245c-1.385 0-2.597.356-3.636 1.069-1.039.713-1.833 1.69-2.383 2.933-.55 1.243-.825 2.648-.825 4.217 0 1.568.275 2.974.825 4.216.55 1.243 1.344 2.22 2.383 2.934 1.04.713 2.251 1.07 3.636 1.07h.245c1.548 0 2.831-.418 3.85-1.254 1.039-.855 1.68-1.976 1.925-3.36h3.086c-.184 1.446-.683 2.729-1.497 3.85-.795 1.12-1.844 1.996-3.148 2.627-1.303.611-2.75.917-4.338.917z"></path></svg></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="Gemini" /></span></div>
+          <div className="marquee-row" aria-hidden="true"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="" /></span><span className="logo" style={{ color: '#f5f5f4' }}><svg fill="currentColor" height="22" viewBox="0 0 91 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M79.915 14.964l-5.53-7.548h3.33l3.88 5.256 3.88-5.256h3.24l-5.5 7.486 5.683 7.792h-3.361l-4.003-5.5-4.064 5.5H74.2l5.715-7.73zM66.368 23c-1.345 0-2.567-.326-3.667-.978-1.08-.652-1.935-1.579-2.567-2.78-.631-1.203-.947-2.608-.947-4.217 0-1.59.316-2.974.947-4.156.652-1.202 1.518-2.129 2.597-2.78 1.08-.652 2.272-.978 3.575-.978 1.813 0 3.33.55 4.553 1.65 1.222 1.1 1.956 2.597 2.2 4.491.082.693.112 1.477.092 2.353H62.09c.06 1.548.489 2.76 1.283 3.636.815.876 1.793 1.314 2.933 1.314h.184c.855 0 1.599-.224 2.23-.672.632-.448 1.06-1.06 1.284-1.833h2.933a6.147 6.147 0 01-2.322 3.575C69.433 22.54 68.018 23 66.368 23zm3.819-9.687c-.082-1.16-.469-2.077-1.161-2.75-.693-.692-1.558-1.038-2.597-1.038h-.214c-.978 0-1.844.315-2.597.947-.734.611-1.212 1.558-1.437 2.841h8.006zM47.834 23c-1.324 0-2.516-.326-3.575-.978-1.039-.652-1.854-1.579-2.444-2.78-.591-1.202-.887-2.598-.887-4.187 0-1.588.306-2.984.917-4.186.611-1.201 1.446-2.128 2.506-2.78 1.08-.652 2.281-.978 3.605-.978 1.08 0 2.047.224 2.903.672.855.449 1.497 1.019 1.925 1.711V1.306h2.903v21.388h-2.903v-2.108c-.408.672-1.06 1.242-1.956 1.711-.896.469-1.894.703-2.994.703zm.58-2.475c.856 0 1.62-.234 2.292-.703.672-.468 1.192-1.11 1.558-1.925.387-.835.58-1.782.58-2.841 0-1.06-.193-1.997-.58-2.812-.366-.835-.886-1.487-1.558-1.955a3.911 3.911 0 00-2.292-.703h-.183c-1.304 0-2.363.51-3.178 1.528-.794 1.018-1.191 2.332-1.191 3.941 0 1.61.397 2.924 1.191 3.942.815 1.019 1.874 1.528 3.178 1.528h.183zM31.022 23c-1.406 0-2.679-.337-3.82-1.009a7.367 7.367 0 01-2.688-2.841c-.652-1.223-.978-2.587-.978-4.095 0-1.507.326-2.862.978-4.064.651-1.222 1.548-2.17 2.688-2.841 1.141-.693 2.414-1.04 3.82-1.04 1.405 0 2.668.347 3.789 1.04 1.14.672 2.037 1.62 2.688 2.841.652 1.202.978 2.557.978 4.064 0 1.508-.326 2.872-.977 4.095a7.367 7.367 0 01-2.69 2.841C33.69 22.663 32.428 23 31.023 23zm.06-2.476c.857 0 1.62-.224 2.293-.672.672-.468 1.201-1.11 1.589-1.925.386-.835.58-1.792.58-2.872 0-1.08-.194-2.027-.58-2.841-.388-.836-.917-1.477-1.59-1.925a3.911 3.911 0 00-2.291-.703H30.9c-1.304 0-2.373.51-3.209 1.528-.814.998-1.222 2.312-1.222 3.941 0 1.63.407 2.954 1.222 3.972.835.998 1.905 1.497 3.209 1.497h.183zM12.053 23c-2.037 0-3.82-.469-5.348-1.406-1.507-.957-2.668-2.271-3.483-3.941S2 14.098 2 12c0-2.098.407-3.982 1.222-5.653.835-1.67 2.017-2.974 3.545-3.91C8.294 1.478 10.057 1 12.053 1c1.609 0 3.055.316 4.338.947 1.304.611 2.363 1.477 3.178 2.597.815 1.1 1.304 2.374 1.467 3.82h-3.117c-.244-1.365-.876-2.465-1.894-3.3-1.019-.856-2.302-1.283-3.85-1.283h-.245c-1.385 0-2.597.356-3.636 1.069-1.039.713-1.833 1.69-2.383 2.933-.55 1.243-.825 2.648-.825 4.217 0 1.568.275 2.974.825 4.216.55 1.243 1.344 2.22 2.383 2.934 1.04.713 2.251 1.07 3.636 1.07h.245c1.548 0 2.831-.418 3.85-1.254 1.039-.855 1.68-1.976 1.925-3.36h3.086c-.184 1.446-.683 2.729-1.497 3.85-.795 1.12-1.844 1.996-3.148 2.627-1.303.611-2.75.917-4.338.917z"></path></svg></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="" /></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* How it works — 3-step flow */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>From install to scraping in three steps.</h2>
+        <p>No selectors to hand-write, no daemon, no driver wiring. The binary, your client, and the model do the rest.</p>
+      </div>
+      <div className="steps">
+        <div className="step">
+          <span className="step-label">Install</span>
+          <h3>One binary, any OS</h3>
+          <p>Install webrain once. No Node, no Python, no Docker. Engines download on demand.</p>
+          <div className="step-term"><span className="step-term-bar"><i /><i /><i /><span>shell</span></span><code>curl -fsSL …/install.sh | bash</code></div>
+        </div>
+        <div className="step">
+          <span className="step-label">Connect</span>
+          <h3>Register it in a client</h3>
+          <p>Add two lines to Claude, Cursor, Copilot, or Codex. The client spawns <code>webrain mcp</code>.</p>
+          <div className="step-term"><span className="step-term-bar"><i /><i /><i /><span>mcp.json</span></span><code>{'{"webrain": { "command": "webrain", "args": ["mcp"] }}'}</code></div>
+        </div>
+        <div className="step">
+          <span className="step-label">Ask</span>
+          <h3>Point the model at the web</h3>
+          <p>Tell the agent what to do in plain language. It navigates, extracts, and returns structured data.</p>
+          <div className="step-term"><span className="step-term-bar"><i /><i /><i /><span>agent</span></span><code>scrape product prices from URL X</code></div>
         </div>
       </div>
     </div>
@@ -53,7 +95,7 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Everything an agent needs to read the web.</h2>
-        <p>Fifteen intent-based tools cover the full job — no selectors to hand-write, no driver plumbing, no daemon.</p>
+        <p>Fifteen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
@@ -62,7 +104,7 @@ mode: custom
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>15 intent-based tools</h3>
             <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Legacy one-action names still dispatch.</p>
             <div className="tool-chips">
-              <span className="tool-chip">navigate</span><span className="tool-chip">observe</span><span className="tool-chip">interact</span><span className="tool-chip">extract</span><span className="tool-chip">scrape</span><span className="tool-chip">batch</span><span className="tool-chip">crawl</span><span className="tool-chip">search</span><span className="tool-chip">pdf</span><span className="tool-chip">download</span><span className="tool-chip">watch</span><span className="tool-chip">session</span><span className="tool-chip">vision</span><span className="tool-chip">eval</span><span className="tool-chip">guide</span>
+              <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">guide</a>
             </div>
           </div>
         </div>
@@ -105,7 +147,7 @@ mode: custom
         <div className="shell card-2">
           <div className="core core-grad">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3V5a3 3 0 0 0-3-3Z" /><circle cx="12" cy="15" r="2.4" /></svg></span>Local AI, all OS</h3>
-            <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision — no cloud key required. Runs fully on your machine.</p>
+            <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision. No cloud key required. Runs fully on your machine.</p>
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
               <div className="stat"><b>3</b><span>browser engines</span></div>
@@ -123,13 +165,29 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>One CDP backend, four ways to load a page.</h2>
-        <p>Pick the right engine for the job — from a full Chrome for interactive SPAs to a no-browser HTTP fetch for static pages.</p>
+        <p>Pick the right engine for the job. From a full Chrome for interactive SPAs to a no-browser HTTP fetch for static pages.</p>
       </div>
       <div className="engines">
-        <div className="engine"><span className="tag">Default</span><div><h3>Chrome</h3><p>Interactive SPAs, challenges, screenshots. Anything real Chrome can do.</p></div></div>
-        <div className="engine"><span className="tag">Fast</span><div><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div></div>
-        <div className="engine"><span className="tag">Light</span><div><h3>Lightpanda</h3><p>Real accessibility tree, lightweight. Screenshot returns a placeholder frame.</p></div></div>
-        <div className="engine"><span className="tag">No browser</span><div><h3>fetch_http</h3><p>Static HTML, no JS, no auth — 10–100× faster. No engine at all.</p></div></div>
+        <div className="engine">
+          <img className="engine-logo" src="https://cdn.simpleicons.org/googlechrome/ffffff" alt="Chrome" width="32" height="32" />
+          <div><h3>Chrome</h3><p>Interactive SPAs, challenges, screenshots. Anything real Chrome can do.</p></div>
+          <span className="tag">Default</span>
+        </div>
+        <div className="engine">
+          <img className="engine-logo" src="/images/landing/obscura-logo.png" alt="Obscura" width="36" height="36" style={{objectFit:'contain'}} />
+          <div><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div>
+          <span className="tag">Fast</span>
+        </div>
+        <div className="engine">
+          <img className="engine-logo" src="/images/landing/lightpanda-logo.svg" alt="Lightpanda" width="36" height="36" style={{objectFit:'contain',borderRadius:'8px',padding:'4px'}} />
+          <div><h3>Lightpanda</h3><p>Real accessibility tree, lightweight. Screenshot returns a placeholder frame.</p></div>
+          <span className="tag">Light</span>
+        </div>
+        <div className="engine">
+          <span className="engine-logo engine-logo-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+          <div><h3>fetch_http</h3><p>Static HTML, no JS, no auth. 10-100× faster. No engine at all.</p></div>
+          <span className="tag">No browser</span>
+        </div>
       </div>
     </div>
   </div>
@@ -150,7 +208,71 @@ mode: custom
           </div>
         </div>
         <div className="why-visual">
-          <img src="/images/landing/flow-art.png" alt="Abstract data pipeline: navigate, observe, interact, extract to JSON" />
+          <img src="/images/landing/mcp-workflow-art.png" alt="webrain MCP workflow: AI agent connects through MCP protocol to browser engine, extracts structured data" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* Benchmark visual */}
+  <div className="wrap">
+    <div className="section" style={{ paddingBottom: '2rem' }}>
+      <div className="benchmark-visual">
+      </div>
+    </div>
+  </div>
+
+  {/* Comparisons teaser — where the deeper docs live */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>How it stacks up against the alternatives.</h2>
+        <p>Honest, feature-by-feature comparisons against the tools you may already be using.</p>
+      </div>
+      <div className="compare-grid">
+        <a className="compare" href="/comparisons/playwright">
+          <div><b>vs Playwright</b><p>Why an MCP-native tool beats a driver library for LLM agents.</p></div>
+          <span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span>
+        </a>
+        <a className="compare" href="/comparisons/firecrawl">
+          <div><b>vs Firecrawl</b><p>Local-first and free versus a hosted API. Zero cloud, zero keys.</p></div>
+          <span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span>
+        </a>
+        <a className="compare" href="/comparisons/browser-use">
+          <div><b>vs Browser Use</b><p>One binary and real CDP engines instead of a Python agent loop.</p></div>
+          <span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span>
+        </a>
+        <a className="compare" href="/comparisons/crawl4ai">
+          <div><b>vs Crawl4AI</b><p>Rust-native extraction strategies and vision with no Python runtime.</p></div>
+          <span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  {/* FAQ */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>Questions, answered plainly.</h2>
+        <p>The objections that come up before you install. The short version: yes, it runs on your machine.</p>
+      </div>
+      <div className="faq">
+        <div className="faq-item">
+          <h3>Do I need Node, Python, or Docker?</h3>
+          <p>No. webrain is a single Rust binary. The browsers it drives (Chrome for Testing, Obscura, Lightpanda) download on demand into a cache dir. Nothing else to install.</p>
+        </div>
+        <div className="faq-item">
+          <h3>Does it cost money or need an API key?</h3>
+          <p>No. It is open source (MIT) and local-first. Cloud keys are optional and only for video transcriptions and vision; the bundled local whisper and Qwen3-VL-2B models work offline.</p>
+        </div>
+        <div className="faq-item">
+          <h3>Which AI clients does it work with?</h3>
+          <p>Any MCP client: Claude, Claude Code, Cursor, GitHub Copilot, Codex, Gemini, and more. Register it once in the client's MCP config and the model drives the browser itself.</p>
+        </div>
+        <div className="faq-item">
+          <h3>How is this different from a scraping API?</h3>
+          <p>webrain runs on your machine, sends no data to a third party, and gives the LLM a real browser with stealth and challenge bypass. For static pages it can be 10-100× faster than a full browser.</p>
         </div>
       </div>
     </div>
@@ -161,7 +283,7 @@ mode: custom
     <div className="section" style={{ paddingTop: '1rem' }}>
       <div className="cta-band">
         <h2>Give your agent a browser in five minutes.</h2>
-        <p>Install webrain, start the MCP server, and ask your LLM to scrape — no selectors, no wrappers.</p>
+        <p>Install webrain, start the MCP server, and ask your LLM to scrape. No selectors, no wrappers.</p>
         <div className="cta-row">
           <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
