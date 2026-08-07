@@ -11,7 +11,6 @@
   "llms": {
     "full": true
   },
-  "landingPage": "landing",
   "navigation": {
     "anchors": [
       {
@@ -21,6 +20,7 @@
           {
             "group": "Getting Started",
             "pages": [
+              "landing",
               "overview",
               "quickstart",
               "installation"

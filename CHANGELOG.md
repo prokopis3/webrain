@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs (landing page)**: custom **landing page** for the docs site
   (`docs/landing.mdx` — `mode: custom`, dark OLED, hairline borders, bento of
   the 15 tools + engines, terminal mockup; styles in `docs/styles/global.css`
-  scoped under `.landing`), enabled via `"landingPage": "landing"` in
-  `docs.json` and served at `/` by the hosted build.
+  scoped under `.landing`). Served at `/` by making it the first page in
+  navigation — the hosted build ignores the `landingPage` config key because
+  the Mintlify dashboard re-serializes `docs.json` and drops unknown keys.
 
 ### Changed
 
