@@ -727,7 +727,7 @@ fn download_plain(url: &str, dest: &Path) -> Result<()> {
 /// and a `<dest>.ok` marker (not size) proves a dest is genuinely complete.
 /// A killed run therefore resumes the missing chunks instead of faking success.
 fn download_to_file(url: &str, dest: &Path) -> Result<()> {
-    use std::io::{Read, Seek, Write};
+    use std::io::Write;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -834,7 +834,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     // in place (no 100s of scrolled "0 B / …" lines); a "Connecting…" state
     // hides the first-seconds 0-byte stall while the 8 chunk sockets open.
     let w = 30usize;
-    let mut last_pct = -1i64;
+    let last_pct: i64 = -1;
     let mut last_done = 0u64;
     let mut last_t = std::time::Instant::now();
     let mut connecting = true;
@@ -905,7 +905,7 @@ fn fetch_chunk(
     done: &std::sync::atomic::AtomicU64,
 ) -> Result<()> {
     use std::io::{Read, Seek, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
     let resp = ureq::get(url)
         .header("User-Agent", "webrain")
         .header("Range", &format!("bytes={start}-{end}"))
@@ -1016,7 +1016,7 @@ fn install_llama_server(force: bool) -> Result<PathBuf> {
 
 /// Install the Qwen3-VL-2B vision model + mmproj into vision/. Local "hero"
 /// vision backend — the whisper GGUF model analog (webrain install vision).
-fn install_vision_model(force: bool) -> Result<(PathBuf, PathBuf)> {
+fn install_vision_model(_force: bool) -> Result<(PathBuf, PathBuf)> {
     let dir = browsers_dir().join("vision");
     std::fs::create_dir_all(&dir)?;
     let model = dir.join(VISION_MODEL);

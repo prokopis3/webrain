@@ -1005,6 +1005,7 @@ fn describe_frames(frames: &[Frame]) -> Result<String> {
 
 /// Watch a single video (URL or local path) → transcript + frames JSON.
 pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
+    let t0 = std::time::Instant::now();
     let is_url = source.starts_with("http://") || source.starts_with("https://");
     let work = opts
         .out_dir
@@ -1112,6 +1113,7 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
             Err(e) => out["vision_error"] = json!(e.to_string()),
         }
     }
+    out["ms"] = json!(t0.elapsed().as_millis());
     Ok(out)
 }
 
