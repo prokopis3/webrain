@@ -217,6 +217,8 @@ pub struct NavOpts {
     pub wait_selector_state: String,
     /// If set, narrow returned text to this element's innerText (token saver).
     pub css_selector: Option<String>,
+    /// Max seconds to wait for readyState + conditions before returning (default 20).
+    pub wait_timeout_secs: Option<u64>,
 }
 
 /// JS that indexes interactive elements for click/type tools (shared by
@@ -861,7 +863,8 @@ impl CdpBackend {
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > 15 {
+            let cap = opts.wait_timeout_secs.unwrap_or(20);
+            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > cap {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -935,7 +938,8 @@ impl CdpBackend {
                     stable = 0;
                     last = n;
                 }
-                if stable >= 4 || start.elapsed().as_secs() > 15 {
+                let cap = opts.wait_timeout_secs.unwrap_or(20);
+                if stable >= 4 || start.elapsed().as_secs() > cap {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -972,7 +976,8 @@ impl CdpBackend {
                     "detached" => got == "detached",
                     _ => got == state,
                 };
-                if done || start.elapsed().as_secs() > 20 {
+                let cap = opts.wait_timeout_secs.unwrap_or(20);
+                if done || start.elapsed().as_secs() > cap {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
