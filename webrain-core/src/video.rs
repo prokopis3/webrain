@@ -501,12 +501,12 @@ fn extract_audio(video: &str, dir: &Path) -> Result<String> {
 /// ponytail: all three speak the OpenAI multipart transcriptions shape — a new
 /// provider is one row in this list, no new code. Gemini is NOT here: its
 /// audio API is inline-file JSON, not multipart (see SttBackend::Gemini stub).
-fn stt_provider(
+fn stt_providers(
     groq: Option<&str>,
     openai: Option<&str>,
     fireworks: Option<&str>,
     model_override: Option<&str>,
-) -> Option<(String, String, String)> {
+) -> Vec<(String, String, String)> {
     let candidates: [(&str, &str, &str, Option<&str>); 3] = [
         (
             "GROQ_API_KEY",
@@ -527,15 +527,32 @@ fn stt_provider(
             fireworks,
         ),
     ];
-    candidates.into_iter().find_map(|(_name, ep, def, key)| {
-        key.map(|k| {
-            (
-                ep.to_string(),
-                model_override.unwrap_or(def).to_string(),
-                k.to_string(),
-            )
+    candidates
+        .into_iter()
+        .filter_map(|(_name, ep, def, key)| {
+            key.map(|k| {
+                (
+                    ep.to_string(),
+                    model_override.unwrap_or(def).to_string(),
+                    k.to_string(),
+                )
+            })
         })
-    })
+        .collect()
+}
+
+#[cfg(test)]
+/// First configured STT provider (Groq → OpenAI → Fireworks); the runtime path
+/// uses `stt_providers` (all of them) so it can fall back on a 429/5xx.
+fn stt_provider(
+    groq: Option<&str>,
+    openai: Option<&str>,
+    fireworks: Option<&str>,
+    model_override: Option<&str>,
+) -> Option<(String, String, String)> {
+    stt_providers(groq, openai, fireworks, model_override)
+        .into_iter()
+        .next()
 }
 
 fn whisper_transcribe(audio: &str, backend: SttBackend) -> Result<Vec<Segment>> {
@@ -543,7 +560,7 @@ fn whisper_transcribe(audio: &str, backend: SttBackend) -> Result<Vec<Segment>> 
     if bytes.len() > 24 * 1024 * 1024 {
         return Err(anyhow!("audio >24MB exceeds the Whisper upload limit"));
     }
-    let (endpoint, model, key) = match backend {
+    let providers: Vec<(String, String, String)> = match backend {
         // ponytail: Gemini has a different (inline-file JSON) API shape — add a
         // real arm when a second audio API shape is actually needed.
         SttBackend::Gemini => {
@@ -556,75 +573,94 @@ fn whisper_transcribe(audio: &str, backend: SttBackend) -> Result<Vec<Segment>> 
             let openai = std::env::var("OPENAI_API_KEY").ok();
             let fireworks = std::env::var("FIREWORKS_API_KEY").ok();
             let model_override = std::env::var("WEBRAIN_STT_MODEL").ok();
-            stt_provider(
+            stt_providers(
                 groq.as_deref(),
                 openai.as_deref(),
                 fireworks.as_deref(),
                 model_override.as_deref(),
             )
-            .ok_or_else(|| {
-                anyhow!(
-                    "no STT key — set GROQ_API_KEY, OPENAI_API_KEY, or FIREWORKS_API_KEY (model: WEBRAIN_STT_MODEL)"
-                )
-            })?
         }
     };
-
-    let boundary = format!(
-        "----webrain{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let mut body = Vec::new();
-    for (name, value) in [
-        ("model", model.as_str()),
-        ("response_format", "verbose_json"),
-    ] {
-        body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
-            )
-            .as_bytes(),
-        );
+    if providers.is_empty() {
+        return Err(anyhow!(
+            "no STT key — set GROQ_API_KEY, OPENAI_API_KEY, or FIREWORKS_API_KEY (model: WEBRAIN_STT_MODEL)"
+        ));
     }
-    body.extend_from_slice(
-        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n")
-            .as_bytes(),
-    );
-    body.extend_from_slice(&bytes);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    // ponytail: one provider can 429/5xx — try each configured provider in order
+    // (Groq → OpenAI → Fireworks) instead of failing the whole watch, mirroring
+    // the cloud→local vision fallback above.
+    let mut last_err: Option<anyhow::Error> = None;
+    for (endpoint, model, key) in providers {
+        let boundary = format!(
+            "----webrain{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let mut body = Vec::new();
+        for (name, value) in [
+            ("model", model.as_str()),
+            ("response_format", "verbose_json"),
+        ] {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
-    let resp = browser_agent()
-        .post(endpoint)
-        .header("Authorization", format!("Bearer {key}"))
-        .header(
-            "Content-Type",
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .send(body)?;
-    let v: Value = resp.into_body().read_json()?;
-    let segments = v["segments"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|s| {
-            let text = s
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            (!text.is_empty()).then(|| Segment {
-                start: s.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                end: s.get("end").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                text,
+        let resp = match browser_agent()
+            .post(endpoint)
+            .header("Authorization", format!("Bearer {key}"))
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send(body)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(e.into());
+                continue;
+            }
+        };
+        let v: Value = match resp.into_body().read_json() {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = Some(e.into());
+                continue;
+            }
+        };
+        let segments = v["segments"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| {
+                let text = s
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                (!text.is_empty()).then(|| Segment {
+                    start: s.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    end: s.get("end").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    text,
+                })
             })
-        })
-        .collect();
-    Ok(segments)
+            .collect();
+        return Ok(segments);
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("all STT providers failed")))
 }
 
 // ---------------------------------------------------------------------------
@@ -935,19 +971,32 @@ fn describe_frames(frames: &[Frame]) -> Result<String> {
             .unwrap_or_else(|| "qwen3-vl-2b".to_string()),
     };
     let body = json!({ "model": model_name, "messages": [{"role":"user","content": content}], "max_tokens": 512 });
-    match target {
+    let cloud = matches!(&target, VisionTarget::Cloud { .. });
+    let mut result = match target {
         VisionTarget::Cloud { endpoint, key, .. } => {
             post_vision(&agent, &endpoint, Some(&key), &body)
         }
         VisionTarget::Local { model, mmproj } => {
-            let (server, _, _) = local.expect("local target implies local stack");
-            let (mut child, endpoint) = spawn_llama_server(&server, &model, &mmproj)?;
+            let (server, _, _) = local.as_ref().expect("local target implies local stack");
+            let (mut child, endpoint) = spawn_llama_server(server, &model, &mmproj)?;
             let out = post_vision(&agent, &endpoint, None, &body);
             let _ = child.kill();
             let _ = child.wait();
             out
         }
+    };
+    // ponytail: a configured cloud provider can 429/5xx mid-watch — fall back to
+    // the bundled local Qwen3-VL instead of failing the whole watch. Keeps the
+    // "cloud-first, local offline" promise honest under rate limits.
+    if result.is_err() && cloud {
+        if let Some((server, model, mmproj)) = local.as_ref() {
+            let (mut child, endpoint) = spawn_llama_server(server, model, mmproj)?;
+            result = post_vision(&agent, &endpoint, None, &body);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+    result
 }
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one batched chat call (`vision::describe_tiles`, reusing the watch llama-server
   spawn) and returns the page description as `vision`. Embeddings still power cosine
   retrieval; the local vision model supplies the real understanding.
+- **watch resilience** (`webrain_core::video`): frame vision now falls back
+  from a configured cloud provider to the bundled local Qwen3-VL when the cloud
+  API errors (429/5xx) instead of failing the whole watch — the fallback was
+  previously key-presence-only, so a rate limit killed vision even with the
+  local model installed. Cloud whisper STT likewise tries every configured
+  provider in order (Groq → OpenAI → Fireworks) on error, not just the first
+  key set (`stt_providers`; `stt_provider` narrowed to a `#[cfg(test)]` helper).
 - **install progress** (`webrain install ...`): every package download now
   prints a live `\r` progress line (`X / Y bytes (N%)` when the server sends
   Content-Length, else MiB) — no more silent "Downloading …" hang. Both
