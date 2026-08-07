@@ -376,66 +376,19 @@ pub fn install_whisper_model(model: &str, force: bool) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Download `url` with live `\r` progress to the terminal (bytes + % when
-/// Content-Length is known, else MiB). `dest: Some` streams to that file and
-/// returns an empty vec; `None` buffers in memory (returning the bytes).
-/// ponytail: no tty detection — `webrain install` is interactive by nature.
-fn download_stream(url: &str, dest: Option<&Path>) -> Result<Vec<u8>> {
-    use std::io::{Read, Write};
-    let resp = ureq::get(url)
-        .header("User-Agent", "webrain")
-        .call()
-        .with_context(|| format!("GET {url}"))?;
-    let total = resp
-        .headers()
-        .get("Content-Length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
-    let name = url.rsplit('/').next().unwrap_or(url).to_string();
-    let mut body = resp.into_body().into_reader();
-    let mut file = match dest {
-        Some(p) => Some(std::fs::File::create(p)?),
-        None => None,
-    };
-    let mut out: Vec<u8> = Vec::new();
-    let mut done: u64 = 0;
-    let mut last: i64 = -1;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = body.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        done += n as u64;
-        match &mut file {
-            Some(f) => f.write_all(&buf[..n])?,
-            None => out.extend_from_slice(&buf[..n]),
-        }
-        let pct = total
-            .filter(|t| *t > 0)
-            .map(|t| ((done as f64 / t as f64) * 100.0) as i64)
-            .unwrap_or(-1);
-        if pct != last {
-            match total {
-                Some(t) if t > 0 => print!("\r  {done} / {t} bytes ({pct}%)   "),
-                _ => print!("\r  {:.1} MiB   ", done as f64 / 1048576.0),
-            }
-            let _ = std::io::stdout().flush();
-            last = pct;
-        }
-    }
-    print!(
-        "\r  {name}: {:.1} MiB                \n",
-        done as f64 / 1048576.0
-    );
-    let _ = std::io::stdout().flush();
-    Ok(out)
-}
-
+/// Download `url` into memory via the parallel chunked `download_to_file` (so
+/// every `install_*` — obscura, chrome, ffmpeg, whisper, yt-dlp — gets the same
+/// animated progress bar + honest per-chunk completion as the vision model).
+/// Streams to a temp file in the cache dir, reads it back, removes it.
 fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    // ureq 3 read_to_vec() caps at 10 MB; we stream into a Vec instead, which
-    // also gives installs live progress (and the cap never bites).
-    download_stream(url, None)
+    let tmp = std::env::temp_dir().join(format!("webrain-dl-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    download_to_file(url, &tmp)?;
+    let bytes = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    // download_to_file leaves a .ok marker next to the file — clean both.
+    let _ = std::fs::remove_file(tmp.with_extension("ok"));
+    Ok(bytes)
 }
 
 fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
@@ -716,6 +669,53 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// Fallback for servers that ignore Range (GitHub API JSON etc.): one plain GET
+/// streamed straight to `dest`. No chunking, no sidecar — small responses.
+fn download_plain(url: &str, dest: &Path) -> Result<()> {
+    use std::io::{Read, Write};
+    let resp = ureq::get(url)
+        .header("User-Agent", "webrain")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let total = resp
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let name = url.rsplit('/').next().unwrap_or(url).to_string();
+    let mut body = resp.into_body().into_reader();
+    let mut file = std::fs::File::create(dest)?;
+    let mut done: u64 = 0;
+    let mut last: i64 = -1;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = body.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        file.write_all(&buf[..n])?;
+        let pct = total
+            .filter(|t| *t > 0)
+            .map(|t| ((done as f64 / t as f64) * 100.0) as i64)
+            .unwrap_or(-1);
+        if pct != last {
+            match total {
+                Some(t) if t > 0 => print!("\r  {done} / {t} bytes ({pct}%)   "),
+                _ => print!("\r  {:.1} MiB   ", done as f64 / 1048576.0),
+            }
+            let _ = std::io::stdout().flush();
+            last = pct;
+        }
+    }
+    print!(
+        "\r  {name}: {:.1} MiB                \n",
+        done as f64 / 1048576.0
+    );
+    let _ = std::io::stdout().flush();
+    Ok(())
+}
+
 /// Download a URL to `dest` in **parallel Range chunks** (the vision model is
 /// ~1.8 GiB; a single connection to HF/CDN throttles to ~KB/s, N parallel GETs
 /// multiply throughput). Downloads to `<dest>.part` then renames on success.
@@ -743,13 +743,21 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         .header("Range", "bytes=0-0")
         .call()
         .with_context(|| format!("probe {url}"))?;
-    let total: u64 = probe
-        .headers()
-        .get("Content-Range")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.rsplit('/').next())
-        .and_then(|v| v.parse().ok())
-        .with_context(|| format!("Content-Range for {url}"))?;
+    let total: Option<u64> = if probe.status() == 206 {
+        probe
+            .headers()
+            .get("Content-Range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit('/').next())
+            .and_then(|v| v.parse().ok())
+    } else {
+        None
+    };
+
+    // Server ignored Range (e.g. GitHub API JSON) — plain single-stream copy.
+    let Some(total) = total else {
+        return download_plain(url, dest);
+    };
 
     // Genuinely complete (has the .ok marker from a prior successful rename)?
     if ok.exists() {

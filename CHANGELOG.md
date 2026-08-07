@@ -108,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-line bar (`█░`, %, human MB/GB, live MiB/s) instead of scrolled raw
   bytes; `install_vision_model` re-validates every file against the server each
   run (probe Content-Range) and prints explicit `[1/2]`/`[2/2]` + status lines.
+- **install (all engines)**: `download_bytes` (used by obscura, chrome,
+  ffmpeg, whisper, yt-dlp, lightpanda) now routes through the same parallel
+  chunked `download_to_file` — every install gets the animated progress bar +
+  honest per-chunk completion, not just the vision model. Servers that ignore
+  `Range` (GitHub API JSON etc.) fall back to a plain single-stream copy via
+  `download_plain`, so release-metadata fetches keep working.
 
 ### Changed
 
