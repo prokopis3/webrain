@@ -700,10 +700,225 @@ fn install_whisper_bin(force: bool) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Stream a URL to disk with live progress (the vision model is ~1.8 GiB —
-/// never buffer it in RAM).
+/// Format a byte count as human-readable (B/KB/MB/GB).
+fn human_bytes(n: u64) -> String {
+    let units = ["B", "KB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < units.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{v:.0} {}", units[u])
+    } else {
+        format!("{v:.1} {}", units[u])
+    }
+}
+
+/// Download a URL to `dest` in **parallel Range chunks** (the vision model is
+/// ~1.8 GiB; a single connection to HF/CDN throttles to ~KB/s, N parallel GETs
+/// multiply throughput). Downloads to `<dest>.part` then renames on success.
+///
+/// **Completion is tracked per-chunk, not by file size** — pre-allocating the
+/// `.part` (set_len) makes its length == total even when empty, so a length
+/// check would "resume" a file of zeros. Each finished chunk appends its index
+/// to `<dest>.part.done`; the file is renamed ONLY when every chunk is marked,
+/// and a `<dest>.ok` marker (not size) proves a dest is genuinely complete.
+/// A killed run therefore resumes the missing chunks instead of faking success.
 fn download_to_file(url: &str, dest: &Path) -> Result<()> {
-    download_stream(url, Some(dest)).map(|_| ())
+    use std::io::{Read, Seek, Write};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let part = dest.with_extension("part");
+    let sidecar = dest.with_extension("part.done");
+    let ok = dest.with_extension("ok");
+    let name = url.rsplit('/').next().unwrap_or(url).to_string();
+
+    // Probe total size with a 1-byte Range (CDN answers 206 + Content-Range).
+    let probe = ureq::get(url)
+        .header("User-Agent", "webrain")
+        .header("Range", "bytes=0-0")
+        .call()
+        .with_context(|| format!("probe {url}"))?;
+    let total: u64 = probe
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|v| v.parse().ok())
+        .with_context(|| format!("Content-Range for {url}"))?;
+
+    // Genuinely complete (has the .ok marker from a prior successful rename)?
+    if ok.exists() {
+        println!("  ✓ {name}: {} (already complete)", human_bytes(total));
+        return Ok(());
+    }
+
+    let workers = 8usize.min(total.div_ceil(16 * 1024 * 1024) as usize).max(1);
+    let chunk = total.div_ceil(workers as u64);
+    let done = Arc::new(AtomicU64::new(0));
+    let completed = Arc::new(Mutex::new(std::collections::HashSet::<u64>::new()));
+
+    // Recover completed chunks from a prior run's sidecar (true resume).
+    if let Ok(s) = std::fs::read_to_string(&sidecar) {
+        for line in s.lines() {
+            if let Ok(i) = line.trim().parse::<u64>() {
+                if i < workers as u64 {
+                    completed.lock().unwrap().insert(i);
+                }
+            }
+        }
+    }
+    let recovered = completed.lock().unwrap().len() as u64;
+    done.store(recovered * chunk, Ordering::Relaxed);
+
+    // The .part is pre-allocated so parallel chunks can write at any offset;
+    // empty regions are fine because only marked chunks are trusted.
+    if !part.exists() {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&part)?;
+        f.set_len(total)?;
+    }
+    let t0 = std::time::Instant::now();
+
+    let handles: Vec<_> = (0..workers)
+        .filter(|w| !completed.lock().unwrap().contains(&(*w as u64))) // skip recovered
+        .map(|w| {
+            let start = w as u64 * chunk;
+            let end = (start + chunk - 1).min(total - 1);
+            let url = url.to_string();
+            let part = part.to_path_buf();
+            let sidecar = sidecar.to_path_buf();
+            let done = Arc::clone(&done);
+            let completed = Arc::clone(&completed);
+            std::thread::spawn(move || -> Result<()> {
+                let mut last_err = None;
+                for attempt in 0..3 {
+                    match fetch_chunk(&url, &part, start, end, &done) {
+                        Ok(()) => {
+                            // mark chunk done + persist, so a kill resumes here
+                            let mut c = completed.lock().unwrap();
+                            c.insert(w as u64);
+                            let _ = std::fs::write(
+                                &sidecar,
+                                c.iter()
+                                    .map(|i| i.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => last_err = Some(e), // transient drop -> retry
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500 * (attempt + 1)));
+                }
+                Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chunk {start}-{end} failed")))
+            })
+        })
+        .collect();
+
+    // Animated single-line progress bar. ANSI erase-line + \r redraws ONE line
+    // in place (no 100s of scrolled "0 B / …" lines); a "Connecting…" state
+    // hides the first-seconds 0-byte stall while the 8 chunk sockets open.
+    let w = 30usize;
+    let mut last_pct = -1i64;
+    let mut last_done = 0u64;
+    let mut last_t = std::time::Instant::now();
+    let mut connecting = true;
+    loop {
+        let d = done.load(Ordering::Relaxed);
+        let pct = if total > 0 {
+            (d as f64 / total as f64 * 100.0) as i64
+        } else {
+            0
+        };
+        let dt = last_t.elapsed().as_secs_f64().max(1e-6);
+        let rate = (d.saturating_sub(last_done)) as f64 / dt / 1048576.0;
+        if d > 0 && connecting {
+            connecting = false;
+        }
+        if connecting {
+            // don't spam — one line, redrawn, until the first byte arrives
+            print!("\x1b[2K\r  Connecting…  [8× parallel chunks]   ");
+        } else if pct != last_pct || rate >= 0.5 {
+            let filled = ((pct as f64 / 100.0) * w as f64).round() as usize;
+            let bar: String = (0..w).map(|i| if i < filled { '█' } else { '░' }).collect();
+            print!(
+                "\x1b[2K\r  {bar} {pct:>3}%  {} / {}  [{rate:>6.1} MiB/s]",
+                human_bytes(d),
+                human_bytes(total)
+            );
+        }
+        let _ = std::io::stdout().flush();
+        last_done = d;
+        last_t = std::time::Instant::now();
+        if d >= total {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+    // The progress loop breaks when done >= total; join the workers and verify
+    // EVERY chunk actually completed (sidecar count) before trusting the file.
+    for h in handles {
+        h.join()
+            .map_err(|_| anyhow::anyhow!("download worker panicked"))??;
+    }
+    let completed_count = completed.lock().unwrap().len();
+    if completed_count < workers {
+        anyhow::bail!("incomplete download: {completed_count}/{workers} chunks done for {name}");
+    }
+    print!(
+        "\x1b[2K\r  ✓ {name}: {} in {:.1}s\n",
+        human_bytes(total),
+        t0.elapsed().as_secs_f64()
+    );
+    let _ = std::io::stdout().flush();
+
+    std::fs::rename(&part, dest)?;
+    // `.ok` marker is the ONLY proof a dest is complete (not file length).
+    std::fs::write(&ok, "ok")?;
+    let _ = std::fs::remove_file(&sidecar);
+    Ok(())
+}
+
+/// One parallel Range chunk: GET `bytes=start-end`, write at the file offset.
+/// `done` is bumped per-read so the progress line moves live (not only when a
+/// whole multi-MB chunk completes).
+fn fetch_chunk(
+    url: &str,
+    path: &std::path::Path,
+    start: u64,
+    end: u64,
+    done: &std::sync::atomic::AtomicU64,
+) -> Result<()> {
+    use std::io::{Read, Seek, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let resp = ureq::get(url)
+        .header("User-Agent", "webrain")
+        .header("Range", &format!("bytes={start}-{end}"))
+        .call()
+        .with_context(|| format!("GET {url} chunk {start}-{end}"))?;
+    let mut body = resp.into_body().into_reader();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut buf = [0u8; 256 * 1024];
+    loop {
+        let k = body.read(&mut buf)?;
+        if k == 0 {
+            break;
+        }
+        file.write_all(&buf[..k])?;
+        done.fetch_add(k as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// Latest llama.cpp CPU release (tag, asset name) per OS/arch — always
@@ -798,16 +1013,14 @@ fn install_vision_model(force: bool) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(&dir)?;
     let model = dir.join(VISION_MODEL);
     let mmproj = dir.join(VISION_MMPROJ);
-    if !force && model.exists() && mmproj.exists() {
-        println!("Qwen3-VL-2B already installed: {}", dir.display());
-        return Ok((model, mmproj));
-    }
+    // No exists() short-circuit here: a truncated file from a dropped download
+    // must be re-validated (probe total size) and restarted, not trusted.
     for (file, dest) in [(VISION_MODEL, &model), (VISION_MMPROJ, &mmproj)] {
-        if dest.exists() {
-            continue;
-        }
         let url = format!("{VISION_HF}/{file}");
-        println!("Downloading {file}...");
+        println!("[{}/2] {file}", if file == VISION_MODEL { 1 } else { 2 });
+        // download_to_file self-validates against the server every run: probes
+        // total size, skips only a genuinely-complete file, renames a complete
+        // .part, else re-downloads fresh. Never trusts `dest.exists()`.
         download_to_file(&url, dest)?;
     }
     println!("Qwen3-VL-2B ready: {}", dir.display());

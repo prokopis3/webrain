@@ -96,6 +96,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine resolves its binary via `install::find_tool("yt-dlp")`, so the bundled
   yt-dlp (`webrain install watch`) is used before PATH — no more
   `yt-dlp: command not found` on systems without it installed.
+- **install downloads** (`webrain install vision/watch`): downloads were
+  **faking completion** — `download_to_file` pre-allocated the `.part` to full
+  size (`set_len`) before any bytes arrived, so a killed run left a full-size
+  empty `.part` and the next run's length check "resumed" a file of zeros. Now
+  **completion is tracked per-chunk**: each of 8 parallel Range chunks writes
+  its index to a `<dest>.part.done` sidecar only after fully finishing, the
+  file is renamed ONLY when every chunk is marked, and a `<dest>.ok` marker
+  (not size) proves a dest is genuinely complete. A killed run resumes the
+  missing chunks instead of faking success. Progress is now an animated
+  single-line bar (`█░`, %, human MB/GB, live MiB/s) instead of scrolled raw
+  bytes; `install_vision_model` re-validates every file against the server each
+  run (probe Content-Range) and prints explicit `[1/2]`/`[2/2]` + status lines.
+
+### Changed
+
+- **spider** (`webrain_core::engines::SpiderEngine`): added
+  `with_nav_opts`/`nav_opts` — every page fetch now goes through
+  `navigate_opts` so `NavOpts` (blocked resources, wait, timeout) apply to the
+  crawl path too, matching the single-tool navigate path (the `NavOpts`
+  `wait_timeout_secs` now also caps the Queen-Reader wait loops in `cdp.rs`,
+  with `Debug` derived for the struct).
+- **obscura** (`webrain_core::launch`): `launch_obscura` now passes
+  `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
+  server is the anti-bot posture, not the vanilla build.
 
 ## [0.5.0] - 2026-08-06
 
