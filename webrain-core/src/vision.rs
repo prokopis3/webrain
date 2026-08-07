@@ -258,11 +258,9 @@ pub fn describe_tiles(b64: &[String]) -> anyhow::Result<String> {
             .timeout_global(Some(std::time::Duration::from_secs(120)))
             .build(),
     );
-    let (mut child, endpoint) = crate::video::spawn_llama_server(&server, &model, &mmproj)?;
-    let out = crate::video::post_vision(&agent, &endpoint, None, &body);
-    let _ = child.kill();
-    let _ = child.wait();
-    out.map_err(|e| anyhow::anyhow!("local vision: {e:#}"))
+    let endpoint = crate::video::llama_vision_endpoint(&server, &model, &mmproj)?;
+    crate::video::post_vision(&agent, &endpoint, None, &body)
+        .map_err(|e| anyhow::anyhow!("local vision: {e:#}"))
 }
 
 /// Index the current page: capture PixelRAG tiles, embed them as images, store.

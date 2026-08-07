@@ -865,9 +865,41 @@ pub(crate) fn post_vision(
         .ok_or_else(|| anyhow!("vision model returned no content"))
 }
 
-/// Spawn the bundled llama-server with Qwen3-VL-2B (model + mmproj) on a free
-/// port, wait for /health, return (child, OpenAI-compat endpoint). Caller kills.
-pub(crate) fn spawn_llama_server(
+/// Get a ready llama-server endpoint for Qwen3-VL-2B vision. On Unix the server
+/// stays warm in a static singleton (model in RAM, ~3s saved per watch call).
+/// On Windows spawns fresh each time. The returned endpoint is an OpenAI-compat
+/// chat/completions URL. Caller does NOT own the process lifecycle.
+pub(crate) fn llama_vision_endpoint(
+    exe: &Path,
+    model: &Path,
+    mmproj: &Path,
+) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::sync::Mutex;
+        static WARM: Mutex<Option<(std::process::Child, String)>> = Mutex::new(None);
+        if let Ok(mut guard) = WARM.lock() {
+            if let Some((ref mut child, ref endpoint)) = *guard {
+                if child.try_wait().ok().and_then(|s| s).is_none() {
+                    return Ok(endpoint.clone());
+                }
+                *guard = None;
+            }
+            let (child, endpoint) = spawn_llama_server_impl(exe, model, mmproj)?;
+            *guard = Some((child, endpoint.clone()));
+            return Ok(endpoint);
+        }
+    }
+    let (child, endpoint) = spawn_llama_server_impl(exe, model, mmproj)?;
+    // Leak the child on purpose — caller can't own it on all platforms.
+    // OS reaps it on process exit. ponytail: one server per process lifetime.
+    std::mem::forget(child);
+    Ok(endpoint)
+}
+
+/// Spawn llama-server, wait for /health. Returns (child, endpoint). Caller owns
+/// the child and must kill it. Internal — use llama_vision_endpoint instead.
+fn spawn_llama_server_impl(
     exe: &Path,
     model: &Path,
     mmproj: &Path,
@@ -985,22 +1017,14 @@ fn describe_frames(frames: &[Frame]) -> Result<String> {
         }
         VisionTarget::Local { model, mmproj } => {
             let (server, _, _) = local.as_ref().expect("local target implies local stack");
-            let (mut child, endpoint) = spawn_llama_server(server, &model, &mmproj)?;
-            let out = post_vision(&agent, &endpoint, None, &body);
-            let _ = child.kill();
-            let _ = child.wait();
-            out
+            let endpoint = llama_vision_endpoint(server, &model, &mmproj)?;
+            post_vision(&agent, &endpoint, None, &body)
         }
     };
-    // ponytail: a configured cloud provider can 429/5xx mid-watch — fall back to
-    // the bundled local Qwen3-VL instead of failing the whole watch. Keeps the
-    // "cloud-first, local offline" promise honest under rate limits.
     if result.is_err() && cloud {
         if let Some((server, model, mmproj)) = local.as_ref() {
-            let (mut child, endpoint) = spawn_llama_server(server, model, mmproj)?;
+            let endpoint = llama_vision_endpoint(server, model, mmproj)?;
             result = post_vision(&agent, &endpoint, None, &body);
-            let _ = child.kill();
-            let _ = child.wait();
         }
     }
     result
