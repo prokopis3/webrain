@@ -6,9 +6,9 @@ mode: custom
 ---
 
 <div className="landing">
-  <div className="mesh"><div className="grid-overlay" /></div>
+  <div className="mesh" />
 
-  {/* Hero — asymmetric split, anti-center */}
+  {/* Hero — typography-led split, anti-center */}
   <div className="wrap">
     <div className="hero">
       <div>
@@ -21,22 +21,19 @@ mode: custom
         </div>
       </div>
       <div className="hero-visual">
-        <img className="hero-art" src="/images/landing/hero-art.png" alt="Abstract electric-blue spider-web network" />
-        <div className="hero-terminal">
-          <img src="/images/landing/hero-terminal.svg" alt="webrain MCP terminal: navigate, observe, interact, extract to JSON" />
-        </div>
+        <img src="/images/landing/hero-terminal.svg" alt="webrain MCP terminal: navigate, observe, interact, extract to JSON" />
       </div>
     </div>
   </div>
 
-  {/* Trust strip — the one marquee (motivated: conveys any-MCP-client breadth) */}
+  {/* Trust strip — real logos, the one marquee */}
   <div className="wrap">
     <div className="logos">
       <div className="cap">Works with any MCP client</div>
       <div className="marquee">
         <div className="marquee-track">
-          <div className="marquee-row"><span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span></div>
-          <div className="marquee-row" aria-hidden="true"><span>Claude</span><span>Claude Code</span><span>Cursor</span><span>GitHub Copilot</span><span>Codex</span><span>Gemini</span></div>
+          <div className="marquee-row"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="Claude Code" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="Cursor" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="GitHub Copilot" /></span><span className="logo"><img src="https://cdn.simpleicons.org/openai/ffffff" alt="Codex" /></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="Gemini" /></span></div>
+          <div className="marquee-row" aria-hidden="true"><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/anthropic/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/cursor/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/github/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/openai/ffffff" alt="" /></span><span className="logo"><img src="https://cdn.simpleicons.org/googlegemini/ffffff" alt="" /></span></div>
         </div>
       </div>
     </div>
@@ -46,15 +43,14 @@ mode: custom
   <div className="wrap">
     <div className="section">
       <div className="section-head">
-        <div className="kicker">Capabilities</div>
         <h2>Everything an agent needs to read the web.</h2>
         <p>Fifteen intent-based tools cover the full job — no selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
         <div className="shell card-2">
-          <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>15 intent-based tools</h3>
+          <div className="core core-grad">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>15 intent-based tools</h3>
             <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Legacy one-action names still dispatch.</p>
             <div className="tool-chips">
               <span className="tool-chip">navigate</span><span className="tool-chip">observe</span><span className="tool-chip">interact</span><span className="tool-chip">extract</span><span className="tool-chip">scrape</span><span className="tool-chip">batch</span><span className="tool-chip">crawl</span><span className="tool-chip">search</span><span className="tool-chip">pdf</span><span className="tool-chip">download</span><span className="tool-chip">watch</span><span className="tool-chip">session</span><span className="tool-chip">vision</span><span className="tool-chip">eval</span><span className="tool-chip">guide</span>
@@ -64,42 +60,42 @@ mode: custom
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg></span>Structured extraction</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg></span>Structured extraction</h3>
             <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Stealth login</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Stealth login</h3>
             <p>Real-Chrome profiles with an encrypted local vault (AES-256-GCM) and optional TOTP. Cookies transfer across engines.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
             <p>Every navigate reports a <code>challenge</code> field; a real-Chrome stealth sidecar solves Cloudflare and Turnstile gates.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>Crawl at scale</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>Crawl at scale</h3>
             <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume.</p>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="m12 7 5 5-5 5M7 12h10" /></svg></span>Read anything</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="m12 7 5 5-5 5M7 12h10" /></svg></span>Read anything</h3>
             <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path.</p>
           </div>
         </div>
 
         <div className="shell card-2">
-          <div className="core">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3V5a3 3 0 0 0-3-3Z" /><circle cx="12" cy="15" r="2.4" /></svg></span>Local AI, all OS</h3>
+          <div className="core core-grad">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3V5a3 3 0 0 0-3-3Z" /><circle cx="12" cy="15" r="2.4" /></svg></span>Local AI, all OS</h3>
             <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision — no cloud key required. Runs fully on your machine.</p>
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
@@ -113,11 +109,10 @@ mode: custom
     </div>
   </div>
 
-  {/* Engines — 2x2 */}
+  {/* Engines — 2x2 over an art texture */}
   <div className="wrap">
     <div className="section">
       <div className="section-head">
-        <div className="kicker">Engines</div>
         <h2>One CDP backend, four ways to load a page.</h2>
         <p>Pick the right engine for the job — from a full Chrome for interactive SPAs to a no-browser HTTP fetch for static pages.</p>
       </div>
@@ -136,7 +131,6 @@ mode: custom
       <div className="split">
         <div>
           <div className="section-head" style={{ marginBottom: 0 }}>
-            <div className="kicker">Why webrain</div>
             <h2>Point any LLM at the web.</h2>
             <p>No driver wiring, no browser download dance, no tool wrappers. Install once, and your agent drives a real browser.</p>
           </div>
