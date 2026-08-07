@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs (landing page)**: custom **landing page** for the docs site
   (`docs/landing-page/index.html` — dark OLED, hairline borders, bento of the 15
   tools + engines, terminal mockup, IntersectionObserver reveals), enabled via
-  `"landingPage": true` in `docs.json` and served at `/` by the hosted build.
+  `"landingPage": "landing-page/index.html"` in `docs.json` (served at `/` by
+  the hosted build).
 
 ### Changed
 
