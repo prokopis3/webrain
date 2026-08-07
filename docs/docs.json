@@ -11,7 +11,7 @@
   "llms": {
     "full": true
   },
-  "landingPage": "landing-page/index.html",
+  "landingPage": "landing",
   "navigation": {
     "anchors": [
       {

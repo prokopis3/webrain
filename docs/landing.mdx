@@ -1,0 +1,186 @@
+---
+title: webrain — MCP browser automation & web scraping server
+description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 15 intent-based tools, any MCP client.
+mode: custom
+---
+
+<div className="landing">
+  <div className="mesh"><div className="grid-overlay" /></div>
+
+  {/* Hero */}
+  <div className="wrap">
+    <div className="hero">
+      <span className="eyebrow"><span className="dot" />Open source · MIT · Rust</span>
+      <h1>Browser automation<br /><span className="grad">for AI agents.</span></h1>
+      <p className="lede">webrain is an MCP server for LLM-driven browser automation and web scraping. One static binary, three browser engines, and 15 intent-based tools any LLM client can call.</p>
+      <div className="cta-row">
+        <a className="btn btn-primary" href="/quickstart">Read the quickstart</a>
+        <a className="btn btn-ghost" href="/overview">Explore the docs</a>
+      </div>
+
+      <div className="terminal">
+        <div className="bar"><i /><i /><i /><span>webrain mcp</span></div>
+        <div className="body">
+          <span className="t-prompt">$</span> <span className="t-cmd">webrain mcp</span><br />
+          webrain: Starting MCP server on stdio... 15 tools loaded<br />
+          <span className="t-prompt">agent&gt;</span> <span className="t-cmd">scrape product prices from URL X</span><br />
+          &nbsp;&nbsp;<span className="t-grey">webrain_navigate</span> <span className="t-ok">→ ok</span><br />
+          &nbsp;&nbsp;<span className="t-grey">webrain_extract (mode=autoschema)</span> <span className="t-ok">→ schema</span><br />
+          &nbsp;&nbsp;<span className="t-grey">webrain_extract (mode=schema)</span> <span className="t-ok">→ 42 rows JSON</span><br />
+          <span className="t-prompt">$</span><span className="cursor" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* Capabilities */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <div className="kicker">Capabilities</div>
+        <h2>Everything an agent needs to read the web.</h2>
+        <p>Fifteen intent-based tools cover the full job — navigate, observe, interact, extract, crawl, and read any file. No selectors to hand-write, no driver plumbing.</p>
+      </div>
+
+      <div className="bento">
+        <div className="shell card-2">
+          <div className="core">
+            <h3><span className="chip-ico">▦</span>15 intent-based tools</h3>
+            <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Legacy one-action names still dispatch.</p>
+            <div className="tool-chips">
+              <span className="tool-chip">navigate</span><span className="tool-chip">observe</span><span className="tool-chip">interact</span><span className="tool-chip">extract</span><span className="tool-chip">scrape</span><span className="tool-chip">batch</span><span className="tool-chip">crawl</span><span className="tool-chip">search</span><span className="tool-chip">pdf</span><span className="tool-chip">download</span><span className="tool-chip">watch</span><span className="tool-chip">session</span><span className="tool-chip">vision</span><span className="tool-chip">eval</span><span className="tool-chip">guide</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico">≡</span>Structured extraction</h3>
+            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data. Zero hand-written selectors.</p>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico">⌁</span>Stealth login</h3>
+            <p>Real-Chrome profiles with an encrypted local vault (AES-256-GCM) and optional TOTP. Transfer cookies across engines.</p>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico">✓</span>Challenge bypass</h3>
+            <p>Every navigate reports a <code>challenge</code> field; a real-Chrome stealth sidecar solves Cloudflare and Turnstile gates.</p>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico">✕</span>Crawl at scale</h3>
+            <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume. Map a site, then harvest it.</p>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico">↻</span>Read anything</h3>
+            <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path for static pages.</p>
+          </div>
+        </div>
+
+        <div className="shell card-2">
+          <div className="core">
+            <h3><span className="chip-ico">◇</span>Local AI, all OS</h3>
+            <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision — no cloud key required. Runs fully on your machine.</p>
+            <div className="stat-row">
+              <div className="stat"><b>1</b><span>static binary</span></div>
+              <div className="stat"><b>3</b><span>browser engines</span></div>
+              <div className="stat"><b>15</b><span>MCP tools</span></div>
+              <div className="stat"><b>0</b><span>Node runtime</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* Engines */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <div className="kicker">Engines</div>
+        <h2>One CDP backend, four ways to load a page.</h2>
+        <p>Pick the right engine for the job — from a full Chrome for interactive SPAs to a no-browser HTTP fetch for static pages.</p>
+      </div>
+      <div className="engines">
+        <div className="shell"><div className="core"><h3>Chrome</h3><p>Interactive SPAs, challenges, screenshots. The default for anything real Chrome can do.</p></div></div>
+        <div className="shell"><div className="core"><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div></div>
+        <div className="shell"><div className="core"><h3>Lightpanda</h3><p>Real accessibility tree, lightweight. Screenshot returns a placeholder frame.</p></div></div>
+        <div className="shell"><div className="core"><h3>fetch_http</h3><p>Static HTML, no JS, no auth — 10–100× faster than a browser. No engine at all.</p></div></div>
+      </div>
+    </div>
+  </div>
+
+  {/* Why */}
+  <div className="wrap">
+    <div className="section">
+      <div className="split">
+        <div>
+          <div className="section-head" style={{ marginBottom: 0 }}>
+            <div className="kicker">Why webrain</div>
+            <h2>Point any LLM at the web.</h2>
+            <p>No driver wiring, no browser download dance, no tool wrappers. Install once, and your agent drives a real browser.</p>
+          </div>
+          <div className="check-list">
+            <div className="check"><span className="tick">✓</span><div><b>MCP native</b><p>stdio or HTTP. Works with Claude, Cursor, Copilot, Codex, Gemini.</p></div></div>
+            <div className="check"><span className="tick">✓</span><div><b>Local first</b><p>Everything runs on your machine. No cloud, no API key, no data leaves.</p></div></div>
+            <div className="check"><span className="tick">✓</span><div><b>Stealth and auth built in</b><p>Challenge bypass, encrypted vault, TOTP, and cookie transfer across engines.</p></div></div>
+          </div>
+        </div>
+        <div>
+          <div className="mini-card">
+            <div className="mono">
+              <span style={{ color: '#60a5fa' }}>#</span> engines, one protocol<br />
+              CdpBackend — Chrome / Lightpanda / Obscura<br />
+              <span style={{ color: '#60a5fa' }}>#</span> one tool router<br />
+              map_surface() → 15 intents, 63 legacy names<br />
+              <span style={{ color: '#60a5fa' }}>#</span> credentials stay local<br />
+              vault — AES-256-GCM + TOTP<br />
+              <span style={{ color: '#60a5fa' }}>#</span> vision &amp; video, offline<br />
+              Qwen3-VL-2B · whisper-cli
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* CTA */}
+  <div className="wrap">
+    <div className="section" style={{ paddingTop: '1rem' }}>
+      <div className="cta-band">
+        <h2>Give your agent a browser in five minutes.</h2>
+        <p>Install webrain, start the MCP server, and ask your LLM to scrape — no selectors, no wrappers.</p>
+        <div className="cta-row">
+          <a className="btn btn-primary" href="/quickstart">Get started</a>
+          <a className="btn btn-ghost" href="https://github.com/prokopis3/webrain">Star on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* Footer */}
+  <div className="wrap">
+    <div className="foot">
+      <span>webrain</span>
+      <div className="links">
+        <a href="/overview">Docs</a>
+        <a href="/reference/tools">Tools</a>
+        <a href="/guides/agent-decision-guide">Agent Guide</a>
+        <a href="/comparisons/playwright">vs Playwright</a>
+        <a href="https://github.com/prokopis3/webrain">GitHub</a>
+      </div>
+      <div className="legal">© 2026 webrain · Open source (MIT) · MCP server for browser automation and web scraping</div>
+    </div>
+  </div>
+</div>
