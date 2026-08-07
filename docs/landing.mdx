@@ -20,9 +20,11 @@ mode: custom
         </div>
         <div className="mini-card" style={{ marginTop: '2rem', maxWidth: '34ch' }}>
             <div className="mono" style={{ fontSize: '0.85rem' }}>
-                <span style={{ color: '#60a5fa' }}>#</span> first run<br />
+                <span style={{ color: '#60a5fa' }}>#</span> Install (PowerShell)<br />
+                irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex<br />
+                <span style={{ color: '#60a5fa' }}>#</span> Setup browsers<br />
                 webrain install<br />
-                <span style={{ color: '#60a5fa' }}>#</span> start server<br />
+                <span style={{ color: '#60a5fa' }}>#</span> Start MCP server<br />
                 webrain mcp
             </div>
         </div>
