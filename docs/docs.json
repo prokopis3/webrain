@@ -11,6 +11,7 @@
   "llms": {
     "full": true
   },
+  "landingPage": true,
   "navigation": {
     "anchors": [
       {

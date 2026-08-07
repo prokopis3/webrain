@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (vs Playwright, Browser Use, Firecrawl, Crawl4AI); canonical **15-tool**
   terminology in overview/quickstart; stronger page descriptions; `llms-full`
   enabled in `docs.json`; `.mintignore` hygiene (audit file + `arch_diagram.mmd`).
+- **docs (landing page)**: custom **landing page** for the docs site
+  (`docs/landing-page/index.html` — dark OLED, hairline borders, bento of the 15
+  tools + engines, terminal mockup, IntersectionObserver reveals), enabled via
+  `"landingPage": true` in `docs.json` and served at `/` by the hosted build.
 
 ### Changed
 
