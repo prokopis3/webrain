@@ -35,7 +35,7 @@ pdfium-render = { version = "0.9", optional = true }
 image = "0.25"
 # Used directly for image XObject extraction from PDFs (matches pdf-inspector's
 # transitive lopdf dep). Removed when pdf-inspector exposes images natively.
-lopdf = "0.41"
+lopdf = "0.44"
 flate2 = "1"
 # agent-browser-style engine install: Chrome for Testing archives are .zip on
 # every platform, so no tar needed (see src/install.rs).
