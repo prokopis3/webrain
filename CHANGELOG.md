@@ -123,6 +123,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `download_plain`, so release-metadata fetches keep working.
 - **watch** (`webrain_watch`): accepts `url` as a fallback when `source` is
   absent — one less argument to get right for a single-video watch.
+- **screenshot** (`webrain_core::backends::cdp`): `Page.captureScreenshot`
+  now sends `captureBeyondViewport` (the real CDP param) instead of `fullPage`
+  (a Playwright abstraction CDP silently ignored) — full-page screenshots on
+  obscura v0.2.0's native renderer finally capture the whole page, not just
+  the viewport.
+- **install** (`webrain install --engine obscura`): falls back to the
+  **v0.1.11** asset when `/latest` has no matching platform/stealth package,
+  instead of failing the whole install on a brand-new release that's still
+  uploading binaries.
+- **install** (`install::find_tool`): finds the bundled yt-dlp even though it
+  installs as `yt-dlp_linux` / `yt-dlp_macos` / `yt-dlp_linux_aarch64` (not
+  the bare name) — fixes `watch`/`download engine:ytdlp` on Linux/macOS with
+  `No such file or directory (os error 2)`.
 
 ### Changed
 
@@ -135,6 +148,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **obscura** (`webrain_core::launch`): `launch_obscura` now passes
   `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
   server is the anti-bot posture, not the vanilla build.
+- **obscura install** (`webrain install --engine obscura`): explicit v0.2.0
+  package selection — `--stealth` and `--no-render` map to the exact asset
+  suffix (`-stealth` / `-no-render` / `-no-render-stealth` / plain render)
+  instead of a length-sort heuristic, so the install pulls the build you ask
+  for (e.g. `render+stealth` = screenshots + anti-bot, verified live).
+- **docs**: obscura v0.2.0 renderer notes (README + `AGENT_DECISION_GUIDE`)
+  — v0.1.11 vs v0.2.0 split in the anti-bot/screenshot table, auto asset
+  selection called out.
 
 ## [0.5.0] - 2026-08-06
 
