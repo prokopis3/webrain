@@ -869,11 +869,7 @@ pub(crate) fn post_vision(
 /// stays warm in a static singleton (model in RAM, ~3s saved per watch call).
 /// On Windows spawns fresh each time. The returned endpoint is an OpenAI-compat
 /// chat/completions URL. Caller does NOT own the process lifecycle.
-pub(crate) fn llama_vision_endpoint(
-    exe: &Path,
-    model: &Path,
-    mmproj: &Path,
-) -> Result<String> {
+pub(crate) fn llama_vision_endpoint(exe: &Path, model: &Path, mmproj: &Path) -> Result<String> {
     #[cfg(unix)]
     {
         use std::sync::Mutex;
@@ -1125,9 +1121,17 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
                 (vec![], "none".to_string())
             });
             frame_list = frames_thread.join().unwrap_or_default();
-            let (segs, src) = whisper_thread.join().unwrap_or_else(|_| (vec![], "none".to_string()));
+            let (segs, src) = whisper_thread
+                .join()
+                .unwrap_or_else(|_| (vec![], "none".to_string()));
             whisper_segments = segs;
-            whisper_source = if src == "local" { "local" } else if src == "whisper" { "whisper" } else { "none" };
+            whisper_source = if src == "local" {
+                "local"
+            } else if src == "whisper" {
+                "whisper"
+            } else {
+                "none"
+            };
         });
     } else {
         frame_list = frames(&video, wd, &probe, opts).unwrap_or_default();

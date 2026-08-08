@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **style**: cargo fmt — line-wraps long `surface_tests` assert calls and
   collapses a double blank line in `call_tool` (no logic change).
+- **style**: cargo fmt on the watch batch — collapses the
+  `llama_vision_endpoint` signature, wraps `whisper_thread.join()`, and expands
+  the `whisper_source` if-chain (CI `cargo fmt --check` gate).
 - **PixelRAG vision model migration** (`webrain_core::vision` + `webrain_vision_index`):
   the vision-embedding fallback (`Qwen3-VL-Embedding-2B` @ local vLLM:8000, GPU-only)
   is replaced by the **bundled local vision model** (`Qwen3-VL-2B` via llama-server,
