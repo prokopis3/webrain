@@ -1,0 +1,43 @@
+{
+  "video_generation_prompt": {
+    "title": "webrain — Live Agent Session",
+    "technical_specifications": {
+      "frame_rate": "24fps, clean steady UI motion",
+      "lens_type": "Locked screen capture, no lens",
+      "resolution": "Sharp flat 2D UI, crisp monospace text, no blur",
+      "aspect_ratio": "680x500 terminal window, centered on near-black canvas"
+    },
+    "artistic_direction": {
+      "style": "Premium dark developer-terminal UI, flat vector, exact original design and colors preserved from the start frame",
+      "lighting": "Deep near-black UI (#0a0a0c) with a soft electric-blue radial glow breathing gently behind the window",
+      "mood": "Precise, calm, confident, alive"
+    },
+    "camera_control": {
+      "movement": "None — perfectly static camera, zero movement, window fixed in frame",
+      "focus": "Sharp throughout; only the terminal content animates, nothing else moves"
+    },
+    "main_text_prompt": "Locked static camera, zero camera movement. A dark premium developer terminal window centered on a near-black background comes alive. The window has a title bar with red, yellow and green macOS dots and monospace text 'webrain mcp'. A left sidebar titled 'TOOLS' lists navigate, observe, interact, extract, crawl, watch, session, vision in monospace, with navigate and extract highlighted electric blue. In the main area the blue block cursor blinks; an 'agent>' command 'scrape product prices from URL X' types itself in character by character; three tool log lines appear one by one each resolving with a green success tag: 'webrain_navigate' with green '→ ok', 'webrain_extract (mode=autoschema)' with green '→ schema', 'webrain_extract (mode=schema)' with green '→ 42 rows'; a rounded JSON result card fades in showing 'USB-C Hub', price $42.90, and a green true value, its border glowing green; a green '✓ 42 products scraped in 1.4s' summary line appears at the bottom with the cursor beside it; a soft electric-blue glow pulses behind the window. Keep the exact original layout, colors and monospace text. Smooth, crisp, clean, no watermark, no style change.",
+    "timeline_breakdown": [
+      {
+        "time_range": "0-1.5s",
+        "action": "Static dark terminal window exactly as the first frame: macOS dots, TOOLS sidebar with navigate and extract highlighted, '$ webrain mcp', 'Starting MCP server on stdio... 15 tools loaded', an empty 'agent>' prompt. The blue block cursor blinks. Nothing else moves."
+      },
+      {
+        "time_range": "1.5-3.5s",
+        "action": "The command types itself in character by character after the 'agent>' prompt: 'scrape product prices from URL X'. Cursor advances with the text."
+      },
+      {
+        "time_range": "3.5-5.5s",
+        "action": "Three tool log lines appear one by one below the command, each resolving with a green success tag that pops in: 'webrain_navigate' + '→ ok', 'webrain_extract (mode=autoschema)' + '→ schema', 'webrain_extract (mode=schema)' + '→ 42 rows'. Sidebar items observe, interact and crawl light up green as they are used."
+      },
+      {
+        "time_range": "5.5-7s",
+        "action": "A rounded JSON result card fades in showing the product 'USB-C Hub', price $42.90, and a green true value; the card border glows soft green. A green '✓ 42 products scraped in 1.4s' summary line appears at the bottom with the block cursor beside it."
+      },
+      {
+        "time_range": "7-8s",
+        "action": "Hold the final state exactly matching the last frame. The cursor blinks, the electric-blue glow pulses softly behind the window, then the scene settles and holds."
+      }
+    ]
+  }
+}

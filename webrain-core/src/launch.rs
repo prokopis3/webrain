@@ -254,6 +254,7 @@ pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
         "0.0.0.0".to_string(),
         "--port".to_string(),
         port.to_string(),
+        "--stealth".to_string(),
     ];
     spawn_and_wait(
         &bin,

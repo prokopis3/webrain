@@ -1,4 +1,4 @@
-use crate::backends::cdp::CdpBackend;
+use crate::backends::cdp::{CdpBackend, NavOpts};
 use crate::browser::{BrowserBackend, PageResult};
 use serde_json::{Value, json};
 
@@ -280,6 +280,9 @@ pub struct SpiderEngine {
     /// stopped. Deleted on a clean finish.
     crawldir: Option<std::path::PathBuf>,
     checkpoint_every: usize,
+    /// NavOpts applied to every page fetch (stealth is always injected by the
+    /// backend; these control blocking, waiting, and timeout).
+    nav_opts: NavOpts,
 }
 
 impl Default for SpiderEngine {
@@ -303,6 +306,7 @@ impl Default for SpiderEngine {
             autothrottle_max_delay_ms: 30_000,
             crawldir: None,
             checkpoint_every: 10,
+            nav_opts: NavOpts::default(),
         }
     }
 }
@@ -395,6 +399,10 @@ impl SpiderEngine {
             Some(std::path::PathBuf::from(dir))
         };
         self.checkpoint_every = every.max(1);
+        self
+    }
+    pub fn with_nav_opts(mut self, opts: NavOpts) -> Self {
+        self.nav_opts = opts;
         self
     }
 
@@ -533,7 +541,7 @@ impl SpiderEngine {
         host == seed_host || host.ends_with(&format!(".{seed_host}"))
     }
 
-    pub async fn crawl(&self, browser: &impl BrowserBackend, seed_url: &str) -> Vec<SpiderResult> {
+    pub async fn crawl(&self, browser: &CdpBackend, seed_url: &str) -> Vec<SpiderResult> {
         use std::collections::{HashSet, VecDeque};
 
         let seed_host = url::Url::parse(seed_url)
@@ -666,7 +674,7 @@ impl SpiderEngine {
                 };
                 let mut attempts = 0;
                 loop {
-                    match browser.navigate(&url).await {
+                    match browser.navigate_opts(&url, &self.nav_opts).await {
                         Ok(state) => {
                             page_result = PageResult {
                                 url: url.clone(),

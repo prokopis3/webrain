@@ -203,7 +203,7 @@ fn tracker_domains() -> &'static [&'static str] {
 /// ponytail: one shared struct, threaded through navigate + navigate_session so the
 /// single-tool path and the batch crawl path hit the SAME wait logic — a fix here
 /// covers every caller, not just the one the ticket names.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NavOpts {
     /// Block font/image/media/stylesheet requests for speed + token savings.
     pub disable_resources: bool,
@@ -217,6 +217,8 @@ pub struct NavOpts {
     pub wait_selector_state: String,
     /// If set, narrow returned text to this element's innerText (token saver).
     pub css_selector: Option<String>,
+    /// Max seconds to wait for readyState + conditions before returning (default 20).
+    pub wait_timeout_secs: Option<u64>,
 }
 
 /// JS that indexes interactive elements for click/type tools (shared by
@@ -861,7 +863,8 @@ impl CdpBackend {
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > 15 {
+            let cap = opts.wait_timeout_secs.unwrap_or(20);
+            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > cap {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -935,7 +938,8 @@ impl CdpBackend {
                     stable = 0;
                     last = n;
                 }
-                if stable >= 4 || start.elapsed().as_secs() > 15 {
+                let cap = opts.wait_timeout_secs.unwrap_or(20);
+                if stable >= 4 || start.elapsed().as_secs() > cap {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -972,7 +976,8 @@ impl CdpBackend {
                     "detached" => got == "detached",
                     _ => got == state,
                 };
-                if done || start.elapsed().as_secs() > 20 {
+                let cap = opts.wait_timeout_secs.unwrap_or(20);
+                if done || start.elapsed().as_secs() > cap {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1142,6 +1147,7 @@ impl CdpBackend {
         // Queen Reader wait: poll until DOMContentLoaded (interactive), fall back to
         // full load when the page is still sparse (<500 chars). Faster than a fixed
         // sleep; absorbed the old read_fast/webrain_read (one wait strategy, one tool).
+        let cap = opts.wait_timeout_secs.unwrap_or(4);
         let start = std::time::Instant::now();
         loop {
             let rs: String = self
@@ -1150,7 +1156,7 @@ impl CdpBackend {
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > 4 {
+            if rs == "interactive" || rs == "complete" || start.elapsed().as_secs() > cap {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1162,6 +1168,7 @@ impl CdpBackend {
             .unwrap_or("")
             .to_string();
         if text.chars().count() < 500 {
+            let cap2 = opts.wait_timeout_secs.unwrap_or(6);
             let start2 = std::time::Instant::now();
             loop {
                 let rs: String = self
@@ -1170,7 +1177,7 @@ impl CdpBackend {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
-                if rs == "complete" || start2.elapsed().as_secs() > 6 {
+                if rs == "complete" || start2.elapsed().as_secs() > cap2 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

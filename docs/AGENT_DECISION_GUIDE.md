@@ -289,7 +289,7 @@ STEP 6: extract (§3) → done
 
 | Backend | Managed JS challenge (Just a moment) | Interactive Turnstile | Non-interactive Turnstile | Screenshot / render |
 |---|---|---|---|---|
-| obscura `--stealth` (lean build) | ❌ V8 crashes (`YS is not a function`) | ❌ no iframe, no token | ~ (best effort) | ❌ no paint engine |
+| obscura `--stealth` (lean build) | ❌ V8 crashes (`YS is not a function`) | ❌ no iframe, no token | ✅ verified: `obscura fetch <url> --stealth --wait-until load --wait 30` passes scrapingcourse cf-turnstile | ❌ no paint engine |
 | real Chrome + `stealth_solve.py` (headed) | ✅ | ⚠️ needs solve service/click | ✅ | ✅ |
 | lightpanda | ❌ | ❌ | ~ | ❌ returns fake placeholder PNG (no paint) |
 
@@ -338,6 +338,15 @@ for DOM growth: poll element count / text length rising with `webrain_wait`
 **`webrain_eval` + async on obscura.** Browser-level `Runtime.evaluate` does not
 reliably await async JS on obscura — an async IIFE returns `null`. For async
 work (fetch loops, waits), use `webrain_batch(op=interact, ...)`: its
+
+**Stealth is automatic — no flag needed.** `stealth_js()` (navigator.webdriver=false,
+UA override, chrome stub, permission query fix, Function.toString native spoof)
+is injected via `Page.addScriptToEvaluateOnNewDocument` on EVERY page. This is
+the CDP equivalent of `obscura --stealth`. The `--wait-until load` equivalent
+is the readyState poll in `navigate_session_opts`. For `--wait 30`: use
+`wait_timeout_secs=30` (default 20) with `wait_selector` + `network_idle` —
+the Turnstile recipe above covers it. Summary: stealth → always on, wait-until
+→ always on (readyState), wait → `wait_timeout_secs` + conditions.
 interaction runs in a session where `await` resolves. Sync JS on `webrain_eval`
 is fine.
 

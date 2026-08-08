@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **style**: cargo fmt — line-wraps long `surface_tests` assert calls and
   collapses a double blank line in `call_tool` (no logic change).
+- **style**: cargo fmt on the watch batch — collapses the
+  `llama_vision_endpoint` signature, wraps `whisper_thread.join()`, and expands
+  the `whisper_source` if-chain (CI `cargo fmt --check` gate).
 - **PixelRAG vision model migration** (`webrain_core::vision` + `webrain_vision_index`):
   the vision-embedding fallback (`Qwen3-VL-Embedding-2B` @ local vLLM:8000, GPU-only)
   is replaced by the **bundled local vision model** (`Qwen3-VL-2B` via llama-server,
@@ -42,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one batched chat call (`vision::describe_tiles`, reusing the watch llama-server
   spawn) and returns the page description as `vision`. Embeddings still power cosine
   retrieval; the local vision model supplies the real understanding.
+- **watch resilience** (`webrain_core::video`): frame vision now falls back
+  from a configured cloud provider to the bundled local Qwen3-VL when the cloud
+  API errors (429/5xx) instead of failing the whole watch — the fallback was
+  previously key-presence-only, so a rate limit killed vision even with the
+  local model installed. Cloud whisper STT likewise tries every configured
+  provider in order (Groq → OpenAI → Fireworks) on error, not just the first
+  key set (`stt_providers`; `stt_provider` narrowed to a `#[cfg(test)]` helper).
+- **watch perf** (`webrain_core::video`): frames + whisper now run in parallel;
+  local vision gets **10 frames** (was 3); the bundled llama-server stays alive
+  across calls on Unix (static keepalive), saving ~3s of model load per watch;
+  `webrain_watch` carries per-step `ms` timing. Compiler warnings fixed.
 - **install progress** (`webrain install ...`): every package download now
   prints a live `\r` progress line (`X / Y bytes (N%)` when the server sends
   Content-Length, else MiB) — no more silent "Downloading …" hang. Both
@@ -89,6 +103,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine resolves its binary via `install::find_tool("yt-dlp")`, so the bundled
   yt-dlp (`webrain install watch`) is used before PATH — no more
   `yt-dlp: command not found` on systems without it installed.
+- **install downloads** (`webrain install vision/watch`): downloads were
+  **faking completion** — `download_to_file` pre-allocated the `.part` to full
+  size (`set_len`) before any bytes arrived, so a killed run left a full-size
+  empty `.part` and the next run's length check "resumed" a file of zeros. Now
+  **completion is tracked per-chunk**: each of 8 parallel Range chunks writes
+  its index to a `<dest>.part.done` sidecar only after fully finishing, the
+  file is renamed ONLY when every chunk is marked, and a `<dest>.ok` marker
+  (not size) proves a dest is genuinely complete. A killed run resumes the
+  missing chunks instead of faking success. Progress is now an animated
+  single-line bar (`█░`, %, human MB/GB, live MiB/s) instead of scrolled raw
+  bytes; `install_vision_model` re-validates every file against the server each
+  run (probe Content-Range) and prints explicit `[1/2]`/`[2/2]` + status lines.
+- **install (all engines)**: `download_bytes` (used by obscura, chrome,
+  ffmpeg, whisper, yt-dlp, lightpanda) now routes through the same parallel
+  chunked `download_to_file` — every install gets the animated progress bar +
+  honest per-chunk completion, not just the vision model. Servers that ignore
+  `Range` (GitHub API JSON etc.) fall back to a plain single-stream copy via
+  `download_plain`, so release-metadata fetches keep working.
+- **watch** (`webrain_watch`): accepts `url` as a fallback when `source` is
+  absent — one less argument to get right for a single-video watch.
+
+### Changed
+
+- **spider** (`webrain_core::engines::SpiderEngine`): added
+  `with_nav_opts`/`nav_opts` — every page fetch now goes through
+  `navigate_opts` so `NavOpts` (blocked resources, wait, timeout) apply to the
+  crawl path too, matching the single-tool navigate path (the `NavOpts`
+  `wait_timeout_secs` now also caps the Queen-Reader wait loops in `cdp.rs`,
+  with `Debug` derived for the struct).
+- **obscura** (`webrain_core::launch`): `launch_obscura` now passes
+  `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
+  server is the anti-bot posture, not the vanilla build.
 
 ## [0.5.0] - 2026-08-06
 

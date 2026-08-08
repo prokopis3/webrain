@@ -97,6 +97,14 @@ BROWSER / CHALLENGE HANDLING
       on 9222. Then set CDP_URL=http://127.0.0.1:9222 and re-navigate — the
       authenticated session (cf_clearance) is shared with webrain.
     * Non-interactive Turnstile / basic bot detection may pass with obscura --stealth.
+      VERIFIED (2026-08-07): `obscura fetch <url> --stealth --wait-until load --wait 30`
+      passes scrapingcourse's `/login/cf-turnstile` — the Turnstile widget loads,
+      solves (token populates `[name="cf-turnstile-response"]`), and the form is ready.
+      From webrain: `webrain_navigate(url, disable_resources=true, block_trackers=true,
+      network_idle=true, wait_selector="[name='cf-turnstile-response']", wait_timeout_secs=30)`
+      achieves the same (Turnstile typically solves in 5-15s). Stealth JS is always injected
+      via Page.addScriptToEvaluateOnNewDocument — no flag needed (equivalent to --stealth).
+      same. Read the form fields, POST with token → logged in. No real Chrome needed.
 - Need screenshots/rendering? Real Chrome. Fast no-challenge scraping? obscura.
   Static HTML, no JS/auth? webrain_scrape.
 
@@ -219,7 +227,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_navigate",
-            "description": "Navigate to a URL and return page state (title, visible text, interactive elements, same-origin links) plus `challenge` (cloudflare_challenge|blocked|captcha) when gated. THE entry point. Optional request-quality params: disable_resources, block_trackers, network_idle, wait_selector(+state), css_selector. Use `links` for one-call crawl discovery.",
+            "description": "Navigate to a URL and return page state (title, visible text, interactive elements, same-origin links) plus `challenge` (cloudflare_challenge|blocked|captcha) when gated. THE entry point. Optional request-quality params: disable_resources, block_trackers, network_idle, wait_selector(+state), wait_timeout_secs, css_selector. Use `links` for one-call crawl discovery.",
             "inputSchema": {"type": "object", "properties": {
                 "url": {"type": "string"},
                 "disable_resources": {"type": "boolean", "default": false},
@@ -227,6 +235,7 @@ pub fn list_tools() -> Vec<Value> {
                 "network_idle": {"type": "boolean", "default": false},
                 "wait_selector": {"type": "string"},
                 "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions"},
                 "css_selector": {"type": "string", "description": "Narrow returned text to this element"}
             }, "required": ["url"]}
         }),
@@ -317,7 +326,8 @@ pub fn list_tools() -> Vec<Value> {
                 "block_trackers": {"type": "boolean", "default": false},
                 "network_idle": {"type": "boolean", "default": false},
                 "wait_selector": {"type": "string"},
-                "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"}
+                "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL"}
             }, "required": ["op", "urls"]}
         }),
         json!({
@@ -343,6 +353,12 @@ pub fn list_tools() -> Vec<Value> {
                 "autothrottle_max_ms": {"type": "integer", "default": 30000},
                 "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir"},
                 "checkpoint_every": {"type": "integer", "default": 10},
+                "disable_resources": {"type": "boolean", "default": false, "description": "spider: block fonts/images/media on every page fetch"},
+                "block_trackers": {"type": "boolean", "default": false, "description": "spider: also block the 3500-domain tracker list"},
+                "network_idle": {"type": "boolean", "default": false, "description": "spider: wait for network idle on every page"},
+                "wait_selector": {"type": "string", "description": "spider: wait for this CSS selector on every page"},
+                "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "spider: max seconds per page load"},
                 "url": {"type": "string", "description": "sitemap: site root or sitemap URL"},
                 "max_scrolls": {"type": "integer", "default": 15, "description": "scan: max scroll steps"},
                 "urls": {"type": "array", "items": {"type": "string"}, "description": "validate: URLs to probe"}
@@ -1665,6 +1681,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .get("css_selector")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
         }
     }
 
@@ -1918,7 +1935,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .with_delay_ms(delay_ms)
                 .with_crawl_timeout(crawl_timeout)
                 .with_autothrottle(autothrottle, 200, autothrottle_max)
-                .with_checkpoint(crawldir, checkpoint_every);
+                .with_checkpoint(crawldir, checkpoint_every)
+                .with_nav_opts(nav_opts(args));
             let t0 = std::time::Instant::now();
             let results = spider.crawl(backend, seed).await;
             // ponytail: spider stats — consistent with the batch stats block; the
@@ -2898,6 +2916,7 @@ pub fn watch_from_args(args: &Value) -> Value {
     };
     let single = args
         .get("source")
+        .or_else(|| args.get("url"))
         .and_then(|v| v.as_str())
         .map(String::from);
     let sources: Vec<String> = args
