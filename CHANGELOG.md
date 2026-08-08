@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+_No unreleased changes yet._
+
+## [0.6.1] - 2026-08-09
+
 ### Changed
 
 - **deps**: RustCrypto stack upgraded together (sha1 0.10→0.11, sha2 0.10→0.11,
   hmac 0.12→0.13, aes-gcm 0.10→0.11, getrandom 0.2→0.4) — they share the `digest`
   trait and must move as one. `getrandom::fill` replaces `getrandom()`.
+- **deps**: lopdf 0.41→0.44; GitHub Actions bumped (checkout 7, upload-artifact 7,
+  download-artifact 8, sticky-comment 3).
+- **deps**: Dependabot enabled — weekly version-update PRs for cargo + GitHub
+  Actions; security alerts + automated security fixes on.
+- **ci**: changelog gate no longer blocks dependabot PRs (skipped when the actor
+  is `dependabot[bot]`).
+- **chore**: repo security hardening — branch protection on `main` (required PR +
+  CI checks, linear history, no force-push), squash-only merging, auto-merge +
+  delete-branch-on-merge, CodeQL scanning.
 
 ## [0.6.0] - 2026-08-08
 

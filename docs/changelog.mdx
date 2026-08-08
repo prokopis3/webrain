@@ -12,6 +12,23 @@ All notable changes, in reverse chronological order. The full version lives in
 
 _No unreleased changes yet._
 
+## v0.6.1
+
+<p className="text-[#888] text-sm">August 9, 2026</p>
+
+### Changed
+
+- **deps**: RustCrypto stack upgraded together (sha1/sha2/hmac/aes-gcm/getrandom)
+  — they share the `digest` trait and must move as one; `getrandom::fill`
+  replaces `getrandom()`.
+- **deps**: lopdf 0.41→0.44; GitHub Actions bumped (checkout 7, upload-artifact 7,
+  download-artifact 8, sticky-comment 3).
+- **deps**: Dependabot enabled — weekly version-update PRs for cargo + GitHub
+  Actions; security alerts + automated security fixes on.
+- **ci**: changelog gate no longer blocks dependabot PRs.
+- **chore**: repo security hardening — branch protection on `main`, squash-only
+  merging, auto-merge + delete-branch-on-merge, CodeQL scanning.
+
 ## v0.6.0
 
 <p className="text-[#888] text-sm">August 8, 2026</p>
