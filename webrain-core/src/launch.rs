@@ -14,14 +14,13 @@ use std::time::{Duration, Instant};
 
 /// Chrome binary. Override with WEBRAIN_CHROME. Auto-detects the platform's
 /// usual Chrome/Chromium/Edge install + PATH lookup (macOS/Linux).
+///
+/// Order: real Chrome FIRST (patchright's #1 best practice — CfT/Chromium is
+/// more fingerprintable and Cloudflare withholds Turnstile tokens from it),
+/// then CfT (`webrain install chrome`) as fallback.
 pub fn chrome_path() -> PathBuf {
     if let Some(p) = std::env::var_os("WEBRAIN_CHROME") {
         return PathBuf::from(p);
-    }
-    // agent-browser-style: Chrome downloaded by `webrain install` wins over
-    // system Chrome (fresh Chrome-for-Testing build, known version).
-    if let Some(p) = crate::install::find_cft_chrome() {
-        return p;
     }
     #[cfg(target_os = "windows")]
     {
@@ -41,6 +40,10 @@ pub fn chrome_path() -> PathBuf {
                 return p;
             }
         }
+    }
+    // CfT fallback only when no real Chrome/Edge is installed.
+    if let Some(p) = crate::install::find_cft_chrome() {
+        return p;
     }
     #[cfg(target_os = "macos")]
     {

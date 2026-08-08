@@ -328,7 +328,13 @@ fn main() -> anyhow::Result<()> {
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
             let backend = rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?;
             rt.block_on(backend.navigate(url))?;
-            println!("opened: {url} — keeping alive; Ctrl-C to stop");
+            // Wait out a Cloudflare/anti-bot interstitial (sidecar's poll+reload
+            // loop, native — no Python). 90s budget; `webrain login` then fills
+            // the form with vault creds.
+            let cleared = rt.block_on(backend.wait_out_challenge(90));
+            println!(
+                "opened: {url} challenge_cleared={cleared} — keeping alive; Ctrl-C to stop"
+            );
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }

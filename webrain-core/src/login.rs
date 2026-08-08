@@ -74,12 +74,15 @@ pub fn otp_selector() -> &'static str {
 }
 
 /// True when the active page carries a session-ish cookie (HttpOnly-aware).
+/// ponytail: exact-name list + any cookie whose name CONTAINS "session" —
+/// sites name them site-specifically (scrapingcoursecom_session, laravel_session,
+/// PHPSESSID, connect.sid, ...) and a redirect to /dashboard is the real signal.
 async fn has_session(b: &CdpBackend) -> anyhow::Result<bool> {
     Ok(b.cookies()
         .await?
         .iter()
         .filter_map(|c| c["name"].as_str())
-        .any(|n| SESSION_COOKIES.contains(&n)))
+        .any(|n| SESSION_COOKIES.contains(&n) || n.to_ascii_lowercase().contains("session")))
 }
 
 async fn gate_up(b: &CdpBackend) -> bool {
@@ -119,6 +122,28 @@ pub async fn run_login(
 ) -> anyhow::Result<Value> {
     if let Some(u) = url {
         backend.navigate(u).await?;
+    }
+    // Auto-bypass any Cloudflare/anti-bot interstitial BEFORE form-fill — the
+    // form only exists after the challenge clears. Same poll+reload loop as the
+    // Python stealth_solve.py sidecar, now native (no Python); the 15s reload
+    // re-kicks the proof until it clears (90s budget). NO waiting_for_human —
+    // the loop auto-clears; if it still can't, login_js reports no-fields below.
+    let _cleared = backend.wait_out_challenge(90).await;
+    // Interactive captcha widget variant (cf-turnstile login form, Google
+    // /sorry, hCaptcha gate: plain page + checkbox widget, NO "Just a moment"
+    // interstitial). Claim + wait for the token to populate — submitting with
+    // an EMPTY token is a 403. Generic: Turnstile / reCAPTCHA / hCaptcha all
+    // get the iframe-claim + CDP center click (browsemind port). patchright's
+    // parity: real Chrome + noise evasions + token wait.
+    if backend
+        .evaluate(
+            r#"!!document.querySelector('#cf-turnstile, .cf-turnstile, [name="cf-turnstile-response"], [name="g-recaptcha-response"], [name="h-captcha-response"], .g-recaptcha, .h-captcha, iframe[src*="recaptcha"], iframe[src*="hcaptcha"]')"#,
+        )
+        .await
+        .map(|v| v.as_bool().unwrap_or(false))
+        .unwrap_or(false)
+    {
+        let _tok = backend.wait_turnstile_token(30).await;
     }
     let submitted = backend.evaluate(&login_js(user, pass)).await?;
     // no form found => page is a tablet/app interstitial or not the login form;
