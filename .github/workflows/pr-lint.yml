@@ -82,7 +82,7 @@ jobs:
 
       - name: Post lint result
         if: failure()
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: pr-lint
           message: |
