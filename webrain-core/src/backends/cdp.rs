@@ -1016,7 +1016,9 @@ impl CdpBackend {
             .send_cmd_with(
                 Some(sid),
                 "Page.captureScreenshot",
-                json!({"format": "png", "fullPage": full_page}),
+                // ponytail: captureBeyondViewport is the real CDP param; the old
+                // "fullPage" was a Playwright abstraction CDP silently ignored.
+                json!({"format": "png", "captureBeyondViewport": full_page}),
             )
             .await?;
         let b64 = result["data"].as_str().context("No screenshot data")?;
@@ -1621,7 +1623,7 @@ impl BrowserBackend for CdpBackend {
         let result = self
             .send_cmd(
                 "Page.captureScreenshot",
-                json!({"format": "png", "fullPage": full_page}),
+                json!({"format": "png", "captureBeyondViewport": full_page}),
             )
             .await?;
         let b64 = result["data"].as_str().context("No screenshot data")?;
