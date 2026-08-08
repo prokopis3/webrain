@@ -232,39 +232,28 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
         .as_str()
         .context("no tag_name in obscura release")?;
     let key = obscura_asset_key();
-    // Fall back to last release with assets when /latest has none (new release
-    // may not have uploaded binaries yet). ponytail: one retry, not a loop.
-    let assets = rel["assets"].as_array().map(|a| a.len()).unwrap_or(0);
-    let (asset_url, tag) = if assets > 0 {
-        let a = rel["assets"]
-            .as_array()
-            .context("no assets in obscura release")?
-            .iter()
-            .find(|a| {
-                let n = a["name"].as_str().unwrap_or("");
-                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
-            })
-            .and_then(|a| a["browser_download_url"].as_str())
-            .context("no matching obscura asset for this platform")?;
-        (a.to_string(), tag.to_string())
-    } else {
-        // /latest has no assets — try the tag before it (v0.1.11).
-        let fallback_url = OBSCURA_RELEASES_URL.replace("/latest", "/tags/v0.1.11");
-        let raw2 = String::from_utf8(download_bytes(&fallback_url)?)
-            .context("obscura fallback release JSON")?;
-        let rel2: Value = serde_json::from_str(&raw2).context("parse fallback release")?;
-        let a = rel2["assets"]
-            .as_array()
-            .context("no assets in fallback release")?
-            .iter()
-            .find(|a| {
-                let n = a["name"].as_str().unwrap_or("");
-                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
-            })
-            .and_then(|a| a["browser_download_url"].as_str())
-            .context("no matching obscura asset for this platform (tried latest + v0.1.11)")?;
-        let t = rel2["tag_name"].as_str().unwrap_or("v0.1.11");
-        (a.to_string(), t.to_string())
+    // Try /latest first. If no matching asset (new release missing platform
+    // binaries), fall back to v0.1.11. ponytail: one retry, not a loop.
+    fn find_asset<'a>(rel: &'a Value, key: &str, stealth: bool) -> Option<&'a str> {
+        rel["assets"].as_array()?.iter().find_map(|a| {
+            let n = a["name"].as_str().unwrap_or("");
+            (n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth)
+                .then(|| a["browser_download_url"].as_str())
+                .flatten()
+        })
+    }
+    let (asset_url, tag) = match find_asset(&rel, key, stealth) {
+        Some(url) => (url.to_string(), tag.to_string()),
+        None => {
+            let fallback_url = OBSCURA_RELEASES_URL.replace("/latest", "/tags/v0.1.11");
+            let raw2 = String::from_utf8(download_bytes(&fallback_url)?)
+                .context("obscura fallback release JSON")?;
+            let rel2: Value = serde_json::from_str(&raw2).context("parse fallback release")?;
+            let url = find_asset(&rel2, key, stealth)
+                .context("no matching obscura asset (tried latest + v0.1.11)")?;
+            let t = rel2["tag_name"].as_str().unwrap_or("v0.1.11");
+            (url.to_string(), t.to_string())
+        }
     };
 
     let fname = asset_url.rsplit('/').next().unwrap_or("archive").to_string();
