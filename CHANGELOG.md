@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.6.0] - 2026-08-08
+
+### Added
+
 - **docs**: tool surface synced to the **15-tool intent-based surface** — the
   Mintlify site (overview, quickstart, browsers, runtime-flow, scrape-at-scale,
   structured-extraction, troubleshooting, CLI reference) now teaches the
