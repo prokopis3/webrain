@@ -27,7 +27,7 @@ sha2 = "0.10"
 aes-gcm = "0.10"
 getrandom = "0.2"
 hmac = "0.12"
-sha1 = "0.10"
+sha1 = "0.11"
 regex = "1"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
 # Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
