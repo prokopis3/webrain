@@ -21,7 +21,29 @@ import sys
 import tempfile
 import time
 
-CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+# Real Chrome wins (patchright's #1 best practice — CfT/Chromium is more
+# fingerprintable); WEBRAIN_CHROME overrides; CfT cache is the last fallback.
+def chrome_binary() -> str:
+    cands = [
+        os.environ.get("WEBRAIN_CHROME", ""),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    # CfT cache fallback (webrain install chrome).
+    for base in (os.environ.get("LOCALAPPDATA", ""), os.path.expanduser("~")):
+        p = os.path.join(base, "AppData", "Local", "webrain", "browsers")
+        if os.path.isdir(p):
+            for d in sorted(os.listdir(p), reverse=True):
+                cand = os.path.join(p, d, "chrome-win64", "chrome.exe")
+                if os.path.isfile(cand):
+                    return cand
+    return "chrome"
+
+
+CHROME = chrome_binary()
 
 
 def challenge_pending(page) -> bool:
@@ -29,6 +51,43 @@ def challenge_pending(page) -> bool:
     # __cf_chl_tk query param survives the solve, so URL-based checks lie.
     title = (page.title() or "").lower()
     return ("just a moment" in title) or ("performing security verification" in title)
+
+
+def turnstile_token(page) -> str:
+    """Value of the hidden cf-turnstile-response input ('' = not solved yet)."""
+    try:
+        return page.eval_on_selector(
+            '[name="cf-turnstile-response"], #cf-chl-widget_response',
+            "el => el.value || ''",
+        )
+    except Exception:
+        return ""
+
+
+def click_turnstile(page) -> bool:
+    """Click the interactive Turnstile checkbox iframe if it rendered (cf-turnstile
+    variant: no 'Just a moment' interstitial, a clickable checkbox instead)."""
+    try:
+        # The widget container is #cf-turnstile / .cf-turnstile; the clickable
+        # checkbox lives in the cross-origin iframe it hosts.
+        frames = page.frames
+        for f in frames:
+            if "challenges.cloudflare.com" in (f.url or ""):
+                try:
+                    cb = f.locator("input[type=checkbox], .ctp-checkbox-label").first
+                    if cb.count():
+                        cb.click(timeout=3000)
+                        return True
+                except Exception:
+                    pass
+        # Fallback: click the widget container area.
+        w = page.locator("#cf-turnstile, .cf-turnstile").first
+        if w.count():
+            w.click(timeout=3000)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 # Session-ish cookies: presence of any after a submit implies the account is
@@ -127,8 +186,17 @@ def main() -> int:
 
     proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    from playwright.sync_api import sync_playwright
-    from undetected_playwright import stealth_sync
+    # patchright = patched Playwright driver (Runtime.enable leak, Console.enable,
+    # command-flag leaks, sourceURL — the CDP-level things Cloudflare checks) +
+    # real Chrome. Falls back to stock playwright + undetected_playwright JS
+    # evasions when patchright isn't installed.
+    try:
+        from patchright.sync_api import sync_playwright
+        use_patchright = True
+    except ImportError:
+        from playwright.sync_api import sync_playwright
+        from undetected_playwright import stealth_sync
+        use_patchright = False
 
     try:
         with sync_playwright() as p:
@@ -144,7 +212,8 @@ def main() -> int:
                 return 2
 
             ctx = browser.contexts[0]  # DEFAULT profile context webrain will also see
-            ctx = stealth_sync(ctx)
+            if not use_patchright:
+                ctx = stealth_sync(ctx)
             page = ctx.new_page()
 
             page.goto(args.url, wait_until="domcontentloaded", timeout=45000)
@@ -164,6 +233,17 @@ def main() -> int:
                         pass
             cleared = not challenge_pending(page)
             print(f"challenge_cleared={cleared} title={page.title()!r} url={page.url}", flush=True)
+
+            # cf-turnstile variant: no "Just a moment" interstitial — a plain
+            # login form with a Turnstile checkbox. Click it and wait for the
+            # hidden token to populate before submitting (empty token = 403).
+            if cleared and page.locator('#cf-turnstile, .cf-turnstile, [name="cf-turnstile-response"]').first.count():
+                if turnstile_token(page) == "":
+                    click_turnstile(page)
+                    t0 = time.time()
+                    while turnstile_token(page) == "" and time.time() - t0 < 30:
+                        time.sleep(2)
+                print(f"turnstile_token={'set' if turnstile_token(page) else 'EMPTY'}", flush=True)
 
             # ponytail: only auto-login when real creds were given — the human-types
             # path (empty creds, per the credentials skill) must leave the form alone.

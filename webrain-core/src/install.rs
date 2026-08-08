@@ -214,8 +214,16 @@ const OBSCURA_RELEASES_URL: &str =
 
 /// Download the latest Obscura release (agent-browser-style: fetch a known
 /// release, extract into the engine cache). `--stealth` picks the BoringSSL
-/// stealth build. Windows assets are .zip; linux/macos are .tar.gz.
-pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
+/// stealth build, `--no-render` the headless no-render build. Windows assets
+/// are .zip; linux/macos are .tar.gz.
+///
+/// v0.2.0 ships 4 packages per platform — exact suffix match, no heuristic:
+///   render+stealth   -> obscura-<key>-stealth.<ext>
+///   render (default) -> obscura-<key>.<ext>
+///   no-render+stealth-> obscura-<key>-no-render-stealth.<ext>
+///   no-render        -> obscura-<key>-no-render.<ext>
+/// v0.1.11 fallback only has the plain (render, no-stealth) package.
+pub fn install_obscura(force: bool, stealth: bool, render: bool) -> Result<PathBuf> {
     if !force {
         if let Some(bin) = find_obscura() {
             println!("Obscura already installed: {}", bin.display());
@@ -232,20 +240,48 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
         .as_str()
         .context("no tag_name in obscura release")?;
     let key = obscura_asset_key();
-    let asset = rel["assets"]
-        .as_array()
-        .context("no assets in obscura release")?
-        .iter()
-        .find(|a| {
+    // Try /latest first. If no matching asset (new release missing platform
+    // binaries, or v0.2.0 lacks the requested variant), fall back to v0.1.11.
+    // ponytail: one retry, not a loop.
+    fn find_asset<'a>(rel: &'a Value, key: &str, stealth: bool, render: bool) -> Option<&'a str> {
+        let suffix = match (render, stealth) {
+            (true, false) => "",
+            (true, true) => "-stealth",
+            (false, false) => "-no-render",
+            (false, true) => "-no-render-stealth",
+        };
+        let prefix = format!("obscura-{key}{suffix}");
+        rel["assets"].as_array()?.iter().find_map(|a| {
             let n = a["name"].as_str().unwrap_or("");
-            n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
+            let rest = n.strip_prefix(&prefix)?;
+            if rest.is_empty() || rest == ".tar.gz" || rest == ".zip" {
+                a["browser_download_url"].as_str()
+            } else {
+                None
+            }
         })
-        .and_then(|a| a["browser_download_url"].as_str())
-        .context("no matching obscura asset for this platform")?;
+    }
+    let (asset_url, tag) = match find_asset(&rel, key, stealth, render) {
+        Some(url) => (url.to_string(), tag.to_string()),
+        None => {
+            let fallback_url = OBSCURA_RELEASES_URL.replace("/latest", "/tags/v0.1.11");
+            let raw2 = String::from_utf8(download_bytes(&fallback_url)?)
+                .context("obscura fallback release JSON")?;
+            let rel2: Value = serde_json::from_str(&raw2).context("parse fallback release")?;
+            let url = find_asset(&rel2, key, stealth, render)
+                .context("no matching obscura asset (tried latest + v0.1.11)")?;
+            let t = rel2["tag_name"].as_str().unwrap_or("v0.1.11");
+            (url.to_string(), t.to_string())
+        }
+    };
 
-    let fname = asset.rsplit('/').next().unwrap_or("archive").to_string();
+    let fname = asset_url
+        .rsplit('/')
+        .next()
+        .unwrap_or("archive")
+        .to_string();
     println!("Downloading Obscura {tag} ({fname})...");
-    let bytes = download_bytes(asset)?;
+    let bytes = download_bytes(&asset_url)?;
     let dest = dir.join(format!("obscura-{tag}"));
     extract_archive(&bytes, &dest, &fname)?;
     find_named(&dest, &bin_name("obscura"), 3)
@@ -498,6 +534,24 @@ pub fn find_tool(tool: &str) -> Option<PathBuf> {
     let own = base.join(tool).join(&exe);
     if own.is_file() {
         return Some(own);
+    }
+    // yt-dlp installs as yt-dlp_linux / yt-dlp_macos / yt-dlp.exe (not the
+    // bare name) — check the platform variants too so the bundled binary is
+    // found on every OS. ponytail: one match, mirror of install_ytdlp's names.
+    let exe_variant = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => None,
+        ("linux", "aarch64") => Some("yt-dlp_linux_aarch64".to_string()),
+        ("linux", _) => Some("yt-dlp_linux".to_string()),
+        ("macos", _) => Some("yt-dlp_macos".to_string()),
+        _ => None,
+    };
+    if tool == "yt-dlp" {
+        if let Some(v) = exe_variant {
+            let own_v = base.join(tool).join(&v);
+            if own_v.is_file() {
+                return Some(own_v);
+            }
+        }
     }
     // ffprobe rides in the ffmpeg dir (shared av DLLs).
     if tool == "ffprobe" {

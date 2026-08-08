@@ -20,12 +20,13 @@ use tokio_tungstenite::tungstenite::Message;
 /// helper survives for page scripts to detect (camoufox addInitScript pattern).
 ///
 /// CORE is always on (webdriver→false, real plugins, window.chrome, Function.toString
-/// spoof — the bits Cloudflare/Google don't punish). NOISE is OFF by default:
+/// spoof — the bits Cloudflare/Google don't punish). NOISE is ON by default:
 /// ponytail: canvas/audio/WebGL spoofs + hardwareConcurrency/deviceMemory/connection
-/// lies are EXACTLY what Cloudflare Turnstile measures — lying there makes CF distrust
-/// us (empty turnstile token → "verification failed"). Real Chrome's real fingerprint
-/// is the CF-trustworthy default (patchright-style). Set WEBRAIN_STEALTH_NOISE=1 to opt
-/// back in when you specifically want to foil third-party hash fingerprinters (CreepJS).
+/// lies — the managed Cloudflare challenge (scrapingcourse cf-antibot) measures
+/// exactly these, and real values leave it stuck on "Just a moment…" (verified:
+/// undetected_playwright's sidecar applies them always and passes). Real Chrome's
+/// real fingerprint alone is NOT CF-managed-challenge-trustworthy. Set
+/// WEBRAIN_STEALTH_NOISE=0 to opt out for sites that distrust the spoofed profile.
 fn stealth_js() -> String {
     const CORE: &str = r#"(() => {
   const apply = (obj, prop, val) => {
@@ -129,12 +130,52 @@ fn stealth_js() -> String {
     _hook(AudioBuffer.prototype, 'getChannelData', (buf) => {
       for (let i = 0; i < buf.length; i++) buf[i] *= 1 + (_det(i, 25) - 12) / 1000;
     });
+  } catch (e) {}
+  // window.outerdimensions (puppeteer-extra evasion): report a consistent
+  // outer/inner size so window.outerWidth - innerWidth isn't a headless tell.
+  try {
+    apply(window, 'outerWidth', window.innerWidth);
+    apply(window, 'outerHeight', window.innerHeight + 72);
+    apply(window, 'outerHeight', Math.max(window.outerHeight, 700));
+  } catch (e) {}
+  // iframe.contentWindow (puppeteer-extra evasion): the HEADCHR_IFRAME check —
+  // cross-origin iframe.contentWindow.chrome must not be undefined. Patchright/
+  // stealth_sync include this; a missing chrome in the widget iframe is a
+  // bot signal Cloudflare's Turnstile widget checks.
+  try {
+    const _cwProxy = new Proxy(window, {
+      get(t, k) { if (k === 'self') return window; if (k === 'frameElement') return null; return Reflect.get(t, k); }
+    });
+    const _oDefine = Object.defineProperty;
+    Object.defineProperty = function (o, p, d) {
+      if (o && o.tagName === 'IFRAME' && p === 'contentWindow' && !o.contentWindow) {
+        d.get = () => _cwProxy;
+      }
+      return _oDefine.call(this, o, p, d);
+    };
+  } catch (e) {}
+  // media.codecs (puppeteer-extra evasion): Chromium reports 'maybe' for
+  // proprietary codecs a real Chrome reports 'probably' — the exact check
+  // fingerprinters use (avc1.42E01E / mp4).
+  try {
+    const _cpt = HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType = function (arg) {
+      const s = String(arg || '').trim();
+      if (s.startsWith('video/mp4') && s.includes('avc1.42E01E')) return 'probably';
+      if (s.startsWith('audio/x-m4a') && !s.includes('codecs')) return 'maybe';
+      return _cpt.call(this, arg);
+    };
   } catch (e) {}"#;
     static NOISE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let on = *NOISE_ON.get_or_init(|| {
+        // Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
+        // checks hardwareConcurrency + WebGL vendor — real values get it stuck on
+        // "Just a moment…". The undetected_playwright sidecar applies these
+        // evasions always. Opt out with WEBRAIN_STEALTH_NOISE=0 for the rare site
+        // that distrusts the spoofed profile.
         std::env::var("WEBRAIN_STEALTH_NOISE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
     });
     if on {
         CORE.replace("/*STEALTH_NOISE*/", NOISE)
@@ -651,45 +692,22 @@ impl CdpBackend {
         // consume — eval already omits contextId). Keep Page.enable for page events.
         self.send_cmd_with(Some(&sid), "Page.enable", json!({}))
             .await?;
-        // Stealth at the CDP level: real Windows-Chrome UA + clear the automation
-        // flag (best-effort — lightpanda/older Chrome may not implement these).
+        // Stealth at the CDP level: clear the automation flag only. NO
+        // Network.setUserAgentOverride — patchright's documented best practice is
+        // "do NOT add custom browser headers or user_agent": a forged UA
+        // (Chrome/151.0.0.0) mismatches the real browser build's TLS fingerprint +
+        // Sec-CH-UA, which Cloudflare flags ("verification failed"). Real Chrome
+        // speaks its own, internally-consistent UA. Network.enable stays for
+        // blocked-urls / cookie plumbing (best-effort; lightpanda may skip it).
         let _ = self
             .send_cmd_with(Some(&sid), "Network.enable", json!({}))
             .await;
-        let _ = self.send_cmd_with(
-            Some(&sid),
-            "Network.setUserAgentOverride",
-            json!({
-                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-                "acceptLanguage": "en-US,en;q=0.9",
-                "platform": "Win32",
-                // Match Sec-CH-UA to the forged UA (rebrowser/nodriver): without
-                // userAgentMetadata, real Chrome emits a Sec-CH-UA header from its
-                // ACTUAL build, mismatching the forged 151 → detectable.
-                "userAgentMetadata": {
-                    "brands": [
-                        {"brand": "Chromium", "version": "151"},
-                        {"brand": "Google Chrome", "version": "151"}
-                    ],
-                    "fullVersion": "151.0.0.0",
-                    "platform": "Windows",
-                    "platformVersion": "15.0.0",
-                    "architecture": "x86",
-                    "model": "",
-                    "mobile": false,
-                    "bitness": "64",
-                    "wow64": false
-                }
-            }),
-        )
-        .await;
-        let _ = self
-            .send_cmd_with(
-                Some(&sid),
-                "Emulation.setAutomationOverride",
-                json!({"enabled": true}),
-            )
-            .await;
+        // ponytail: NO Emulation.setAutomationOverride — patchright's driver
+        // patch list has zero calls to it, and it's a detectable CDP automation
+        // signal (real Chrome never sets it). navigator.webdriver is already
+        // masked by stealth_js(); the launch flag --disable-blink-features=
+        // AutomationControlled clears the command-flag leak. Leave the emulation
+        // domain untouched — that's what patchright does.
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
         self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
@@ -986,6 +1004,145 @@ impl CdpBackend {
         Ok(())
     }
 
+    /// Wait out a Cloudflare/interactive anti-bot interstitial (the Python
+    /// sidecar's poll+reload loop, native): poll title+text for challenge
+    /// markers, reload every ~15s to re-kick the proof, cap at `secs`. Returns
+    /// true when the challenge cleared. On a normal page returns immediately.
+    /// ponytail: marker set is detect_antibot's; challenge layouts that need
+    /// HTML markers go there, not here.
+    pub async fn wait_out_challenge(&self, secs: u64) -> bool {
+        let start = std::time::Instant::now();
+        let mut last_reload = std::time::Instant::now();
+        loop {
+            let title: String = self
+                .eval_js("document.title")
+                .await
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            let text: String = self
+                .eval_js("document.body ? document.body.innerText || '' : ''")
+                .await
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            if detect_antibot(&title, &text).is_none() {
+                return true;
+            }
+            if start.elapsed().as_secs() >= secs {
+                return false;
+            }
+            // reload every 15s to re-kick the challenge (__cf_chl_rt_tk rotates
+            // per reload — same cadence the Python sidecar used).
+            if last_reload.elapsed().as_secs() >= 15 {
+                let _ = self
+                    .send_cmd("Page.reload", json!({"ignoreCache": false}))
+                    .await;
+                last_reload = std::time::Instant::now();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
+
+    /// Generic captcha widget claiming — Turnstile / reCAPTCHA / hCaptcha
+    /// (cf-turnstile login form, Google /sorry block page, hCaptcha gates: a
+    /// plain page + a checkbox widget, NO "Just a moment" interstitial). Port
+    /// of browsemind's `claim_captcha_widget` + `_WIDGET_CLAIM_JS`:
+    ///   1. score ALL visible iframes by overlay traits (fixed/sticky, z-index,
+    ///      captcha src pattern, size), JS-click the best one
+    ///   2. CDP-click its center via Input.dispatchMouseEvent — crosses the
+    ///      cross-origin iframe barrier real reCAPTCHA/Turnstile checkboxes
+    ///      live behind (a JS el.click() alone can't reach them)
+    /// Then poll until a captcha token populates (`*-response`), or the block
+    /// page redirects away (Google /sorry auto-continues on pass). Returns
+    /// true when cleared.
+    pub async fn wait_turnstile_token(&self, secs: u64) -> bool {
+        // browsemind _WIDGET_CLAIM_JS (trimmed): score + click the best captcha
+        // iframe, return its center for the cross-origin CDP click.
+        const CLAIM_JS: &str = r#"(function() {
+  var iframes = document.querySelectorAll('iframe');
+  var best = null, bestScore = 0;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  for (var i = 0; i < iframes.length; i++) {
+    var f = iframes[i], r = f.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) continue;
+    if (r.top > vh || r.bottom < 0) continue;
+    var cs = window.getComputedStyle(f);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    var score = 0;
+    var pos = cs.position;
+    if (pos === 'fixed') score += 30; else if (pos === 'sticky') score += 20;
+    var zi = parseInt(cs.zIndex) || 0;
+    if (zi >= 100) score += 20; else if (zi >= 10) score += 10;
+    if (r.width >= 60 && r.width <= 500 && r.height >= 60 && r.height <= 600) score += 25;
+    if (r.width > vw * 0.8 && r.height > vh * 0.8) score -= 20;
+    var src = (f.src || '').toLowerCase();
+    if (src.indexOf('google.com/recaptcha') >= 0) score += 10;
+    if (src.indexOf('challenges.cloudflare.com') >= 0) score += 10;
+    if (src.indexOf('hcaptcha.com') >= 0) score += 10;
+    if (f.getAttribute('role') === 'presentation') score += 5;
+    if (score > bestScore) { bestScore = score; best = f; }
+  }
+  if (best) {
+    try { best.click(); } catch (e) {}
+    var br = best.getBoundingClientRect();
+    return JSON.stringify({claimed: true, cx: Math.round(br.left + br.width/2), cy: Math.round(br.top + br.height/2)});
+  }
+  return JSON.stringify({claimed: false});
+})()"#;
+        let start = std::time::Instant::now();
+        let mut claimed = false;
+        loop {
+            // Any captcha token set => cleared (Turnstile / reCAPTCHA / hCaptcha
+            // all write a hidden `*-response` textarea on pass).
+            let val: String = self
+                .eval_js(
+                    r#"(function(){ var t = document.querySelector('textarea[name="cf-turnstile-response"], textarea[name="g-recaptcha-response"], textarea[name="h-captcha-response"]'); return (t && t.value) || ''; })()"#,
+                )
+                .await
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            if !val.is_empty() {
+                return true;
+            }
+            // Google /sorry style: the block page auto-redirects on pass — the
+            // recaptcha iframe + "unusual traffic" copy vanish from the DOM.
+            let left_block: bool = self
+                .eval_js(
+                    r#"(function(){ var b = document.body ? document.body.innerText : ''; if (location.href.indexOf('/sorry') >= 0 && !document.querySelector('iframe[src*="recaptcha"], .g-recaptcha')) return true; return /unusual traffic/.test(b) === false && location.href.indexOf('/sorry') < 0 && b.indexOf('Just a moment') < 0; })()"#,
+                )
+                .await
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            if left_block && start.elapsed().as_secs() > 2 {
+                return true;
+            }
+            // Not claimed yet: run the widget-claim (JS click + CDP center click).
+            if !claimed && start.elapsed().as_secs() < 4 {
+                let res: Value = self.eval_js(CLAIM_JS).await.unwrap_or(Value::Null);
+                if let Some(obj) = res.as_object() {
+                    if obj.get("claimed").and_then(|v| v.as_bool()) == Some(true) {
+                        let cx = obj.get("cx").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let cy = obj.get("cy").and_then(|v| v.as_i64()).unwrap_or(0);
+                        // CDP Input.dispatchMouseEvent — trusted, crosses
+                        // cross-origin iframe (real checkbox behind it).
+                        let _ = self.click_coords(cx, cy).await;
+                        claimed = true;
+                    }
+                }
+                // Fallback nudge: click the widget container div too (some
+                // Turnstile builds render the checkbox in-page, not iframe).
+                let _ = self
+                    .eval_js(
+                        r#"(function(){ const w = document.querySelector('#cf-turnstile, .cf-turnstile'); if (w) { w.click(); return true; } return false; })()"#,
+                    )
+                    .await;
+            }
+            if start.elapsed().as_secs() >= secs {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
     /// Evaluate in a session (if any) else the active page — shared by wait helpers.
     async fn eval_scoped(&self, sid: Option<&str>, expr: &str) -> anyhow::Result<Value> {
         match sid {
@@ -1016,7 +1173,9 @@ impl CdpBackend {
             .send_cmd_with(
                 Some(sid),
                 "Page.captureScreenshot",
-                json!({"format": "png", "fullPage": full_page}),
+                // ponytail: captureBeyondViewport is the real CDP param; the old
+                // "fullPage" was a Playwright abstraction CDP silently ignored.
+                json!({"format": "png", "captureBeyondViewport": full_page}),
             )
             .await?;
         let b64 = result["data"].as_str().context("No screenshot data")?;
@@ -1621,7 +1780,7 @@ impl BrowserBackend for CdpBackend {
         let result = self
             .send_cmd(
                 "Page.captureScreenshot",
-                json!({"format": "png", "fullPage": full_page}),
+                json!({"format": "png", "captureBeyondViewport": full_page}),
             )
             .await?;
         let b64 = result["data"].as_str().context("No screenshot data")?;

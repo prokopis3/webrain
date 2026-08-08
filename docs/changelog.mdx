@@ -10,6 +10,12 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ## Unreleased
 
+_No unreleased changes yet._
+
+## v0.6.0
+
+<p className="text-[#888] text-sm">August 8, 2026</p>
+
 ### Changed
 
 - **MCP surface — 63 → 15 intent-based tools** (`map_surface` router):
@@ -19,6 +25,14 @@ All notable changes, in reverse chronological order. The full version lives in
   legacy one-action names still dispatch (backward compatible).
 - **Install progress** — every package download streams with a live
   `X / Y bytes (N%)` line (lifts the old 10 MiB `read_to_vec` cap).
+- **Patchright-parity stealth** — fingerprint noise **ON by default**
+  (`WEBRAIN_STEALTH_NOISE=0` opts out), new puppeteer-extra evasions
+  (outerdimensions, iframe.contentWindow, media.codecs), no forged UA /
+  `Emulation.setAutomationOverride`; real Chrome preferred for launch.
+- **Native Cloudflare/captcha solving** — `webrain_login` / `webrain open`
+  auto-wait challenges and claim Turnstile/reCAPTCHA/hCaptcha widgets; the
+  Python sidecar prefers the patchright driver with interactive Turnstile
+  solving.
 - **style** — cargo fmt.
 
 ## v0.5.0

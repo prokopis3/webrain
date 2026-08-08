@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.6.0] - 2026-08-08
+
+### Added
+
 - **docs**: tool surface synced to the **15-tool intent-based surface** — the
   Mintlify site (overview, quickstart, browsers, runtime-flow, scrape-at-scale,
   structured-extraction, troubleshooting, CLI reference) now teaches the
@@ -79,20 +85,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `waiting_for_human`), because the browser is built to **not trigger**
   challenges in the first place: CDP-direct (no chromedriver `cdc_` marker),
   `--disable-blink-features=AutomationControlled` with no automation flag,
-  per-profile `user-data-dir` so `cf_clearance` persists across logins. No
-  challenge-solving — the checkbox auto-click ladder was dropped as
-  unnecessary when bypass does its job. The attach now sends
-  `userAgentMetadata` (Sec-CH-UA matches the forged UA) and a
-  `Function.prototype.toString` native-code spoof (uc pattern).
-- **stealth**: fingerprint noise is now **opt-in** (`WEBRAIN_STEALTH_NOISE=1`).
-  The canvas/audio/WebGL spoofs + `hardwareConcurrency`/`deviceMemory`/
-  `connection` lies are OFF by default because Cloudflare Turnstile / Google
-  reCAPTCHA measure exactly those signals — a pristine real-Chrome fingerprint
-  is the CF/Google-trustworthy default (patchright-style). Core stealth
-  (webdriver→false, real plugins, `window.chrome`, `Function.prototype.toString`
-  spoof) stays always-on. Live test: the /cloudflare-challenge JS challenge
-  auto-passes; an invisible-managed Turnstile that silently withholds its token
-  is Cloudflare's risk decision (IP + automation), not a fingerprint fix.
+  per-profile `user-data-dir` so `cf_clearance` persists across logins.
+  `Function.prototype.toString` native-code spoof (uc pattern). NO forged
+  UA / userAgentMetadata / `Emulation.setAutomationOverride` (patchright parity).
+- **stealth** (patchright parity): fingerprint noise is now **ON by default**
+  (`WEBRAIN_STEALTH_NOISE=0` opts out) — the canvas/audio/WebGL spoofs +
+  `hardwareConcurrency`/`deviceMemory`/`connection` lies are exactly what the
+  managed Cloudflare challenge measures (real values leave it stuck on "Just a
+  moment…", verified vs scrapingcourse cf-antibot). New puppeteer-extra
+  evasions: `window.outerdimensions`, cross-origin `iframe.contentWindow`
+  proxy (HEADCHR_IFRAME), `media.codecs` canPlayType ('probably' for
+  avc1/mp4). Core stealth (webdriver→false, real plugins, `window.chrome`,
+  Function.toString spoof) stays always-on.
+- **core**: native Cloudflare/anti-bot + captcha solving — `wait_out_challenge`
+  (the Python sidecar's poll+reload loop, now in Rust) + captcha widget
+  claiming (Turnstile/reCAPTCHA/hCaptcha iframe-claim + CDP center click) +
+  `wait_turnstile_token` (never submit an empty token). `webrain_login` and
+  `webrain open` auto-wait challenges before form-fill.
+- **core**: real Chrome is preferred for launch (patchright #1 — CfT/Chromium
+  is more fingerprintable); the CfT cache is the fallback only.
+- **login**: `has_session` now catches site-specific `*session*` cookie names
+  (PHPSESSID, laravel_session, connect.sid, …), not just the exact list.
+- **scripts**: `stealth_solve.py` prefers the patched **patchright** Playwright
+  driver (falls back to playwright + undetected_playwright), real-Chrome-first
+  binary detection, and interactive **Turnstile** checkbox click + token wait.
 
 ### Fixed
 
@@ -123,6 +139,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `download_plain`, so release-metadata fetches keep working.
 - **watch** (`webrain_watch`): accepts `url` as a fallback when `source` is
   absent — one less argument to get right for a single-video watch.
+- **screenshot** (`webrain_core::backends::cdp`): `Page.captureScreenshot`
+  now sends `captureBeyondViewport` (the real CDP param) instead of `fullPage`
+  (a Playwright abstraction CDP silently ignored) — full-page screenshots on
+  obscura v0.2.0's native renderer finally capture the whole page, not just
+  the viewport.
+- **install** (`webrain install --engine obscura`): falls back to the
+  **v0.1.11** asset when `/latest` has no matching platform/stealth package,
+  instead of failing the whole install on a brand-new release that's still
+  uploading binaries.
+- **install** (`install::find_tool`): finds the bundled yt-dlp even though it
+  installs as `yt-dlp_linux` / `yt-dlp_macos` / `yt-dlp_linux_aarch64` (not
+  the bare name) — fixes `watch`/`download engine:ytdlp` on Linux/macOS with
+  `No such file or directory (os error 2)`.
 
 ### Changed
 
@@ -135,6 +164,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **obscura** (`webrain_core::launch`): `launch_obscura` now passes
   `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
   server is the anti-bot posture, not the vanilla build.
+- **obscura install** (`webrain install --engine obscura`): explicit v0.2.0
+  package selection — `--stealth` and `--no-render` map to the exact asset
+  suffix (`-stealth` / `-no-render` / `-no-render-stealth` / plain render)
+  instead of a length-sort heuristic, so the install pulls the build you ask
+  for (e.g. `render+stealth` = screenshots + anti-bot, verified live).
+- **docs**: obscura v0.2.0 renderer notes (README + `AGENT_DECISION_GUIDE`)
+  — v0.1.11 vs v0.2.0 split in the anti-bot/screenshot table, auto asset
+  selection called out.
 
 ## [0.5.0] - 2026-08-06
 
