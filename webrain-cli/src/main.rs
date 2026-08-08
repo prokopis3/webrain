@@ -332,9 +332,7 @@ fn main() -> anyhow::Result<()> {
             // loop, native — no Python). 90s budget; `webrain login` then fills
             // the form with vault creds.
             let cleared = rt.block_on(backend.wait_out_challenge(90));
-            println!(
-                "opened: {url} challenge_cleared={cleared} — keeping alive; Ctrl-C to stop"
-            );
+            println!("opened: {url} challenge_cleared={cleared} — keeping alive; Ctrl-C to stop");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }

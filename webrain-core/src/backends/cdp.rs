@@ -1033,7 +1033,9 @@ impl CdpBackend {
             // reload every 15s to re-kick the challenge (__cf_chl_rt_tk rotates
             // per reload — same cadence the Python sidecar used).
             if last_reload.elapsed().as_secs() >= 15 {
-                let _ = self.send_cmd("Page.reload", json!({"ignoreCache": false})).await;
+                let _ = self
+                    .send_cmd("Page.reload", json!({"ignoreCache": false}))
+                    .await;
                 last_reload = std::time::Instant::now();
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

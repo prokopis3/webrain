@@ -243,12 +243,7 @@ pub fn install_obscura(force: bool, stealth: bool, render: bool) -> Result<PathB
     // Try /latest first. If no matching asset (new release missing platform
     // binaries, or v0.2.0 lacks the requested variant), fall back to v0.1.11.
     // ponytail: one retry, not a loop.
-    fn find_asset<'a>(
-        rel: &'a Value,
-        key: &str,
-        stealth: bool,
-        render: bool,
-    ) -> Option<&'a str> {
+    fn find_asset<'a>(rel: &'a Value, key: &str, stealth: bool, render: bool) -> Option<&'a str> {
         let suffix = match (render, stealth) {
             (true, false) => "",
             (true, true) => "-stealth",
@@ -280,7 +275,11 @@ pub fn install_obscura(force: bool, stealth: bool, render: bool) -> Result<PathB
         }
     };
 
-    let fname = asset_url.rsplit('/').next().unwrap_or("archive").to_string();
+    let fname = asset_url
+        .rsplit('/')
+        .next()
+        .unwrap_or("archive")
+        .to_string();
     println!("Downloading Obscura {tag} ({fname})...");
     let bytes = download_bytes(&asset_url)?;
     let dest = dir.join(format!("obscura-{tag}"));
