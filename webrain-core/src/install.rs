@@ -214,8 +214,16 @@ const OBSCURA_RELEASES_URL: &str =
 
 /// Download the latest Obscura release (agent-browser-style: fetch a known
 /// release, extract into the engine cache). `--stealth` picks the BoringSSL
-/// stealth build. Windows assets are .zip; linux/macos are .tar.gz.
-pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
+/// stealth build, `--no-render` the headless no-render build. Windows assets
+/// are .zip; linux/macos are .tar.gz.
+///
+/// v0.2.0 ships 4 packages per platform — exact suffix match, no heuristic:
+///   render+stealth   -> obscura-<key>-stealth.<ext>
+///   render (default) -> obscura-<key>.<ext>
+///   no-render+stealth-> obscura-<key>-no-render-stealth.<ext>
+///   no-render        -> obscura-<key>-no-render.<ext>
+/// v0.1.11 fallback only has the plain (render, no-stealth) package.
+pub fn install_obscura(force: bool, stealth: bool, render: bool) -> Result<PathBuf> {
     if !force {
         if let Some(bin) = find_obscura() {
             println!("Obscura already installed: {}", bin.display());
@@ -233,29 +241,39 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
         .context("no tag_name in obscura release")?;
     let key = obscura_asset_key();
     // Try /latest first. If no matching asset (new release missing platform
-    // binaries), fall back to v0.1.11. ponytail: one retry, not a loop.
-    fn find_asset<'a>(rel: &'a Value, key: &str, stealth: bool) -> Option<&'a str> {
-        // v0.2.0 ships 4 variants per platform: default (render), -stealth,
-        // -no-render, -no-render-stealth. Sort by name length (shorter = fewer
-        // suffixes = render build preferred), then pick first match.
-        let mut candidates: Vec<&'a Value> = rel["assets"].as_array()?.iter()
-            .filter(|a| {
-                let n = a["name"].as_str().unwrap_or("");
-                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
-            })
-            .collect();
-        candidates.sort_by_key(|a| a["name"].as_str().unwrap_or("").len());
-        candidates.first()
-            .and_then(|a| a["browser_download_url"].as_str())
+    // binaries, or v0.2.0 lacks the requested variant), fall back to v0.1.11.
+    // ponytail: one retry, not a loop.
+    fn find_asset<'a>(
+        rel: &'a Value,
+        key: &str,
+        stealth: bool,
+        render: bool,
+    ) -> Option<&'a str> {
+        let suffix = match (render, stealth) {
+            (true, false) => "",
+            (true, true) => "-stealth",
+            (false, false) => "-no-render",
+            (false, true) => "-no-render-stealth",
+        };
+        let prefix = format!("obscura-{key}{suffix}");
+        rel["assets"].as_array()?.iter().find_map(|a| {
+            let n = a["name"].as_str().unwrap_or("");
+            let rest = n.strip_prefix(&prefix)?;
+            if rest.is_empty() || rest == ".tar.gz" || rest == ".zip" {
+                a["browser_download_url"].as_str()
+            } else {
+                None
+            }
+        })
     }
-    let (asset_url, tag) = match find_asset(&rel, key, stealth) {
+    let (asset_url, tag) = match find_asset(&rel, key, stealth, render) {
         Some(url) => (url.to_string(), tag.to_string()),
         None => {
             let fallback_url = OBSCURA_RELEASES_URL.replace("/latest", "/tags/v0.1.11");
             let raw2 = String::from_utf8(download_bytes(&fallback_url)?)
                 .context("obscura fallback release JSON")?;
             let rel2: Value = serde_json::from_str(&raw2).context("parse fallback release")?;
-            let url = find_asset(&rel2, key, stealth)
+            let url = find_asset(&rel2, key, stealth, render)
                 .context("no matching obscura asset (tried latest + v0.1.11)")?;
             let t = rel2["tag_name"].as_str().unwrap_or("v0.1.11");
             (url.to_string(), t.to_string())

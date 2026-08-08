@@ -289,11 +289,14 @@ STEP 6: extract (§3) → done
 
 | Backend | Managed JS challenge (Just a moment) | Interactive Turnstile | Non-interactive Turnstile | Screenshot / render |
 |---|---|---|---|---|
-| obscura `--stealth` (lean build) | ❌ V8 crashes (`YS is not a function`) | ❌ no iframe, no token | ✅ verified: `obscura fetch <url> --stealth --wait-until load --wait 30` passes scrapingcourse cf-turnstile | ❌ no paint engine |
+| obscura v0.1.11 `--stealth` | ❌ V8 crashes | ❌ no iframe | ✅ `obscura fetch --stealth --wait 30` | ❌ no paint engine |
+| obscura v0.2.0 `--stealth` | ❌ V8 crashes (same) | ❌ no iframe | ✅ same recipe | ✅ native Rust renderer |
 | real Chrome + `stealth_solve.py` (headed) | ✅ | ⚠️ needs solve service/click | ✅ | ✅ |
-| lightpanda | ❌ | ❌ | ~ | ❌ returns fake placeholder PNG (no paint) |
+| lightpanda | ❌ | ❌ | ~ | ❌ fake placeholder PNG |
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
+webrain auto-selects the best asset for your platform + stealth preference
+(render build preferred over no-render when available).
 
 ---
 

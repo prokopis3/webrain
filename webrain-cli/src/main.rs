@@ -188,10 +188,14 @@ fn main() -> anyhow::Result<()> {
             eprintln!("watch done in {} ms", t0.elapsed().as_millis());
         }
         Some("install") => {
-            // webrain install [--force] [--engine chrome|obscura] [--stealth]
+            // webrain install [--force] [--engine chrome|obscura] [--stealth] [--no-render]
             // agent-browser-style: download the engine into a cache dir.
+            // Obscura v0.2.0 ships 4 packages/OS: render | -stealth | -no-render |
+            // -no-render-stealth. --stealth = stealth build, --no-render = drop the
+            // native render engine (screenshots/PDF unavailable). Default: render.
             let force = args.contains(&"--force".to_string());
             let stealth = args.contains(&"--stealth".to_string());
+            let render = !args.contains(&"--no-render".to_string());
             let engine = args
                 .iter()
                 .position(|a| a == "--engine")
@@ -201,8 +205,13 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| args.get(2).cloned().unwrap_or_else(|| "chrome".to_string()));
             match engine.as_str() {
                 "obscura" => {
-                    let bin = webrain_core::install::install_obscura(force, stealth)?;
+                    let bin = webrain_core::install::install_obscura(force, stealth, render)?;
                     println!("engine ready: obscura at {}", bin.display());
+                    println!(
+                        "  package: {}{}",
+                        if render { "render" } else { "no-render" },
+                        if stealth { "+stealth" } else { "" }
+                    );
                     println!("  start it: `webrain obscura`");
                 }
                 "lightpanda" => {
