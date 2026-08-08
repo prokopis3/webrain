@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-_No unreleased changes yet._
+- **deps**: RustCrypto stack upgraded together (sha1 0.10→0.11, sha2 0.10→0.11,
+  hmac 0.12→0.13, aes-gcm 0.10→0.11, getrandom 0.2→0.4) — they share the `digest`
+  trait and must move as one. `getrandom::fill` replaces `getrandom()`.
 
 ## [0.6.0] - 2026-08-08
 

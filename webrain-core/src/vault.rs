@@ -93,7 +93,7 @@ fn ensure_key() -> anyhow::Result<[u8; 32]> {
             .map_err(|_| anyhow::anyhow!("vault.key must be 32 bytes"));
     }
     let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key)?;
+    getrandom::fill(&mut key)?;
     std::fs::create_dir_all(vault_dir())?;
     std::fs::write(key_path(), key)?;
     #[cfg(unix)]
@@ -115,10 +115,10 @@ fn load_key() -> anyhow::Result<[u8; 32]> {
 
 fn encrypt(key: &[u8; 32], plain: &str) -> anyhow::Result<Enc> {
     let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut nonce)?;
+    getrandom::fill(&mut nonce)?;
     let ct = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("cipher init: {e}"))?
-        .encrypt(Nonce::from_slice(&nonce), plain.as_bytes())
+        .encrypt(&Nonce::from(nonce), plain.as_bytes())
         .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
     Ok(Enc {
         nonce: b64().encode(nonce),
@@ -131,7 +131,10 @@ fn decrypt(key: &[u8; 32], enc: &Enc) -> anyhow::Result<Cred> {
     let ct = b64().decode(&enc.ct)?;
     let pt = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("cipher init: {e}"))?
-        .decrypt(Nonce::from_slice(&nonce), ct.as_ref())
+        .decrypt(
+            &Nonce::try_from(nonce.as_slice()).map_err(|_| anyhow::anyhow!("bad nonce length"))?,
+            ct.as_ref(),
+        )
         .map_err(|e| anyhow::anyhow!("decrypt failed (wrong key?): {e}"))?;
     Ok(serde_json::from_slice(&pt)?)
 }
@@ -231,8 +234,7 @@ pub fn remove(service: &str, profile: &str) -> anyhow::Result<()> {
 type HmacSha1 = Hmac<sha1::Sha1>;
 
 fn totp_at(key: &[u8], counter: u64) -> String {
-    let mut mac =
-        <HmacSha1 as hmac::Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = <HmacSha1 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(&counter.to_be_bytes());
     let out = mac.finalize().into_bytes();
     let offset = (out[out.len() - 1] & 0x0f) as usize;

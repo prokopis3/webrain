@@ -1452,7 +1452,12 @@ pub async fn batch_screenshot(
             let mut hasher = sha2::Sha256::new();
             use sha2::Digest;
             hasher.update(url.as_bytes());
-            let h = format!("{:x}", hasher.finalize());
+            // sha2 0.11 output no longer implements LowerHex; format manually.
+            let h = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
             let path = format!("{dir}/page_{}.png", &h[..12]);
             std::fs::write(&path, &png)?;
             Ok((path, format!("{} bytes", png.len()), None))
