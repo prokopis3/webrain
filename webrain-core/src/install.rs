@@ -235,12 +235,18 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
     // Try /latest first. If no matching asset (new release missing platform
     // binaries), fall back to v0.1.11. ponytail: one retry, not a loop.
     fn find_asset<'a>(rel: &'a Value, key: &str, stealth: bool) -> Option<&'a str> {
-        rel["assets"].as_array()?.iter().find_map(|a| {
-            let n = a["name"].as_str().unwrap_or("");
-            (n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth)
-                .then(|| a["browser_download_url"].as_str())
-                .flatten()
-        })
+        // v0.2.0 ships 4 variants per platform: default (render), -stealth,
+        // -no-render, -no-render-stealth. Sort by name length (shorter = fewer
+        // suffixes = render build preferred), then pick first match.
+        let mut candidates: Vec<&'a Value> = rel["assets"].as_array()?.iter()
+            .filter(|a| {
+                let n = a["name"].as_str().unwrap_or("");
+                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
+            })
+            .collect();
+        candidates.sort_by_key(|a| a["name"].as_str().unwrap_or("").len());
+        candidates.first()
+            .and_then(|a| a["browser_download_url"].as_str())
     }
     let (asset_url, tag) = match find_asset(&rel, key, stealth) {
         Some(url) => (url.to_string(), tag.to_string()),
@@ -511,6 +517,24 @@ pub fn find_tool(tool: &str) -> Option<PathBuf> {
     let own = base.join(tool).join(&exe);
     if own.is_file() {
         return Some(own);
+    }
+    // yt-dlp installs as yt-dlp_linux / yt-dlp_macos / yt-dlp.exe (not the
+    // bare name) — check the platform variants too so the bundled binary is
+    // found on every OS. ponytail: one match, mirror of install_ytdlp's names.
+    let exe_variant = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => None,
+        ("linux", "aarch64") => Some("yt-dlp_linux_aarch64".to_string()),
+        ("linux", _) => Some("yt-dlp_linux".to_string()),
+        ("macos", _) => Some("yt-dlp_macos".to_string()),
+        _ => None,
+    };
+    if tool == "yt-dlp" {
+        if let Some(v) = exe_variant {
+            let own_v = base.join(tool).join(&v);
+            if own_v.is_file() {
+                return Some(own_v);
+            }
+        }
     }
     // ffprobe rides in the ffmpeg dir (shared av DLLs).
     if tool == "ffprobe" {
