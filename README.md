@@ -445,7 +445,10 @@ webrain (single binary)
 **How it works:**
 
 1. `CdpBackend` connects to a CDP endpoint (Chrome, lightpanda, or obscura — all speak CDP) over a raw WebSocket.
-2. On attach it applies stealth hardening (UA override, `Emulation.setAutomationOverride`, JS patches) — so it can log into real sites.
+2. On attach it applies stealth hardening (JS patches + fingerprint-noise evasions
+   ON by default, no forged UA / `Emulation.setAutomationOverride` — patchright
+   parity) and waits out Cloudflare/captcha interstitials natively — so it can
+   log into real sites.
 3. The MCP layer exposes every action as a tool. An LLM picks tools by intent; `webrain_guide` + `AGENT_DECISION_GUIDE.md` encode the *which-browser / which-tool* decisions so the LLM never guesses.
 4. Extraction is generic — autoschema probes the DOM, JSON/regex/table extractors read container-level structure, spider/batch/sitemap crawl at scale, vision tiles give the model "eyes" for tables/charts.
 

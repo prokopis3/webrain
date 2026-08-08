@@ -79,20 +79,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `waiting_for_human`), because the browser is built to **not trigger**
   challenges in the first place: CDP-direct (no chromedriver `cdc_` marker),
   `--disable-blink-features=AutomationControlled` with no automation flag,
-  per-profile `user-data-dir` so `cf_clearance` persists across logins. No
-  challenge-solving — the checkbox auto-click ladder was dropped as
-  unnecessary when bypass does its job. The attach now sends
-  `userAgentMetadata` (Sec-CH-UA matches the forged UA) and a
-  `Function.prototype.toString` native-code spoof (uc pattern).
-- **stealth**: fingerprint noise is now **opt-in** (`WEBRAIN_STEALTH_NOISE=1`).
-  The canvas/audio/WebGL spoofs + `hardwareConcurrency`/`deviceMemory`/
-  `connection` lies are OFF by default because Cloudflare Turnstile / Google
-  reCAPTCHA measure exactly those signals — a pristine real-Chrome fingerprint
-  is the CF/Google-trustworthy default (patchright-style). Core stealth
-  (webdriver→false, real plugins, `window.chrome`, `Function.prototype.toString`
-  spoof) stays always-on. Live test: the /cloudflare-challenge JS challenge
-  auto-passes; an invisible-managed Turnstile that silently withholds its token
-  is Cloudflare's risk decision (IP + automation), not a fingerprint fix.
+  per-profile `user-data-dir` so `cf_clearance` persists across logins.
+  `Function.prototype.toString` native-code spoof (uc pattern). NO forged
+  UA / userAgentMetadata / `Emulation.setAutomationOverride` (patchright parity).
+- **stealth** (patchright parity): fingerprint noise is now **ON by default**
+  (`WEBRAIN_STEALTH_NOISE=0` opts out) — the canvas/audio/WebGL spoofs +
+  `hardwareConcurrency`/`deviceMemory`/`connection` lies are exactly what the
+  managed Cloudflare challenge measures (real values leave it stuck on "Just a
+  moment…", verified vs scrapingcourse cf-antibot). New puppeteer-extra
+  evasions: `window.outerdimensions`, cross-origin `iframe.contentWindow`
+  proxy (HEADCHR_IFRAME), `media.codecs` canPlayType ('probably' for
+  avc1/mp4). Core stealth (webdriver→false, real plugins, `window.chrome`,
+  Function.toString spoof) stays always-on.
+- **core**: native Cloudflare/anti-bot + captcha solving — `wait_out_challenge`
+  (the Python sidecar's poll+reload loop, now in Rust) + captcha widget
+  claiming (Turnstile/reCAPTCHA/hCaptcha iframe-claim + CDP center click) +
+  `wait_turnstile_token` (never submit an empty token). `webrain_login` and
+  `webrain open` auto-wait challenges before form-fill.
+- **core**: real Chrome is preferred for launch (patchright #1 — CfT/Chromium
+  is more fingerprintable); the CfT cache is the fallback only.
+- **login**: `has_session` now catches site-specific `*session*` cookie names
+  (PHPSESSID, laravel_session, connect.sid, …), not just the exact list.
+- **scripts**: `stealth_solve.py` prefers the patched **patchright** Playwright
+  driver (falls back to playwright + undetected_playwright), real-Chrome-first
+  binary detection, and interactive **Turnstile** checkbox click + token wait.
 
 ### Fixed
 
