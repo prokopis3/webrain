@@ -295,7 +295,7 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 
 **Key rules (see [Agent Decision Guide](#agent-decision-guide)):**
 
-- **Never** use obscura/lightpanda for Material/SPA interaction or screenshots — they have **no layout/paint engine**. Obscura errors loudly on screenshots; lightpanda returns a *fake placeholder PNG*. Route interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
+- **Never** use obscura/lightpanda for Material/SPA interaction — they still lack the layout engine for complex Material UI widgets. Obscura v0.2.0+ **render builds** can screenshot and export PDFs (native Rust renderer). Lightpanda returns a *fake placeholder PNG*. Route interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
 - Read the `challenge` field after every `webrain_navigate`. If it's non-null, the page is gated — use the real-Chrome stealth sidecar.
 - Extract from container/card-level DOM, not bare `$` text nodes (Google Flights renders a spurious price grid).
 
@@ -516,7 +516,7 @@ docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webr
 
 **`port X already has a CDP endpoint`** → a browser is already running there. Stop it, or pick another port (`--port N`).
 
-**Screenshots fail / blank on obscura or lightpanda** → they have no paint engine. Obscura errors loudly; lightpanda returns a *fake placeholder PNG*. Use real Chrome.
+**Screenshots fail / blank on obscura or lightpanda** → obscura v0.2.0+ render builds support screenshots; older builds and lightpanda have no paint engine (lightpanda returns a *fake placeholder PNG*). Use real Chrome.
 
 **Empty a11y tree** → the page likely never rendered (consent/challenge page) or the control needs interaction. Check `webrain_navigate`'s `challenge`; try real Chrome; drop the `role` filter and use `filter` on the label.
 
