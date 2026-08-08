@@ -232,20 +232,44 @@ pub fn install_obscura(force: bool, stealth: bool) -> Result<PathBuf> {
         .as_str()
         .context("no tag_name in obscura release")?;
     let key = obscura_asset_key();
-    let asset = rel["assets"]
-        .as_array()
-        .context("no assets in obscura release")?
-        .iter()
-        .find(|a| {
-            let n = a["name"].as_str().unwrap_or("");
-            n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
-        })
-        .and_then(|a| a["browser_download_url"].as_str())
-        .context("no matching obscura asset for this platform")?;
+    // Fall back to last release with assets when /latest has none (new release
+    // may not have uploaded binaries yet). ponytail: one retry, not a loop.
+    let assets = rel["assets"].as_array().map(|a| a.len()).unwrap_or(0);
+    let (asset_url, tag) = if assets > 0 {
+        let a = rel["assets"]
+            .as_array()
+            .context("no assets in obscura release")?
+            .iter()
+            .find(|a| {
+                let n = a["name"].as_str().unwrap_or("");
+                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
+            })
+            .and_then(|a| a["browser_download_url"].as_str())
+            .context("no matching obscura asset for this platform")?;
+        (a.to_string(), tag.to_string())
+    } else {
+        // /latest has no assets — try the tag before it (v0.1.11).
+        let fallback_url = OBSCURA_RELEASES_URL.replace("/latest", "/tags/v0.1.11");
+        let raw2 = String::from_utf8(download_bytes(&fallback_url)?)
+            .context("obscura fallback release JSON")?;
+        let rel2: Value = serde_json::from_str(&raw2).context("parse fallback release")?;
+        let a = rel2["assets"]
+            .as_array()
+            .context("no assets in fallback release")?
+            .iter()
+            .find(|a| {
+                let n = a["name"].as_str().unwrap_or("");
+                n.contains("obscura-") && n.contains(key) && n.contains("stealth") == stealth
+            })
+            .and_then(|a| a["browser_download_url"].as_str())
+            .context("no matching obscura asset for this platform (tried latest + v0.1.11)")?;
+        let t = rel2["tag_name"].as_str().unwrap_or("v0.1.11");
+        (a.to_string(), t.to_string())
+    };
 
-    let fname = asset.rsplit('/').next().unwrap_or("archive").to_string();
+    let fname = asset_url.rsplit('/').next().unwrap_or("archive").to_string();
     println!("Downloading Obscura {tag} ({fname})...");
-    let bytes = download_bytes(asset)?;
+    let bytes = download_bytes(&asset_url)?;
     let dest = dir.join(format!("obscura-{tag}"));
     extract_archive(&bytes, &dest, &fname)?;
     find_named(&dest, &bin_name("obscura"), 3)
