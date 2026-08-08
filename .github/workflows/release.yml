@@ -49,7 +49,7 @@ jobs:
         run: mv target/release/${{ matrix.bin }} target/release/${{ matrix.out }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webrain-${{ matrix.os }}
           path: target/release/${{ matrix.out }}
