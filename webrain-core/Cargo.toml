@@ -23,11 +23,11 @@ futures-util = "0.3"
 url = "2"
 base64 = "0.22"
 ureq = { version = "3", features = ["json"] }
-sha2 = "0.10"
-aes-gcm = "0.10"
-getrandom = "0.2"
-hmac = "0.12"
-sha1 = "0.10"
+sha2 = "0.11"
+aes-gcm = "0.11"
+getrandom = "0.4"
+hmac = "0.13"
+sha1 = "0.11"
 regex = "1"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
 # Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
