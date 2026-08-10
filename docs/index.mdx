@@ -230,6 +230,10 @@ mode: custom
         <p>No selectors to hand-write, no daemon, no driver wiring. The binary, your client, and the model do the rest.</p>
       </div>
       <div className="steps">
+        <svg className="steps-flow" viewBox="0 0 300 100" fill="none" aria-hidden="true" preserveAspectRatio="none">
+          <path className="steps-line" d="M22 14 H278" />
+          <path className="steps-packet" d="M0 -3.4 a3.4 3.4 0 1 1 0 6.8 a3.4 3.4 0 1 1 0 -6.8" />
+        </svg>
         <div className="step">
           <span className="step-label">Install</span>
           <h3>One binary, any OS</h3>
@@ -248,6 +252,39 @@ mode: custom
           <p>Tell the agent what to do in plain language. It navigates, extracts, and returns structured data.</p>
           <div className="step-term"><span className="step-term-bar"><i /><i /><i /><span>agent</span></span><code>scrape product prices from URL X</code></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  {/* The agent loop — living SVG circuit */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>One loop, every site.</h2>
+        <p>Read the page, pick a tool, act, hand back structured JSON. The agent walks the same circuit on every job.</p>
+      </div>
+      <div className="loop">
+        <div className="loop-radar" aria-hidden="true" />
+        <svg className="loop-circuit" viewBox="0 0 760 460" fill="none" aria-hidden="true">
+          <path className="loop-arc" d="M380 80 A150 150 0 0 1 522.6 183.6" />
+          <path className="loop-arc" d="M522.6 183.6 A150 150 0 0 1 468.2 351.4" />
+          <path className="loop-arc" d="M468.2 351.4 A150 150 0 0 1 291.8 351.4" />
+          <path className="loop-arc" d="M291.8 351.4 A150 150 0 0 1 237.4 183.6" />
+          <path className="loop-arc" d="M237.4 183.6 A150 150 0 0 1 380 80" />
+          <path className="loop-inner" d="M380 140 a90 90 0 1 1 0 180 a90 90 0 1 1 0 -180" />
+          <path className="loop-hub-ring" d="M380 184 a46 46 0 1 1 0 92 a46 46 0 1 1 0 -92" />
+          <path className="loop-hub-ring loop-hub-ring-2" d="M380 196 a34 34 0 1 1 0 68 a34 34 0 1 1 0 -68" />
+          <path className="loop-track" d="M380 80 a150 150 0 1 1 0 300 a150 150 0 1 1 0 -300" />
+          <path className="loop-track" d="M380 140 a90 90 0 1 0 0 180 a90 90 0 1 0 0 -180" />
+          <path className="loop-particle" d="M0 -4 a4 4 0 1 1 0 8 a4 4 0 1 1 0 -8" />
+          <path className="loop-particle loop-particle-2" d="M0 -2.6 a2.6 2.6 0 1 1 0 5.2 a2.6 2.6 0 1 1 0 -5.2" />
+        </svg>
+        <div className="loop-node" style={{ left: '50%', top: '17.4%' }} data-node="0"><b>ask</b><span>plain-language prompt</span></div>
+        <div className="loop-node" style={{ left: '68.8%', top: '39.9%' }} data-node="1"><b>navigate</b><span>engine loads the page</span></div>
+        <div className="loop-node" style={{ left: '61.6%', top: '76.4%' }} data-node="2"><b>observe</b><span>DOM snapshot</span></div>
+        <div className="loop-node" style={{ left: '38.4%', top: '76.4%' }} data-node="3"><b>decide</b><span>LLM picks the tool</span></div>
+        <div className="loop-node" style={{ left: '31.2%', top: '39.9%' }} data-node="4"><b>extract</b><span>structured JSON out</span></div>
+        <div className="loop-hub"><b>webrain</b><span>one binary</span></div>
       </div>
     </div>
   </div>

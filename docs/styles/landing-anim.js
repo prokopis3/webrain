@@ -121,6 +121,8 @@
     { sel: '.landing .faq-item', anim: 'rise' },
     { sel: '.landing .bench-stats', anim: 'rise' },
     { sel: '.landing .benchmark-visual', anim: 'fade' },
+    { sel: '.landing .loop', anim: 'fade' },
+    { sel: '.landing .steps-flow', anim: 'fade' },
     { sel: '.landing .cta-band', anim: 'rise' }
   ];
 
@@ -143,6 +145,8 @@
     var type = el.getAttribute('data-anim') || 'rise';
     anime(Object.assign({ targets: el }, animator(type, i)));
     if (el.classList.contains('shell')) revealCellInner(el, i);
+    if (el.classList.contains('loop')) playLoopCircuit(el);
+    if (el.classList.contains('steps-flow')) playStepsFlow(el);
     if (type === 'check') {
       var p = el.querySelector('.tick svg path');
       if (p) {
@@ -179,6 +183,87 @@
         p.style.strokeDasharray = len;
         p.style.strokeDashoffset = len;
         anime({ targets: p, strokeDashoffset: [len, 0], duration: 800, delay: base + 260, easing: 'easeOutCubic' });
+      });
+    }
+  }
+
+  // Draw an SVG path from a hidden state: dasharray = full length, then ease
+  // the dashoffset to 0 so it appears to draw itself.
+  function drawPath(p, duration, delay) {
+    if (!p) return;
+    var len = p.getTotalLength();
+    p.style.strokeDasharray = len;
+    p.style.strokeDashoffset = len;
+    anime({ targets: p, strokeDashoffset: [len, 0], duration: duration || 700, delay: delay || 0, easing: 'easeInOutCubic' });
+  }
+
+  /* ---------------- the agent loop (living SVG circuit) ---------------- */
+  var loopRunner = null; // travelling-particle animation, rebuilt on React re-render
+  function playLoopCircuit(shell) {
+    if (REDUCE || !shell) return;
+    var svg = shell.querySelector('.loop-circuit');
+    if (!svg || !window.anime) return;
+    var arcs = Array.prototype.slice.call(svg.querySelectorAll('.loop-arc'));
+    arcs.forEach(function (p, i) { drawPath(p, 640, i * 170); });
+    drawPath(svg.querySelector('.loop-inner'), 900, 320);
+    Array.prototype.slice.call(svg.querySelectorAll('.loop-hub-ring')).forEach(function (p, i) {
+      drawPath(p, 700, 520 + i * 220);
+    });
+    // once the ring is drawn, start the travelling particles
+    setTimeout(function () {
+      if (REDUCE) return;
+      startLoopParticles(shell);
+    }, arcs.length * 170 + 720);
+  }
+  function startLoopParticles(shell) {
+    var svg = shell.querySelector('.loop-circuit');
+    if (!svg) return;
+    var dot = svg.querySelector('.loop-particle');
+    var dot2 = svg.querySelector('.loop-particle-2');
+    var track = svg.querySelector('.loop-track');
+    var track2 = svg.querySelectorAll('.loop-track')[1];
+    var nodes = Array.prototype.slice.call(shell.querySelectorAll('.loop-node'));
+    if (loopRunner) { loopRunner.pause(); loopRunner = null; }
+    nodes.forEach(function (n) { n.classList.remove('lit'); });
+    if (track && dot) {
+      var path = anime.path(track);
+      var litIndex = -1;
+      loopRunner = anime({
+        targets: dot,
+        translateX: path('x'), translateY: path('y'), rotate: path('angle'),
+        duration: 5400, easing: 'linear', loop: true,
+        update: function (a) {
+          if (!nodes.length) return;
+          var seg = Math.floor((a.progress / 100) * 5);   // which outer arc (0..4)
+          var target = (seg + 1) % nodes.length;          // light the arriving node
+          if (target !== litIndex) {
+            if (litIndex >= 0 && nodes[litIndex]) nodes[litIndex].classList.remove('lit');
+            if (nodes[target]) nodes[target].classList.add('lit');
+            litIndex = target;
+          }
+        }
+      });
+    }
+    if (track2 && dot2) {
+      var path2 = anime.path(track2);
+      anime({ targets: dot2, translateX: path2('x'), translateY: path2('y'), duration: 3800, easing: 'linear', loop: true });
+    }
+  }
+
+  // The setup-steps connector: fade the dashed line in, then run one packet
+  // across Install -> Connect -> Ask.
+  function playStepsFlow(el) {
+    if (REDUCE || !el) return;
+    var line = el.querySelector('.steps-line');
+    var packet = el.querySelector('.steps-packet');
+    anime({ targets: el, opacity: [0, 1], duration: 500 });
+    if (line && packet) {
+      var path = anime.path(line);
+      anime({
+        targets: packet,
+        translateX: path('x'), translateY: path('y'),
+        duration: 1900, delay: 700, easing: 'easeInOutCubic',
+        complete: function () { anime({ targets: packet, opacity: 0, duration: 300 }); }
       });
     }
   }
