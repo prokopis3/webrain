@@ -264,7 +264,8 @@ mode: custom
         <div className="shell card-2">
           <div className="core core-grad">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>15 intent-based tools</h3>
-            <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Legacy one-action names still dispatch.</p>
+            <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Sixty-three legacy one-action aliases still dispatch.</p>
+            <div className="agent-mini" aria-hidden="true"><span className="am-seg">agent</span><span className="am-arrow">→</span><span className="am-seg">navigate</span><span className="am-arrow">→</span><span className="am-seg">observe</span><span className="am-arrow">→</span><span className="am-seg">extract</span><span className="am-arrow">→</span><span className="am-seg am-json">JSON</span><span className="am-cursor" /></div>
             <div className="tool-chips">
               <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">guide</a>
             </div>
@@ -274,14 +275,16 @@ mode: custom
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg></span>Structured extraction</h3>
-            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data.</p>
+            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data. Zero LLM, zero cost.</p>
+            <div className="cap-tags"><a className="tool-chip" href="/reference/tools">autoschema</a><a className="tool-chip" href="/reference/tools">schema</a><a className="tool-chip" href="/reference/tools">regex</a><a className="tool-chip" href="/reference/tools">table</a><a className="tool-chip" href="/reference/tools">jsonld</a><a className="tool-chip" href="/reference/tools">bm25</a></div>
           </div>
         </div>
 
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Stealth login</h3>
-            <p>Real-Chrome profiles with an encrypted local vault (AES-256-GCM) and optional TOTP. Cookies transfer across engines.</p>
+            <p>Real-Chrome profiles with an encrypted local vault and optional TOTP. Cookies transfer across engines.</p>
+            <div className="cap-tags"><span className="tool-chip">AES-256-GCM</span><span className="tool-chip">TOTP</span><span className="tool-chip">cookie transfer</span></div>
           </div>
         </div>
 
@@ -289,6 +292,7 @@ mode: custom
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
             <p>Every navigate reports a <code>challenge</code> field; a real-Chrome stealth sidecar solves Cloudflare and Turnstile gates.</p>
+            <div className="cap-tags"><span className="tool-chip">cloudflare_challenge</span><span className="tool-chip">blocked</span><span className="tool-chip">captcha</span></div>
           </div>
         </div>
 
@@ -296,13 +300,28 @@ mode: custom
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>Crawl at scale</h3>
             <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume.</p>
+            <div className="cap-tags"><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">spider</a><a className="tool-chip" href="/reference/tools">sitemap</a><a className="tool-chip" href="/reference/tools">scan</a></div>
+            <svg className="crawl-vis" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+              <path className="crawl-ring" fill="none" d="M60 14 a46 46 0 1 1 0 92 a46 46 0 1 1 0 -92" />
+              <path className="crawl-ring" fill="none" d="M60 30 a30 30 0 1 1 0 60 a30 30 0 1 1 0 -60" />
+              <path className="crawl-ring" fill="none" d="M60 45 a15 15 0 1 1 0 30 a15 15 0 1 1 0 -30" />
+              <path className="crawl-ray" fill="none" d="M14 60 L106 60" />
+              <path className="crawl-ray" fill="none" d="M60 14 L60 106" />
+              <path className="crawl-ray" fill="none" d="M27 27 L93 93" />
+              <path className="crawl-ray" fill="none" d="M93 27 L27 93" />
+              <path className="crawl-core" d="M60 57 a3 3 0 1 1 0 6 a3 3 0 1 1 0 -6" />
+              <path className="crawl-node" d="M106 57.5 a2.5 2.5 0 1 1 0 5 a2.5 2.5 0 1 1 0 -5" />
+              <path className="crawl-node" d="M27 24.5 a2.5 2.5 0 1 1 0 5 a2.5 2.5 0 1 1 0 -5" />
+              <path className="crawl-node" d="M93 90.5 a2.5 2.5 0 1 1 0 5 a2.5 2.5 0 1 1 0 -5" />
+            </svg>
           </div>
         </div>
 
         <div className="shell">
-          <div className="core">
+          <div className="core core-art">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="m12 7 5 5-5 5M7 12h10" /></svg></span>Read anything</h3>
             <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path.</p>
+            <div className="cap-tags"><a className="tool-chip" href="/reference/tools">PDF</a><a className="tool-chip" href="/reference/tools">video</a><a className="tool-chip" href="/reference/tools">downloads</a><a className="tool-chip" href="/reference/tools">JSON-LD</a><a className="tool-chip" href="/reference/tools">HTTP</a></div>
           </div>
         </div>
 
@@ -310,6 +329,7 @@ mode: custom
           <div className="core core-grad">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3V5a3 3 0 0 0-3-3Z" /><circle cx="12" cy="15" r="2.4" /></svg></span>Local AI, all OS</h3>
             <p>Bundled whisper-cli for transcripts and Qwen3-VL-2B for vision. No cloud key required. Runs fully on your machine.</p>
+            <div className="cap-tags"><span className="tool-chip">whisper-cli</span><span className="tool-chip">Qwen3-VL-2B</span></div>
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
               <div className="stat"><b>3</b><span>browser engines</span></div>

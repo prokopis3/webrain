@@ -169,13 +169,14 @@
 /* ===== bento — asymmetric, gapless, double-bezel ===== */
 .landing .bento { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-flow: dense; gap: 1rem; }
 .landing .shell { padding: 1px; border-radius: 2.05rem; background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02)); }
-.landing .core { height: 100%; padding: 1.6rem; border-radius: 2rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.06); transition: background 0.4s var(--ease), transform 0.4s var(--ease); }
+.landing .core { position: relative; height: 100%; padding: 1.6rem; border-radius: 2rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.06); transition: background 0.4s var(--ease), transform 0.4s var(--ease); }
 .landing .shell:hover .core { background: rgba(255,255,255,0.045); }
 /* visual variation in selected cells (bento background diversity) */
-.landing .core-grad { background: radial-gradient(120% 120% at 18% 0%, rgba(59,130,246,0.16), transparent 55%), var(--bg-soft); }
+.landing .core-grad { position: relative; overflow: hidden; background: var(--bg-soft); }
+.landing .core-grad::before { content: ""; position: absolute; inset: 0; background: radial-gradient(120% 120% at 18% 0%, rgba(59,130,246,0.16), transparent 55%); pointer-events: none; }
 .landing .card-2 { grid-column: span 2; }
 .landing .core h3 { font-size: 1.12rem; font-weight: 600; letter-spacing: -0.015em; display: flex; align-items: center; gap: 0.65rem; }
-.landing .core h3 .chip-ico { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; flex: none; background: rgba(59,130,246,0.14); color: var(--accent-2); }
+.landing .core h3 .chip-ico { width: 32px; height: 32px; border-radius: 11px; display: grid; place-items: center; flex: none; color: var(--accent-2); background: linear-gradient(180deg, rgba(59,130,246,0.22), rgba(59,130,246,0.08)); border: 1px solid rgba(59,130,246,0.24); box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); will-change: transform; }
 .landing .core h3 .chip-ico svg { width: 16px; height: 16px; }
 .landing .core p { margin-top: 0.8rem; color: var(--muted); font-size: 0.925rem; line-height: 1.55; }
 .landing .core code { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.85em; color: var(--accent-2); background: rgba(59,130,246,0.1); padding: 0.1rem 0.32rem; border-radius: 0.35rem; }
@@ -390,6 +391,37 @@
 .landing .ussay-row:hover .ussay-arr svg { transform: translateX(3px); color: var(--accent-2); }
 .landing .ussay-prompt { font-size: 0.94rem; color: var(--muted); line-height: 1.5; }
 @media (max-width: 640px) { .landing .ussay-row { flex-wrap: wrap; gap: 0.55rem; } .landing .ussay-tool { white-space: normal; } }
+
+/* ===== v4.1 capabilities-bento upgrades ===== */
+/* capability tags (mono chips reused from .tool-chip, slightly smaller) */
+.landing .cap-tags { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.9rem; }
+.landing .cap-tags .tool-chip { font-size: 0.68rem; padding: 0.26rem 0.58rem; }
+/* agent flow mini-line (real loop: navigate → observe → extract → JSON) */
+.landing .agent-mini { display: flex; flex-wrap: wrap; align-items: center; gap: 0.32rem; margin-top: 1.05rem; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.74rem; color: var(--muted); }
+.landing .am-seg { padding: 0.2rem 0.5rem; border-radius: 0.5rem; background: rgba(255,255,255,0.04); border: 1px solid var(--hairline); }
+.landing .am-arrow { color: var(--faint); }
+.landing .am-json { color: var(--accent-2); border-color: rgba(59,130,246,0.28); background: rgba(59,130,246,0.1); }
+.landing .am-cursor { display: inline-block; width: 0.5em; height: 1.05em; margin-left: 2px; vertical-align: text-bottom; background: var(--accent-2); animation: wf-blink 1.05s steps(1) infinite; }
+/* crawl spiderweb motif (functional diagram, drawn on reveal) */
+.landing .crawl-vis { position: absolute; right: 0.9rem; bottom: 0.9rem; width: 108px; height: 108px; opacity: 0.7; pointer-events: none; }
+.landing .crawl-ring, .landing .crawl-ray { stroke: rgba(96,165,250,0.45); stroke-width: 1; }
+.landing .crawl-node { fill: rgba(96,165,250,0.55); }
+.landing .crawl-core { fill: var(--ok); box-shadow: 0 0 10px rgba(52,211,153,0.7); }
+/* art-texture cell (dimmed generated art behind content) */
+.landing .core-art { position: relative; overflow: hidden; }
+.landing .core-art::before { content: ""; position: absolute; inset: 0; background-image: url('/images/landing/flow-art.png'); background-size: cover; background-position: center; opacity: 0.14; pointer-events: none; -webkit-mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent); }
+.landing .core-art > * { position: relative; z-index: 1; }
+/* shell border spotlight on hover (intensify the bezel to electric blue) */
+.landing .shell { transition: background 0.4s var(--ease); }
+.landing .shell:hover { background: linear-gradient(180deg, rgba(59,130,246,0.26), rgba(255,255,255,0.04)); }
+/* slow gradient drift on feature cells (GPU-safe transform only) */
+@media (prefers-reduced-motion: no-preference) {
+  .landing .core-grad::before { animation: cap-drift 16s ease-in-out infinite alternate; }
+}
+@keyframes cap-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(-4%, 5%, 0) scale(1.08); }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .landing *, .landing *::before, .landing *::after { animation: none !important; transition: none !important; }
