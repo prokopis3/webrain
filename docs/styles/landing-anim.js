@@ -139,8 +139,10 @@
   }
 
   function reveal(el, i) {
+    if (REDUCE) return;
     var type = el.getAttribute('data-anim') || 'rise';
     anime(Object.assign({ targets: el }, animator(type, i)));
+    if (el.classList.contains('shell')) revealCellInner(el, i);
     if (type === 'check') {
       var p = el.querySelector('.tick svg path');
       if (p) {
@@ -151,6 +153,34 @@
       }
     }
     if (el.classList.contains('bench-stats')) runCounters(el);
+  }
+
+  // Layered entrance inside a bento cell: icon pop, then a cascade of the
+  // tool/cap chips and the agent-flow segments, then the crawl spiderweb draws.
+  function revealCellInner(el, i) {
+    var base = i * 70;
+    var ico = el.querySelector('.chip-ico');
+    if (ico) {
+      anime.set(ico, { scale: 0.4, rotate: -90 });
+      anime({ targets: ico, scale: [0.4, 1], rotate: [-90, 0], duration: 520, delay: base + 130, easing: 'easeOutBack' });
+    }
+    var chips = el.querySelectorAll('.tool-chip, .am-seg');
+    if (chips.length) {
+      anime.set(chips, { opacity: 0, translateY: 8 });
+      anime({
+        targets: chips, opacity: [0, 1], translateY: [8, 0], duration: 420,
+        delay: anime.stagger(45, { start: base + 230 }), easing: 'easeOutCubic'
+      });
+    }
+    var web = el.querySelectorAll('.crawl-ring, .crawl-ray');
+    if (web.length) {
+      Array.prototype.forEach.call(web, function (p) {
+        var len = p.getTotalLength();
+        p.style.strokeDasharray = len;
+        p.style.strokeDashoffset = len;
+        anime({ targets: p, strokeDashoffset: [len, 0], duration: 800, delay: base + 260, easing: 'easeOutCubic' });
+      });
+    }
   }
 
   // Mintlify's React shell can rebuild the landing subtree after hydration

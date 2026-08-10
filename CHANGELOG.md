@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Landing moved `landing.mdx` → `index.mdx` and nav points to `index` so the
     landing serves at `/`.
 
+- **docs**: capabilities bento ("Everything an agent needs to read the web.")
+  upgraded with richer content and per-cell motion:
+  - Seven asymmetric cells (span-2 + 1, 1+1+1, 1 + span-2) covering the 15
+    intent-based tools, structured extraction, stealth login, challenge bypass,
+    crawl-at-scale, read-anything, and local-AI engines.
+  - Per-cell anime.js entrance layered inside each card: icon pop
+    (`chip-ico`, scale 0.4→1 + rotate −90°→0, `easeOutBack`), then a staggered
+    cascade of capability tags (`cap-tags` / `tool-chip`) and the
+    `agent → navigate → observe → extract → JSON` agent-flow mini-line, then the
+    crawl spiderweb SVG stroke-draws itself (path-based, dasharray/dashoffset).
+  - Art + gradient cells: `core-art` dims the flow-art texture behind
+    Read-anything; `core-grad` adds an animated drifting radial gradient to the
+    two span-2 cells; hairline `shell` spotlight border on hover.
+  - Capability tags per cell (autoschema/regex/table/jsonld/bm25, AES-256-GCM/
+    TOTP/cookie transfer, cloudflare_challenge/blocked/captcha, batch/spider/
+    sitemap/scan, PDF/video/downloads/JSON-LD/HTTP, whisper-cli/Qwen3-VL-2B)
+    linking to `/reference/tools`.
+  - Spiderweb rendered with `<path>` elements only (Mintlify's sanitizer strips
+    `<circle>`/`<line>`; `<path>` survives — proven by the existing checkmarks).
+
 ## [0.6.1] - 2026-08-09
 
 ### Changed
