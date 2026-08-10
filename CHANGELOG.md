@@ -9,7 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **docs**: landing page (now `docs/index.mdx`, served at `/`) rebuilt with a
+  massive motion + sections upgrade:
+  - **Try the agent** playground — a live scraper-LLM demo: preset workflows
+    (Scrape prices / Auth + Turnstile / Batch interact) or a custom
+    plain-language prompt; the agent loop streams (`webrain_navigate` →
+    `observe` → `extract autoschema` → `extract schema`) into a JSON result
+    card, powered by anime.js.
+  - **You say / webrain does** — prompt→tool dispatch rows (grounded in the
+    agent decision guide) linking to `/guides/agent-decision-guide`.
+  - **Benchmark** section — animated counters (42 products in 1.4s, 3 engines,
+    15 tools, up to 100× faster) + the extraction benchmark art.
+  - Hero choreography — word-split headline reveal, staggered entrance
+    timeline, typed install command (per-OS), all via
+    `docs/styles/landing-anim.js` (self-healing against React rebuilds;
+    additive/SEO-safe; `prefers-reduced-motion` respected).
+  - Headings now render in Geist (Mintlify forces Inter on `h1`-`h6`; overridden
+    scoped under `.landing`).
+  - Landing moved `landing.mdx` → `index.mdx` and nav points to `index` so the
+    landing serves at `/`.
 
 ## [0.6.1] - 2026-08-09
 

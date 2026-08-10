@@ -20,7 +20,7 @@
           {
             "group": "Getting Started",
             "pages": [
-              "landing",
+              "index",
               "overview",
               "quickstart",
               "installation"
