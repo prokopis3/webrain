@@ -501,5 +501,6 @@ mode: custom
 
   {/* anime.js motion layer — scroll reveals (reduced-motion aware); hero streams via CSS */}
   <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js" />
-  <script src="/styles/landing-anim.js" />
+  {/* Mintlify's hosted build does NOT serve raw /styles/*.js, so load via jsDelivr (same pattern as logo-nav.js) */}
+  <script src="https://cdn.jsdelivr.net/gh/prokopis3/webrain@main/docs/styles/landing-anim.js" />
 </div>
