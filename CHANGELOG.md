@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Spiderweb rendered with `<path>` elements only (Mintlify's sanitizer strips
     `<circle>`/`<line>`; `<path>` survives — proven by the existing checkmarks).
 
+- **docs**: new "One loop, every site." section — a living SVG circuit of the
+  agent core loop (ask → navigate → observe → decide → extract), animated with
+  anime.js:
+  - Five arc segments draw themselves in sequence on scroll into view
+    (`strokeDashoffset`), then the hub rings and inner ring join the draw.
+  - A particle travels the closed ring continuously via `anime.path()`
+    (motion-path following: `translateX`/`translateY`/`rotate`), with a
+    slower counter-rotating particle on the inner ring.
+  - The arriving tool node lights up as the particle passes (anime
+    `onUpdate` progress → segment → node `.lit` highlight).
+  - Conic `loop-radar` CSS sweep behind the circuit; reduced-motion keeps the
+    circuit fully drawn and static (additive/SEO-safe, like every section).
+  - All geometry is `<path>` only (sanitizer-safe); node chips are HTML
+    absolutely-positioned over the SVG so labels stay crisp at any width.
+- **docs**: setup-steps connector — a dashed hairline across Install →
+  Connect → Ask draws on scroll and runs one glowing packet across it
+  (`anime.path`), tying the three step cards into a single flow.
+
 ## [0.6.1] - 2026-08-09
 
 ### Changed
