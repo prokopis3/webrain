@@ -68,8 +68,86 @@
 .landing .btn svg { width: 15px; height: 15px; }
 
 /* hero visual — one crisp framed product window */
-.landing .hero-visual { border-radius: 1.5rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: 0 60px 120px -50px rgba(0,0,0,0.85), inset 0 1px 1px rgba(255,255,255,0.06); transition: transform 0.6s var(--ease), box-shadow 0.6s var(--ease); }
-.landing .hero-visual:hover { transform: translateY(-4px); box-shadow: 0 80px 150px -60px rgba(0,0,0,0.9), inset 0 1px 1px rgba(255,255,255,0.06); }
+/* hero frame removed — the 3D terminals float free in the page (no box, no border) */
+.landing .hero-visual { position: relative; overflow: hidden; display: flex; }
+
+/* hero workflow demo — 3 example terminals in a 3D coverflow (pure CSS, no JS) */
+.landing .wf-stage { position: relative; display: flex; flex: 1; min-width: 0; min-height: 340px; overflow-x: auto; scroll-snap-type: x mandatory; }
+.landing .wf-card3d { position: relative; flex: 0 0 100%; scroll-snap-align: start; min-height: 340px; display: flex; }
+.landing .wf-card3d.wf-dup { display: none; }
+.landing .wf-card3d .workflow-term { flex: 1; min-height: 340px; display: flex; flex-direction: column; }
+.landing .workflow-term .term-body { flex: 1; display: flex; flex-direction: column; justify-content: flex-start; gap: 0.55rem; }
+.landing .workflow-term .wf-group { display: flex; flex-direction: column; gap: 0.3rem; }
+.landing .wf-ask { color: var(--faint); }
+.landing .wf-json { color: var(--accent-2); }
+.landing .wf-done { color: var(--muted); }
+.landing .wf-done .wf-cursor { display: inline-block; width: 0.52em; height: 1.05em; margin-left: 3px; vertical-align: text-bottom; background: var(--accent-2); }
+.landing .term-live { display: inline-flex; align-items: center; gap: 0.35rem; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ok); }
+.landing .term-live i { width: 7px; height: 7px; border-radius: 9999px; background: var(--ok); box-shadow: 0 0 10px rgba(52,211,153,0.7); }
+/* 3D coverflow + per-window command streaming. Each card: front → left →
+   behind → right over 28s (offset -7s per card, exactly one is front at a
+   time). When a window reaches front it streams its commands one by one
+   (per-group keyframes, phase-locked to the card by the same negative delay);
+   when it leaves, the transcript fades and re-streams the next time the window
+   returns to front. Content is never hidden by JS; reduced-motion users get a
+   swipeable row of the 3 terminals. */
+@media (prefers-reduced-motion: no-preference) {
+  .landing .wf-stage { display: block; perspective: 1700px; overflow: hidden; }
+  .landing .wf-card3d { position: absolute; inset: 0; flex: none; backface-visibility: hidden; will-change: transform, opacity; animation: wf-cover 28s cubic-bezier(0.32, 0.72, 0, 1) both infinite; animation-delay: calc(var(--card, 0) * -7s); }
+  .landing .wf-card3d.wf-dup { display: block; }
+  .landing .wf-stage:hover .wf-card3d { animation-play-state: paused; }
+  .landing .workflow-term .wf-body > .wf-group { animation-duration: 28s; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); animation-fill-mode: backwards; animation-iteration-count: infinite; animation-delay: calc(var(--card, 0) * -7s); }
+  .landing .workflow-term .wf-body > .wf-group:nth-child(1) { animation-name: wf-g0; }
+  .landing .workflow-term .wf-body > .wf-group:nth-child(2) { animation-name: wf-g1; }
+  .landing .workflow-term .wf-body > .wf-group:nth-child(3) { animation-name: wf-g2; }
+  .landing .workflow-term .wf-body > .wf-group:nth-child(4) { animation-name: wf-g3; }
+  .landing .workflow-term .wf-body > .wf-group:nth-child(5) { animation-name: wf-g4; }
+  .landing .term-live i { animation: wf-live 1.4s ease-in-out infinite; }
+  .landing .wf-done .wf-cursor { animation: wf-blink 1.05s steps(1) infinite; }
+}
+@keyframes wf-cover {
+  0%, 22%  { transform: translateX(0) rotateY(0deg) translateZ(0) scale(1); opacity: 1; }
+  27%, 47% { transform: translateX(-46%) rotateY(-32deg) translateZ(-240px) scale(0.7); opacity: 0; }
+  52%, 72% { transform: translateX(0) rotateY(0deg) translateZ(-460px) scale(0.55); opacity: 0; }
+  77%, 97% { transform: translateX(46%) rotateY(32deg) translateZ(-240px) scale(0.7); opacity: 0; }
+  100%     { transform: translateX(0) rotateY(0deg) translateZ(0) scale(1); opacity: 1; }
+}
+/* one keyframes set per group index — the reveal timing bakes the stagger in,
+   and the shared negative card delay keeps it phase-locked across every loop */
+@keyframes wf-g0 { 0% { opacity: 0; transform: translateY(8px); } 0.5% { opacity: 0; } 3% { opacity: 1; transform: none; } 50% { opacity: 1; } 54% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes wf-g1 { 0% { opacity: 0; transform: translateY(8px); } 4.5% { opacity: 0; } 7% { opacity: 1; transform: none; } 50% { opacity: 1; } 54% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes wf-g2 { 0% { opacity: 0; transform: translateY(8px); } 8.5% { opacity: 0; } 11% { opacity: 1; transform: none; } 50% { opacity: 1; } 54% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes wf-g3 { 0% { opacity: 0; transform: translateY(8px); } 12.5% { opacity: 0; } 15% { opacity: 1; transform: none; } 50% { opacity: 1; } 54% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes wf-g4 { 0% { opacity: 0; transform: translateY(8px); } 16.5% { opacity: 0; } 19% { opacity: 1; transform: none; } 50% { opacity: 1; } 54% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes wf-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+@keyframes wf-live { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ===== all-sections motion — scroll-driven reveals (pure CSS, no JS) =====
+   Every section's text and boxes rise into view as they enter the viewport.
+   Uses the modern scroll-driven animation API; browsers without it fall back
+   to a fully visible static page (content is never hidden by JS). */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .landing .section-head,
+    .landing .check,
+    .landing .bento .shell,
+    .landing .steps .step,
+    .landing .engines .engine,
+    .landing .why-visual,
+    .landing .compare,
+    .landing .faq-item,
+    .landing .cta-band,
+    .landing .benchmark-visual {
+      animation: wf-scroll-in 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 45%;
+    }
+  }
+}
+@keyframes wf-scroll-in {
+  from { opacity: 0; transform: translateY(26px); }
+  to   { opacity: 1; transform: none; }
+}
 
 /* ===== trust strip — real logos ===== */
 .landing .logos { padding: 4rem 0 1rem; text-align: center; }
@@ -163,6 +241,7 @@
 
 /* benchmark visual — full-bleed data-vis card */
 .landing .benchmark-visual { border-radius: 1.75rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); }
+.landing .benchmark-visual img { width: 100%; height: auto; display: block; }
 
 /* ===== how it works — 3-step flow ===== */
 .landing .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; position: relative; }
@@ -221,35 +300,13 @@
 @keyframes marquee { from { transform: translate3d(0,0,0); } to { transform: translate3d(-50%,0,0); } }
 
 @media (prefers-reduced-motion: no-preference) {
-  .landing .hero > div { animation: rise 0.7s var(--ease) both; }
-  .landing .hero > div:nth-child(2) { animation-delay: 0.14s; }
-  .landing .logos, .landing .section-head, .landing .cta-band, .landing .benchmark-visual { animation: rise 0.7s var(--ease) both; }
-  .landing .bento .shell { animation: rise 0.6s var(--ease) both; }
-  .landing .bento .shell:nth-child(2) { animation-delay: 0.05s; }
-  .landing .bento .shell:nth-child(3) { animation-delay: 0.1s; }
-  .landing .bento .shell:nth-child(4) { animation-delay: 0.15s; }
-  .landing .bento .shell:nth-child(5) { animation-delay: 0.2s; }
-  .landing .bento .shell:nth-child(6) { animation-delay: 0.25s; }
-  .landing .bento .shell:nth-child(7) { animation-delay: 0.3s; }
-  .landing .engines .engine { animation: rise 0.6s var(--ease) both; }
-  .landing .engines .engine:nth-child(2) { animation-delay: 0.06s; }
-  .landing .engines .engine:nth-child(3) { animation-delay: 0.12s; }
-  .landing .engines .engine:nth-child(4) { animation-delay: 0.18s; }
-  .landing .steps .step { animation: rise 0.6s var(--ease) both; }
-  .landing .steps .step:nth-child(2) { animation-delay: 0.08s; }
-  .landing .steps .step:nth-child(3) { animation-delay: 0.16s; }
-  .landing .compare { animation: rise 0.6s var(--ease) both; }
-  .landing .compare:nth-child(2) { animation-delay: 0.06s; }
-  .landing .compare:nth-child(3) { animation-delay: 0.12s; }
-  .landing .compare:nth-child(4) { animation-delay: 0.18s; }
-  .landing .faq-item { animation: rise 0.6s var(--ease) both; }
-  .landing .faq-item:nth-child(2) { animation-delay: 0.06s; }
-  .landing .faq-item:nth-child(3) { animation-delay: 0.12s; }
-  .landing .faq-item:nth-child(4) { animation-delay: 0.18s; }
+  /* hero entrance is choreographed by the anime.js layer (styles/landing-anim.js) */
   .landing .mesh::before { animation: drift 26s ease-in-out infinite; }
   .landing .mesh::after { animation: drift 32s ease-in-out infinite reverse; }
   .landing .marquee-track { animation: marquee 32s linear infinite; }
 }
+/* below-fold entrance (steps, bento, engines, compare, faq, section heads)
+   is driven by the anime.js scroll layer in styles/landing-anim.js */
 .landing .marquee-track:hover { animation-play-state: paused; }
 
 /* focus-visible (a11y) */
@@ -267,6 +324,73 @@
   .landing h1 { max-width: 100%; }
   .landing .btn { width: 100%; justify-content: center; }
 }
+/* ===== v4 additions: Geist headings, word-split hero, playground, benchmark, you-say ===== */
+/* Mintlify's theme forces headings to Inter; keep the intended Geist voice
+   on the landing (scoped under .landing, docs pages untouched). */
+.landing h1, .landing h2, .landing h3, .landing h4, .landing h5, .landing h6 {
+  font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+/* hero word-split spans (added by landing-anim.js; harmless inline-blocks without JS) */
+.landing h1 .w { display: inline-block; will-change: transform, opacity; }
+
+/* ---- Try the agent (the scraper-LLM playground) ---- */
+.landing .try { position: relative; border: 1px solid var(--hairline); border-radius: 1.5rem; background: linear-gradient(180deg, #0e0e11, #08080a); box-shadow: inset 0 1px 1px rgba(255,255,255,0.06), 0 40px 90px -50px rgba(0,0,0,0.95); overflow: hidden; }
+.landing .try::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(96,165,250,0.5), transparent); opacity: 0.8; pointer-events: none; }
+.landing .try-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.7rem 1rem; border-bottom: 1px solid var(--hairline); background: rgba(255,255,255,0.03); }
+.landing .try-title { flex: 1; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.72rem; color: var(--faint); letter-spacing: 0.02em; }
+.landing .try-live { display: inline-flex; align-items: center; gap: 0.35rem; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ok); }
+.landing .try-live i { width: 7px; height: 7px; border-radius: 9999px; background: var(--ok); box-shadow: 0 0 10px rgba(52,211,153,0.7); animation: wf-live 1.4s ease-in-out infinite; }
+.landing .try-presets { display: flex; flex-wrap: wrap; gap: 0.45rem; padding: 0.8rem 1rem 0; }
+.landing .try-preset { font-family: inherit; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); background: rgba(255,255,255,0.02); border: 1px solid var(--hairline); padding: 0.34rem 0.9rem; border-radius: 9999px; cursor: pointer; transition: color 0.3s var(--ease), border-color 0.3s var(--ease), background 0.3s var(--ease); }
+.landing .try-preset:hover { color: var(--muted); border-color: var(--hairline-strong); }
+.landing .try-preset.active { color: var(--accent-2); border-color: rgba(59,130,246,0.4); background: rgba(59,130,246,0.14); }
+.landing .try-prompt { display: flex; align-items: center; gap: 0.6rem; margin: 0.9rem 1rem 0; padding: 0.7rem 0.85rem; border: 1px solid var(--hairline); border-radius: 0.85rem; background: rgba(10,10,12,0.7); }
+.landing .try-prompt .term-prompt { flex: none; }
+.landing .try-input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--text); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.8rem; caret-color: var(--accent-2); }
+.landing .try-input::placeholder { color: var(--faint); }
+.landing .try-go { flex: none; font-family: inherit; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: #0a0a0c; background: var(--text); border: 0; padding: 0.42rem 1rem; border-radius: 9999px; cursor: pointer; font-weight: 550; transition: transform 0.3s var(--ease), opacity 0.3s var(--ease); }
+.landing .try-go:hover { transform: translateY(-1px); opacity: 0.9; }
+.landing .try-go:active { transform: scale(0.97); }
+.landing .try-body { padding: 0.9rem 1rem 1.1rem; }
+.landing .try-console { display: grid; gap: 0.55rem; }
+.landing .try-line { display: flex; gap: 0.6rem; align-items: baseline; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.78rem; line-height: 1.55; }
+.landing .try-line .term-prompt { color: var(--accent-2); flex: none; }
+.landing .try-line code { color: var(--text); overflow-wrap: anywhere; }
+.landing .try-line .try-ok { color: var(--ok); flex: none; margin-left: auto; text-align: right; }
+.landing .try-ask { color: var(--faint); }
+.landing .try-idle { color: var(--faint); }
+.landing .try-type { color: var(--text); }
+.landing .try-type::after { content: ""; display: inline-block; width: 0.5em; height: 1em; margin-left: 2px; vertical-align: text-bottom; background: var(--accent-2); animation: wf-blink 1.05s steps(1) infinite; }
+.landing .try-card { margin-top: 0.7rem; border: 1px solid rgba(52,211,153,0.28); border-radius: 0.9rem; background: rgba(10,10,12,0.7); box-shadow: inset 0 0 0 1px rgba(52,211,153,0.06), 0 0 40px -18px rgba(52,211,153,0.35); overflow: hidden; }
+.landing .try-card-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.85rem; border-bottom: 1px solid var(--hairline); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.68rem; color: var(--faint); }
+.landing .try-card-tag { margin-left: auto; color: var(--ok); letter-spacing: 0.06em; text-transform: uppercase; }
+.landing .try-card pre { padding: 0.75rem 0.85rem; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.74rem; line-height: 1.6; color: var(--accent-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  .landing .try-line { flex-wrap: wrap; }
+  .landing .try-line .try-ok { margin-left: 0; text-align: left; }
+}
+
+/* ---- Benchmark ---- */
+.landing .bench-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+.landing .bench-stat { padding: 1.3rem 1.4rem; border: 1px solid var(--hairline); border-radius: 1.25rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); transition: transform 0.4s var(--ease), border-color 0.35s var(--ease); }
+.landing .bench-stat:hover { transform: translateY(-2px); border-color: rgba(59,130,246,0.3); }
+.landing .bench-stat b { display: flex; align-items: baseline; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 2.1rem; font-weight: 650; letter-spacing: -0.03em; color: var(--text); }
+.landing .bench-stat b em { font-style: normal; color: var(--accent-2); margin-left: 1px; }
+.landing .bench-stat span { display: block; margin-top: 0.35rem; font-size: 0.82rem; color: var(--faint); line-height: 1.45; }
+@media (max-width: 900px) { .landing .bench-stats { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .landing .bench-stats { grid-template-columns: 1fr; } }
+
+/* ---- You say / webrain does ---- */
+.landing .ussay { position: relative; display: grid; gap: 0.55rem; max-width: 56rem; }
+.landing .ussay-row { position: relative; display: flex; align-items: center; gap: 1rem; padding: 0.85rem 1.1rem; border: 1px solid var(--hairline); border-radius: 1rem; background: var(--bg-soft); transition: transform 0.4s var(--ease), border-color 0.35s var(--ease), background 0.35s var(--ease); }
+.landing .ussay-row:hover { transform: translateX(4px); border-color: rgba(59,130,246,0.32); background: rgba(255,255,255,0.035); }
+.landing .ussay-tool { flex: none; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.72rem; color: var(--accent-2); background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.24); padding: 0.28rem 0.7rem; border-radius: 9999px; white-space: nowrap; }
+.landing .ussay-arr { flex: none; color: var(--faint); display: grid; place-items: center; }
+.landing .ussay-arr svg { width: 14px; height: 14px; transition: transform 0.35s var(--ease), color 0.35s var(--ease); }
+.landing .ussay-row:hover .ussay-arr svg { transform: translateX(3px); color: var(--accent-2); }
+.landing .ussay-prompt { font-size: 0.94rem; color: var(--muted); line-height: 1.5; }
+@media (max-width: 640px) { .landing .ussay-row { flex-wrap: wrap; gap: 0.55rem; } .landing .ussay-tool { white-space: normal; } }
+
 @media (prefers-reduced-motion: reduce) {
   .landing *, .landing *::before, .landing *::after { animation: none !important; transition: none !important; }
 }
