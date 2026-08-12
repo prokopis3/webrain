@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.6.2] - 2026-08-12
+
+### Added
+
 - **docs**: landing page (now `docs/index.mdx`, served at `/`) rebuilt with a
   massive motion + sections upgrade:
   - **Try the agent** playground — a live scraper-LLM demo: preset workflows
