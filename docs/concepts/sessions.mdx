@@ -1,0 +1,33 @@
+---
+title: Browser Sessions
+description: Session lifecycle in webrain — create, attach a profile, drive with real Chrome, preserve across calls. How sessions carry authentication and why they are execution state.
+---
+
+# Browser Sessions
+
+A **session** is a live browser instance plus its CDP connection, bound to a
+profile. In MCP, `webrain_session(op=open, cdp_url=...)` creates a named session
+pool that later tool calls route to via `session_id`.
+
+## Lifecycle
+
+```
+CREATE → PROFILE ATTACHED → REAL CHROME → SESSION ACTIVE
+       → NAVIGATE → PAGE STATE → HANDLE → EXTRACT → VERIFY → PRESERVE
+```
+
+Keep the session open across pages; close it with `webrain_session(op=close)`.
+
+## Reuse and re-attach
+
+- Keep a session open for subsequent navigations — never restart a working browser.
+- Re-attach an already-authenticated Chrome by pointing `cdp_url`/`CDP_URL` at
+  its port; the session and cookies are shared.
+- Sessions are isolated: different sessions/browsers have separate cookie jars.
+  Set cookies and batch on the SAME connection, or the isolation bites you
+  (obscura keeps per-connection cookie jars).
+
+## Sessions and profiles
+
+Sessions bind to profiles (see [Browser Profiles](/concepts/profiles)). The
+profile is the durable state; the session is the live instance.

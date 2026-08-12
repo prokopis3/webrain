@@ -6,20 +6,22 @@ description: The project's hard-won gotchas, in one place.
 # Troubleshooting
 
 Start every session with `webrain doctor` — it checks engines, MCP server, CDP
-ports (9222/9224/9225), vault, and the Python sidecar. Exit **0** healthy,
+ports (9222/9224/9225), and vault. Exit **0** healthy,
 **2** broken.
 
 ## The big three
 
 <Warning>
   **1. Read `challenge` on every `webrain_navigate`.** Obscura/lightpanda
-  cannot pass interactive challenges — only real Chrome + `stealth_solve.py`.
+  cannot pass interactive challenges — only real Chrome with a persistent
+  profile + session (native login).
 </Warning>
 
 <Warning>
-  **2. Obscura has no paint engine.** `webrain_screenshot` errors loudly, and
-  Material dropdowns / Google widgets don't respond to synthetic clicks. Route
-  interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
+  **2. Obscura v0.2.0+ render builds can screenshot + PDF** (no-render builds
+  and lightpanda have no paint engine). Interactive Material / Google widgets
+  and interactive challenges still need real Chrome via
+  `cdp_urls:["http://127.0.0.1:9222"]`.
 </Warning>
 
 <Warning>
@@ -33,7 +35,7 @@ ports (9222/9224/9225), vault, and the Python sidecar. Exit **0** healthy,
 | Symptom | Fix |
 |---|---|
 | *"shared library"* errors running Chrome (Linux) | Install the missing system libs (see [Installation](/installation)) |
-| `challenge: cloudflare_challenge` / `blocked` | Run `python scripts/stealth_solve.py <url> --cdp-port 9222 --headed`, re-attach `CDP_URL=http://127.0.0.1:9222` |
+| `challenge: cloudflare_challenge` / `blocked` | `webrain launch <service> <profile> <url>` then `webrain login <service> <profile>`, or re-attach an authenticated Chrome via `CDP_URL=http://127.0.0.1:9222` |
 | Chrome won't launch / port busy | `webrain doctor`; check `port_blocklist.ps1` on Windows |
 | Batch returns nothing on lightpanda | Expected — single context. Use obscura for parallelism |
 | Google Flights / Material controls don't open | Real Chrome only, never obscura/lightpanda |

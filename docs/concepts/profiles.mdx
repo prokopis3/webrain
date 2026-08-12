@@ -1,0 +1,43 @@
+---
+title: Browser Profiles
+description: Persistent per-account browser profiles in webrain — what they hold (cookies, session state, cf_clearance), when to create vs reuse, and how they carry authentication across runs.
+---
+
+# Browser Profiles
+
+A **profile** is a persistent per-account browser state — cookies (including
+HttpOnly session cookies and cf_clearance), localStorage, and site data — kept on
+disk as Chrome's `--user-data-dir` under `WEBRAIN_PROFILES_DIR` (default
+`%APPDATA%/webrain/profiles/<service>/<profile>`).
+
+## Why profiles matter
+
+A profile is what survives a Chrome restart. Reusing a profile restores the
+site's session and auth state — no re-login, no re-solving. That is why
+protected or authenticated workflows **start with a persistent profile**, never
+an anonymous first attempt.
+
+## When to create vs reuse
+
+| Situation | Action |
+|---|---|
+| First login for a service | Create: `webrain launch <service> <profile> <url>` or `webrain_session(op=login)` with the vault |
+| Every later task for that account | Reuse the same profile |
+| After a challenge / auth failure | Reuse — never discard a working profile |
+
+## Profiles and sessions
+
+A profile is the durable state; a session is the live browser bound to it. See
+[Browser Sessions](/concepts/sessions). List vault profiles with
+`webrain_session(op=profiles)` — names only, never secrets.
+
+## Cross-browser auth transfer
+
+1. Log in once in real Chrome on a persistent profile.
+2. Export cookies on the live browser (`webrain_session(op=cookies)` or CLI
+   `webrain cookies`). Session cookies do NOT survive a Chrome restart — export
+   while Chrome is alive.
+3. Import on the target connection (`webrain_session(op=setcookies)`), then batch
+   on that same connection.
+4. Or use `webrain_session(op=save_state)` / `op=restore_state` for portable
+   cookies + localStorage JSON per profile.

@@ -10,9 +10,9 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 
 | Situation | Browser | Why |
 |---|---|---|
-| **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns/comboboxes, segmented controls) | **real Chrome**, routed per-tab via `cdp_urls:["http://127.0.0.1:9222"]` | Material/Google widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda**: no layout engine → synthetic clicks don't open the controls. |
-| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **Real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
-| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. No paint engine → no screenshots (errors loudly) and no interactive Material. |
+| **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns/comboboxes, segmented controls) | **real Chrome**, routed per-tab via `cdp_urls:["http://127.0.0.1:9222"]` | Material/Google widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda** for interactive Material: obscura v0.2.0 rendering is not full Chromium parity, and lightpanda has no layout engine. |
+| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
+| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material (not full layout parity). |
 | Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target CDP** — `webrain_batch` falls back to sequential single-tab reuse (probe detects it). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10-100× faster than a browser, zero memory. |
 
@@ -50,18 +50,21 @@ After `webrain_navigate(url)`, check `challenge` in the response:
   - **obscura CANNOT pass it** (no layout engine → iframe never renders;
     V8 watchdog kills the challenge script — proven: nowsecure, cf-turnstile,
     cf-antibot all fail).
-  - **Solution — the "chrome way"** (verified working on cf-antibot):
-    1. Run the stealth sidecar:
-       ```bash
-       python scripts/stealth_solve.py <login_or_challenge_url> --cdp-port 9222 --headed
-       ```
-       It launches real Chrome + stealth, **waits out the challenge** (do NOT
-       reload-spam — that resets the proof), logs in with the page's demo creds
-       (or `--creds user:pass`), exports cookies, and keeps Chrome alive.
-    2. Re-attach webrain to that Chrome: `CDP_URL=http://127.0.0.1:9222`
-       (same browser profile → session/cookies shared).
-    3. `webrain_navigate` the protected URL → `challenge: null`,
-       authenticated → extract normally.
+  - **Solution — persistent profile + real Chrome + session** (native):
+    1. Launch real Chrome on a persistent profile: `webrain launch <service>
+       <profile> <login_url>` (or `webrain_session(op=login, ...)` for native
+       vault + TOTP — it auto-waits challenges and claims
+       Turnstile/reCAPTCHA/hCaptcha widgets; do NOT reload-spam — that resets
+       the proof).
+    2. On a 2FA/approval gate, login returns `waiting_for_human:true` — the
+       human acts in the headed browser, then call login again.
+    3. Re-attach webrain to that Chrome: `CDP_URL=http://127.0.0.1:9222` (same
+       browser profile → session/cookies shared), or
+       `webrain_session(op=open, cdp_url=...)`.
+    4. `webrain_navigate` the protected URL → `challenge: null`, authenticated →
+       extract normally.
+    Interactive Turnstile/hCaptcha the native path can't claim need a human in
+    the headed browser (`waiting_for_human:true`).
   - **Non-interactive** Turnstile / basic bot detection → obscura `--stealth`
     may pass (still verify via the `challenge` field).
 
@@ -291,7 +294,7 @@ STEP 6: extract (§3) → done
 |---|---|---|---|---|
 | obscura v0.1.11 `--stealth` | ❌ V8 crashes | ❌ no iframe | ✅ `obscura fetch --stealth --wait 30` | ❌ no paint engine |
 | obscura v0.2.0 `--stealth` | ❌ V8 crashes (same) | ❌ no iframe | ✅ same recipe | ✅ native Rust renderer |
-| real Chrome + `stealth_solve.py` (headed) | ✅ | ⚠️ needs solve service/click | ✅ | ✅ |
+| real Chrome + persistent profile/session (native login) | ✅ | ✅ auto-waits; ⚠️ interactive needs human | ✅ | ✅ |
 | lightpanda | ❌ | ❌ | ~ | ❌ fake placeholder PNG |
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
@@ -363,15 +366,11 @@ the wrong field. If a type lands in the wrong box, re-check the page's FIRST
 interactive element — it may be a logo link or button that shifts indices.
 Hidden inputs (e.g. CSRF tokens) also occupy an index.
 
-**Chrome sidecar solves managed-CF + login, but NOT embedded Turnstile
-widgets.** `scripts/stealth_solve.py` waits out title-based interstitials
-("Just a moment…"), then fills the login form. It works for `/login/cf-antibot`
-(full solve → dashboard) and plain/CSRF login. But a page that embeds a
-Turnstile *checkbox widget* (scrapingcourse `/login/cf-turnstile`) has a normal
-title from load, so the sidecar skips the wait and submits without a token →
-`Forbidden`. Solving that needs a real click on the widget's iframe checkbox
-(manual or a click-capable automation loop). `cf_clearance` from one challenge
-does not transfer to a differently-solved page.
+**Turnstile widget nuances.** Native `webrain_session(op=login)` auto-waits and
+claims Turnstile/reCAPTCHA/hCaptcha widgets; a page embedding a Turnstile
+*checkbox widget* (scrapingcourse `/login/cf-turnstile`) may still need a real
+click on the widget's iframe checkbox (the human, or a click-capable loop).
+`cf_clearance` from one challenge does not transfer to a differently-solved page.
 
 **`obscura::console` ERROR lines are page noise, not failures.** obscura logs
 every page `console.error(...)` at ERROR level under the `obscura::console`

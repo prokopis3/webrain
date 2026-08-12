@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// ponytail: canvas/audio/WebGL spoofs + hardwareConcurrency/deviceMemory/connection
 /// lies — the managed Cloudflare challenge (scrapingcourse cf-antibot) measures
 /// exactly these, and real values leave it stuck on "Just a moment…" (verified:
-/// undetected_playwright's sidecar applies them always and passes). Real Chrome's
+/// the stealth-noise profile applies them always and passes). Real Chrome's
 /// real fingerprint alone is NOT CF-managed-challenge-trustworthy. Set
 /// WEBRAIN_STEALTH_NOISE=0 to opt out for sites that distrust the spoofed profile.
 fn stealth_js() -> String {
@@ -170,9 +170,8 @@ fn stealth_js() -> String {
     let on = *NOISE_ON.get_or_init(|| {
         // Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
         // checks hardwareConcurrency + WebGL vendor — real values get it stuck on
-        // "Just a moment…". The undetected_playwright sidecar applies these
-        // evasions always. Opt out with WEBRAIN_STEALTH_NOISE=0 for the rare site
-        // that distrusts the spoofed profile.
+        // "Just a moment…". The noise evasions are applied always. Opt out with
+        // WEBRAIN_STEALTH_NOISE=0 for the rare site that distrusts the spoofed profile.
         std::env::var("WEBRAIN_STEALTH_NOISE")
             .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true)
@@ -1031,7 +1030,7 @@ impl CdpBackend {
                 return false;
             }
             // reload every 15s to re-kick the challenge (__cf_chl_rt_tk rotates
-            // per reload — same cadence the Python sidecar used).
+            // per reload).
             if last_reload.elapsed().as_secs() >= 15 {
                 let _ = self
                     .send_cmd("Page.reload", json!({"ignoreCache": false}))
@@ -1084,7 +1083,16 @@ impl CdpBackend {
   if (best) {
     try { best.click(); } catch (e) {}
     var br = best.getBoundingClientRect();
-    return JSON.stringify({claimed: true, cx: Math.round(br.left + br.width/2), cy: Math.round(br.top + br.height/2)});
+    // reCAPTCHA v2/enterprise anchor (304x78): the checkbox is a 28px box at
+    // the TOP-LEFT of the iframe (~27,37 from its origin), NOT the center —
+    // center-clicking the anchor hits the "I'm not a robot" text and does
+    // nothing. Verified live: checkbox center sits at iframe-left+27,
+    // iframe-top+37. Turnstile/hCaptcha widgets keep the center click.
+    var src = (best.src || '').toLowerCase();
+    var isRecaptchaAnchor = src.indexOf('google.com/recaptcha') >= 0 && br.height >= 70 && br.height <= 90;
+    var ox = isRecaptchaAnchor ? 27 : br.width / 2;
+    var oy = isRecaptchaAnchor ? 37 : br.height / 2;
+    return JSON.stringify({claimed: true, cx: Math.round(br.left + ox), cy: Math.round(br.top + oy)});
   }
   return JSON.stringify({claimed: false});
 })()"#;
@@ -1464,6 +1472,18 @@ async fn focus_clear(b: &CdpBackend, index: usize) -> anyhow::Result<()> {
 /// adding el.click() would double-fire. Engines without Input.* (lightpanda)
 /// return Err; callers fall back to element-based el.click().
 async fn dispatch_click(b: &CdpBackend, x: i64, y: i64) -> anyhow::Result<()> {
+    // Move the pointer to (x,y) FIRST. reCAPTCHA v2/enterprise (and most
+    // modern widgets) track hover/move state: a mousePressed+mouseReleased
+    // with no prior pointer position is treated as synthetic and silently
+    // ignored even though isTrusted=true. Playwright/browsemind both send a
+    // mouseMoved before the click for exactly this reason — verified live:
+    // without it the recaptcha-demo checkbox never registers, with it the
+    // click lands and advances to the image puzzle.
+    let moved = b.send_cmd(
+        "Input.dispatchMouseEvent",
+        json!({"type": "mouseMoved", "x": x, "y": y}),
+    );
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), moved).await;
     // Bound the ack wait (agent-browser `dispatch_mouse_or_dialog` borrow): a
     // synchronous alert()/confirm() in the click handler pauses the renderer,
     // so the CDP input ack never arrives — without a timeout the click call
@@ -1795,6 +1815,63 @@ impl BrowserBackend for CdpBackend {
         self.eval_js(js).await
     }
 
+    async fn eval_in_frame(
+        &self,
+        url_contains: &str,
+        expression: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        self.ensure_page_attached().await?;
+        // Page.getFrameTree → find the frame whose URL matches (needs
+        // Page.enable, already on at attach). Returns CDP result obj, so the
+        // tree lives under `frameTree`.
+        let tree = self.send_cmd("Page.getFrameTree", json!({})).await?;
+        fn walk(node: &Value, needle: &str, out: &mut Option<String>) {
+            if out.is_some() {
+                return;
+            }
+            let f = node.get("frame");
+            if let Some(url) = f.and_then(|x| x.get("url")).and_then(|x| x.as_str()) {
+                if url.contains(needle) {
+                    if let Some(id) = f.and_then(|x| x.get("id")).and_then(|x| x.as_str()) {
+                        *out = Some(id.to_string());
+                        return;
+                    }
+                }
+            }
+            if let Some(children) = node.get("childFrames").and_then(|c| c.as_array()) {
+                for child in children {
+                    walk(child, needle, out);
+                    if out.is_some() {
+                        return;
+                    }
+                }
+            }
+        }
+        let mut frame_id = None;
+        walk(
+            &tree.get("frameTree").cloned().unwrap_or(Value::Null),
+            url_contains,
+            &mut frame_id,
+        );
+        let Some(frame_id) = frame_id else {
+            return Ok(None);
+        };
+        // Create an isolated world in that frame and evaluate there.
+        let world = self
+            .send_cmd("Page.createIsolatedWorld", json!({"frameId": frame_id}))
+            .await?;
+        let Some(ctx) = world.get("executionContextId").and_then(|v| v.as_i64()) else {
+            return Ok(None);
+        };
+        let result = self
+            .send_cmd(
+                "Runtime.evaluate",
+                json!({"contextId": ctx, "expression": expression, "returnByValue": true, "awaitPromise": true}),
+            )
+            .await?;
+        Ok(result.get("result").and_then(|r| r.get("value")).cloned())
+    }
+
     async fn click(&self, index: usize) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         // 1) Stable backend-node click (browsemind cdp_session_click_backend):
@@ -1923,6 +2000,40 @@ impl BrowserBackend for CdpBackend {
         Ok(())
     }
 
+    async fn drag(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Trusted drag (drag-and-drop / slider CAPTCHAs): mouseMoved to the
+        // handle, press (button held), a few move steps so the widget tracks
+        // the pointer, release. Crosses cross-origin iframes like clicks.
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseMoved", "x": x1, "y": y1, "button": "left", "buttons": 0}),
+        )
+        .await?;
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mousePressed", "x": x1, "y": y1, "button": "left", "buttons": 1, "clickCount": 1}),
+        )
+        .await?;
+        let steps = 10;
+        for i in 1..=steps {
+            let x = x1 + (x2 - x1) * i / steps;
+            let y = y1 + (y2 - y1) * i / steps;
+            self.send_cmd(
+                "Input.dispatchMouseEvent",
+                json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}),
+            )
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseReleased", "x": x2, "y": y2, "button": "left", "buttons": 0}),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn scroll(&self, direction: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         let amount = if direction == "down" { 500 } else { -500 };
@@ -1948,6 +2059,7 @@ impl BrowserBackend for CdpBackend {
         y: f64,
         width: f64,
         height: f64,
+        scale: f64,
     ) -> anyhow::Result<Vec<u8>> {
         self.ensure_page_attached().await?;
         let result = self
@@ -1955,7 +2067,7 @@ impl BrowserBackend for CdpBackend {
                 "Page.captureScreenshot",
                 json!({
                     "format": "png",
-                    "clip": {"x": x, "y": y, "width": width, "height": height, "scale": 1},
+                    "clip": {"x": x, "y": y, "width": width, "height": height, "scale": scale.max(0.5)},
                     "captureBeyondViewport": true
                 }),
             )

@@ -31,7 +31,7 @@ use webrain_core::engines::{
     batch_interact, batch_screenshot, bm25_filter, build_adaptive_extract_js, build_clean_js,
     build_extract_js, download_files, http_fetch, regex_extract, sitemap_urls, validate_urls,
 };
-use webrain_core::vision::{index_current_page, retrieve as vision_retrieve};
+use webrain_core::vision::{ask_viewport, index_current_page, retrieve as vision_retrieve};
 
 /// Render the AX tree as compact `role "name"` lines for LLM reading.
 /// ponytail: flat walk, capped 200 nodes, no hierarchy (a11y gives JSON for depth).
@@ -62,7 +62,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-15 TOOLS — match the request to a boundary:
+16 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      console|flatten|fit|clean|screenshot|pixel|page_info|annotate|media)
@@ -84,27 +84,39 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_vision     screenshot-tile vision index (op: index|retrieve)
   webrain_eval       arbitrary JS (the escape hatch)
   webrain_guide      this guide
+  webrain_eval_in_frame  run JS inside a cross-origin iframe (isolated world) →
+                     exact reCAPTCHA/hCaptcha grid + verify geometry
 
-BROWSER / CHALLENGE HANDLING
+BROWSER / PROFILE / SESSION / CHALLENGE MODEL
+- Browser identity, profile, and session are EXECUTION STATE. Never treat a
+  browser as disposable. Protected navigation starts with a persistent profile +
+  real Chrome + a session — never an anonymous first attempt.
 - webrain_navigate returns a `challenge` field — read it on EVERY navigate.
 - challenge == null -> page OK, go extract.
-- challenge != null (cloudflare_challenge | blocked | captcha) -> page is gated.
-    * obscura / lightpanda CANNOT pass interactive challenges (no paint engine;
-      challenge JS crashes).
-    * FIX (the "chrome way"): run the real-Chrome stealth sidecar once:
-        python scripts/stealth_solve.py <login_or_challenge_url> --cdp-port 9222 --headed
-      it waits out the challenge, logs in (--creds user:pass), keeps Chrome alive
-      on 9222. Then set CDP_URL=http://127.0.0.1:9222 and re-navigate — the
-      authenticated session (cf_clearance) is shared with webrain.
+- challenge != null (cloudflare_challenge | blocked | captcha) -> page is gated:
+    * obscura / lightpanda CANNOT pass interactive challenges (the challenge JS
+      crashes).
+    * FIX — start real Chrome with a persistent profile + session (native):
+        webrain_session(op=profiles)                        # list vault profiles
+        webrain_session(op=open, cdp_url="http://127.0.0.1:9222")
+        webrain_session(op=login, service, profile, url)    # vault + TOTP login
+      or from the CLI: `webrain launch <service> <profile> <url>` then
+      `webrain login <service> <profile>`. The profile persists — RE-USE it for
+      subsequent navigations so cookies/session survive. Never discard a working
+      profile/session after a challenge.
+    * OR re-attach an already-authenticated Chrome: webrain_session(op=open,
+      cdp_url=...) at its port, then re-navigate — the session is shared.
+    * Interactive Turnstile/hCaptcha the native path can't claim need a human in
+      the headed browser (2FA/approval gates return waiting_for_human:true).
     * Non-interactive Turnstile / basic bot detection may pass with obscura --stealth.
       VERIFIED (2026-08-07): `obscura fetch <url> --stealth --wait-until load --wait 30`
       passes scrapingcourse's `/login/cf-turnstile` — the Turnstile widget loads,
       solves (token populates `[name="cf-turnstile-response"]`), and the form is ready.
       From webrain: `webrain_navigate(url, disable_resources=true, block_trackers=true,
       network_idle=true, wait_selector="[name='cf-turnstile-response']", wait_timeout_secs=30)`
-      achieves the same (Turnstile typically solves in 5-15s). Stealth JS is always injected
-      via Page.addScriptToEvaluateOnNewDocument — no flag needed (equivalent to --stealth).
-      same. Read the form fields, POST with token → logged in. No real Chrome needed.
+      achieves the same (Turnstile typically solves in 5-15s).
+- Never report success on a challenge/login/consent page — verify the target
+  content before returning results.
 - Need screenshots/rendering? Real Chrome. Fast no-challenge scraping? obscura.
   Static HTML, no JS/auth? webrain_scrape.
 
@@ -421,15 +433,22 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_vision",
-            "description": "Vision index over screenshot tiles. op: index (embed current-page tiles into a named index: tag + tile params) | retrieve (cosine top-k tile ids for a text query: tag+query+k). Requires EMBED_URL.",
+            "description": "Vision over screenshot pixels with the bundled local Qwen3-VL. op: index (embed current-page tiles into a named index: tag + tile params) | retrieve (cosine top-k tile ids for a text query: tag+query+k) | ask (screenshot the viewport or a clip region and ask the local vision model a prompt — THE captcha/visual-QA tool; returns the model's answer, no cloud key needed).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["index","retrieve"]},
+                "op": {"type": "string", "enum": ["index","retrieve","ask"]},
                 "tag": {"type": "string", "default": "default", "description": "Index name"},
                 "max_tiles": {"type": "integer", "default": 8, "description": "index: max tiles to embed"},
                 "tile_width": {"type": "number", "default": 800},
                 "tile_height": {"type": "number", "default": 800},
                 "query": {"type": "string", "description": "retrieve: text query"},
-                "k": {"type": "integer", "default": 5, "description": "retrieve: top-k"}
+                "k": {"type": "integer", "default": 5, "description": "retrieve: top-k"},
+                "prompt": {"type": "string", "description": "ask: question for the local vision model"},
+                "scale": {"type": "number", "default": 1, "description": "ask: upscale factor for each clip (>1 = higher-res capture — use 3 for small captcha tiles so the 2B model reads them accurately)"},
+                "tiles": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}}, "description": "ask: BATCH mode — array of clip regions; each is captured at `scale` and ALL sent in ONE llama request as numbered images (watch-frames batching). Use for per-tile captcha classification; the prompt must state the numbering (1..N)."},
+                "x": {"type": "number", "description": "ask: clip region x (default full viewport)"},
+                "y": {"type": "number", "description": "ask: clip region y"},
+                "w": {"type": "number", "description": "ask: clip region width"},
+                "h": {"type": "number", "description": "ask: clip region height"}
             }, "required": ["op"]}
         }),
     ]
@@ -444,7 +463,7 @@ pub fn legacy_tool_schemas() -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "webrain_guide",
-            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run scripts/stealth_solve.py for gated pages), the extraction tool matrix, and the multi-agent delegation doctrine (when/how to spawn parallel subagents by CDP_URL to optimize large or mixed-engine scrapes). Call FIRST when unsure which webrain tool/browser to use.",
+            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), challenge handling (check the `challenge` field after webrain_navigate; persistent profile + real Chrome + session via webrain_session(op=login)), the extraction tool matrix, and the multi-agent delegation doctrine (when/how to spawn parallel subagents by CDP_URL to optimize large or mixed-engine scrapes). Call FIRST when unsure which webrain tool/browser to use.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
@@ -958,6 +977,18 @@ pub fn legacy_tool_schemas() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "webrain_eval_in_frame",
+            "description": "Run JS inside a specific cross-origin iframe (matched by src substring) via a CDP isolated world — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile challenge frames (grid tile rects, verify button) that webrain_eval cannot reach. Returns the expression's JSON value (string results need parsing).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url_contains": {"type": "string", "description": "Substring of the target iframe's src, e.g. \"bframe\""},
+                    "js": {"type": "string", "description": "JS expression to evaluate in that frame (return a JSON-serializable value)"}
+                },
+                "required": ["url_contains", "js"]
+            }
+        }),
+        json!({
             "name": "webrain_get_images",
             "description": "List images on the current page: [{src, alt, width, height}]. Useful for extracting product/photo URLs.",
             "inputSchema": {
@@ -1420,6 +1451,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
             let legacy = match action {
                 "click" => "webrain_click",
                 "click_coords" => "webrain_click_coords",
+                "drag" => "webrain_drag",
                 "type" => "webrain_type",
                 "press" => "webrain_press",
                 "scroll" => "webrain_scroll",
@@ -1524,6 +1556,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
                 match op {
                     "index" => "webrain_vision_index",
                     "retrieve" => "webrain_vision_retrieve",
+                    "ask" => "webrain_vision_ask",
                     _ => return None,
                 },
                 a,
@@ -1783,6 +1816,38 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             match backend.click_coords(x, y).await {
                 Ok(_) => json!({"status": "ok", "x": x, "y": y}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_drag" => {
+            let x1 = args.get("x1").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let y1 = args.get("y1").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let x2 = args.get("x2").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let y2 = args.get("y2").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0 {
+                return json!({"status": "error", "message": "x1,y1,x2,y2 required"});
+            }
+            match backend.drag(x1, y1, x2, y2).await {
+                Ok(_) => json!({"status": "ok", "drag": [x1, y1, x2, y2]}),
+                Err(e) => err(e),
+            }
+        }
+        "webrain_eval_in_frame" => {
+            let url_contains = args
+                .get("url_contains")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let js = args
+                .get("js")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if url_contains.is_empty() || js.is_empty() {
+                return json!({"status": "error", "message": "url_contains and js required"});
+            }
+            match backend.eval_in_frame(&url_contains, &js).await {
+                Ok(v) => json!({"status": "ok", "result": v}),
                 Err(e) => err(e),
             }
         }
@@ -2790,6 +2855,50 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let k = args.get("k").and_then(|v| v.as_i64()).unwrap_or(5) as usize;
             match vision_retrieve(&tag, &query, k) {
                 Ok(v) => v,
+                Err(e) => err(e),
+            }
+        }
+        "webrain_vision_ask" => {
+            let prompt = args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if prompt.is_empty() {
+                return json!({"status": "error", "message": "prompt required"});
+            }
+            let clip = match (
+                args.get("x").and_then(|v| v.as_f64()),
+                args.get("y").and_then(|v| v.as_f64()),
+                args.get("w").and_then(|v| v.as_f64()),
+                args.get("h").and_then(|v| v.as_f64()),
+            ) {
+                (Some(x), Some(y), Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
+                _ => None,
+            };
+            let scale = args
+                .get("scale")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0)
+                .max(0.5);
+            let mut tiles: Vec<(f64, f64, f64, f64)> = Vec::new();
+            if let Some(arr) = args.get("tiles").and_then(|v| v.as_array()) {
+                for t in arr {
+                    let (x, y, w, h) = (
+                        t.get("x").and_then(|v| v.as_f64()),
+                        t.get("y").and_then(|v| v.as_f64()),
+                        t.get("w").and_then(|v| v.as_f64()),
+                        t.get("h").and_then(|v| v.as_f64()),
+                    );
+                    if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) {
+                        if w > 0.0 && h > 0.0 {
+                            tiles.push((x, y, w, h));
+                        }
+                    }
+                }
+            }
+            match ask_viewport(backend, &prompt, clip, &tiles, scale).await {
+                Ok(ans) => json!({"status": "ok", "answer": ans}),
                 Err(e) => err(e),
             }
         }

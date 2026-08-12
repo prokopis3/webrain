@@ -792,7 +792,7 @@ fn whisper_json_segments(v: &Value) -> Vec<Segment> {
 // content), so it's intentionally absent.
 // ---------------------------------------------------------------------------
 
-enum VisionTarget {
+pub(crate) enum VisionTarget {
     Cloud {
         endpoint: String,
         model: String,
@@ -804,43 +804,117 @@ enum VisionTarget {
     },
 }
 
-fn vision_target(
-    groq: Option<&str>,
+/// All configured vision targets in priority order (OpenRouter → OpenAI →
+/// Fireworks → Groq → bundled local) — the failover list for every caller.
+/// ponytail: one ordered list; a flaky provider falls through to the next
+/// instead of killing the op (live hit: OpenRouter returned empty, Groq fine).
+pub(crate) fn vision_targets(
+    openrouter: Option<&str>,
     openai: Option<&str>,
+    fireworks: Option<&str>,
+    groq: Option<&str>,
     model: Option<&Path>,
     mmproj: Option<&Path>,
-) -> Option<VisionTarget> {
+) -> Vec<VisionTarget> {
+    const OPENROUTER: (&str, &str) = (
+        "https://openrouter.ai/api/v1/chat/completions",
+        "qwen/qwen3.6-27b",
+    );
+    const OPENAI: (&str, &str) = ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini");
+    const FIREWORKS: (&str, &str) = (
+        "https://api.fireworks.ai/inference/v1/chat/completions",
+        "accounts/fireworks/models/qwen2.5-vl-72b-instruct",
+    );
     const GROQ: (&str, &str) = (
         "https://api.groq.com/openai/v1/chat/completions",
         "qwen/qwen3.6-27b",
     );
-    const OPENAI: (&str, &str) = ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini");
-    if let Some(k) = groq {
-        Some(VisionTarget::Cloud {
-            endpoint: GROQ.0.into(),
-            model: GROQ.1.into(),
+    let mut out = Vec::new();
+    if let Some(k) = openrouter {
+        out.push(VisionTarget::Cloud {
+            endpoint: OPENROUTER.0.into(),
+            model: OPENROUTER.1.into(),
             key: k.into(),
-        })
-    } else if let Some(k) = openai {
-        Some(VisionTarget::Cloud {
+        });
+    }
+    if let Some(k) = openai {
+        out.push(VisionTarget::Cloud {
             endpoint: OPENAI.0.into(),
             model: OPENAI.1.into(),
             key: k.into(),
-        })
-    } else if let (Some(m), Some(p)) = (model, mmproj) {
-        Some(VisionTarget::Local {
+        });
+    }
+    if let Some(k) = fireworks {
+        out.push(VisionTarget::Cloud {
+            endpoint: FIREWORKS.0.into(),
+            model: FIREWORKS.1.into(),
+            key: k.into(),
+        });
+    }
+    if let Some(k) = groq {
+        out.push(VisionTarget::Cloud {
+            endpoint: GROQ.0.into(),
+            model: GROQ.1.into(),
+            key: k.into(),
+        });
+    }
+    if let (Some(m), Some(p)) = (model, mmproj) {
+        out.push(VisionTarget::Local {
             model: m.to_path_buf(),
             mmproj: p.to_path_buf(),
-        })
-    } else {
-        None
+        });
+    }
+    out
+}
+
+/// First configured vision target — where a single provider suffices
+/// (frame captions); `ask_viewport` uses the full `vision_targets` list.
+pub(crate) fn vision_target(
+    openrouter: Option<&str>,
+    openai: Option<&str>,
+    fireworks: Option<&str>,
+    groq: Option<&str>,
+    model: Option<&Path>,
+    mmproj: Option<&Path>,
+) -> Option<VisionTarget> {
+    vision_targets(openrouter, openai, fireworks, groq, model, mmproj)
+        .into_iter()
+        .next()
+}
+
+/// OpenAI-compatible chat/completions POST with ONE retry on transient
+/// failures (429/5xx/network/empty output) at the shared choke point — every
+/// caller gets it without per-caller retry loops. Surfacing the API's own
+/// error body on non-2xx (status-as-error off — a bare "http status: 400" hid
+/// a decommissioned-model cause before). `auth: None` = local server (no key).
+pub(crate) fn post_vision(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    auth: Option<&str>,
+    body: &Value,
+) -> Result<String> {
+    // ponytail: one retry absorbs transient empty-content/rate-limit; a hard
+    // 4xx (bad model/key) is NOT retried — it won't heal.
+    let first = post_vision_once(agent, endpoint, auth, body);
+    match &first {
+        Err(e) if vision_retryable(e) => {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            post_vision_once(agent, endpoint, auth, body)
+        }
+        _ => first,
     }
 }
 
-/// OpenAI-compatible chat/completions POST, surfacing the API's own error
-/// body on non-2xx (status-as-error off — a bare "http status: 400" hid a
-/// decommissioned-model cause before). `auth: None` = local server (no key).
-pub(crate) fn post_vision(
+fn vision_retryable(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("http 429")
+        || s.contains("http 50")
+        || s.contains("http 51")
+        || s.contains("no content")
+        || !s.contains("http ")
+}
+
+fn post_vision_once(
     agent: &ureq::Agent,
     endpoint: &str,
     auth: Option<&str>,
@@ -859,36 +933,57 @@ pub(crate) fn post_vision(
         return Err(anyhow!("vision API http {status}: {detail}"));
     }
     let v: Value = resp.into_body().read_json()?;
-    v["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("vision model returned no content"))
+    let msg = &v["choices"][0]["message"];
+    // content may be a plain string OR an array of content blocks (OpenRouter
+    // / Qwen3 emit [{type:text,...}]); Qwen3 also keeps the answer in
+    // `message.reasoning` when `content` is empty. Any of those is the answer.
+    let text = match &msg["content"] {
+        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Value::Array(a) => {
+            let mut s = String::new();
+            for b in a {
+                if b["type"] == "text" {
+                    s.push_str(b["text"].as_str().unwrap_or(""));
+                }
+            }
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        _ => None,
+    };
+    match text.or_else(|| msg["reasoning"].as_str().map(|r| r.trim().to_string())) {
+        Some(t) if !t.is_empty() => Ok(t),
+        _ => Err(anyhow!("vision model returned no content")),
+    }
 }
 
-/// Get a ready llama-server endpoint for Qwen3-VL-2B vision. On Unix the server
-/// stays warm in a static singleton (model in RAM, ~3s saved per watch call).
-/// On Windows spawns fresh each time. The returned endpoint is an OpenAI-compat
-/// chat/completions URL. Caller does NOT own the process lifecycle.
+/// Get a ready llama-server endpoint for Qwen3-VL-2B vision. The server stays
+/// warm in a static singleton (model in RAM, ~3s saved per call) on ALL
+/// platforms — Windows previously spawned-and-leaked a fresh server per call,
+/// so every vision call (watch, caption_tiles, ask_viewport) paid a ~90s cold
+/// load. The returned endpoint is an OpenAI-compat chat/completions URL.
+/// Caller does NOT own the process lifecycle.
 pub(crate) fn llama_vision_endpoint(exe: &Path, model: &Path, mmproj: &Path) -> Result<String> {
-    #[cfg(unix)]
-    {
-        use std::sync::Mutex;
-        static WARM: Mutex<Option<(std::process::Child, String)>> = Mutex::new(None);
-        if let Ok(mut guard) = WARM.lock() {
-            if let Some((ref mut child, ref endpoint)) = *guard {
-                if child.try_wait().ok().and_then(|s| s).is_none() {
-                    return Ok(endpoint.clone());
-                }
-                *guard = None;
+    use std::sync::Mutex;
+    static WARM: Mutex<Option<(std::process::Child, String)>> = Mutex::new(None);
+    if let Ok(mut guard) = WARM.lock() {
+        if let Some((ref mut child, ref endpoint)) = *guard {
+            if child.try_wait().ok().and_then(|s| s).is_none() {
+                return Ok(endpoint.clone());
             }
-            let (child, endpoint) = spawn_llama_server_impl(exe, model, mmproj)?;
-            *guard = Some((child, endpoint.clone()));
-            return Ok(endpoint);
+            *guard = None;
         }
+        let (child, endpoint) = spawn_llama_server_impl(exe, model, mmproj)?;
+        *guard = Some((child, endpoint.clone()));
+        return Ok(endpoint);
     }
+    // Lock poisoned — fall back to a one-off spawn (rare).
     let (child, endpoint) = spawn_llama_server_impl(exe, model, mmproj)?;
-    // Leak the child on purpose — caller can't own it on all platforms.
-    // OS reaps it on process exit. ponytail: one server per process lifetime.
+    // Leak the child on purpose — the WARM static owns it on success.
     std::mem::forget(child);
     Ok(endpoint)
 }
@@ -915,11 +1010,18 @@ fn spawn_llama_server_impl(
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
+        // 16k context: --image-min-tokens 1024 makes EVERY image >=1024 tokens,
+        // so a 4-tile caption batch (4*1024) + text overflowed the old -c 4096
+        // and llama-server rejected the whole request -> empty captions.
         .arg("-c")
-        .arg("4096")
+        .arg("16384")
         .arg("-t")
         .arg(&threads)
         .arg("--mlock")
+        // ponytail: Qwen-VL coordinates are unreliable for grounding without
+        // this (llama.cpp warns); required for the captcha click loop.
+        .arg("--image-min-tokens")
+        .arg("1024")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -964,12 +1066,16 @@ fn spawn_llama_server_impl(
 /// Local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage;
 /// ~256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
 fn describe_frames(frames: &[Frame]) -> Result<String> {
-    let groq = std::env::var("GROQ_API_KEY").ok();
+    let openrouter = std::env::var("OPENROUTER_API_KEY").ok();
     let openai = std::env::var("OPENAI_API_KEY").ok();
+    let fireworks = std::env::var("FIREWORKS_API_KEY").ok();
+    let groq = std::env::var("GROQ_API_KEY").ok();
     let local = crate::install::vision_local();
     let target = vision_target(
-        groq.as_deref(),
+        openrouter.as_deref(),
         openai.as_deref(),
+        fireworks.as_deref(),
+        groq.as_deref(),
         local.as_ref().map(|t| t.1.as_path()),
         local.as_ref().map(|t| t.2.as_path()),
     )
@@ -1291,8 +1397,41 @@ mod tests {
 
     #[test]
     fn vision_target_prefers_cloud_then_local() {
-        assert!(vision_target(None, None, None, None).is_none());
-        match vision_target(Some("g"), Some("o"), None, None).unwrap() {
+        assert!(vision_target(None, None, None, None, None, None).is_none());
+        match vision_target(Some("or"), Some("o"), None, Some("g"), None, None).unwrap() {
+            VisionTarget::Cloud {
+                endpoint,
+                model,
+                key,
+            } => {
+                assert!(endpoint.contains("openrouter.ai"));
+                assert!(model.contains("qwen"));
+                assert_eq!(key, "or");
+            }
+            _ => panic!("openrouter should win"),
+        }
+        match vision_target(None, Some("o"), Some("f"), Some("g"), None, None).unwrap() {
+            VisionTarget::Cloud {
+                endpoint, model, ..
+            } => {
+                assert!(endpoint.contains("openai.com"));
+                assert_eq!(model, "gpt-4o-mini");
+            }
+            _ => panic!("openai beats fireworks+groq"),
+        }
+        match vision_target(None, None, Some("f"), Some("g"), None, None).unwrap() {
+            VisionTarget::Cloud {
+                endpoint,
+                model,
+                key,
+            } => {
+                assert!(endpoint.contains("fireworks.ai"));
+                assert!(model.contains("qwen"));
+                assert_eq!(key, "f");
+            }
+            _ => panic!("fireworks beats groq"),
+        }
+        match vision_target(None, None, None, Some("g"), None, None).unwrap() {
             VisionTarget::Cloud {
                 endpoint,
                 model,
@@ -1302,28 +1441,56 @@ mod tests {
                 assert!(model.contains("qwen"));
                 assert_eq!(key, "g");
             }
-            _ => panic!("groq should win"),
-        }
-        match vision_target(None, Some("o"), None, None).unwrap() {
-            VisionTarget::Cloud {
-                endpoint, model, ..
-            } => {
-                assert!(endpoint.contains("openai.com"));
-                assert_eq!(model, "gpt-4o-mini");
-            }
-            _ => panic!("openai fallback"),
+            _ => panic!("groq last cloud"),
         }
         let (m, p) = (
             std::path::PathBuf::from("m.gguf"),
             std::path::PathBuf::from("p.gguf"),
         );
-        match vision_target(None, None, Some(&m), Some(&p)).unwrap() {
+        match vision_target(None, None, None, None, Some(&m), Some(&p)).unwrap() {
             VisionTarget::Local { model, mmproj } => {
                 assert_eq!(model, m);
                 assert_eq!(mmproj, p);
             }
             _ => panic!("local hero fallback"),
         }
+    }
+
+    // ponytail: one runnable check for the failover order — a flaky provider
+    // must fall through to the next, and local is always the last resort.
+    #[test]
+    fn vision_targets_failover_order_is_openrouter_openai_fireworks_groq_local() {
+        let (m, p) = (
+            std::path::PathBuf::from("m.gguf"),
+            std::path::PathBuf::from("p.gguf"),
+        );
+        let ts = vision_targets(
+            Some("or"),
+            Some("o"),
+            Some("f"),
+            Some("g"),
+            Some(&m),
+            Some(&p),
+        );
+        assert_eq!(ts.len(), 5, "all four cloud keys + local");
+        let ep = |t: &VisionTarget| match t {
+            VisionTarget::Cloud { endpoint, .. } => endpoint.clone(),
+            VisionTarget::Local { .. } => "local".to_string(),
+        };
+        let eps: Vec<String> = ts.iter().map(ep).collect();
+        assert!(
+            eps[0].contains("openrouter.ai"),
+            "openrouter first: {eps:?}"
+        );
+        assert!(eps[1].contains("openai.com"), "openai second: {eps:?}");
+        assert!(eps[2].contains("fireworks.ai"), "fireworks third: {eps:?}");
+        assert!(eps[3].contains("groq.com"), "groq fourth: {eps:?}");
+        assert_eq!(eps[4], "local", "local always last: {eps:?}");
+        // a missing cloud key simply drops that provider, not everything after
+        let ts2 = vision_targets(None, None, None, Some("g"), Some(&m), Some(&p));
+        assert_eq!(ts2.len(), 2, "only groq + local");
+        assert!(ep(&ts2[0]).contains("groq.com"));
+        assert_eq!(ep(&ts2[1]), "local");
     }
 
     #[test]

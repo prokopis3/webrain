@@ -1,4 +1,4 @@
-// Native login automation — port of stealth_solve.py's submit_login + 2FA gate,
+// Native login automation — submit_login + 2FA gate through CdpBackend + vault,
 // driven through the existing CdpBackend.evaluate + vault (no Python, no
 // chromiumoxide). Browser + CDP are the only moving parts, so this is OS-agnostic.
 //
@@ -124,10 +124,10 @@ pub async fn run_login(
         backend.navigate(u).await?;
     }
     // Auto-bypass any Cloudflare/anti-bot interstitial BEFORE form-fill — the
-    // form only exists after the challenge clears. Same poll+reload loop as the
-    // Python stealth_solve.py sidecar, now native (no Python); the 15s reload
-    // re-kicks the proof until it clears (90s budget). NO waiting_for_human —
-    // the loop auto-clears; if it still can't, login_js reports no-fields below.
+    // form only exists after the challenge clears. Native poll+reload loop; the
+    // 15s reload re-kicks the proof until it clears (90s budget). NO
+    // waiting_for_human — the loop auto-clears; if it still can't, login_js
+    // reports no-fields below.
     let _cleared = backend.wait_out_challenge(90).await;
     // Interactive captcha widget variant (cf-turnstile login form, Google
     // /sorry, hCaptcha gate: plain page + checkbox widget, NO "Just a moment"

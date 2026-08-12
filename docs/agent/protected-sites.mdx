@@ -1,0 +1,50 @@
+---
+title: Protected Websites
+description: How webrain handles Cloudflare, Turnstile, CAPTCHA, and authenticated sites — persistent profile + real Chrome + session, native login, and verification rules (no Python sidecar).
+---
+
+# Protected Websites
+
+A protected website is a page state, not a dead end. Webrain's model for gated
+or authenticated sites is:
+
+```
+persistent profile → real Chrome → persistent session → navigate
+  → inspect page state → handle challenge/auth → verify → extract
+```
+
+## Rules
+
+1. **Protected navigation starts with real Chrome** + a persistent profile +
+   a session. Never the anonymous "blocked → fresh browser → retry" loop.
+2. **Read `challenge` on every navigate** (`null` | `cloudflare_challenge` |
+   `blocked` | `captcha`). A challenge page is not successful navigation — never
+   extract it as target content.
+3. **Use the native path first**: `webrain_session(op=login, service, profile, url)`
+   (vault + TOTP) or `webrain launch` + `webrain login`. It auto-waits challenges
+   and claims Turnstile/reCAPTCHA/hCaptcha widgets; a 2FA/approval gate returns
+   `waiting_for_human:true` and the human acts in the headed browser.
+4. **Re-attach, don't restart**: an already-authenticated Chrome is reused by
+   pointing `CDP_URL` at its port.
+5. **No Python sidecar.** Challenge handling is native (vault + TOTP); interactive
+   CAPTCHAs the native path can't claim need a human in the headed browser.
+6. **Verify before returning**: confirm the target content loaded (not a
+   challenge/login/consent page).
+
+## Capability (runtime-dependent)
+
+- obscura / lightpanda cannot pass interactive challenges (the challenge JS crashes).
+  Non-interactive Turnstile may pass (verified).
+- Real Chrome + profile: native login with vault + TOTP. Challenge handling is an
+  internal webrain capability and continues to grow inside the runtime (detect →
+  classify → execute → verify); it is not delegated to an external sidecar.
+
+## What NOT to do
+
+- Start protected workflows statelessly.
+- Discard a working profile or session after a challenge.
+- Switch to a fresh browser after a challenge.
+- Claim a bypass succeeded without verifying the target content.
+- Treat a challenge/login/consent page as scraped content.
+
+Full anti-pattern list: [Agent Decision Guide](/guides/agent-decision-guide).

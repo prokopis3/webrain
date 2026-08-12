@@ -144,10 +144,9 @@ Sessions pool browsers per `session_id` for parallel subagent isolation.
   vault seed, a `waiting_for_human: true` reply on a 2FA gate, and a 15s
   timeout with a clear message (login.rs:96).
 - **Challenges**: `webrain_navigate` returns a `challenge` field on every
-  call. When it is non-null, only **real Chrome** can pass it —
-  `scripts/stealth_solve.py` launches a stealth Chrome, waits out the proof,
-  logs in, exports cookies, and keeps the browser alive on 9222 so webrain
-  re-attaches to the shared session.
+  call. When it is non-null, only **real Chrome** can pass it — start Chrome on a
+  persistent profile (`webrain launch` / `webrain_session(op=login)`, vault +
+  TOTP) and re-attach via the shared CDP session.
 
 ## Operational boundaries & failure points
 
@@ -156,7 +155,7 @@ Sessions pool browsers per `session_id` for parallel subagent isolation.
 | MCP transport | `webrain-mcp/src/lib.rs` | `webrain doctor` shows MCP down → `webrain mcp --http 9223`; logs on stderr |
 | Browser attach | `backends/cdp.rs` | dead-socket errors (`os error 10054`) → restart the browser; backend reconnects |
 | Engine install | `install.rs` | *"shared library"* / spawn failure → `webrain install` or missing Linux libs |
-| Stealth / challenge | `scripts/stealth_solve.py` + `backends/cdp.rs` | `challenge_cleared=False` → interactive gate, human or solver needed |
+| Stealth / challenge | `login.rs` + `launch.rs` + `backends/cdp.rs` (native) | `waiting_for_human:true` → interactive gate, human needed |
 | Login / vault | `login.rs` + `vault.rs` | `no session cookie after 15s` → check creds; 0 cookies on a logged-in browser → restart killed the session |
 | Extraction | `engines.rs` | 0 items → verify the page isn't a block page, re-run `webrain_extract` (mode=autoschema) |
 
@@ -175,4 +174,4 @@ Sessions pool browsers per `session_id` for parallel subagent isolation.
 | Login | `webrain-core/src/login.rs` |
 | Credential vault + TOTP | `webrain-core/src/vault.rs` |
 | Vision tiles + vector store | `webrain-core/src/vision.rs` |
-| Challenge sidecar | `scripts/stealth_solve.py` |
+| Challenge handling | `login.rs` + `launch.rs` (native) |

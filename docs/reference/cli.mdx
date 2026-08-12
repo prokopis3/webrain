@@ -26,7 +26,7 @@ Drive webrain by hand — every engine and tool has a CLI twin.
 | `webrain screenshot <url>` | Screenshot (single or full page) |
 | `webrain spider <url> [--depth N --pages N --respect-robots --json-urls --dfs --bestfirst --keywords k1,k2 --no-same-domain --discover-only]` | Crawl |
 | `webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` | Drive the `CDP_URL` backend |
-| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, Python sidecar, `recommend` |
+| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend` |
 
 ## Snapshot-driven interaction
 
@@ -47,6 +47,6 @@ The MCP tools also accept plain CSS selectors directly (e.g.
 ## `webrain doctor`
 
 Exit codes: **0** healthy, **2** broken. Checks the install end to end —
-engines, MCP server, CDP ports, vault, Python sidecar — and prints a
+engines, MCP server, CDP ports, vault — and prints a
 `recommend` line. The first step in any troubleshooting session. `--doctor`
 is an alias flag.

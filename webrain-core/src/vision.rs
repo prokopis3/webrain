@@ -147,6 +147,7 @@ pub struct VectorStore {
     pub index: String,
     pub path: std::path::PathBuf,
     map: HashMap<String, Vec<f32>>,
+    texts: HashMap<String, String>,
     dirty: bool,
 }
 
@@ -156,6 +157,7 @@ impl VectorStore {
             index: index.to_string(),
             path: std::path::PathBuf::from(dir).join(format!("{index}.jsonl")),
             map: HashMap::new(),
+            texts: HashMap::new(),
             dirty: false,
         }
     }
@@ -179,7 +181,12 @@ impl VectorStore {
                     })
                     .unwrap_or_default();
                 if !id.is_empty() && !vec.is_empty() {
-                    self.map.insert(id, vec);
+                    self.map.insert(id.clone(), vec);
+                }
+                if let Some(text) = v["text"].as_str() {
+                    if !id.is_empty() {
+                        self.texts.insert(id, text.to_string());
+                    }
                 }
             }
         }
@@ -192,8 +199,19 @@ impl VectorStore {
         self.dirty = true;
     }
 
+    /// Add a caption-only entry (offline mode — no embedding vector).
+    pub fn add_text(&mut self, id: &str, text: &str) {
+        self.texts.insert(id.to_string(), text.to_string());
+        self.dirty = true;
+    }
+
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.map.len() + self.texts.len()
+    }
+
+    /// True when this index holds caption text (offline mode) rather than vectors.
+    pub fn has_text(&self) -> bool {
+        !self.texts.is_empty()
     }
 
     pub fn save(&mut self) -> anyhow::Result<()> {
@@ -206,6 +224,10 @@ impl VectorStore {
         let mut s = String::new();
         for (id, vec) in &self.map {
             s.push_str(&json!({ "id": id, "vec": vec }).to_string());
+            s.push('\n');
+        }
+        for (id, text) in &self.texts {
+            s.push_str(&json!({ "id": id, "text": text }).to_string());
             s.push('\n');
         }
         std::fs::write(&self.path, s)?;
@@ -225,6 +247,153 @@ impl VectorStore {
         scored.truncate(k);
         scored
     }
+
+    /// Keyword top-k over caption text (offline mode): fraction of query tokens
+    /// present in each caption, descending.
+    pub fn search_text(&self, q: &str, k: usize) -> Vec<(String, f32)> {
+        let qw: Vec<String> = q.split_whitespace().map(|w| w.to_lowercase()).collect();
+        if qw.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(String, f32)> = self
+            .texts
+            .iter()
+            .map(|(id, text)| {
+                let tl = text.to_lowercase();
+                let hits = qw.iter().filter(|w| tl.contains(w.as_str())).count();
+                (id.clone(), hits as f32 / qw.len() as f32)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
+    }
+}
+
+/// Ask the bundled local Qwen3-VL about the current viewport (or a clip
+/// region) and return its text answer — the pixel workflow tool for captchas
+/// and visual QA: screenshot → local vision → answer. Unlike `describe_tiles`
+/// (fixed "describe the page" prompt) this takes an arbitrary prompt, e.g.
+/// "which grid tiles contain traffic lights?". No cloud key needed.
+pub async fn ask_viewport(
+    backend: &impl BrowserBackend,
+    prompt: &str,
+    clip: Option<(f64, f64, f64, f64)>,
+    tiles: &[(f64, f64, f64, f64)],
+    scale: f64,
+) -> anyhow::Result<String> {
+    // Cloud-first provider chain: OpenRouter → OpenAI → Fireworks → Groq →
+    // bundled local Qwen3-VL-2B. Try each in order — a flaky provider falls
+    // through to the next instead of killing the op (live hit: OpenRouter
+    // returned empty, Groq was fine).
+    let openrouter = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let openai = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let fireworks = std::env::var("FIREWORKS_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let groq = std::env::var("GROQ_API_KEY").ok().filter(|s| !s.is_empty());
+    let local = crate::install::vision_local();
+    let (s, _m, _p): (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) = local
+        .as_ref()
+        .map(|(s, m, p)| (s.clone(), m.clone(), p.clone()))
+        .unwrap_or_else(|| {
+            (
+                std::path::PathBuf::new(),
+                std::path::PathBuf::new(),
+                std::path::PathBuf::new(),
+            )
+        });
+    let targets = crate::video::vision_targets(
+        openrouter.as_deref(),
+        openai.as_deref(),
+        fireworks.as_deref(),
+        groq.as_deref(),
+        local.as_ref().map(|t| t.1.as_path()),
+        local.as_ref().map(|t| t.2.as_path()),
+    );
+    if targets.is_empty() {
+        anyhow::bail!(
+            "no vision backend — set OPENROUTER_API_KEY/OPENAI_API_KEY/FIREWORKS_API_KEY/GROQ_API_KEY or run `webrain install vision`"
+        );
+    }
+
+    use base64::Engine;
+    // Batch mode: multiple tile clips -> ONE request with all images in order
+    // (watch `describe_frames` batching). The prompt tells the model the
+    // numbering (1..N). 1 call instead of N sequential per-tile calls.
+    // Capture the pixels ONCE — provider-independent. Only the model name in
+    // the body differs per target, so a failed provider retries on the next.
+    let content: Value = if !tiles.is_empty() {
+        let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
+        for (x, y, w, h) in tiles {
+            let png = backend.screenshot_clip(*x, *y, *w, *h, scale).await?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+            c.push(json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}));
+        }
+        json!(c)
+    } else {
+        let (x, y, w, h) = match clip {
+            Some(c) => c,
+            None => {
+                let vp: Value = backend
+                    .evaluate("[window.innerWidth, window.innerHeight]")
+                    .await?;
+                (
+                    0.0,
+                    0.0,
+                    vp[0].as_f64().unwrap_or(1280.0).max(1.0),
+                    vp[1].as_f64().unwrap_or(800.0).max(1.0),
+                )
+            }
+        };
+        let png = backend.screenshot_clip(x, y, w, h, scale).await?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        json!([{"type":"text","text": prompt}, {"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}])
+    };
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build(),
+    );
+    // Failover: first provider that returns content wins; try the next on error.
+    let mut last_err = None;
+    for t in &targets {
+        let (endpoint, auth, model_name): (String, Option<String>, String) = match t {
+            crate::video::VisionTarget::Cloud {
+                endpoint,
+                model,
+                key,
+            } => (endpoint.clone(), Some(key.clone()), model.clone()),
+            crate::video::VisionTarget::Local { model, mmproj } => {
+                let e = crate::video::llama_vision_endpoint(&s, model, mmproj)?;
+                let n = model
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "qwen3-vl-2b".to_string());
+                (e, None, n)
+            }
+        };
+        let body = json!({
+            "model": model_name,
+            "messages": [{"role":"user","content": content.clone()}],
+            "max_tokens": 512
+        });
+        match crate::video::post_vision(&agent, &endpoint, auth.as_deref(), &body) {
+            Ok(ans) => return Ok(ans),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "vision ask: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "all vision providers failed".to_string())
+    ))
 }
 
 /// Caption a batch of base64 tile PNGs with the bundled LOCAL vision model
@@ -263,6 +432,92 @@ pub fn describe_tiles(b64: &[String]) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("local vision: {e:#}"))
 }
 
+/// Caption every tile with the bundled local Qwen3-VL — one llama-server spawn
+/// for all tiles, then a few BATCHED requests (like `watch` batches frames): a
+/// group of tiles per request, answered as numbered per-tile captions. Batching
+/// beats per-tile calls because llama-server runs a single slot (concurrency
+/// would only queue). Used as the offline fallback when no embedding backend.
+fn caption_tiles(b64: &[String]) -> anyhow::Result<Vec<String>> {
+    let (server, model, mmproj) = crate::install::vision_local()
+        .ok_or_else(|| anyhow::anyhow!("no local vision stack — run `webrain install vision`"))?;
+    let endpoint = crate::video::llama_vision_endpoint(&server, &model, &mmproj)?;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build(),
+    );
+    let model_name = model
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "qwen3-vl-2b".to_string());
+    let group = 4usize;
+    let mut out: Vec<String> = vec![String::new(); b64.len()];
+    for (start, chunk) in b64.chunks(group).enumerate() {
+        let base = start * group;
+        let mut content: Vec<Value> = vec![json!({
+            "type":"text",
+            "text": format!(
+                "Caption each of these {} images on its own numbered line as '1. caption', '2. caption', ... Each under 8 words.",
+                chunk.len()
+            )
+        })];
+        for b in chunk {
+            content.push(json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b}")}}));
+        }
+        let body = json!({
+            "model": model_name,
+            "messages": [{"role":"user","content": content}],
+            "max_tokens": (32 + 24 * chunk.len()).min(512)
+        });
+        // ponytail: health flips to "ok" a beat before the model accepts
+        // inference — a single retry after a pause absorbs that first 503.
+        let mut raw = crate::video::post_vision(&agent, &endpoint, None, &body);
+        if raw.is_err() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            raw = crate::video::post_vision(&agent, &endpoint, None, &body);
+        }
+        // Surface the real error instead of silently returning empty captions
+        // (" |  |  | " looked like success but was a swallowed failure).
+        let raw = raw.map_err(|e| anyhow::anyhow!("local vision batch {base}: {e:#}"))?;
+        for (j, cap) in parse_numbered(&raw, chunk.len()).into_iter().enumerate() {
+            out[base + j] = cap;
+        }
+    }
+    Ok(out)
+}
+
+/// Split a "1. cap / 2. cap ..." model answer into per-index captions.
+fn parse_numbered(raw: &str, n: usize) -> Vec<String> {
+    let mut caps: Vec<Option<String>> = vec![None; n];
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let ne = t.find(|c: char| !c.is_ascii_digit());
+        if let Some(ne) = ne {
+            if ne > 0 {
+                if let Ok(k) = t[..ne].parse::<usize>() {
+                    if (1..=n).contains(&k) {
+                        let cap = t[ne..]
+                            .trim_start_matches(|c| c == '.' || c == ':' || c == '-' || c == ')')
+                            .trim()
+                            .to_string();
+                        caps[k - 1] = Some(cap);
+                        continue;
+                    }
+                }
+            }
+        }
+        // no leading number → fill the first empty slot positionally
+        if let Some(slot) = caps.iter_mut().find(|c| c.is_none()) {
+            *slot = Some(t.to_string());
+        }
+    }
+    caps.into_iter().map(|c| c.unwrap_or_default()).collect()
+}
+
 /// Index the current page: capture PixelRAG tiles, embed them as images, store.
 /// When the bundled local vision model is installed, also captions the tiles
 /// (returned as `vision`) — real understanding the embeddings can't provide.
@@ -289,45 +544,75 @@ pub async fn index_current_page(
         .iter()
         .map(|t| EmbedInput::Image(t.png_b64.clone()))
         .collect();
-    let vecs = client.embed(&inputs)?;
     let mut store = VectorStore::new(tag, "vision");
     store.load()?;
-    for (i, t) in tiles.iter().enumerate() {
-        store.add(
-            &format!("{url}#tile{}", t.index),
-            vecs.get(i).cloned().unwrap_or_default(),
-        );
-    }
+    let (mode, vision): (&str, Option<String>) = match client.embed(&inputs) {
+        Ok(vecs) => {
+            for (i, t) in tiles.iter().enumerate() {
+                store.add(&format!("{url}#tile{}", t.index), vecs[i].clone());
+            }
+            let v = crate::install::vision_local()
+                .is_some()
+                .then(|| {
+                    let t: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
+                    describe_tiles(&t).ok()
+                })
+                .flatten();
+            ("embed", v)
+        }
+        Err(_) => {
+            // ponytail: offline fallback — caption each tile with the bundled
+            // local Qwen3-VL so webrain_vision works without a cloud embed key.
+            if crate::install::vision_local().is_some() {
+                let b: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
+                let caps = caption_tiles(&b)?;
+                for (i, t) in tiles.iter().enumerate() {
+                    store.add_text(&format!("{url}#tile{}", t.index), &caps[i]);
+                }
+                ("captions", Some(caps.join(" | ")))
+            } else {
+                anyhow::bail!(
+                    "no embedding backend (set EMBED_URL/EMBED_API_KEY) and no local vision (run `webrain install vision`)"
+                );
+            }
+        }
+    };
     let total = store.len();
     store.save()?;
-    let vision = crate::install::vision_local()
-        .is_some()
-        .then(|| {
-            let tiles: Vec<String> = tiles.iter().map(|t| t.png_b64.clone()).collect();
-            describe_tiles(&tiles).ok()
-        })
-        .flatten();
     Ok(json!({
-        "status": "ok", "tag": tag, "indexed": tiles.len(), "total": total,
-        "url": url, "dim": vecs.first().map(|v| v.len()).unwrap_or(0),
-        "model": client.model(),
-        "vision": vision
+        "status": "ok", "mode": mode, "tag": tag, "indexed": tiles.len(), "total": total,
+        "url": url, "vision": vision
     }))
 }
 
 /// Embed a text query and return the cosine top-k stored tile ids.
 pub fn retrieve(tag: &str, query: &str, k: usize) -> anyhow::Result<Value> {
-    let client = EmbeddingClient::from_env();
-    let vecs = client.embed(&[EmbedInput::Text(query.to_string())])?;
     let mut store = VectorStore::new(tag, "vision");
     store.load()?;
+    // Offline caption index (no embed backend): keyword-match over captions.
+    if store.has_text() {
+        let top = store.search_text(query, k);
+        let results: Vec<Value> = top
+            .into_iter()
+            .map(|(id, s)| json!({ "id": id, "score": s }))
+            .collect();
+        return Ok(json!({
+            "status": "ok", "mode": "captions", "tag": tag,
+            "total": store.len(), "results": results
+        }));
+    }
+    let client = EmbeddingClient::from_env();
+    let vecs = client.embed(&[EmbedInput::Text(query.to_string())])?;
     let q = vecs.into_iter().next().unwrap_or_default();
     let top = store.search(&q, k);
     let results: Vec<Value> = top
         .into_iter()
         .map(|(id, s)| json!({ "id": id, "score": s }))
         .collect();
-    Ok(json!({ "status": "ok", "tag": tag, "total": store.len(), "results": results }))
+    Ok(json!({
+        "status": "ok", "mode": "embed", "tag": tag,
+        "total": store.len(), "results": results
+    }))
 }
 
 #[cfg(test)]

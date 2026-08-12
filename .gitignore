@@ -9,3 +9,4 @@ vision/
 /build_err.txt
 .vscode/
 /dist_*
+/profiles

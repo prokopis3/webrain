@@ -124,6 +124,12 @@ pub trait BrowserBackend: Send + Sync {
     async fn press(&self, key: &str) -> anyhow::Result<()>;
     /// Trusted click at raw viewport coords (cross-origin iframes / reCAPTCHA).
     async fn click_coords(&self, x: i64, y: i64) -> anyhow::Result<()>;
+
+    /// Trusted drag (press at x1,y1 → move with the button held → release at
+    /// x2,y2) for drag-and-drop / slider CAPTCHAs. Crosses cross-origin iframes.
+    async fn drag(&self, _x1: i64, _y1: i64, _x2: i64, _y2: i64) -> anyhow::Result<()> {
+        anyhow::bail!("drag not supported by this backend")
+    }
     async fn get_html(&self) -> anyhow::Result<String>;
 
     /// Register a JS init script (agent-browser `--init-script` borrow): runs
@@ -173,14 +179,29 @@ pub trait BrowserBackend: Send + Sync {
     }
 
     /// Capture a rectangular region of the page in CSS px (PixelRAG-style tiles).
+    /// `scale` upscales the capture (>1 = higher-res output — the crop+upscale
+    /// precision pass for small captcha tiles the 2B vision model misreads).
     async fn screenshot_clip(
         &self,
         _x: f64,
         _y: f64,
         _width: f64,
         _height: f64,
+        _scale: f64,
     ) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("screenshot_clip not supported by this backend")
+    }
+
+    /// Evaluate JS inside a cross-origin iframe's isolated world (reCAPTCHA
+    /// puzzle bframe, challenge frames) where parent-page JS can't reach.
+    /// Returns None when the backend can't do it (non-CDP) or the frame isn't
+    /// found — callers fall back to vision-locate heuristics.
+    async fn eval_in_frame(
+        &self,
+        _url_contains: &str,
+        _js: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
     }
 
     /// Save the current page as PDF.

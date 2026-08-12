@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     // `webrain doctor` / `--doctor`: diagnose install — MCP, CDP ports, engines,
-    // vault, Python sidecar. Exit 0 healthy / 2 broken.
+    // vault. Exit 0 healthy / 2 broken.
     if args.contains(&"--doctor".to_string()) || args.get(1).map(|s| s.as_str()) == Some("doctor") {
         std::process::exit(run_doctor(&rt));
     }
@@ -301,7 +301,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("launch") => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // Native replacement for the Python stealth_solve.py launch path:
+            // Spawns a stealth Chrome with a persistent per-account profile and
             // spawns a stealth Chrome with a persistent per-account profile and
             // opens the site so the human can log in (Channel A).
             let service = args.get(2).cloned().unwrap_or_default();
@@ -328,9 +328,8 @@ fn main() -> anyhow::Result<()> {
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
             let backend = rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?;
             rt.block_on(backend.navigate(url))?;
-            // Wait out a Cloudflare/anti-bot interstitial (sidecar's poll+reload
-            // loop, native — no Python). 90s budget; `webrain login` then fills
-            // the form with vault creds.
+            // Wait out a Cloudflare/anti-bot interstitial (native poll+reload
+            // loop). 90s budget; `webrain login` then fills the form with vault creds.
             let cleared = rt.block_on(backend.wait_out_challenge(90));
             println!("opened: {url} challenge_cleared={cleared} — keeping alive; Ctrl-C to stop");
             loop {
@@ -743,7 +742,7 @@ async fn cdp_info(port: u16) -> CdpInfo {
 }
 
 /// `webrain doctor` — diagnose the install: version, MCP server, CDP ports,
-/// engines (agent-browser-style discovery), encrypted vault, Python sidecar.
+/// engines (agent-browser-style discovery), encrypted vault.
 /// Exit 0 if a browser is reachable, 2 otherwise.
 fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
     let cdp_ports = [9222u16, 9224u16, 9225u16];
@@ -807,19 +806,6 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
             "✅ present"
         } else {
             "⚠️ empty — `webrain vault set`".into()
-        }
-    );
-    let py_ok = std::process::Command::new("python")
-        .arg("-c")
-        .arg("import playwright, undetected_playwright")
-        .output()
-        .is_ok();
-    println!(
-        "  stealth_solve     {}",
-        if py_ok {
-            "✅ (Python + playwright + undetected_playwright)"
-        } else {
-            "⚠️ deps missing — pip install playwright undetected_playwright && playwright install chromium".into()
         }
     );
     let rec = if rt.block_on(async { check_tcp("127.0.0.1", 9222).await }) {

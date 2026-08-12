@@ -3,6 +3,24 @@
 Guidance for AI agents working in this repo. Read before making changes or
 using the `mcp_webrain-*` tools.
 
+## Critical Rules (read first)
+
+1. **Browser identity is state.** Profile is state. Session is state. A
+   challenge is page/runtime state. Never treat a browser as disposable.
+2. **Protected navigation starts with real Chrome** + a persistent profile + a
+   session. Never recommend the stateless "anonymous → blocked → fresh browser →
+   retry" loop.
+3. **No Python in the codebase.** Challenge handling is native (vault + TOTP).
+   Do not reintroduce a Python stealth sidecar for protected sites.
+4. **A challenge page is not successful navigation.** Read the `challenge`
+   field on every navigate; never extract a challenge/login/consent page as
+   target content.
+5. **Capability-driven claims only.** Never document or claim challenge
+   handling the runtime doesn't provide; keep "implemented" vs "planned"
+   separate.
+6. **Verify before returning.** Confirm target content exists before reporting
+   success.
+
 ## Webrain = portable MCP scraping tool
 
 `webrain-mcp` exposes browser/scraping tools over MCP. It is meant to be
@@ -14,8 +32,8 @@ Cursor, …). Follow `docs/AGENT_DECISION_GUIDE.md` — or just call the
 | Need | Browser |
 |---|---|
 | Material / interactive SPA (Google Flights, dropdowns, calendars) — **never obscura/lightpanda** | real Chrome via `cdp_urls:["http://127.0.0.1:9222"]` |
-| Cloudflare / CAPTCHA / Turnstile challenges, real screenshots, rendering | real Chrome + `scripts/stealth_solve.py` |
-| Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — no paint engine, no screenshots, no Material |
+| Protected / authenticated / Cloudflare / CAPTCHA / Turnstile challenges, real screenshots, rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain login`) |
+| Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — v0.2.0+ render builds screenshot/PDF; no-render builds have no paint engine; no interactive Material |
 | Lightweight / minimal, want real a11y, no rendering needed | lightpanda — real AX tree, but screenshot = fake placeholder PNG |
 | Static HTML, no JS/auth | `webrain_fetch_http` |
 
@@ -32,10 +50,12 @@ agent-browser's `--engine chrome|lightpanda`, all engines speak CDP —
 
 ### Challenge rule (read `challenge` on every navigate)
 `webrain_navigate` returns `challenge`. If non-null (`cloudflare_challenge` /
-`blocked` / `captcha`), the page is gated: run the real-Chrome sidecar
-(`python scripts/stealth_solve.py <url> --cdp-port 9222 --headed`) to solve +
-login, then re-attach webrain to that CDP port. obscura/lightpanda cannot pass
-interactive challenges.
+`blocked` / `captcha`), the page is gated. The fix is real Chrome with a
+**persistent profile + session**: `webrain launch <service> <profile> <url>`
+then `webrain login <service> <profile>` (vault + TOTP), or re-attach an
+already-authenticated Chrome by pointing `CDP_URL` at its port. obscura/
+lightpanda cannot pass interactive challenges. No Python sidecar — interactive
+CAPTCHAs need a human in the headed browser.
 
 ### Interactive SPAs (Google Flights, Material UI, calendars, search UIs)
 Heavy JS apps with Material/segmented controls need **real Chrome** — obscura

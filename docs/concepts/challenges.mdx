@@ -5,8 +5,8 @@ description: Detect and get past Cloudflare, Turnstile, and CAPTCHA gates.
 
 # Challenges & Anti-Bot
 
-Gated pages are the #1 reason scrapes fail. Webrain surfaces the gate
-explicitly and gives you a real-Chrome escape hatch.
+Gated pages are the #1 reason scrapes fail. Webrain surfaces the gate explicitly
+and handles it with a persistent profile + real Chrome + session.
 
 ## Read `challenge` on every navigate
 
@@ -22,24 +22,22 @@ After `webrain_navigate(url)`, check the `challenge` field in the response:
   script. lightpanda is in the same boat. Only real Chrome works.
 </Warning>
 
-## The "chrome way" (verified on cf-antibot)
+## The native way (persistent profile + real Chrome + session)
 
-1. Run the stealth sidecar:
-   ```bash
-   python scripts/stealth_solve.py <login_or_challenge_url> --cdp-port 9222 --headed
-   ```
-   It launches real Chrome + stealth, **waits out the challenge** (do NOT
-   reload-spam — that resets the proof), logs in with the page's demo creds (or
-   `--creds user:pass`), exports cookies, and keeps Chrome alive.
-2. Re-attach webrain to that Chrome:
-   ```bash
-   CDP_URL=http://127.0.0.1:9222
-   ```
-   Same browser profile → session/cookies shared.
-3. `webrain_navigate` the protected URL → `challenge: null`, authenticated →
+1. Start real Chrome on a persistent profile: `webrain launch <service> <profile>
+   <url>` or `webrain_session(op=login, service, profile, url)` — native vault +
+   TOTP login that auto-waits challenges and claims Turnstile/reCAPTCHA/hCaptcha
+   widgets. Do **not** reload-spam — that resets the proof.
+2. On a 2FA/approval gate, login returns `waiting_for_human:true` — the human
+   acts in the headed browser, then call login again.
+3. Re-attach webrain to that Chrome: `CDP_URL=http://127.0.0.1:9222` (or
+   `webrain_session(op=open, cdp_url=...)`). Same profile → session/cookies shared.
+4. `webrain_navigate` the protected URL → `challenge: null`, authenticated →
    extract normally.
 
-## Non-interactive Turnstile / basic bot detection
+No Python sidecar. Interactive Turnstile/hCaptcha the native path can't claim
+need a human in the headed browser (2FA/approval gates return
+`waiting_for_human:true`).
 
 Obscura with `--stealth` may pass these — always verify via the `challenge`
 field before trusting the result.
@@ -57,9 +55,9 @@ webrain setcookies tmp/google_consent_cookies.json --port 9222
 Log in once in **real Chrome** (Turnstile/Cloudflare auto-solve), export, and
 replay into the batch browser:
 
-1. `webrain_cookies` / `webrain cookies --port 9222 --out` — export from the
-   live authenticated Chrome.
-2. `webrain_setcookies` on the session connection.
+1. `webrain_session(op=cookies)` / `webrain cookies --port 9222 --out` — export
+   from the live authenticated Chrome.
+2. `webrain_session(op=setcookies)` on the session connection.
 3. `webrain_batch` **without** `cdp_urls` — set + batch must share one
    connection, because obscura isolates cookie jars per CDP connection.
 

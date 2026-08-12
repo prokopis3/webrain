@@ -94,7 +94,7 @@ mode: custom
                 </div>
                 <div className="wf-group" style={{ '--i': 2 }}>
                   <div className="term-line wf-line"><span className="term-prompt">❯</span><code>navigate auth.store.example.com</code></div>
-                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>challenge turnstile → solved · sidecar</span></div>
+                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>challenge turnstile → cleared · native login</span></div>
                 </div>
                 <div className="wf-group" style={{ '--i': 3 }}>
                   <div className="term-line wf-line"><span className="term-prompt">❯</span><code>session login service=store profile=default</code></div>
@@ -328,7 +328,7 @@ mode: custom
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
-            <p>Every navigate reports a <code>challenge</code> field; a real-Chrome stealth sidecar solves Cloudflare and Turnstile gates.</p>
+            <p>Every navigate reports a <code>challenge</code> field; real Chrome with a persistent profile and native login clears Cloudflare and Turnstile gates.</p>
             <div className="cap-tags"><span className="tool-chip">cloudflare_challenge</span><span className="tool-chip">blocked</span><span className="tool-chip">captcha</span></div>
           </div>
         </div>
@@ -449,25 +449,6 @@ mode: custom
         <a className="ussay-row" href="/guides/agent-decision-guide"><span className="ussay-tool">webrain_batch</span><span className="ussay-arr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span><span className="ussay-prompt">“Scrape these 50 URLs”</span></a>
         <a className="ussay-row" href="/guides/agent-decision-guide"><span className="ussay-tool">webrain_watch</span><span className="ussay-arr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span><span className="ussay-prompt">“Get a transcript and frames of this video”</span></a>
         <a className="ussay-row" href="/guides/agent-decision-guide"><span className="ussay-tool">webrain_session</span><span className="ussay-arr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span><span className="ussay-prompt">“Log in and keep the session”</span></a>
-      </div>
-    </div>
-  </div>
-
-  {/* Benchmark — counters + extraction visual */}
-  <div className="wrap">
-    <div className="section" style={{ paddingBottom: '2rem' }}>
-      <div className="section-head">
-        <h2>Fast enough that the agent finishes before the tab does.</h2>
-        <p>Representative session figures from the built-in agent loop, plus the extraction benchmark across engines.</p>
-      </div>
-      <div className="bench-stats">
-        <div className="bench-stat"><b data-count="42"><span className="num">0</span></b><span>products in 1.4s, one command</span></div>
-        <div className="bench-stat"><b data-count="3"><span className="num">0</span></b><span>browser engines, one binary</span></div>
-        <div className="bench-stat"><b data-count="15"><span className="num">0</span></b><span>intent-based MCP tools</span></div>
-        <div className="bench-stat"><b data-count="100"><span className="num">0</span><em>×</em></b><span>faster than a full browser on static HTML</span></div>
-      </div>
-      <div className="benchmark-visual">
-        <img src="/images/landing/benchmark-art.png" alt="webrain extraction benchmark across engines" />
       </div>
     </div>
   </div>
