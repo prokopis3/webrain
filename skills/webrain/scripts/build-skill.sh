@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."          # skills/webrain
 mkdir -p dist
+# ponytail: git archive only — no Python fallback. Needs a committed skill dir.
 git archive --format=zip --prefix=webrain/ --output=dist/webrain.skill HEAD:skills/webrain 2>/dev/null \
-  || python -m zipfile -c dist/webrain.skill SKILL.md scripts
+  || { echo "not a git clone — git archive needs the repo (commit the skill first)"; exit 1; }
 echo "wrote dist/webrain.skill"
