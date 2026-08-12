@@ -10,7 +10,30 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ## Unreleased
 
-_No unreleased changes yet._
+### Added
+
+- **Native CAPTCHA v2** — trusted `drag` (slider CAPTCHAs) + `eval_in_frame`
+  (CDP isolated world inside a reCAPTCHA/hCaptcha/Turnstile frame) →
+  `webrain_drag` / `webrain_eval_in_frame`; reCAPTCHA v2 anchor-click fix
+  (checkbox is top-left, ~27,37) + `mouseMoved` before every CDP click.
+- **Vision v2** — `webrain_vision` op=ask (screenshot → local/cloud → answer,
+  batch tiles in one request, `scale` upscales small captcha tiles); offline
+  caption index; warm llama-server singleton (no ~90s cold load per call);
+  provider failover OpenRouter → OpenAI → Fireworks → Groq → local.
+
+### Changed
+
+- **Docs/skill rearchitecture** — Mintlify nav gains an **Agent** group
+  (`agent/protected-sites`, `agent/session-strategy`) + new Concepts pages
+  (profiles, sessions); the agent decision guide and `webrain_guide` re-center
+  on **persistent profile + real Chrome + session** (browser identity is state).
+- **Obscura v0.2.0 rendering** — render builds now screenshot + PDF natively;
+  no-render builds and lightpanda still lack a paint engine.
+
+### Removed
+
+- **Python stealth sidecar** — `stealth_solve.py` + `preflight.py` deleted; no
+  Python in the repo. Challenge handling is native (vault + TOTP).
 
 ## v0.6.1
 

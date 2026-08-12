@@ -66,6 +66,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs**: setup-steps connector — a dashed hairline across Install →
   Connect → Ask draws on scroll and runs one glowing packet across it
   (`anime.path`), tying the three step cards into a single flow.
+- **core**: trusted `drag` (slider/drag CAPTCHAs — press → move with the button
+  held → release; crosses cross-origin iframes) and `eval_in_frame` (CDP
+  isolated world inside a src-matched iframe — reads reCAPTCHA/hCaptcha/Turnstile
+  puzzle geometry parent JS can't reach). Exposed as `webrain_drag` /
+  `webrain_eval_in_frame`.
+- **core**: reCAPTCHA v2/enterprise anchor fix — the checkbox sits at the
+  anchor's top-left (~27,37), not the center; a `mouseMoved` now precedes every
+  CDP click so modern widgets accept it as trusted.
+- **core**: `webrain_vision` op=ask — screenshot the viewport or a clip region,
+  ask the bundled local Qwen3-VL (or the cloud chain), return the answer; batch
+  tiles in ONE request (numbered 1..N); `scale` upscales small captcha tiles the
+  2B model misreads. Offline caption index (keyword top-k, no embedding model)
+  added.
+- **core**: warm llama-server singleton — no ~90s cold load per vision call;
+  provider failover OpenRouter → OpenAI → Fireworks → Groq → local at a shared
+  choke point with one retry (surfaces the API's own error body).
+
+### Changed
+
+- **core**: `screenshot_clip` gained a `scale` param (high-res crop pass); vision
+  callers route through the shared provider-failover/retry post.
+- **skill**: `skills/webrain/` restructured into a progressive-disclosure router —
+  `SKILL.md` (identity, mandatory rules, routing table) + new `references/`
+  (`core-rules`, `browser-selection`, `challenges`, `profiles`, `extraction`,
+  `anti-patterns`), `workflows/protected-site.md`, and `evals/README.md`.
+- **docs**: Mintlify nav reorganized around intent — new **Agent** group
+  (`agent/protected-sites`, `agent/session-strategy`, decision guide) and new
+  Concepts pages (`concepts/profiles`, `concepts/sessions`). Agent decision
+  guide, browsers/challenges/runtime-flow concepts, troubleshooting, README,
+  AGENTS.md, and the binary `AGENT_GUIDE` all re-centered on the
+  persistent-profile + real-Chrome + session model (browser identity, profile,
+  and session are execution state).
+- **docs**: Obscura v0.2.0 rendering reflected everywhere — render builds
+  screenshot + PDF (raster-backed) natively; no-render builds and lightpanda
+  still have no paint engine; interactive Material and interactive challenges
+  still need real Chrome.
+- **cli**: `webrain doctor` no longer probes for a Python sidecar (removed the
+  `python -c "import playwright, undetected_playwright"` check and its
+  `stealth_solve` line).
+- **mcp**: `webrain_guide` (AGENT_GUIDE) challenge section rewritten — native
+  `webrain_session(op=login)` profile/login flow replaces the Python sidecar as
+  the documented challenge fix; interactive CAPTCHAs need a human in the headed
+  browser.
+
+### Removed
+
+- **scripts**: `scripts/stealth_solve.py`, `skills/webrain/scripts/stealth_solve.py`,
+  and `skills/webrain/scripts/preflight.py` deleted — the Python stealth sidecar
+  architecture is gone (no Python in the repo). Challenge handling is native
+  (vault + TOTP; `wait_out_challenge` poll+reload in `login.rs`/`launch.rs`).
 
 ## [0.6.1] - 2026-08-09
 
@@ -131,6 +181,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local model installed. Cloud whisper STT likewise tries every configured
   provider in order (Groq → OpenAI → Fireworks) on error, not just the first
   key set (`stt_providers`; `stt_provider` narrowed to a `#[cfg(test)]` helper).
+- **captcha solve loop** (`webrain_solve_captcha` tool + `video::solve_captcha`):
+  screenshots the exact viewport at scale 1 (so vision pixels == click pixels),
+  uses the bundled local Qwen3-VL-2B to locate a reCAPTCHA checkbox, and clicks
+  it via trusted CDP `click_coords`, looping until solved/puzzle/timeout.
+  `--image-min-tokens 1024` added to the llama-server spawn for coordinate
+  grounding. Verified live: clicked Google's `/sorry` checkbox and advanced it
+  to the image puzzle (checkbox stage solved; image grids return `puzzle`).
+- **offline tile vision** (`webrain_vision` + `vision::index_current_page`):
+  the tile index no longer hard-fails when no embedding backend is configured
+  (was `401` without an `EMBED_URL` key). It now falls back to **per-tile
+  captions** from the bundled local Qwen3-VL (`VectorStore` gains a text store +
+  keyword `retrieve`), so `webrain_vision` works fully offline. Captions are
+  fetched in **batched groups** like `watch` batches frames (numbered per-tile
+  answers, `parse_numbered`) — one llama-server spawn for all tiles.
+- **captcha solver hardened + generalized** (`webrain_core::video`,
+  `webrain_core::backends::cdp`, `webrain_vision`):
+  - **trusted clicks register now** — `dispatch_click` sends a `mouseMoved`
+    before press+release (reCAPTCHA v2/enterprise silently ignored a
+    press+release with no prior pointer position — the cause of every "fake"
+    click); `wait_turnstile_token` clicks the checkbox **top-left offset**
+    (27,37), not the iframe center (center is the label text).
+  - **empty captions root-caused** — `--image-min-tokens 1024` made every image
+    ≥1024 tokens, so a 4-tile batch overflowed the `-c 4096` context and
+    llama-server rejected every request; context is now `-c 16384` and vision
+    errors surface instead of returning `" |  |  | "`.
+  - **generic solver** — `solve_puzzle` is provider-agnostic: isolated-world
+    grid discovery (any visible `img` grid, prompt from first `strong`/heading,
+    verify by button text) + **one-shot classification** (screenshot the whole
+    puzzle frame → 1 llama call → matching tile numbers; no tile cropping).
+    Ground truth = the `*-response` token; vision "DONE" is never trusted
+    without it.
+  - **`webrain_interact drag`** — new trusted drag action (CDP press → move
+    with button held → release) for drag-and-drop / slider CAPTCHAs; crosses
+    cross-origin iframes like clicks.
+  - **`webrain_vision op=ask`** — new workflow tool: screenshot a viewport/clip
+    region → bundled Qwen3-VL answers an arbitrary prompt (captchas/visual QA).
+    New `scale` param upscales the clip (crop+upscale precision pass for small
+    captcha tiles; `screenshot_clip` gained a `scale` param, all other callers
+    pass 1.0).
+- **captcha-solve skill** (`skills/webrain/workflows/captcha-solve.md`): step-by-step
+  algorithm any LLM follows to solve ANY captcha (reCAPTCHA/hCaptcha/Turnstile/
+  2captcha xcaptcha) with webrain vision — token ground truth, checkbox claim,
+  scaled `op=ask`, exact `webrain_eval_in_frame` geometry, parallel clicks,
+  expiry loop, anti-patterns. Added the **TEXT/ASSEMBLE-CODE** flow: extract
+  the shared data-URL sprite from the same-origin iframe (deterministic,
+  expiry-immune), crop tiles, OCR each single-image (Qwen3 multi-image reads
+  truncate + hallucinate), click the 2 matching tiles **in order**, Confirm →
+  token.
+- **cloud-first vision chain + failover** (`webrain_core::video`,
+  `webrain_core::vision`): every vision path now routes through one
+  `vision_targets` provider list in priority order — **OpenRouter (Qwen3.6-27B)
+  → OpenAI → Fireworks → Groq → bundled local Qwen3-VL-2B**. `ask_viewport`
+  captures pixels ONCE and tries each provider in order, so a flaky provider
+  falls through to the next instead of killing the op (live hit: OpenRouter
+  returned empty, Groq was fine). `post_vision` (the shared choke point) now
+  retries ONCE on transient failures (429/5xx/network/empty output) for every
+  caller — no more per-caller retry loops — and parses content as string OR
+  content-block array OR `message.reasoning` (Qwen3/OpenRouter put the answer
+  there when `content` is empty). One unit test pins the failover order.
+- **monolithic captcha solver removed** (`webrain_core::video`,
+  `webrain-mcp`): `webrain_solve_captcha` + `solve_captcha`/`solve_puzzle`/
+  `captcha_token`/`BFRAME_JS`/`PUZZLE_JS` deleted. The generic tool flow
+  (checkbox claim → scaled `op=ask` tiles → exact geometry → parallel clicks →
+  verify → token) — live-verified to solve a reCAPTCHA grid end-to-end — is now
+  the ONLY path, and its exact-geometry capability moved into a new generic
+  tool **`webrain_eval_in_frame`** (run JS inside a cross-origin iframe via a
+  CDP isolated world: grid tile rects + verify button for any challenge frame,
+  which `webrain_eval` cannot reach).
 - **watch perf** (`webrain_core::video`): frames + whisper now run in parallel;
   local vision gets **10 frames** (was 3); the bundled llama-server stays alive
   across calls on Unix (static keepalive), saving ~3s of model load per watch;
