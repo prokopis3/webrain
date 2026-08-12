@@ -28,7 +28,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 | **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
 | **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
 | **LLM-ready** | MCP server, 15 tools, built-in decision guide | you hand-roll tool functions |
-| **Anti-bot** | challenge detection + stealth sidecar | manual |
+| **Anti-bot** | challenge detection + persistent profile + native login | manual |
 | **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
 | **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
 
@@ -37,7 +37,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **Scrape at scale** — batch pagination + spider with auto-throttle and checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
 - **Structured data without hand-written selectors** — `webrain_autoschema` probes the DOM, then JSON / regex / table extractors read container-level structure.
 - **Stealth login** — real-Chrome profiles with an encrypted local credential vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
-- **Get past challenges** — reads the `challenge` field on every navigate and solves Cloudflare/Turnstile via a real-Chrome stealth sidecar.
+- **Get past challenges** — reads the `challenge` field on every navigate; protected sites use real Chrome + a persistent profile + session (native login).
 - **See the page** — a11y / semantic tree, snapshots, and vision tiles (screenshot → vector store) for tables and charts.
 - **Read anything** — PDFs (extract + render), JSON-LD, media, plus `fetch_http` for static pages 10–100× faster than a browser.
 
@@ -59,7 +59,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **OS**: Windows, macOS, or Linux (x86_64 / arm64).
 - **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
 - **Linux**: system libraries for Chrome (list below) before first run.
-- **Python 3** — only for the stealth sidecar (`scripts/stealth_solve.py`) to bypass Cloudflare/Turnstile challenges.
+- **Docker** — only to run the obscura / lightpanda engines in containers.
 - **Docker** — only to run the obscura / lightpanda engines in containers.
 - **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
 
@@ -241,7 +241,7 @@ Prefer to drive it by hand? Every engine + tool has a CLI twin:
 
 ```bash
 webrain launch scrapingcourse demo "https://example.com/login" --port 9222   # headed Chrome + login
-webrain doctor                 # full diagnosis: engines, MCP, CDP, vault, sidecar
+webrain doctor                 # full diagnosis: engines, MCP, CDP, vault
 webrain fetch <url>             # attach to CDP_URL and fetch
 webrain screenshot <url>
 webrain eval "document.title"
@@ -288,15 +288,15 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 
 | Need | Engine | How to get it |
 |---|---|---|
-| Material / interactive SPA (Google Flights, calendars, dropdowns), real screenshots, Cloudflare/Turnstile | **real Chrome** | `webrain install` |
-| Fast scraping of non-challenged JS pages, parallel tabs | **obscura** (stealth) | `webrain install --engine obscura [--stealth]`, then `webrain obscura` |
+| Material / interactive SPA (Google Flights, calendars, dropdowns), interactive challenges | **real Chrome** | `webrain install` |
+| Fast scraping of non-challenged JS pages, parallel tabs; v0.2.0+ render builds also screenshot + PDF | **obscura** | `webrain install --engine obscura [--stealth] [--no-render]`, then `webrain obscura` |
 | Fastest/lightest, real a11y + semantic tree, no rendering | **lightpanda** | install the binary, then `webrain lightpanda` |
 | Static HTML, no JS/auth | **fetch_http** (no browser) | built-in |
 
 **Key rules (see [Agent Decision Guide](#agent-decision-guide)):**
 
 - **Never** use obscura/lightpanda for Material/SPA interaction — they still lack the layout engine for complex Material UI widgets. Obscura v0.2.0+ **render builds** can screenshot and export PDFs (native Rust renderer). Lightpanda returns a *fake placeholder PNG*. Route interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
-- Read the `challenge` field after every `webrain_navigate`. If it's non-null, the page is gated — use the real-Chrome stealth sidecar.
+- Read the `challenge` field after every `webrain_navigate`. If it's non-null, the page is gated — use real Chrome + a persistent profile + session (`webrain launch` / `webrain login`).
 - Extract from container/card-level DOM, not bare `$` text nodes (Google Flights renders a spurious price grid).
 
 ## MCP Tools
@@ -358,7 +358,7 @@ anything's missing.
 | `webrain cookies [--port N] [--out file]` / `webrain setcookies <file>` | Export / import cookies |
 | `webrain fetch <url>` · `webrain screenshot <url>` · `webrain spider <url>` · `webrain click <i>` · `webrain type <i> <text>` · `webrain eval <js>` | Drive the `CDP_URL` backend |
 | `webrain vault set\|list\|user\|rm` | Manage encrypted credentials (hidden prompts) |
-| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, Python sidecar, `recommend`. `--doctor` alias |
+| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend`. `--doctor` alias |
 
 ## Environment Variables
 
@@ -463,7 +463,7 @@ LLM prompt → tool call (webrain_navigate/extract/batch/…) → CdpBackend →
 
 **Read [`docs/AGENT_DECISION_GUIDE.md`](docs/AGENT_DECISION_GUIDE.md) before browser tasks.** It encodes, with live-verified results:
 
-- **Browser selection** — Material/SPA → real Chrome via `cdp_urls`; Cloudflare/Turnstile → Chrome + stealth sidecar; fast JS scraping → obscura; lightpanda for real a11y with minimal footprint; static → `fetch_http`.
+- **Browser selection** — Material/SPA → real Chrome via `cdp_urls`; Cloudflare/Turnstile → Chrome + persistent profile/session (native login); fast JS scraping → obscura; lightpanda for real a11y with minimal footprint; static → `fetch_http`.
 - **Challenge handling** — read `challenge` after every navigate; obscura/lightpanda cannot pass interactive challenges.
 - **Extraction matrix** — autoschema → extract_json → batch → regex → table → spider; never guess selectors.
 - **a11y** — Google/Material widgets are `combobox`/`option`/`tab`, not `button`; `filter` matches name/value/css_path; if `role=<x>` returns `[]`, drop the role and filter by label.
@@ -527,7 +527,7 @@ docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webr
 
 **`webrain doctor` shows MCP down** → start `webrain mcp --http 9223`; if CDP ports are down, `webrain install` then start an engine.
 
-**Cloudflare/Turnstile blocks the scrape** → read the `challenge` field and use the real-Chrome stealth sidecar (`python scripts/stealth_solve.py <url> --cdp-port 9222 --headed`), then re-attach webrain to that CDP port.
+**Cloudflare/Turnstile blocks the scrape** → read the `challenge` field and use real Chrome with a persistent profile + session: `webrain launch <service> <profile> <url>` then `webrain login <service> <profile>`, or re-attach an already-authenticated Chrome via `CDP_URL`.
 
 ## Changelog
 

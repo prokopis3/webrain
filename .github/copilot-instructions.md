@@ -93,9 +93,9 @@ mcp_codebase-memo_manage_adr(mode="store", title="...", context="...", decision=
 When using the `mcp_webrain-*` tools, follow **`docs/AGENT_DECISION_GUIDE.md`**.
 It encodes: browser selection (real Chrome vs obscura vs lightpanda vs
 `fetch_http`), the challenge/anti-bot decision tree (check the `challenge`
-field after `webrain_navigate`; use `scripts/stealth_solve.py` for Cloudflare/
-CAPTCHA pages), and the extraction tool matrix (autoschema → extract_json →
-batch, regex, table, spider, etc.). Do not guess selectors or browsers from
+field after `webrain_navigate`; protected pages → real Chrome + persistent
+profile + session via `webrain launch` / `webrain_session(op=login)`), and the
+extraction tool matrix (autoschema → extract_json → batch, regex, table, spider, etc.). Do not guess selectors or browsers from
 memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 `challenge` field on every navigate.
 

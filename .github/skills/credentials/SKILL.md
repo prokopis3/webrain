@@ -18,10 +18,10 @@ round-trips through the LLM and lands in session logs — so never ask in chat.
 3. Use the value, never print it; redact it if it ever shows up in args/output.
 
 ### Channel A — user types into the real browser (preferred, `mcp_webrain-*`)
-Run `stealth_solve.py <url> --headed` — real Chrome opens headed, the **user**
-types the creds into the site's login window, cookies export, webrain
-re-attaches to the same CDP session. You get the authenticated session, never
-the password.
+`webrain launch <service> <profile> <url>` — real Chrome opens headed on a
+persistent profile, the **user** types the creds into the site's login window,
+the session is saved to the profile, and webrain re-attaches to the same CDP
+session. You get the authenticated session, never the password.
 
 ### Channel B — env vars (no browser, or `--creds`)
 User sets the secret in the terminal (never in chat):
@@ -29,8 +29,8 @@ User sets the secret in the terminal (never in chat):
 $env:WEBRAIN_USER = "..."                        # typed by user
 $env:WEBRAIN_PASS = Read-Host "password"         # typed by user
 ```
-Pass them by name into commands — `--creds "$env:WEBRAIN_USER`:$env:WEBRAIN_PASS"` —
-never inline the values, never echo them.
+Then `webrain login <service> <profile>` (or `webrain_session(op=login)`) reads
+them by name — never inline the values, never echo them.
 
 ### Channel C — local vault (fully automatic, preferred for repeat logins)
 One-time enroll, then the LLM logs in with zero user typing:
