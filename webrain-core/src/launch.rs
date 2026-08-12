@@ -1,4 +1,4 @@
-// Native Chrome launcher — replaces the Python stealth_solve.py launch path.
+// Native Chrome launcher — spawns real Chrome with a persistent per-account profile.
 // Spawns real Chrome with a persistent per-account profile + the same stealth
 // flags the sidecar used, hands the CDP URL to CdpBackend (which applies
 // STEALTH_JS + UA override on attach). chromiumoxide slots in here later for
@@ -187,7 +187,7 @@ pub fn launch_chrome(
         format!("--user-data-dir={}", profile_dir.display()),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
-        // stealth flags — same set the Python sidecar used
+        // stealth flags
         "--disable-blink-features=AutomationControlled".to_string(),
         "--disable-features=AutomationControlled".to_string(),
     ];

@@ -54,7 +54,7 @@ impl TileEngine {
                 let y = r as f64 * self.tile_height;
                 let w = self.tile_width.min(page_w - x);
                 let h = self.tile_height.min(page_h - y);
-                let png = backend.screenshot_clip(x, y, w, h).await?;
+                let png = backend.screenshot_clip(x, y, w, h, 1.0).await?;
                 tiles.push(TileShot {
                     index: idx,
                     x,
