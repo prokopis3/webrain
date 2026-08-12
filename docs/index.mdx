@@ -12,9 +12,9 @@ mode: custom
   <div className="wrap">
     <div className="hero">
       <div>
-        <span className="eyebrow"><span className="dot" />Open source · MIT · Rust</span>
+        <span className="eyebrow"><span className="dot" />Rust · open source</span>
         <h1>Browser automation <em>for AI agents.</em></h1>
-        <p className="lede">An MCP server that gives any LLM a real browser. Scrape, crawl, and extract with 15 intent-based tools.</p>
+        <p className="lede">One Rust binary that gives any LLM a real browser. Scrape, beat captchas, and transcribe videos, all on your machine.</p>
         <div className="cta-row">
           <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
@@ -197,6 +197,7 @@ mode: custom
           <button className="try-preset active" data-demo="prices" role="tab" aria-selected="true" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Scrape prices</button>
           <button className="try-preset" data-demo="auth" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Auth + Turnstile</button>
           <button className="try-preset" data-demo="batch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Batch interact</button>
+          <button className="try-preset" data-demo="watch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Watch video</button>
         </div>
         <div className="try-prompt">
           <span className="term-prompt">❯</span>
@@ -312,7 +313,7 @@ mode: custom
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg></span>Structured extraction</h3>
-            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data. Zero LLM, zero cost.</p>
+            <p>Autoschema probes the DOM, then schema, regex, table, JSON-LD, and BM25 modes return clean data. Zero LLM, zero cost. Live: 407 products from a real store in ~17 tool calls.</p>
             <div className="cap-tags"><a className="tool-chip" href="/reference/tools">autoschema</a><a className="tool-chip" href="/reference/tools">schema</a><a className="tool-chip" href="/reference/tools">regex</a><a className="tool-chip" href="/reference/tools">table</a><a className="tool-chip" href="/reference/tools">jsonld</a><a className="tool-chip" href="/reference/tools">bm25</a></div>
           </div>
         </div>
@@ -328,7 +329,7 @@ mode: custom
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Challenge bypass</h3>
-            <p>Every navigate reports a <code>challenge</code> field; real Chrome with a persistent profile and native login clears Cloudflare and Turnstile gates.</p>
+            <p>Every navigate reports a <code>challenge</code> field; real Chrome with a persistent profile and native login clears Cloudflare, Turnstile, and reCAPTCHA gates. No Python sidecar.</p>
             <div className="cap-tags"><span className="tool-chip">cloudflare_challenge</span><span className="tool-chip">blocked</span><span className="tool-chip">captcha</span></div>
           </div>
         </div>
@@ -336,7 +337,7 @@ mode: custom
         <div className="shell">
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>Crawl at scale</h3>
-            <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume.</p>
+            <p>Batch, spider, sitemap, and scan modes with auto-throttle and checkpoint/resume. 132 products in one parallel call, ~2-4 s/page on Lightpanda.</p>
             <div className="cap-tags"><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">spider</a><a className="tool-chip" href="/reference/tools">sitemap</a><a className="tool-chip" href="/reference/tools">scan</a></div>
             <svg className="crawl-vis" viewBox="0 0 120 120" fill="none" aria-hidden="true">
               <path className="crawl-ring" fill="none" d="M60 14 a46 46 0 1 1 0 92 a46 46 0 1 1 0 -92" />
@@ -357,7 +358,7 @@ mode: custom
         <div className="shell">
           <div className="core core-art">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="m12 7 5 5-5 5M7 12h10" /></svg></span>Read anything</h3>
-            <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path.</p>
+            <p>PDF extract and render, video transcripts plus frames, downloads, JSON-LD, media, and a no-browser HTTP path. Video transcripts run fully offline with bundled whisper and local vision.</p>
             <div className="cap-tags"><a className="tool-chip" href="/reference/tools">PDF</a><a className="tool-chip" href="/reference/tools">video</a><a className="tool-chip" href="/reference/tools">downloads</a><a className="tool-chip" href="/reference/tools">JSON-LD</a><a className="tool-chip" href="/reference/tools">HTTP</a></div>
           </div>
         </div>
@@ -376,6 +377,23 @@ mode: custom
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  {/* Proven on real jobs — verified results */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>Proven on real jobs.</h2>
+        <p>Measured on live sites and documented in the repo. No invented numbers, no benchmark theater.</p>
+      </div>
+      <div className="bench-stats">
+        <div className="bench-stat"><b data-count="407"><em className="num">407</em></b><span>unique products from a live store in ~17 tool calls, ~46K tokens</span></div>
+        <div className="bench-stat"><b data-count="132"><em className="num">132</em></b><span>products in one parallel batch call, zero logins</span></div>
+        <div className="bench-stat"><b data-count="3"><em className="num">3</em></b><span>browser engines behind one CDP backend, plus a no-browser HTTP path</span></div>
+        <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies. One ~22 MB Rust binary on macOS, Linux, and Windows</span></div>
+      </div>
+      <p className="proven-note">Every figure is in the repo: the <a href="/guides/agent-decision-guide">agent guide</a> and the <a href="https://github.com/prokopis3/webrain">changelog</a>.</p>
     </div>
   </div>
 

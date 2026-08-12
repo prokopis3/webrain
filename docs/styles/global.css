@@ -93,7 +93,7 @@
    swipeable row of the 3 terminals. */
 @media (prefers-reduced-motion: no-preference) {
   .landing .wf-stage { display: block; perspective: 1700px; overflow: hidden; }
-  .landing .wf-card3d { position: absolute; inset: 0; flex: none; backface-visibility: hidden; will-change: transform, opacity; animation: wf-cover 28s cubic-bezier(0.32, 0.72, 0, 1) both infinite; animation-delay: calc(var(--card, 0) * -7s); }
+  .landing .wf-card3d { position: absolute; inset: 0; flex: none; backface-visibility: hidden; animation: wf-cover 28s cubic-bezier(0.32, 0.72, 0, 1) both infinite; animation-delay: calc(var(--card, 0) * -7s); }
   .landing .wf-card3d.wf-dup { display: block; }
   .landing .wf-stage:hover .wf-card3d { animation-play-state: paused; }
   .landing .workflow-term .wf-body > .wf-group { animation-duration: 28s; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); animation-fill-mode: backwards; animation-iteration-count: infinite; animation-delay: calc(var(--card, 0) * -7s); }
@@ -238,11 +238,12 @@
 .landing .check:hover .tick { transform: scale(1.12); }
 .landing .check b { font-weight: 550; }
 .landing .check p { color: var(--muted); font-size: 0.9rem; margin-top: 0.1rem; }
-.landing .why-visual { border-radius: 1.5rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); }
+.landing .why-visual { border-radius: 1.5rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); aspect-ratio: 4 / 3; }
+.landing .why-visual img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* benchmark visual — full-bleed data-vis card */
-.landing .benchmark-visual { border-radius: 1.75rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); }
-.landing .benchmark-visual img { width: 100%; height: auto; display: block; }
+.landing .benchmark-visual { border-radius: 1.75rem; overflow: hidden; border: 1px solid var(--hairline); background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); aspect-ratio: 16 / 9; }
+.landing .benchmark-visual img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ===== how it works — 3-step flow ===== */
 .landing .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; position: relative; }
@@ -380,6 +381,8 @@
 .landing .bench-stat span { display: block; margin-top: 0.35rem; font-size: 0.82rem; color: var(--faint); line-height: 1.45; }
 @media (max-width: 900px) { .landing .bench-stats { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 520px) { .landing .bench-stats { grid-template-columns: 1fr; } }
+.landing .proven-note { margin-top: 1.4rem; font-size: 0.82rem; color: var(--faint); }
+.landing .proven-note a { color: var(--accent-2); border-bottom: 1px solid rgba(96,165,250,0.3); }
 
 /* ---- You say / webrain does ---- */
 .landing .ussay { position: relative; display: grid; gap: 0.55rem; max-width: 56rem; }
