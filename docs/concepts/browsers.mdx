@@ -12,8 +12,8 @@ working click and a silent no-op.
 | Situation | Browser | Why |
 |---|---|---|
 | **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns, segmented controls) | **real Chrome** (`cdp_urls:["http://127.0.0.1:9222"]`) | Material widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda.** |
-| **Cloudflare / Turnstile / CAPTCHA**, or need **real** screenshots / pixel rendering | **real Chrome + stealth sidecar** (`scripts/stealth_solve.py`) | Only a real rendering engine can run/solve these. Obscura has no paint engine; its V8 crashes on challenge JS. |
-| JS pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab `webrain_batch` runs parallel tabs. No paint engine → no screenshots. |
+| **Cloudflare / Turnstile / CAPTCHA**, or need **real** rendering for interactive challenges | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only real Chrome passes interactive challenge JS; obscura/lightpanda V8 crash on it. |
+| JS pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material. |
 | Lightweight footprint, want a **real AX tree + semantic tree**, no rendering | **lightpanda** | Fastest, lightest, real a11y. Single-target CDP — `webrain_batch` falls back to sequential single-tab reuse. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10–100× faster than a browser, zero memory. |
 
@@ -26,19 +26,26 @@ working click and a silent no-op.
 
 | Capability | Chrome for Testing | Obscura | Lightpanda | `scrape` |
 |---|---|---|---|---|
-| Paint / layout engine | ✅ real | ❌ none | ❌ none | ❌ |
-| Real screenshots (`observe` what=screenshot/pixel) | ✅ | ❌ errors loudly | ⚠️ fake placeholder PNG | ❌ |
+| Paint / layout engine | ✅ real | ⚠️ v0.2.0+ render builds (not full Chromium parity) | ❌ none | ❌ |
+| Real screenshots (`observe` what=screenshot/pixel) | ✅ | ✅ v0.2.0+ render builds (PNG/JPEG/WebP, full-page) | ⚠️ fake placeholder PNG | ❌ |
+| PDF export (`webrain_pdf` op=page) | ✅ | ✅ v0.2.0+ render builds (raster-backed) | ❌ | ❌ |
 | Interactive Material / SPA (dropdowns, calendars, segmented controls) | ✅ | ❌ | ❌ | ❌ |
-| Cloudflare / Turnstile / CAPTCHA (via `stealth_solve.py`) | ✅ | ❌ | ❌ | ❌ |
+| Cloudflare / Turnstile / CAPTCHA (native login, persistent profile) | ✅ | ❌ | ❌ | ❌ |
 | a11y tree (`observe` what=a11y) | ✅ | ⚠️ no `option` role | ✅ real AX tree | ❌ |
 | Parallel batch tabs | ✅ | ✅ N tabs | ⚠️ sequential (one context) | n/a |
 | Static HTML speed | slow | fast | fast | ✅ fastest (10-100×) |
 | Install | `webrain install` | `webrain install --engine obscura` | binary + `webrain lightpanda` | built-in |
 
-**What requires real Chrome:** screenshots, pixel/vision tiles, interactive
-Material/Google widgets, and any interactive anti-bot challenge. Obscura has
-no paint engine (screenshots error), lightpanda's screenshot is a silent
-placeholder, and `webrain_scrape` is a plain HTTP GET.
+**What still requires real Chrome:** interactive Material/Google widgets
+(dropdowns, calendars, segmented controls), interactive anti-bot challenges,
+and rendering edge cases beyond Obscura v0.2.0's parity. Obscura **render
+builds** (default) now screenshot + PDF natively; no-render builds and
+lightpanda have no paint engine (lightpanda's screenshot is a silent
+placeholder), and `webrain_scrape` is a plain HTTP GET.
+
+**Authenticated / protected workflows** also need a **persistent profile +
+session** on real Chrome — see [Browser Profiles](/concepts/profiles) and
+[Browser Sessions](/concepts/sessions).
 
 **Fallbacks to expect:** `webrain_batch` auto-detects lightpanda's single
 context and runs URLs sequentially on one reused tab (same tool call, same
@@ -52,7 +59,7 @@ rendered (consent/challenge gate) — check `challenge` and try real Chrome.
 | Engine | Command |
 |---|---|
 | Chrome for Testing | `webrain install` |
-| Obscura | `webrain install --engine obscura` then `webrain obscura` |
+| Obscura | `webrain install --engine obscura [--stealth] [--no-render]` then `webrain obscura` — render builds (default) screenshot + PDF; `--no-render` = legacy lightweight |
 | Lightpanda | install the binary, then `webrain lightpanda` |
 | `fetch_http` | built-in — no install |
 

@@ -40,7 +40,8 @@ it directly.
 - **Stealth login** — real-Chrome profiles with an encrypted local credential
   vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
 - **Get past challenges** — reads the `challenge` field on every navigate and
-  solves Cloudflare/Turnstile via a real-Chrome stealth sidecar.
+  clears Cloudflare/Turnstile via real Chrome + a persistent profile and native
+  login.
 - **See the page** — `webrain_observe` (a11y / semantic / state), plus vision
   tiles (screenshot → vector store) for tables and charts.
 - **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus
@@ -62,7 +63,6 @@ backend drives Chrome, Lightpanda, and Obscura interchangeably.
 - **OS**: Windows, macOS, or Linux (x86_64 / arm64).
 - **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
 - **Linux**: system libraries for Chrome — see [Installation](/installation).
-- **Python 3** — only for the stealth sidecar (`scripts/stealth_solve.py`) to bypass Cloudflare/Turnstile challenges.
 - **Docker** — only to run the obscura / lightpanda engines in containers.
 - **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
 

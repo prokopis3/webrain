@@ -1,0 +1,42 @@
+---
+title: Session Strategy
+description: How to preserve authentication and browser state across scrapes — reuse a persistent profile, keep the session alive, re-attach authenticated Chrome, and transfer cookies between engines.
+---
+
+# Session Strategy
+
+The question: *how do I keep a login and browser state alive across many pages
+and many tool calls?*
+
+## Preserve, don't recreate
+
+- Use ONE persistent profile per account (`webrain_session(op=login)`).
+- Keep the session open across pages (`webrain_session(op=open)` → navigate →
+  navigate → … → close).
+- Never discard a working profile/session — that is how you end up re-solving
+  challenges.
+
+## Authenticate once
+
+1. `webrain launch <service> <profile> <url>` (or `webrain_session(op=login)`).
+2. Log in (native login, vault + TOTP) or let the human complete a 2FA/approval
+   gate in the headed browser.
+3. The profile now carries the session.
+
+## Reuse it
+
+- Re-attach the authenticated Chrome: `CDP_URL=http://127.0.0.1:9222` (or
+  `webrain_session(op=open, cdp_url=...)`).
+- Every subsequent navigate/extract shares the session.
+
+## Transfer to another engine
+
+Export cookies on the live browser (`webrain_session(op=cookies)`), import on the
+target connection (`op=setcookies`), then batch on that same connection. Or use
+`op=save_state` / `op=restore_state` for portable cookies + localStorage.
+
+## Session isolation
+
+Different sessions/browsers have isolated cookie jars. Set cookies and batch on
+the SAME connection — obscura keeps per-connection cookie jars, so a fresh
+connection starts empty.

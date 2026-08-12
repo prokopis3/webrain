@@ -39,14 +39,23 @@
             "group": "Concepts",
             "pages": [
               "concepts/browsers",
+              "concepts/profiles",
+              "concepts/sessions",
               "concepts/challenges",
               "concepts/runtime-flow"
             ]
           },
           {
+            "group": "Agent",
+            "pages": [
+              "agent/protected-sites",
+              "agent/session-strategy",
+              "guides/agent-decision-guide"
+            ]
+          },
+          {
             "group": "Guides",
             "pages": [
-              "guides/agent-decision-guide",
               "guides/structured-extraction",
               "guides/scrape-at-scale",
               "guides/auth-and-login",

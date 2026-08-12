@@ -40,8 +40,8 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_download` (`engine=…`) | download (http/ytdlp), media, get_images | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
 | `webrain_session` (`op=…`) | open/close/list_session · cookies · setcookies · save/restore_state · profiles · login · close_launch | ✅ CDP + vault |
-| `webrain_vision` (`op=…`) | vision_index · vision_retrieve | ✅ CDP (screenshot) |
-| `webrain_eval` | eval (arbitrary JS) | ✅ CDP |
+| `webrain_vision` (`op=…`) | vision_index · vision_retrieve · ask (clip/tiles → vision answer) | ✅ CDP (screenshot) |
+| `webrain_eval` | eval (arbitrary JS) · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_guide` | agent decision guide | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
@@ -56,7 +56,7 @@ dependency (`webrain_scrape`, `webrain_search`, `webrain_crawl` mode=sitemap,
 <AccordionGroup>
 
 <Accordion title="webrain_guide">
-Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to bypass Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; run `scripts/stealth_solve.py` for gated pages), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.
+Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to handle Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; persistent profile + real Chrome + session via webrain_session(op=login)), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.
 </Accordion>
 
 <Accordion title="webrain_navigate">
@@ -103,7 +103,9 @@ Return captured page errors/warnings (uncaught errors + unhandled rejections) si
 Take a screenshot of the current page. Returns base64-encoded PNG. `full_page` captures the full scrollable page.
 
 <Note>
-  Requires a real paint engine — real Chrome only. Obscura errors; lightpanda returns a fake placeholder PNG.
+  Requires a paint engine — real Chrome, or Obscura v0.2.0+ **render builds**
+  (default install). No-render builds and lightpanda have no paint engine
+  (lightpanda returns a fake placeholder PNG).
 </Note>
 </Accordion>
 
@@ -313,6 +315,18 @@ Capture the current page as vision tiles, embed each via `EMBED_URL` (OpenAI-com
 
 <Accordion title="webrain_vision_retrieve">
 Embed a text query and return the cosine top-k stored tile ids from a vision index — semantic page retrieval. `tag`, `query`, `k` (5).
+</Accordion>
+
+<Accordion title="webrain_vision (op=ask)">
+Screenshot a viewport / clip region and ask a vision LLM an arbitrary prompt (captchas, visual QA). Provider chain is **cloud-first**: `OPENROUTER_API_KEY` (Qwen3.6-27B) → `OPENAI_API_KEY` → `FIREWORKS_API_KEY` → `GROQ_API_KEY` → bundled local Qwen3-VL-2B (`webrain install vision`) — a 27B cloud model reads captcha tiles the local 2B misreads, and a flaky provider fails over to the next.
+
+- `clip` `x,y,w,h` (default: full viewport), optional `scale` (2-3× upscale for small tiles; the answer's coords divide by `scale` to get viewport px).
+- `tiles`: array of `{x,y,w,h}` clips sent in ONE request as numbered images — the batched precision pass for grid captchas (1 call, not N). Keep `scale:2` on cloud models; `scale:3` only helps the weak local 2B.
+- Note: Qwen3 dumps a long `<think>` that truncates multi-image answers in tool results and misreads distorted text — for text/assemble puzzles read each tile as its OWN single-image `op=ask`.
+</Accordion>
+
+<Accordion title="webrain_eval_in_frame">
+Run JS inside a specific cross-origin iframe (matched by `url_contains` src substring) via a CDP **isolated world** — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile/2captcha challenge frames (grid tile rects, verify button, shared sprite data-URLs) that `webrain_eval` cannot reach. Returns the expression's JSON value (string results need parsing). Same-origin iframes can be reached with plain `webrain_eval` via `contentDocument`. See `workflows/captcha-solve.md` for the exact puzzle-geometry expressions.
 </Accordion>
 
 <Accordion title="webrain_watch">

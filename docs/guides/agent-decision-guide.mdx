@@ -26,8 +26,8 @@ runtime by `webrain_guide`.
 | Download files (HTTP / yt-dlp), media | `webrain_download` | `engine=…` |
 | Transcribe + describe a video (no browser) | `webrain_watch` | — |
 | Sessions, cookies, profiles, login (vault + TOTP) | `webrain_session` | `op=…` |
-| Vision index / retrieve (screenshots → embeddings) | `webrain_vision` | `op=…` |
-| Run arbitrary JavaScript in the page | `webrain_eval` | — |
+| Vision: index / retrieve / ask (screenshot → vision answer; captcha OCR) | `webrain_vision` | `op=…` |
+| Run arbitrary JavaScript in the page (or in a cross-origin iframe via `webrain_eval_in_frame`) | `webrain_eval` | — |
 | Get this guide from the LLM at runtime | `webrain_guide` | — |
 
 ## Decision tree
@@ -59,8 +59,9 @@ field — if non-null, the page is gated (see [Challenges](/concepts/challenges)
 eval | screenshot`, optional `cdp_urls` fan-out).
 
 **Logged-in / gated content** → `webrain_session` (`op=open` → login →
-`op=cookies` / `setcookies`, profile save/restore). See
-[Auth & Login](/guides/auth-and-login).
+`op=cookies` / `setcookies`, profile save/restore). For protected / Cloudflare /
+Turnstile sites see [Protected Websites](/agent/protected-sites) and
+[Session Strategy](/agent/session-strategy).
 
 **A PDF, a video, a file** → `webrain_pdf` / `webrain_watch` / `webrain_download`.
 
@@ -85,6 +86,8 @@ eval | screenshot`, optional `cdp_urls` fan-out).
 
 - [Tools Reference](/reference/tools) — exact schemas and legacy aliases
 - [Browser Engines](/concepts/browsers) — which browser for which job
+- [Protected Websites](/agent/protected-sites) — Cloudflare / Turnstile / auth gates
+- [Session Strategy](/agent/session-strategy) — preserving login and browser state
 - [Structured Extraction](/guides/structured-extraction)
 - [Scraping at Scale](/guides/scrape-at-scale)
 - [Auth & Login](/guides/auth-and-login)
