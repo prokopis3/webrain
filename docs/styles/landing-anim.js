@@ -21,9 +21,18 @@
   /* ---------------- hero entrance (timeline) ---------------- */
   if (!REDUCE) {
     (function hero() {
+      // Gate: the full hide-and-enter sequence runs EXACTLY once. Mintlify's
+      // React shell re-renders the custom page after hydration and wipes the
+      // DOM-injected word spans; re-running play() on every pass re-hides the
+      // whole hero and re-animates it, which reads as a page reload / flash on
+      // first load. Later passes only re-wrap the words and restore the
+      // visible state (no hide -> no flash).
+      var played = false;
+
       function play() {
         var h1 = document.querySelector('.landing .hero h1');
-        if (!h1) return;
+        if (!h1 || played) return;
+        played = true;
 
         // Word-split the headline (spaces kept as .ws, <em> preserved).
         if (!h1.querySelector('.w')) wrapWords(h1);
@@ -51,18 +60,34 @@
           .add({ targets: '.landing .hero-visual', opacity: [0, 1], translateY: [26, 0], duration: 820 }, '-=700');
       }
 
+      // Restore the hero to its fully visible state without animating (used
+      // after a re-render wiped the entrance). transform/opacity only.
+      function restoreHero() {
+        anime.set([
+          '.landing .hero .eyebrow',
+          '.landing .hero h1 .w',
+          '.landing .hero .lede',
+          '.landing .hero .cta-row',
+          '.landing .hero .install-block',
+          '.landing .hero-visual'
+        ], { opacity: 1, translateY: 0, rotateX: 0 });
+      }
+
       play();
 
       // Mintlify's React shell can re-render the custom page shortly after
-      // hydration and wipe DOM-injected word spans. Re-apply (bounded) if so;
-      // production never re-renders, so this is just insurance.
+      // hydration and wipe DOM-injected word spans. If the entrance already
+      // ran, silently re-wrap + restore visible state (no re-animation, no
+      // flash); if it never ran (h1 missing at boot), run the real entrance.
       var reapplied = 0;
       var guard = setInterval(function () {
         var h1 = document.querySelector('.landing .hero h1');
-        if (!h1 || reapplied >= 2) { clearInterval(guard); return; }
+        if (!h1 || reapplied >= 3) { clearInterval(guard); return; }
         if (h1.querySelectorAll('.w').length === 0 && h1.textContent.indexOf('Browser') !== -1) {
           reapplied++;
-          play();
+          if (!played) { play(); return; }
+          wrapWords(h1);
+          restoreHero();
         }
       }, 1300);
 
@@ -283,7 +308,22 @@
         targets.push(nodes[i]);
       }
     });
-    var fresh = targets.filter(function (el) { return !revealed.has(el); });
+    // Fresh = not yet revealed. A node already inside the viewport at this
+    // pass was revealed before a Mintlify re-render replaced the DOM node, so
+    // never re-hide it (that re-hide is the first-load flash); reveal it
+    // immediately instead.
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var fresh = [];
+    targets.forEach(function (el) {
+      if (revealed.has(el)) return;
+      var r = el.getBoundingClientRect();
+      if (r.top < vh && r.bottom > 0) {
+        revealed.add(el);
+        reveal(el, Number(el.getAttribute('data-i') || 0));
+      } else {
+        fresh.push(el);
+      }
+    });
     if (fresh.length) anime.set(fresh, { opacity: 0 });
     if (scrollIo) scrollIo.disconnect();
     scrollIo = new IntersectionObserver(function (entries) {
@@ -385,7 +425,7 @@
       prompt: 'extract prices from 12 auth pages behind Turnstile',
       lines: [
         { k: 'cmd', t: 'webrain_session · op=login', out: '→ vault AES-256-GCM + TOTP ok' },
-        { k: 'cmd', t: 'webrain_navigate', out: '→ challenge: turnstile → solved · chrome sidecar' },
+        { k: 'cmd', t: 'webrain_navigate', out: '→ challenge: turnstile → cleared · native login' },
         { k: 'cmd', t: 'webrain_batch · op=extract', out: '→ 12 urls · 214 items' }
       ],
       card: {
@@ -403,6 +443,18 @@
       card: {
         title: 'result.json · 312 rows',
         body: '{ "pages": 40, "rows": 312, "logins": 0, "ok": true }'
+      }
+    },
+    watch: {
+      prompt: 'summarize this video, fully offline',
+      lines: [
+        { k: 'cmd', t: 'webrain_watch · source=https://youtu.be/…', out: '→ bundled ffmpeg + yt-dlp + whisper' },
+        { k: 'cmd', t: '… transcript · 47 timestamped segments', out: '→ t=00:00 → 14:32' },
+        { k: 'cmd', t: '… 12 frames · vision=local', out: '→ captions + visual summary' }
+      ],
+      card: {
+        title: 'result.json · video',
+        body: '{ "transcript": 47, "frames": 12, "vision": "Qwen3-VL-2B", "ok": true }'
       }
     }
   };

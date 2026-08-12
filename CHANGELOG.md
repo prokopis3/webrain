@@ -9,7 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **docs**: landing page (`docs/index.mdx`) bug fix + marketing sharpening:
+  - **First-load flash fix** — the hero entrance now runs exactly once. When
+    Mintlify's React shell re-renders after hydration and wipes the
+    DOM-injected word spans, the animation layer silently re-wraps and restores
+    the visible state instead of re-hiding and re-animating (the "page reloads
+    2-3 times" flash). Scroll reveals also never re-hide nodes already in the
+    viewport after a re-render.
+  - **Verified proof band** — "Proven on real jobs." stats with real, auditable
+    numbers: 407 unique products in ~17 tool calls (~46K tokens), 132 products
+    in one parallel batch call, 3 browser engines, 0 runtime deps (one ~22 MB
+    Rust binary).
+  - **Game-changer copy** — hero lede now leads with the one-binary story
+    ("Scrape, beat captchas, and transcribe videos, all on your machine"),
+    eyebrow rationed to one separator, and the capabilities bento carries
+    verified specifics (reCAPTCHA + no Python sidecar, offline whisper + local
+    vision, Lightpanda ~2-4 s/page).
 
 ## [0.6.2] - 2026-08-12
 
