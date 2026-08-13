@@ -37,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (e.g. `extract_json`, `pdf_page`, `list_session`, which are not valid
   selector values and errored as `Unknown tool`), and gains a
   `webrain_drag` accordion.
+- **core, mcp, cli**: structured SERP API — `webrain_serp` returns **typed**
+  results (`{position,title,url,domain,snippet}`) instead of a raw results
+  page. Engines: `duckduckgo` (default) · `bing` · `google` (plain HTML over
+  the pooled no-browser HTTP agent) · `brave` (JS SPA — renders in the
+  connected CDP engine, works on Chrome/obscura/lightpanda) · `auto` (fetches
+  all HTTP engines concurrently, merges + dedupes). Built-in recommended
+  features: provider fallback (`fallback`), URL dedupe, pagination (`page`),
+  safe search (`safe`) + region (`region`, e.g. `us-en`/`gr-el`), `request_id`
+  + `ms` in the reply, retry with backoff (`retries`). New CLI:
+  `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe]
+  [--region R] [--json]`. MCP surface: `webrain_serp` (guide + tools
+  reference updated). Reference/inspiration: the standalone `rust-serp-api`
+  reference app, folded into webrain's single transport instead of a second
+  HTTP server.
 
 ## [0.6.2] - 2026-08-12
 

@@ -36,6 +36,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_batch` (`op=…`) | fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
+| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto) | 🔶 mixed (HTTP engines no browser; brave uses CDP) |
 | `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
@@ -47,7 +48,8 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
 lightpanda, and obscura alike — the differences are capability (screenshots,
 challenge solving, a11y fidelity), not protocol. Tools with **no** browser
-dependency (`webrain_scrape`, `webrain_search`, `webrain_crawl` mode=sitemap,
+dependency (`webrain_scrape`, `webrain_search`, `webrain_serp` HTTP engines,
+`webrain_crawl` mode=sitemap,
 `webrain_download`, `webrain_pdf`, `webrain_watch`) are intercepted in
 `webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
 
@@ -301,6 +303,18 @@ Search the web and navigate to the results page. `duckduckgo` is HTML-lite and s
 ```json
 { "q": "product reviews", "engine": "duckduckgo" }
 ```
+</Accordion>
+
+<Accordion title="webrain_serp">
+Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` / `google` are plain HTML served over the pooled no-browser HTTP agent; `brave` is a JS SPA rendered in the connected CDP engine (Chrome/obscura/lightpanda); `auto` fetches all HTTP engines concurrently and merges + dedupes.
+
+Built-in: provider fallback (`fallback`, default true), URL dedupe, pagination (`page`), safe search (`safe`) + region (`region`, e.g. `us-en`/`gb-en`/`gr-el`), `request_id` + `ms` in the reply, retry with backoff (`retries`).
+
+```json
+{ "q": "product reviews", "engine": "auto", "limit": 20, "region": "gb-en" }
+```
+
+Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--json]`.
 </Accordion>
 
 </AccordionGroup>

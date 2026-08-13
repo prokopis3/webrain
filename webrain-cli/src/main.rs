@@ -187,6 +187,81 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             eprintln!("watch done in {} ms", t0.elapsed().as_millis());
         }
+        Some("serp") => {
+            // webrain serp "query" [--engine duckduckgo|bing|google|brave|auto]
+            //   [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]
+            // Structured SERP JSON. duckduckgo/bing/google/auto need no browser;
+            // brave renders in the connected CDP engine (CDP_URL /
+            // --remote-debugging-port=9222).
+            let query = args.get(2).cloned().unwrap_or_default();
+            if query.trim().is_empty() {
+                println!(
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]"
+                );
+                println!(
+                    "  duckduckgo|bing|google|auto need no browser; brave uses the connected CDP engine (CDP_URL / --remote-debugging-port=9222)"
+                );
+                return Ok(());
+            }
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let engine = flag("--engine").unwrap_or_else(|| "auto".to_string());
+            let limit: usize = flag("--limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10)
+                .clamp(1, 50);
+            let page: usize = flag("--page").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let safe = args.contains(&"--safe".to_string());
+            let region = flag("--region");
+            let fallback = !args.contains(&"--no-fallback".to_string());
+            let json_out = args.contains(&"--json".to_string());
+            let opts = webrain_core::serp::SerpOpts {
+                query: query.trim().to_string(),
+                engine,
+                limit,
+                page,
+                safe,
+                region,
+                retries: 2,
+                fallback,
+            };
+            let backend = if opts.engine == "brave" {
+                Some(rt.block_on(CdpBackend::connect_default())?)
+            } else {
+                None
+            };
+            match rt.block_on(webrain_core::serp::serp_search(&opts, backend.as_ref())) {
+                Ok(r) => {
+                    if json_out {
+                        println!("{}", serde_json::to_string_pretty(&r)?);
+                    } else {
+                        let mut head = format!(
+                            "query: {} | engine: {} | {} results ({}ms)",
+                            r.query,
+                            r.engine,
+                            r.results.len(),
+                            r.ms
+                        );
+                        if !r.skipped.is_empty() {
+                            head.push_str(&format!(" | skipped: {}", r.skipped.join(", ")));
+                        }
+                        println!("{head}");
+                        for x in &r.results {
+                            // plain ASCII separator — Windows consoles mangle the em-dash
+                            println!("{}. {} - {}", x.position, x.title, x.url);
+                            if !x.snippet.is_empty() {
+                                println!("   {}", x.snippet);
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("error: {e}"),
+            }
+        }
         Some("install") => {
             // webrain install [--force] [--engine chrome|obscura] [--stealth] [--no-render]
             // agent-browser-style: download the engine into a cache dir.

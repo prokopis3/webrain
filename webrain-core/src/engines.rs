@@ -1522,6 +1522,17 @@ fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
     req
 }
 
+/// Full raw HTML GET for SERP parsing — `http_fetch` truncates HTML text to
+/// 3000 chars (fine for probes, useless for parsing a results page). Returns
+/// `(status, body)` with the FULL body. Reuses the pooled agent + Chrome headers.
+/// ponytail: one new fn instead of widening http_fetch's cap for every caller.
+pub(crate) fn serp_http_get(url: &str) -> anyhow::Result<(u16, String)> {
+    let resp = browser_req(browser_agent().get(url)).call()?;
+    let status = resp.status().as_u16();
+    let text = resp.into_body().read_to_string()?;
+    Ok((status, text))
+}
+
 /// No-browser HTTP fetch (browsemind `http_crawl`): GET a URL, return status +
 /// visible-ish text. 10-100x faster than browser navigation, zero memory — but no
 /// JS/SPA/auth. ponytail: ureq GET → plain text; cap to keep MCP replies small.

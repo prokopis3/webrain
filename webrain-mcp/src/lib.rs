@@ -236,6 +236,28 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 };
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
             }
+            // ponytail: serp HTTP engines (duckduckgo/bing/google/auto) use ureq —
+            // no browser, so skip CDP connect too. `brave` is a JS SPA → it needs
+            // a connected CDP engine (Chrome/obscura/lightpanda) and falls through
+            // to the backend connect + call_tool dispatch below.
+            if tool_name == "webrain_serp" {
+                let engine = arguments
+                    .get("engine")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("duckduckgo");
+                if engine != "brave" {
+                    let result = crate::tools::serp_from_args(&arguments, None).await;
+                    let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
+                    return json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                            "isError": is_err
+                        }
+                    });
+                }
+                // brave → continue to backend connect + call_tool.
+            }
             // ponytail: pdf_render uses pdfium (no browser), so skip CDP connect too.
             if tool_name == "webrain_pdf_render" {
                 let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");

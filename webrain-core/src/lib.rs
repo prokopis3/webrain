@@ -11,6 +11,7 @@ pub mod engines;
 pub mod install;
 pub mod launch;
 pub mod login;
+pub mod serp;
 pub mod vault;
 pub mod video;
 pub mod vision;

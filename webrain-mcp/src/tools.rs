@@ -62,7 +62,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-16 TOOLS — match the request to a boundary:
+17 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      console|flatten|fit|clean|screenshot|pixel|page_info|annotate|media)
@@ -76,6 +76,9 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
                      interact|eval|screenshot) + cdp_urls per-proxy fan-out
   webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
   webrain_search     web search (duckduckgo|google|bing|brave)
+  webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
+                     engine; duckduckgo/bing/google/auto need no browser, brave uses
+                     the connected CDP engine; dedupes + paginates + falls back
   webrain_pdf        pdf work (op: page|extract|render|images)
   webrain_download   files/media (engine: http|ytdlp)
   webrain_watch      video → transcript + frames
@@ -132,7 +135,9 @@ EXTRACTION MATRIX
 - JSON-LD / microdata              -> extract(mode=jsonld)
 - tables                           -> extract(mode=table)
 - infinite scroll / load-more      -> crawl(mode=scan) then extract; or interact(scroll)
-- search                           -> webrain_search
+- search                           -> webrain_search (navigate to results page)
+- typed SERP results                -> webrain_serp (structured JSON; engine:
+                                      duckduckgo|bing|google|brave|auto)
 - relevance filter                 -> extract(mode=bm25)
 - watch a video (URL or local file)-> webrain_watch(url) — timestamped transcript
                                       (yt-dlp captions -> local whisper-cli -> Whisper
@@ -382,6 +387,20 @@ pub fn list_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
                 "engine": {"type": "string", "enum": ["duckduckgo","google","bing","brave"], "default": "duckduckgo"}
+            }, "required": ["q"]}
+        }),
+        json!({
+            "name": "webrain_serp",
+            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google (plain HTML, no browser needed) | brave (SPA — renders in the connected CDP engine: Chrome/obscura/lightpanda) | auto (fetch duckduckgo+bing+google concurrently, merge + dedupe). Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms in the reply, retry with backoff. Returns {status, query, engine, results[], request_id, ms, skipped[]}.",
+            "inputSchema": {"type": "object", "properties": {
+                "q": {"type": "string"},
+                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "auto merges all HTTP engines"},
+                "limit": {"type": "integer", "default": 10, "description": "max results, 1..=50"},
+                "page": {"type": "integer", "default": 0, "description": "0-based results page"},
+                "safe": {"type": "boolean", "default": false},
+                "region": {"type": "string", "description": "locale/region, e.g. us-en, gb-en, gr-el, de-de"},
+                "fallback": {"type": "boolean", "default": true, "description": "fall back to another provider when the requested engine errors or returns zero"},
+                "retries": {"type": "integer", "default": 2, "description": "transient-failure retries with backoff, 0..=5"}
             }, "required": ["q"]}
         }),
         json!({
@@ -2711,6 +2730,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        // Structured SERP API — shared helper used by BOTH this dispatch (browser
+        // available for brave) and the lib.rs no-browser short-circuit (HTTP only).
+        "webrain_serp" => serp_from_args(&args, Some(backend)).await,
         "webrain_nav" => {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("back");
             let js = match op {
@@ -3055,5 +3077,66 @@ pub fn watch_from_args(args: &Value) -> Value {
         })
     } else {
         json!({"status": "error", "message": "source or sources required"})
+    }
+}
+
+/// Structured SERP search — shared by the webrain_serp call_tool arm (browser
+/// attached, so `brave` works) and the lib.rs no-browser short-circuit (HTTP
+/// engines only). One implementation, two callers (watch_from_args pattern).
+pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value {
+    let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("");
+    if q.trim().is_empty() {
+        return json!({"status": "error", "message": "q required"});
+    }
+    let opts = webrain_core::serp::SerpOpts {
+        query: q.trim().to_string(),
+        engine: args
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("duckduckgo")
+            .to_string(),
+        limit: args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(10)
+            .clamp(1, 50),
+        page: args
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0),
+        safe: args.get("safe").and_then(|v| v.as_bool()).unwrap_or(false),
+        region: args
+            .get("region")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        retries: args
+            .get("retries")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(2)
+            .min(5),
+        fallback: args
+            .get("fallback")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+    };
+    // brave needs a browser — the lib.rs short-circuit routes HTTP engines
+    // around the backend; here (call_tool) a backend may or may not be attached.
+    if opts.engine == "brave" && backend.is_none() {
+        return json!({"status": "error", "message": "engine 'brave' requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222); duckduckgo|bing|google|auto work without one"});
+    }
+    match webrain_core::serp::serp_search(&opts, backend).await {
+        Ok(r) => json!({
+            "status": "ok",
+            "query": r.query,
+            "engine": r.engine,
+            "results": r.results,
+            "request_id": r.request_id,
+            "ms": r.ms,
+            "skipped": r.skipped,
+        }),
+        Err(e) => json!({"status": "error", "message": e.to_string()}),
     }
 }
