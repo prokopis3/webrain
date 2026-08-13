@@ -26,22 +26,22 @@ consolidated tool + selector into the legacy arm name, then the existing
 model is simple: **browser tools run through `CdpBackend`** (one shared
 WebSocket to the engine); a handful of tools skip the browser entirely.
 
-| Tool (selector) | Legacy capabilities folded in | Browser? |
+| Tool (selector) | Selector values (→ legacy arm) | Browser? |
 |---|---|---|
-| `webrain_navigate` | navigate, page state + challenge detection | ✅ CDP |
-| `webrain_observe` (`what=…`) | snapshot · a11y · semantic_tree · get_html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
-| `webrain_interact` (`action=…`) | click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
-| `webrain_extract` (`mode=…`) | autoschema · extract_json · extract_regex · table · jsonld · bm25 | ✅ CDP (in-page, zero-LLM) |
+| `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
+| `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
+| `webrain_interact` (`action=…`) | click · click_coords · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
+| `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
-| `webrain_batch` (`op=…`) | batch fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
-| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate_urls | 🔶 mixed |
-| `webrain_search` | search (ddg/google/bing/brave) | ❌ no browser |
-| `webrain_pdf` (`op=…`) | pdf_page · pdf_extract · pdf_render · pdf_images | ❌ no browser |
-| `webrain_download` (`engine=…`) | download (http/ytdlp), media, get_images | 🔶 mixed |
+| `webrain_batch` (`op=…`) | fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
+| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
+| `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
+| `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
+| `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
-| `webrain_session` (`op=…`) | open/close/list_session · cookies · setcookies · save/restore_state · profiles · login · close_launch | ✅ CDP + vault |
-| `webrain_vision` (`op=…`) | vision_index · vision_retrieve · ask (clip/tiles → vision answer) | ✅ CDP (screenshot) |
-| `webrain_eval` | eval (arbitrary JS) · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
+| `webrain_session` (`op=…`) | open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_vision` (`op=…`) | index · retrieve · ask | ✅ CDP (screenshot) |
+| `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_guide` | agent decision guide | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
@@ -181,6 +181,10 @@ Upload files to a file input by index via CDP `DOM.setFileInputFiles`. Index mus
 
 <Accordion title="webrain_click_coords">
 Trusted click at raw viewport coordinates. For cross-origin iframe content and reCAPTCHA checkboxes where JS clicks only focus the element. Get coords from a screenshot or `webrain_page_info`.
+</Accordion>
+
+<Accordion title="webrain_drag">
+Trusted drag across viewport coordinates (`x1,y1` → `x2,y2`): press → move with the button held → release, via CDP Input events. Built for slider/drag CAPTCHAs ("slide to unlock") and works across cross-origin iframes where synthetic JS events are ignored. Get coords from a screenshot (`webrain_observe what=screenshot`) or `webrain_page_info`.
 </Accordion>
 
 <Accordion title="webrain_add_init_script">

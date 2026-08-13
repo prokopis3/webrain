@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     eyebrow rationed to one separator, and the capabilities bento carries
     verified specifics (reCAPTCHA + no Python sidecar, offline whisper + local
     vision, Lightpanda ~2-4 s/page).
+  - **Watch video preset** — the "Try the agent" playground gained a 4th demo
+    (`webrain_watch`): bundled ffmpeg/yt-dlp/whisper → timestamped transcript
+    → 12 frames + local Qwen3-VL-2B visual summary, all offline.
+- **mcp**: `webrain_interact` `action` now advertises `drag` (trusted
+  slider/drag CAPTCHA solving, `webrain_drag`) in the schema enum — the 0.6.2
+  capability was implemented in `map_surface`/`call_tool` but never exposed to
+  MCP clients, so no agent could discover it.
+- **docs**: `reference/tools.mdx` table now shows the real selector enums
+  (`what`/`action`/`op`/`mode`/`engine`) instead of legacy executor names
+  (e.g. `extract_json`, `pdf_page`, `list_session`, which are not valid
+  selector values and errored as `Unknown tool`), and gains a
+  `webrain_drag` accordion.
 
 ## [0.6.2] - 2026-08-12
 

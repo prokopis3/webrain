@@ -273,9 +273,9 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_interact",
-            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), type (index,text), press (key), scroll (direction), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
+            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), drag (x1,y1 → x2,y2: trusted slider/drag CAPTCHAs, crosses cross-origin iframes), type (index,text), press (key), scroll (direction), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
             "inputSchema": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["click","click_coords","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
+                "action": {"type": "string", "enum": ["click","click_coords","drag","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
                 "index": {"type": "integer", "description": "Element index from navigate/observe"},
                 "text": {"type": "string", "description": "type: text to type; wait: text substring to wait for"},
                 "key": {"type": "string", "description": "press: Enter|Tab|Escape|Backspace|ArrowDown|..."},
