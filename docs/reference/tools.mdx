@@ -306,7 +306,7 @@ Search the web and navigate to the results page. `duckduckgo` is HTML-lite and s
 </Accordion>
 
 <Accordion title="webrain_serp">
-Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` / `google` are plain HTML served over the pooled no-browser HTTP agent; `brave` is a JS SPA rendered in the connected CDP engine (Chrome/obscura/lightpanda); `auto` fetches all HTTP engines concurrently and merges + dedupes.
+Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML served over the pooled no-browser HTTP agent; `google` is JS-gated (consent/anti-bot wall over plain HTTP) so it needs the connected CDP engine — `webrain serp --engine google` connects it and drives the homepage → type → trusted-click flow; `brave` is a JS SPA rendered in the connected CDP engine (Chrome/obscura/lightpanda); `auto` fetches the HTTP engines concurrently and merges + dedupes.
 
 Built-in: provider fallback (`fallback`, default true), URL dedupe, pagination (`page`), safe search (`safe`) + region (`region`, e.g. `us-en`/`gb-en`/`gr-el`), `request_id` + `ms` in the reply, retry with backoff (`retries`).
 

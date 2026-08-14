@@ -381,6 +381,38 @@
 .landing .bench-stat span { display: block; margin-top: 0.35rem; font-size: 0.82rem; color: var(--faint); line-height: 1.45; }
 @media (max-width: 900px) { .landing .bench-stats { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 520px) { .landing .bench-stats { grid-template-columns: 1fr; } }
+
+/* ===== structured search (SERP) - asymmetric split: capability list + live terminal ===== */
+.landing .serp { display: grid; grid-template-columns: 0.85fr 1.15fr; gap: 1.25rem; align-items: stretch; }
+@media (max-width: 900px) { .landing .serp { grid-template-columns: 1fr; } }
+.landing .serp-copy { display: flex; flex-direction: column; justify-content: space-between; gap: 1.1rem; }
+.landing .serp-caps { display: grid; gap: 0.6rem; }
+.landing .serp-cap { display: flex; flex-direction: column; gap: 0.18rem; padding: 0.85rem 1rem; border: 1px solid var(--hairline); border-radius: 1rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); transition: transform 0.45s var(--ease), border-color 0.4s var(--ease); }
+.landing .serp-cap:hover { transform: translateX(4px); border-color: rgba(59,130,246,0.3); }
+.landing .serp-cap code { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.78rem; letter-spacing: -0.01em; color: var(--accent-2); }
+.landing .serp-cap span { font-size: 0.85rem; color: var(--muted); line-height: 1.4; }
+.landing .serp-term .term-body { display: flex; flex-direction: column; gap: 0.95rem; }
+.landing .serp-lines { display: grid; gap: 0.3rem; }
+.landing .serp-ask { color: var(--faint); }
+.landing .serp-cursor { display: inline-block; width: 0.52em; height: 1.05em; margin-left: 3px; vertical-align: text-bottom; background: var(--accent-2); }
+@media (prefers-reduced-motion: no-preference) { .landing .serp-cursor { animation: wf-blink 1.05s steps(1) infinite; } }
+.landing .serp-results { display: grid; gap: 0.55rem; }
+.landing .serp-row { display: grid; grid-template-columns: 1.5rem 1fr; gap: 0.6rem; align-items: start; padding: 0.6rem 0.75rem; border: 1px solid var(--hairline); border-radius: 0.85rem; background: rgba(255,255,255,0.02); }
+.landing .serp-rank { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.72rem; color: var(--faint); padding-top: 1px; }
+.landing .serp-row-main { display: flex; flex-direction: column; gap: 0.14rem; min-width: 0; }
+.landing .serp-row b { font-size: 0.86rem; font-weight: 550; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.landing .serp-url { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.68rem; color: var(--ok); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.landing .serp-snip { font-size: 0.74rem; color: var(--muted); line-height: 1.45; }
+.landing .serp-json { overflow: hidden; border: 1px solid var(--hairline); border-radius: 0.85rem; background: rgba(10,10,12,0.6); }
+.landing .serp-json-head { display: flex; align-items: center; justify-content: space-between; padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--hairline); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.64rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.landing .serp-json-tag { color: var(--accent-2); }
+.landing .serp-json pre { padding: 0.7rem 0.75rem; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.7rem; color: var(--muted); line-height: 1.5; overflow-x: auto; white-space: pre-wrap; }
+.landing .serp-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; }
+.landing .serp-stat { padding: 0.8rem 0.9rem; border: 1px solid var(--hairline); border-radius: 0.85rem; background: var(--bg-soft); box-shadow: inset 0 1px 1px rgba(255,255,255,0.05); }
+.landing .serp-stat b { display: flex; align-items: baseline; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 1.5rem; font-weight: 650; letter-spacing: -0.03em; color: var(--text); }
+.landing .serp-stat b em { font-style: normal; color: var(--accent-2); margin-left: 1px; }
+.landing .serp-stat span { display: block; margin-top: 0.25rem; font-size: 0.72rem; color: var(--faint); line-height: 1.4; }
+@media (max-width: 520px) { .landing .serp-stats { grid-template-columns: 1fr; } }
 .landing .proven-note { margin-top: 1.4rem; font-size: 0.82rem; color: var(--faint); }
 .landing .proven-note a { color: var(--accent-2); border-bottom: 1px solid rgba(96,165,250,0.3); }
 

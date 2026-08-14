@@ -91,7 +91,7 @@ After `webrain_navigate(url)`, check `challenge` in the response:
 | JSON-LD / microdata | `webrain_get_jsonld` | Zero cost. |
 | HTML tables | `webrain_table` | |
 | Infinite scroll / feed | `webrain_batch(op=interact, urls=[...], interaction=<scroll/click loop>, base_selector, fields)`; or single-page: `webrain_scan` (auto-scroll) then `webrain_extract_json`; or `webrain_click` "Load More" + re-extract | Dynamic pages: wait for JS to hydrate before extracting. `op=interact` is the parallel multi-page path. |
-| Search engines | `webrain_serp` (structured JSON: position/title/url/snippet — duckduckgo/bing/google/auto need no browser, brave uses the connected CDP engine) · `webrain_search` (navigate to the results page) | `webrain_serp` dedupes, paginates (`page`), supports safe/region, and falls back across providers; `engine=auto` merges duckduckgo+bing+google concurrently. |
+| Search engines | `webrain_serp` (structured JSON: position/title/url/snippet — duckduckgo/bing need no browser; google and brave use the connected CDP engine) · `webrain_search` (navigate to the results page) | `webrain_serp` dedupes, paginates (`page`), supports safe/region, and falls back across providers; `engine=auto` merges duckduckgo+bing concurrently (google joins via the browser path). |
 | Static page, no browser | `webrain_fetch_http(url)` | |
 | Relevance filter on extracted items | `webrain_bm25(query, items)` | Keep top-k. |
 

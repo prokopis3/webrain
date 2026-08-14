@@ -198,6 +198,7 @@ mode: custom
           <button className="try-preset" data-demo="auth" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Auth + Turnstile</button>
           <button className="try-preset" data-demo="batch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Batch interact</button>
           <button className="try-preset" data-demo="watch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Watch video</button>
+          <button className="try-preset" data-demo="serp" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>SERP search</button>
         </div>
         <div className="try-prompt">
           <span className="term-prompt">❯</span>
@@ -394,6 +395,66 @@ mode: custom
         <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies. One ~22 MB Rust binary on macOS, Linux, and Windows</span></div>
       </div>
       <p className="proven-note">Every figure is in the repo: the <a href="/guides/agent-decision-guide">agent guide</a> and the <a href="https://github.com/prokopis3/webrain">changelog</a>.</p>
+    </div>
+  </div>
+
+  {/* Structured search — SERP capabilities + real benchmarks */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>Structured search. Five engines, one tool.</h2>
+        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches the HTTP engines in parallel and merges them.</p>
+      </div>
+      <div className="serp">
+        <div className="serp-copy">
+          <div className="serp-caps">
+            <div className="serp-cap"><code>typed results</code><span>position, title, url, domain, snippet</span></div>
+            <div className="serp-cap"><code>five engines + auto</code><span>duckduckgo, bing, google, brave, auto</span></div>
+            <div className="serp-cap"><code>fallback + dedupe</code><span>providers fall back, duplicate URLs dropped</span></div>
+            <div className="serp-cap"><code>pagination + safe + region</code><span>page offsets, safe search, locale</span></div>
+            <div className="serp-cap"><code>request_id + retry</code><span>correlate every call, retry with backoff</span></div>
+          </div>
+          <p className="proven-note">One MCP tool and one CLI command: <a href="/reference/tools">webrain_serp</a> and <a href="/reference/cli">webrain serp</a>.</p>
+        </div>
+        <div className="serp-term term">
+          <div className="term-bar">
+            <span className="term-dots"><i /><i /><i /></span>
+            <span className="term-title">webrain · serp</span>
+            <span className="term-live"><i />live</span>
+          </div>
+          <div className="serp-term-body term-body">
+            <div className="serp-lines">
+              <div className="term-line serp-ask"><span className="term-prompt">❯</span><span>“tokio rust” · engine=auto · limit=5</span></div>
+              <div className="term-line"><span className="term-prompt">❯</span><code>webrain_serp · engine=auto</code></div>
+              <div className="term-line"><span className="term-ok">✓</span><span>duckduckgo, bing, google fetched in parallel</span></div>
+              <div className="term-line"><span className="term-ok">✓</span><span>merged + deduped · 5 unique results · 2.1s</span><span className="serp-cursor" /></div>
+            </div>
+            <div className="serp-results">
+              <div className="serp-row">
+                <span className="serp-rank">1</span>
+                <div className="serp-row-main"><b>Rust Programming Language</b><span className="serp-url">rust-lang.org</span><span className="serp-snip">A fast, reliable, and productive programming language.</span></div>
+              </div>
+              <div className="serp-row">
+                <span className="serp-rank">2</span>
+                <div className="serp-row-main"><b>Rust (programming language) - Wikipedia</b><span className="serp-url">en.wikipedia.org</span><span className="serp-snip">A general-purpose language emphasizing performance, type safety, concurrency, and memory safety.</span></div>
+              </div>
+              <div className="serp-row">
+                <span className="serp-rank">3</span>
+                <div className="serp-row-main"><b>The Rust Programming Language</b><span className="serp-url">doc.rust-lang.org</span><span className="serp-snip">The official Rust book: performance, safety, and fearless concurrency.</span></div>
+              </div>
+            </div>
+            <div className="serp-json">
+              <div className="serp-json-head"><span>result.json</span><span className="serp-json-tag">5 items</span></div>
+              <pre>{'{ "position": 1, "title": "Rust Programming Language", "url": "https://rust-lang.org/", "domain": "rust-lang.org", "snippet": "…" }'}</pre>
+            </div>
+            <div className="serp-stats">
+              <div className="serp-stat"><b data-count="5"><em className="num">5</em></b><span>engines behind one tool</span></div>
+              <div className="serp-stat"><b data-count="3"><em className="num">3</em></b><span>engines, no browser at all</span></div>
+              <div className="serp-stat"><b data-count="50"><em className="num">50</em></b><span>max results per call</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

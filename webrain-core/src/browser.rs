@@ -118,12 +118,36 @@ pub trait BrowserBackend: Send + Sync {
     async fn evaluate(&self, js: &str) -> anyhow::Result<serde_json::Value>;
     async fn click(&self, index: usize) -> anyhow::Result<()>;
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()>;
+    /// Type text character-by-character with a per-keystroke delay (human-like
+    /// pacing; Google flags a whole-string insertText). Backends without
+    /// per-char input fall back to a single insertText.
+    async fn type_text_delayed(
+        &self,
+        index: usize,
+        text: &str,
+        _delay_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.type_text(index, text).await
+    }
     async fn scroll(&self, direction: &str) -> anyhow::Result<()>;
     /// Press a key (Enter, Tab, ArrowDown...) in the focused element. Trusted
     /// CDP Input when supported, JS fallback (Enter -> form.submit) otherwise.
     async fn press(&self, key: &str) -> anyhow::Result<()>;
     /// Trusted click at raw viewport coords (cross-origin iframes / reCAPTCHA).
     async fn click_coords(&self, x: i64, y: i64) -> anyhow::Result<()>;
+    /// Trace a human-like mouse path toward (x,y) (eased, jittered steps) before
+    /// a click — a real pointer travels, it doesn't teleport. Backends without
+    /// trusted input no-op (the click still lands).
+    async fn mouse_move_human(&self, _x: i64, _y: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Hard-reload the current page bypassing cache (Ctrl+Shift+R) — drops the
+    /// anti-bot state Google set on a flagged request; the manual recipe that
+    /// beats the /sorry wall. Default falls back to location.reload() (best-
+    /// effort; CDP backends override with Page.reload ignoreCache:true).
+    async fn reload_hard(&self) -> anyhow::Result<()> {
+        self.evaluate("location.reload(true); true").await.map(|_| ())
+    }
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at
     /// x2,y2) for drag-and-drop / slider CAPTCHAs. Crosses cross-origin iframes.

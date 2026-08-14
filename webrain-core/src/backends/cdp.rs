@@ -1939,6 +1939,32 @@ impl BrowserBackend for CdpBackend {
         Ok(())
     }
 
+    async fn type_text_delayed(
+        &self,
+        index: usize,
+        text: &str,
+        delay_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Focus+clear once, then Input.insertText per character with a delay —
+        // human-like keystroke pacing (browsemind press_sequentially 40-120ms).
+        // Google flags a whole-string insertText as scripted.
+        if focus_clear(self, index).await.is_ok() {
+            for c in text.chars() {
+                if self
+                    .send_cmd("Input.insertText", json!({ "text": c.to_string() }))
+                    .await
+                    .is_err()
+                {
+                    return self.type_text(index, text).await; // fallback
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            return Ok(());
+        }
+        self.type_text(index, text).await
+    }
+
     async fn press(&self, key: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         // Trusted CDP path (browsemind cdp_session_press). NOTE: CDP
@@ -1997,6 +2023,40 @@ impl BrowserBackend for CdpBackend {
             ))
             .await?;
         }
+        Ok(())
+    }
+
+    async fn mouse_move_human(&self, x: i64, y: i64) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Trace an eased, slightly-jittered path from a plausible start toward
+        // (x,y) — a real pointer travels, it doesn't teleport. Engines without
+        // Input.* return Err and the caller's click_coords falls back on its own.
+        let (sx, sy) = ((x - 180).max(0), (y - 70).max(0));
+        let steps = 16;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = 1.0 - (1.0 - t) * (1.0 - t); // ease-out
+            let jx = ((i * 7) % 5) as i64 - 2; // tiny pseudo-jitter
+            let jy = ((i * 13) % 7) as i64 - 3;
+            let px = sx + ((x - sx) as f64 * ease) as i64 + jx;
+            let py = sy + ((y - sy) as f64 * ease) as i64 + jy;
+            self.send_cmd(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseMoved", "x": px, "y": py }),
+            )
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(10 + (i % 4))).await;
+        }
+        Ok(())
+    }
+
+    async fn reload_hard(&self) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Ctrl+Shift+R equivalent: Page.reload with ignoreCache — the anti-bot
+        // wall sets state that a plain navigation re-uses; the hard reload
+        // drops it (the manual recipe that works).
+        self.send_cmd("Page.reload", json!({ "ignoreCache": true }))
+            .await?;
         Ok(())
     }
 

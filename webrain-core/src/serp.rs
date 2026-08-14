@@ -284,8 +284,11 @@ fn bing_target(href: &str) -> Option<String> {
 
 fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
     let doc = scraper::Html::parse_document(html);
-    // Container: #search .g (newer layout is div.MjjYud — keep both).
-    let Ok(cont_sel) = scraper::Selector::parse("#search .g, div.MjjYud") else {
+    // Containers: #search .g (classic), div.MjjYud (current), div.g and the
+    // modern div[data-hveid] result blocks (browsemind GoogleSERPClient's proven
+    // selector set — these cover the layouts Google actually ships).
+    let Ok(cont_sel) = scraper::Selector::parse("#search .g, div.MjjYud, div.g, div[data-hveid]")
+    else {
         return Vec::new();
     };
     let Ok(a_sel) = scraper::Selector::parse("a[href]") else {
@@ -294,11 +297,17 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
     let Ok(h3_sel) = scraper::Selector::parse("h3") else {
         return Vec::new();
     };
-    let Ok(snip_sel) = scraper::Selector::parse(".VwiC3b") else {
+    // Snippets: .VwiC3b (newer), span.aCOpRe + div[data-sncf] (browsemind's set).
+    let Ok(snip_sel) = scraper::Selector::parse(".VwiC3b, span.aCOpRe, div[data-sncf]") else {
         return Vec::new();
     };
 
     let mut out = Vec::new();
+    // div[data-hveid] matches NESTED result blocks (a result's sub-divs carry
+    // data-hveid too), so the same link can appear many times — dedupe by href
+    // HERE, inside the loop, or the duplicates fill `limit` before the distinct
+    // results are reached (post-parse dedupe_cap can't recover them).
+    let mut seen: HashSet<String> = HashSet::new();
     for el in doc.select(&cont_sel) {
         if out.len() >= limit {
             break;
@@ -310,7 +319,7 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
             let Some(href) = a.value().attr("href") else {
                 continue;
             };
-            let url = normalize_url(href);
+            let url = google_href(href);
             if url.is_empty() || url.starts_with("https://www.google.") {
                 continue;
             }
@@ -326,6 +335,9 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
             }
         }
         let Some((title, url)) = chosen else { continue };
+        if !seen.insert(url.clone()) {
+            continue;
+        }
         let snippet = el
             .select(&snip_sel)
             .next()
@@ -340,6 +352,26 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
         });
     }
     out
+}
+
+/// Resolve a Google result href to an absolute https:// URL.
+/// Google organic links are `/url?q=<urlencoded target>` redirects (decode the
+/// real URL) or relative `/...` (prefix the google origin); plain absolute
+/// http(s) links pass through via normalize_url.
+fn google_href(href: &str) -> String {
+    // /url?q=<urlencoded target>&sa=... — percent-decode the target.
+    if let Some(idx) = href.find("q=") {
+        let rest = &href[idx + 2..];
+        let end = rest.find(['&', '#']).unwrap_or(rest.len());
+        let decoded = percent_decode(&rest[..end]);
+        if decoded.starts_with("http://") || decoded.starts_with("https://") {
+            return decoded;
+        }
+    }
+    if let Some(rest) = href.strip_prefix('/') {
+        return format!("https://www.google.com/{rest}");
+    }
+    normalize_url(href)
 }
 
 fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
@@ -539,13 +571,197 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
     }
 }
 
+/// Human-like synthetic events for Google, injected as an init script so they
+/// run on the FIRST document load (browsemind test_hook_human_like.py recipe:
+/// a real user's mouse is moving while the page opens). webdriver hiding is
+/// already done by webrain's stealth_js on attach; this adds the mouse trace.
+/// Google is the one site where the heavier STEALTH_PATCH-style fingerprint
+/// lies are detectable, so this stays minimal: synthetic events + a hesitant
+/// scroll, nothing Google punishes.
+const GOOGLE_HUMAN_JS: &str = r#"(function(){
+  try {
+    const events = ['mousemove', 'mousedown', 'mouseup'];
+    events.forEach(function(t) {
+      document.dispatchEvent(new MouseEvent(t, {
+        clientX: 120 + Math.random() * 700,
+        clientY: 80 + Math.random() * 360,
+        bubbles: true, cancelable: true, view: window
+      }));
+    });
+    window.scrollTo(0, Math.floor(Math.random() * 220));
+  } catch (e) {}
+})();"#;
+
+/// Dismiss a Google consent wall / regional dialog if one is blocking the
+/// results (browsemind DISMISS_JS pattern; the SOCS/CONSENT cookie recipe in
+/// AGENTS.md is the robust pre-set — this is the in-page best-effort).
+const CONSENT_DISMISS_JS: &str = r#"(function(){
+  try {
+    const overlay = document.querySelector('.LSCOAf');
+    if (overlay) { overlay.remove(); return 'removed'; }
+    const btns = document.querySelectorAll('button, form[action*="consent"] button');
+    for (const b of btns) {
+      const t = (b.innerText || b.textContent || '').trim();
+      if (/reject all|rechazar todo|rifiuta tutto|refuser tout|ablehnen|απόρριψη|decline|i agree|accept all/i.test(t)) {
+        b.click(); return 'clicked';
+      }
+    }
+    return 'none';
+  } catch (e) { return 'err'; }
+})();"#;
+
+/// Register the Google human-like init script once per backend process (it is
 /// Render an engine's results page in an attached browser and parse the DOM —
-/// works on every CDP engine (Chrome/obscura/lightpanda); needed for `brave`.
+/// works on every CDP engine (Chrome/obscura/lightpanda); needed for `brave`
+/// and the only path that beats Google's consent/JS wall.
+///
+/// Google goes through the HOMEPAGE → search-box flow (browsemind recipe):
+/// loading the homepage, human-like events (after navigation, before consent),
+/// dismissing consent, TYPING the
+/// query with trusted CDP Input.insertText (Google's controlled input ignores
+/// JS `.value=` + synthetic Event — trusted keys are required to reveal the
+/// search button) and TRUSTED-clicking "Google Search" (never JS Enter, which
+/// Google penalizes). Hitting `/search?q=` directly is a strong bot signal that
+/// reliably trips Google's "unusual traffic" page, so we never use the direct
+/// search URL for google. Then we WAIT for the results page before parsing
+/// (never parse a consent/JS-shell/bot-wall page that loads first).
 async fn browser_search<B: BrowserBackend>(
     backend: &B,
     engine: &str,
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
+    if engine == "google" {
+        backend.navigate("https://www.google.com").await?;
+        // Ctrl+Shift+R hard reload of the start page — the manual recipe that
+        // beats the anti-bot page: after a wall, back to the start + hard
+        // refresh (bypass cache, drops Google's anti-bot state), then search.
+        let _ = backend.reload_hard().await;
+        // The consent dialog + page JS render AFTER load — wait for a fully
+        // loaded document (readyState complete, then a beat for the overlay)
+        // BEFORE running the human-like events and consent dismissal, or both
+        // fire on the empty shell and miss the live DOM (no consent seen).
+        for _ in 0..20 {
+            let ready = backend
+                .evaluate("document.readyState")
+                .await
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            if ready == "complete" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Human-like events run on the LOADED page — after navigation, BEFORE
+        // consent dismissal. evaluate() runs them on the real rendered DOM so
+        // the consent click that follows reads as a human who moved the mouse.
+        let _ = backend.evaluate(GOOGLE_HUMAN_JS).await;
+        let _ = backend.evaluate(CONSENT_DISMISS_JS).await;
+        // Human pacing: read the page a beat before typing. A script types in
+        // <1s after load; a human takes seconds — manual searches in the same
+        // browser/IP pass while the instant automation walls. This is the delay
+        // that was missing.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Find the search box in webrain's interactive-element index, then type
+        // the query with TRUSTED CDP Input.insertText (type_text). JS .value= +
+        // synthetic Event is ignored by Google's controlled input — without
+        // trusted keys the "Google Search" button never reveals.
+        let idx_js = r#"(function() {
+            const els = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
+            for (let i = 0; i < els.length; i++) {
+                if (els[i].matches('textarea[name="q"], input[name="q"], [role="searchbox"]')) return i;
+            }
+            return -1;
+        })()"#;
+        let idx = backend.evaluate(idx_js).await?.as_i64().unwrap_or(-1);
+        if idx >= 0 {
+            // Type character-by-character with human keystroke pacing
+            // (browsemind press_sequentially 40-120ms) — Google flags a
+            // whole-string insertText as scripted.
+            let _ = backend
+                .type_text_delayed(idx as usize, &opts.query, 70)
+                .await;
+            // Pause after typing before committing (human reviews the query).
+            tokio::time::sleep(Duration::from_millis(800)).await;
+        }
+
+        // The search button's label is localized in every language — never match
+        // it by name (a keyword list will always miss some locale). The UNIQUE
+        // language-independent handle is the search form's submit button:
+        // `type="submit"` is not localized anywhere. Google keeps a hidden
+        // JS-less submit (input[name=btnK]) BEFORE the visible one in the DOM,
+        // so iterate ALL candidates and take the first with a real rect. The
+        // button only renders after the query registers, so poll up to the same
+        // budget as wait_for_results below.
+        let rect_js = r#"(function() {
+            const cand = [
+                'form[action*="search"] input[type="submit"], form[action*="search"] button[type="submit"]',
+                'input[type="submit"], button[type="submit"]',
+                '[role="option"]'
+            ];
+            for (const s of cand) {
+                const els = document.querySelectorAll(s);
+                for (const el of els) {
+                    if (!el) continue;
+                    const r = el.getBoundingClientRect();
+                    if (!r || (r.width === 0 && r.height === 0)) continue;
+                    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+                }
+            }
+            return null;
+        })()"#;
+        // Click the search button until navigation actually starts (the button
+        // reveals a beat after trusted typing; Google sometimes ignores the
+        // first click). Bound ~6s — a real Google navigation lands in 1-3s, so
+        // anything past that is a swallowed click / wall, not slow rendering.
+        // Stop early on the /sorry bot wall.
+        let nav_js = "location.pathname.indexOf('/search') >= 0 || /sorry|unusual traffic|not a robot|captcha/i.test(location.href)";
+        for _ in 0..20 {
+            if backend
+                .evaluate(nav_js)
+                .await
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false)
+            {
+                break;
+            }
+            if let Some((x, y)) = backend.evaluate(rect_js).await.ok().and_then(|v| {
+                v.get("x")
+                    .and_then(|x| x.as_i64())
+                    .zip(v.get("y").and_then(|y| y.as_i64()))
+            }) {
+                // Travel to the button like a human pointer, then trusted-click.
+                let _ = backend.mouse_move_human(x, y).await;
+                let _ = backend.click_coords(x, y).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        // If the click never left the homepage, this attempt is a dead end
+        // (walled IP / swallowed click / consent redirect): a homepage has no
+        // results, and the 12s wait for a /search URL that will never come is
+        // the whole slowness. Return empty so the retry/fallback chain takes
+        // over immediately instead of burning the wait budget.
+        let on_results = backend
+            .evaluate("location.href.indexOf('/search') >= 0")
+            .await
+            .map(|v| v.as_bool().unwrap_or(false))
+            .unwrap_or(false);
+        if !on_results {
+            return Ok(Vec::new());
+        }
+        wait_for_results(backend, "google").await?;
+        // Google streams results in over ~1s; the wait returns as soon as the
+        // first result block renders — settle so the full set is in the DOM
+        // before get_html (else we parse a 1-result page).
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let html = backend.get_html().await?;
+        // Google can render the same result in nested/duplicate containers —
+        // dedupe by normalized URL + renumber (dedupe_cap) like the HTTP paths.
+        return Ok(dedupe_cap(parse_results("google", &html, opts.limit), opts.limit));
+    }
+
     let url = engine_url(
         engine,
         &opts.query,
@@ -554,8 +770,107 @@ async fn browser_search<B: BrowserBackend>(
         opts.region.as_deref(),
     )?;
     backend.navigate(&url).await?;
+    wait_for_results(backend, engine).await?;
     let html = backend.get_html().await?;
-    Ok(parse_results(engine, &html, opts.limit))
+    Ok(dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit))
+}
+
+/// Wait (bounded) for an engine's results container to render before parsing,
+/// so we never parse a consent wall / JS shell / still-loading page. Times out
+/// quietly — the caller parses whatever rendered (often 0 results → fallback).
+/// For google we poll ONLY for the results container: its consent / "enable JS"
+/// wall carries enough body text that a length heuristic would return early and
+/// parse the wall (0 results) instead of waiting for the real results.
+async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyhow::Result<()> {
+    let sel = match engine {
+        "google" => "#search, div[data-hveid], #rso",
+        "duckduckgo" => ".result",
+        "bing" => "li.b_algo",
+        "brave" => ".snippet",
+        _ => return Ok(()),
+    };
+    let js = if engine == "google" {
+        // Real results = #rso h3 present AND the count has stopped growing
+        // across consecutive polls (Google streams results — the first block
+        // arrives before the rest, so a single check parses a 1-result page;
+        // the header Gmail link has no #rso h3, so it can't false-positive).
+        // Bot-wall markers short-circuit so the retry re-navigates fast.
+        format!(
+            r#"(function() {{
+                if (/unusual traffic|not a robot|captcha|sorry/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))) return true;
+                if (location.href.indexOf('/search') < 0) {{ window.__serp_n = -1; window.__serp_flat = 0; return false; }}
+                const n = document.querySelectorAll('#rso h3').length;
+                if (n === (window.__serp_n || -1)) {{ window.__serp_flat = (window.__serp_flat || 0) + 1; }}
+                else {{ window.__serp_n = n; window.__serp_flat = 0; }}
+                return n > 0 && (window.__serp_flat || 0) >= 3;
+            }})()"#,
+        )
+    } else {
+        format!(
+            "(document.querySelectorAll({sel}).length > 0 || (document.body && document.body.innerText.length > 500))",
+            sel = serde_json::to_string(sel)?
+        )
+    };
+    for _ in 0..40 {
+        if let Ok(v) = backend.evaluate(&js).await {
+            let ok = v.as_bool().unwrap_or(false) || v.as_str() == Some("true");
+            if ok {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Ok(())
+}
+
+/// Search one specific HTTP engine (duckduckgo/bing/google). Google is JS-gated
+/// over plain HTTP (consent/JS shell → zero results), so when a browser is
+/// attached it goes straight to the browser path — the only one that returns
+/// real Google results. Everything else uses HTTP with provider fallback.
+async fn specific_engine<B: BrowserBackend>(
+    engine: &str,
+    opts: &SerpOpts,
+    backend: Option<&B>,
+) -> anyhow::Result<(Vec<SerpResult>, Vec<String>)> {
+    // Google is JS-gated over plain HTTP (consent/JS shell → zero results), so
+    // when a browser is attached it goes straight to the browser path — the only
+    // one that returns real Google results (browsemind recipe: real Chrome +
+    // human-like init + wait-for-results + consent dismiss + data-hveid parse).
+    if let Some(b) = backend.filter(|_| engine == "google") {
+        // Google intermittently serves a "unusual traffic / not a robot" CAPTCHA
+        // page (rate-limited IP). A persistent-profile wall usually clears in
+        // ~10s (attempt 2 catches it), but a fresh profile on a flagged IP stays
+        // walled for minutes — retrying that 4× burns ~60s for nothing. So: two
+        // consecutive walled attempts = IP blocked for this session → fall back
+        // to the other engines instead of wasting more navigations.
+        let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
+        let mut walls = 0u32;
+        for attempt in 0..4 {
+            let rs = browser_search(b, "google", opts).await.unwrap_or_default();
+            if !rs.is_empty() {
+                return Ok((rs, Vec::new()));
+            }
+            let walled = b
+                .evaluate(wall_js)
+                .await
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            if walled {
+                walls += 1;
+                if walls >= 2 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+        }
+    }
+    match http_search(engine, opts).await {
+        Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new())),
+        Ok(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
+        Ok(rs) => Ok((rs, Vec::new())),
+        Err(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
+        Err(err) => Err(err),
+    }
 }
 
 /// Fallback chain for a failed/empty specific engine: try the other HTTP
@@ -578,7 +893,13 @@ async fn fallback_chain<B: BrowserBackend>(
     }
     if let Some(b) = backend {
         match browser_search(b, exclude, opts).await {
-            Ok(rs) if !rs.is_empty() => return (rs, skipped),
+            Ok(rs) if !rs.is_empty() => {
+                // The requested engine's browser render succeeded after all —
+                // it was never really skipped; drop it from the skip list so a
+                // successful google run doesn't report `skipped: google`.
+                skipped.retain(|s| s != exclude);
+                return (rs, skipped);
+            }
             _ => {}
         }
         skipped.push(format!("{exclude} (browser)"));
@@ -621,13 +942,7 @@ pub async fn serp_search<B: BrowserBackend>(
             })?;
             (browser_search(b, "brave", opts).await?, Vec::new())
         }
-        e if HTTP_ENGINES.contains(&e) => match http_search(e, opts).await {
-            Ok(rs) if !rs.is_empty() => (rs, Vec::new()),
-            Ok(_) if opts.fallback => fallback_chain(e, opts, backend).await,
-            Ok(rs) => (rs, Vec::new()),
-            Err(_) if opts.fallback => fallback_chain(e, opts, backend).await,
-            Err(err) => return Err(err),
-        },
+        e if HTTP_ENGINES.contains(&e) => specific_engine(e, opts, backend).await?,
         other => {
             return Err(anyhow::anyhow!(
                 "unknown engine '{other}' (duckduckgo|bing|google|brave|auto)"
@@ -727,6 +1042,49 @@ mod tests {
         assert_eq!(rs[0].title, "Rust Language");
         assert_eq!(rs[0].url, "https://rust-lang.org");
         assert_eq!(rs[0].snippet, "A systems programming language.");
+    }
+
+    #[test]
+    fn google_parse_modern_layout_and_redirect() {
+        // browsemind's proven container/snippet selectors + the /url?q= redirect
+        // form Google actually ships in the modern (data-hveid) layout.
+        let html = r#"
+        <html><body><div id="rso">
+            <div data-hveid="CAI">
+                <div class="yuRUbf"><a href="/url?q=https%3A%2F%2Ftokio.rs%2F&sa=U&ved=2ah"><h3>Tokio</h3></a></div>
+                <span class="aCOpRe">An asynchronous runtime for the Rust language.</span>
+            </div>
+        </div></body></html>
+        "#;
+        let rs = parse_google(html, 10);
+        assert_eq!(rs.len(), 1, "modern data-hveid container parsed");
+        assert_eq!(rs[0].title, "Tokio");
+        assert_eq!(rs[0].url, "https://tokio.rs/");
+        assert_eq!(rs[0].domain, "tokio.rs");
+        assert_eq!(
+            rs[0].snippet,
+            "An asynchronous runtime for the Rust language."
+        );
+    }
+
+    #[test]
+    fn google_href_resolves_redirects_and_relative() {
+        // /url?q= redirect → decoded real target
+        assert_eq!(
+            google_href("/url?q=https%3A%2F%2Frust-lang.org%2F&sa=U&ved=2"),
+            "https://rust-lang.org/"
+        );
+        // relative /search → google origin (then skipped as internal by caller)
+        assert_eq!(
+            google_href("/search?q=related"),
+            "https://www.google.com/search?q=related"
+        );
+        // absolute passes through
+        assert_eq!(
+            google_href("https://example.com/x"),
+            "https://example.com/x"
+        );
+        assert_eq!(google_href(""), "");
     }
 
     #[test]

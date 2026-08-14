@@ -196,10 +196,10 @@ fn main() -> anyhow::Result<()> {
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 println!(
-                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]"
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless]"
                 );
                 println!(
-                    "  duckduckgo|bing|google|auto need no browser; brave uses the connected CDP engine (CDP_URL / --remote-debugging-port=9222)"
+                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached (CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one)"
                 );
                 return Ok(());
             }
@@ -219,6 +219,7 @@ fn main() -> anyhow::Result<()> {
             let region = flag("--region");
             let fallback = !args.contains(&"--no-fallback".to_string());
             let json_out = args.contains(&"--json".to_string());
+            let headless = args.contains(&"--headless".to_string());
             let opts = webrain_core::serp::SerpOpts {
                 query: query.trim().to_string(),
                 engine,
@@ -229,8 +230,34 @@ fn main() -> anyhow::Result<()> {
                 retries: 2,
                 fallback,
             };
-            let backend = if opts.engine == "brave" {
-                Some(rt.block_on(CdpBackend::connect_default())?)
+            // google is JS-gated (consent/JS shell over plain HTTP) — same as
+            // brave, it needs a real browser. For google, if none is attached,
+            // auto-launch a stealth Chrome with a PERSISTENT profile
+            // (profiles/serp/google) so the engine always exists; that profile
+            // accumulates Google consent/session cookies over runs and becomes
+            // trusted (the warm-up that made serp_test work), headed or
+            // headless alike. The browser stays alive as a warm session.
+            let backend = if opts.engine == "brave" || opts.engine == "google" {
+                match rt.block_on(CdpBackend::connect_default()) {
+                    Ok(b) => Some(b),
+                    Err(_) if opts.engine == "google" => {
+                        let launched = webrain_core::launch::launch_chrome(
+                            "serp",
+                            "google",
+                            9222,
+                            !headless,
+                        )?;
+                        println!(
+                            "launched chrome: {} (CDP_URL={})",
+                            launched.profile_dir.display(),
+                            launched.cdp_url
+                        );
+                        // keep the child alive (dropping Child doesn't kill);
+                        // the profile dir persists and warms between runs.
+                        Some(rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?)
+                    }
+                    Err(e) => return Err(e),
+                }
             } else {
                 None
             };

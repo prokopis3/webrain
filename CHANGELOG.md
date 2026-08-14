@@ -39,18 +39,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webrain_drag` accordion.
 - **core, mcp, cli**: structured SERP API — `webrain_serp` returns **typed**
   results (`{position,title,url,domain,snippet}`) instead of a raw results
-  page. Engines: `duckduckgo` (default) · `bing` · `google` (plain HTML over
-  the pooled no-browser HTTP agent) · `brave` (JS SPA — renders in the
+  page. Engines: `duckduckgo` (default) · `bing` (plain HTML over the pooled
+  no-browser HTTP agent) · `google` (JS-gated — browser path, see below) ·
+  `brave` (JS SPA — renders in the
   connected CDP engine, works on Chrome/obscura/lightpanda) · `auto` (fetches
   all HTTP engines concurrently, merges + dedupes). Built-in recommended
   features: provider fallback (`fallback`), URL dedupe, pagination (`page`),
   safe search (`safe`) + region (`region`, e.g. `us-en`/`gr-el`), `request_id`
   + `ms` in the reply, retry with backoff (`retries`). New CLI:
   `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe]
-  [--region R] [--json]`. MCP surface: `webrain_serp` (guide + tools
+  [--region R] [--json] [--headless]`. MCP surface: `webrain_serp` (guide + tools
   reference updated). Reference/inspiration: the standalone `rust-serp-api`
   reference app, folded into webrain's single transport instead of a second
   HTTP server.
+- **core, cli**: Google SERP over the browser path returns real results.
+  `google` is JS-gated over plain HTTP (Google serves a CAPTCHA "unusual
+  traffic" wall → `skipped: google`), so `webrain serp --engine google`
+  auto-launches a **persistent-profile** Chrome (AppData `profiles/serp/google`,
+  `--headless` for headless) when none is attached, then drives the homepage →
+  hard-refresh → type → submit flow like a real user:
+  - **Hard refresh first** (`Page.reload ignoreCache`, Ctrl+Shift+R) — drops
+    the anti-bot state the `/sorry` wall sets, so even a fresh profile can get
+    real results.
+  - **Humanized event order**: navigate → wait `readyState==="complete"` →
+    synthetic mousemove/down/up + hesitant scroll → consent dismiss (localized
+    Reject-all/I-agree) — human events fire *after* load, never during it.
+  - **Per-keystroke typing** (`type_text_delayed`, ~70 ms/char; Google flags a
+    whole-string `insertText`) and an **eased/jittered mouse travel**
+    (`mouse_move_human`) before the trusted click of the language-independent
+    submit button.
+  - **Stability wait** — `#rso h3` count flat across 3 polls, so the parse
+    never captures a half-streamed 1-result page; click-until-navigation +
+    dead-end guard bound the failure path (51s → ~20s).
+  - In-parse href dedupe (nested `div[data-hveid]` previously collapsed the
+    result set down to 1); 4× retry absorbs Google's intermittent IP CAPTCHA.
 
 ## [0.6.2] - 2026-08-12
 
