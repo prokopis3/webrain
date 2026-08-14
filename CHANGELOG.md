@@ -63,9 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     direct `/search?q=` then falls back honestly.
   - **`--hold`** keeps the launched Chrome open after the search so you can
     watch it (press Enter to close).
-  - **`--stealth`** opts IN to launch-flag stealth (`--disable-blink-features=
-    AutomationControlled`); the default stays a plain launch + CDP-level
-    masking (patchright/browsemind's recommended combo).
+  - **`--stealth`** is now a NO-OP — the `--disable-blink-features=
+    AutomationControlled` launch flags were removed (Chrome shows an
+    "unsupported command-line flag" warning banner for them, a visible
+    fingerprint). All automation masking is CDP-level
+    (`attach_and_init`'s stealth_js).
   - **Trusted scroll**: `CdpBackend::scroll` now dispatches a real CDP
     `Input.dispatchMouseEvent mouseWheel` (isTrusted=true) instead of JS
     `window.scrollBy` — every google human-like action is now trusted CDP input,

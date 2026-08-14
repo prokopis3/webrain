@@ -169,16 +169,16 @@ fn spawn_and_wait(
 /// Spawn real Chrome (headed by default) with a persistent per-account profile,
 /// wait for its CDP endpoint, and return a handle + CDP URL.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
-/// `stealth=true` adds the AutomationControlled suppression launch flags — a
-/// DETECTABLE fingerprint (a human-launched Chrome has none). Google paths use
-/// `stealth=false` and rely on CDP-level masking (attach_and_init's stealth_js)
-/// instead — the less-detectable recipe.
+/// `stealth` is currently a NO-OP: the AutomationControlled suppression launch
+/// flags were removed — Chrome shows an "unsupported command-line flag" warning
+/// banner for them (a visible fingerprint) and they're detectable. All
+/// automation masking is CDP-level (attach_and_init's stealth_js).
 fn launch_chrome_opt(
     service: &str,
     profile: &str,
     port: u16,
     headed: bool,
-    stealth: bool,
+    _stealth: bool,
     proxy: Option<&str>,
 ) -> anyhow::Result<Launched> {
     if port_open(port) {
@@ -194,10 +194,6 @@ fn launch_chrome_opt(
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
     ];
-    if stealth {
-        args.push("--disable-blink-features=AutomationControlled".to_string());
-        args.push("--disable-features=AutomationControlled".to_string());
-    }
     if let Some(p) = proxy {
         args.push(format!("--proxy-server={p}"));
     }
