@@ -166,14 +166,19 @@ fn spawn_and_wait(
     anyhow::bail!("{name} did not open CDP on port {port} within 20s")
 }
 
-/// Spawn real Chrome (headed by default) with a persistent per-account profile
-/// and stealth flags, wait for its CDP endpoint, and return a handle + CDP URL.
+/// Spawn real Chrome (headed by default) with a persistent per-account profile,
+/// wait for its CDP endpoint, and return a handle + CDP URL.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
+/// `stealth=true` adds the AutomationControlled suppression launch flags — a
+/// DETECTABLE fingerprint (a human-launched Chrome has none). Google paths use
+/// `stealth=false` and rely on CDP-level masking (attach_and_init's stealth_js)
+/// instead — the less-detectable recipe.
 fn launch_chrome_opt(
     service: &str,
     profile: &str,
     port: u16,
     headed: bool,
+    stealth: bool,
     proxy: Option<&str>,
 ) -> anyhow::Result<Launched> {
     if port_open(port) {
@@ -188,10 +193,11 @@ fn launch_chrome_opt(
         format!("--user-data-dir={}", profile_dir.display()),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
-        // stealth flags
-        "--disable-blink-features=AutomationControlled".to_string(),
-        "--disable-features=AutomationControlled".to_string(),
     ];
+    if stealth {
+        args.push("--disable-blink-features=AutomationControlled".to_string());
+        args.push("--disable-features=AutomationControlled".to_string());
+    }
     if let Some(p) = proxy {
         args.push(format!("--proxy-server={p}"));
     }
@@ -218,7 +224,7 @@ pub fn launch_chrome(
     port: u16,
     headed: bool,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, None)
+    launch_chrome_opt(service, profile, port, headed, true, None)
 }
 
 /// Spawn real Chrome routing through an HTTP(S)/SOCKS proxy (`--proxy-server`).
@@ -230,7 +236,62 @@ pub fn launch_chrome_with_proxy(
     headed: bool,
     proxy: &str,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, Some(proxy))
+    launch_chrome_opt(service, profile, port, headed, true, Some(proxy))
+}
+
+/// Spawn a PLAIN Chrome (no AutomationControlled suppression flags) — the
+/// google-SERP auto-launch path. A human's Chrome has no such flags, and
+/// Google fingerprints the stealth-tuned launch; CDP-level masking
+/// (stealth_js via Page.addScriptToEvaluateOnNewDocument) hides the
+/// automation markers instead. Keeps remote-debugging + user-data-dir.
+pub fn launch_chrome_plain(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+) -> anyhow::Result<Launched> {
+    launch_chrome_opt(service, profile, port, headed, false, None)
+}
+
+/// Plain Chrome through an HTTP(S)/SOCKS proxy (`--proxy-server`).
+/// Same no-stealth-flags semantics as [`launch_chrome_plain`].
+pub fn launch_chrome_plain_with_proxy(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+    proxy: &str,
+) -> anyhow::Result<Launched> {
+    launch_chrome_opt(service, profile, port, headed, false, Some(proxy))
+}
+
+/// Spawn a Chrome over `--remote-debugging-pipe` (stdin/stdout, NO listening
+/// port) — the undetectable-CDP path for google: an open debugging port is the
+/// automation fingerprint Google flags on `/sorry`, and a pipe-launched Chrome
+/// has none. Returns the `Child` (stdio piped); pass it to
+/// `CdpBackend::connect_pipe`, which owns it and kills it when the connection
+/// closes. No proxy support (pipe mode can't bake `--proxy-server` here).
+pub async fn launch_chrome_pipe(
+    service: &str,
+    profile: &str,
+    headed: bool,
+) -> anyhow::Result<tokio::process::Child> {
+    let profile_dir = profiles_dir().join(service).join(profile);
+    std::fs::create_dir_all(&profile_dir)?;
+    let mut cmd = tokio::process::Command::new(chrome_path());
+    cmd.arg("--remote-debugging-pipe")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check");
+    if !headed {
+        cmd.arg("--headless=new");
+    }
+    cmd.arg("about:blank")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    cmd.spawn()
+        .with_context(|| format!("failed to spawn pipe Chrome at {}", chrome_path().display()))
 }
 
 /// Spawn the lightpanda CDP server (agent-browser `--engine lightpanda`).

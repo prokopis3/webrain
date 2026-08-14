@@ -320,9 +320,9 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 { "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }
 ```
 
-Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh]`.
+Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--hold]`.
 
-`--fresh` (google) always launches a **brand-new profile + cookies** on a free port (never reuses a warm browser), so the consent modal always renders and is always dismissed before the humanized flow — the deterministic anti-bot recipe when a stale profile's trust signals are suspect.
+**Default (google) = warm persistent profile + session** — the real bypass path (see `skills/webrain/references/challenges.md`): the auto-launched Chrome stays alive on `9222` between runs, accumulating consent/session cookies until it becomes a *trusted* Google profile. `--fresh` opts OUT of the warm session: it always launches a **brand-new profile + cookies** on a free port, so the consent modal always renders and is always dismissed before the humanized flow — use it when you want deterministic consent (e.g. a suspect/stale profile). `--hold` keeps the launched Chrome open after the search so you can watch it (press Enter to close).
 </Accordion>
 
 </AccordionGroup>

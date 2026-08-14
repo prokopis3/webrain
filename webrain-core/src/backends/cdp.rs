@@ -400,17 +400,10 @@ struct Tab {
 }
 
 struct CdpConnection {
-    write: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Message,
-    >,
-    read: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
+    /// JSON payloads out to the browser (WS Text frame, or pipe length-framed).
+    write: tokio::sync::mpsc::Sender<String>,
+    /// JSON payloads in from the browser, bridged by a background task.
+    read: tokio::sync::mpsc::Receiver<String>,
     cmd_id: u64,
 }
 
@@ -438,10 +431,38 @@ impl CdpBackend {
         };
 
         let (write, read) = ws.split();
+        // Bridge WebSocket frames <-> JSON payload channels — ONE shared
+        // connection abstraction for the WebSocket transport and the
+        // --remote-debugging-pipe transport (connect_pipe uses the same).
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(64);
+        tokio::spawn(async move {
+            let mut sink = write;
+            while let Some(text) = out_rx.recv().await {
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            let _ = sink.close().await;
+        });
+        tokio::spawn(async move {
+            let mut stream = read;
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(Message::Text(t)) => {
+                        if in_tx.send(t.to_string()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
 
         let inner = CdpConnection {
-            write,
-            read,
+            write: out_tx,
+            read: in_rx,
             cmd_id: 1,
         };
 
@@ -459,10 +480,15 @@ impl CdpBackend {
     }
 
     /// Connect from CDP_URL env (default http://127.0.0.1:9222).
-    /// ponytail: one shared resolution for CLI and MCP.
+    /// ponytail: one shared resolution for CLI and MCP. Empty CDP_URL (set but
+    /// blank) falls back to the default — otherwise a warm 9222 session is never
+    /// re-attached and callers wrongly re-launch into a busy port.
     pub async fn connect_default() -> anyhow::Result<Self> {
-        let cdp_url =
-            std::env::var("CDP_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
+        let cdp_url = std::env::var("CDP_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "http://127.0.0.1:9222".to_string());
         Self::connect_with_url(&cdp_url).await
     }
 
@@ -470,6 +496,78 @@ impl CdpBackend {
     /// ponytail: same as connect_default but takes url instead of env var.
     pub async fn connect_with_url(cdp_url: &str) -> anyhow::Result<Self> {
         Self::connect(&resolve_ws(cdp_url)?).await
+    }
+
+    /// Connect to a Chrome launched with `--remote-debugging-pipe` — CDP over
+    /// the process's stdin/stdout, NO listening port. An open debugging port is
+    /// the automation fingerprint Google keys on for `/sorry`; a pipe-launched
+    /// Chrome has none. CDP-over-pipe frames each JSON payload as
+    /// `<byte-length>\n<payload>` on stdin/stdout. The `Child` is owned by the
+    /// reader bridge task, which kills Chrome when the connection closes (so a
+    /// dropped backend never orphans it).
+    pub async fn connect_pipe(child: tokio::process::Child) -> anyhow::Result<Self> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let mut child = child;
+        let mut stdin = child.stdin.take().context("pipe: browser stdin not piped")?;
+        let stdout = child.stdout.take().context("pipe: browser stdout not piped")?;
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        // Writer: length-framed JSON payloads -> child stdin.
+        tokio::spawn(async move {
+            while let Some(text) = out_rx.recv().await {
+                let framed = format!("{}\n{}", text.len(), text);
+                if stdin.write_all(framed.as_bytes()).await.is_err()
+                    || stdin.flush().await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+        // Reader: length-framed JSON payloads <- child stdout; kills Chrome on
+        // exit (EOF / channel close).
+        tokio::spawn(async move {
+            let mut child = child;
+            let mut reader = BufReader::new(stdout);
+            let mut len_buf = String::new();
+            loop {
+                len_buf.clear();
+                if reader.read_line(&mut len_buf).await.is_err() || len_buf.is_empty() {
+                    break;
+                }
+                let Ok(n) = len_buf.trim().parse::<usize>() else {
+                    break;
+                };
+                let mut payload = vec![0u8; n];
+                if reader.read_exact(&mut payload).await.is_err() {
+                    break;
+                }
+                let Ok(text) = String::from_utf8(payload) else {
+                    break;
+                };
+                if in_tx.send(text).await.is_err() {
+                    break;
+                }
+            }
+            let _ = child.kill().await;
+        });
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(CdpConnection {
+                write: out_tx,
+                read: in_rx,
+                cmd_id: 1,
+            })),
+            tabs: Arc::new(Mutex::new(HashMap::new())),
+            active: Arc::new(Mutex::new(String::new())),
+            next_id: Arc::new(Mutex::new(0)),
+            fp: Arc::new(Mutex::new(None)),
+            snap: Arc::new(Mutex::new(None)),
+            net_capture: Arc::new(Mutex::new(false)),
+            net_urls: Arc::new(Mutex::new(Vec::new())),
+            init_scripts: Arc::new(Mutex::new(Vec::new())),
+        })
     }
 
     /// Send a command scoped to the ACTIVE tab's session.
@@ -539,42 +637,37 @@ impl CdpBackend {
         }
 
         let text = serde_json::to_string(&msg)?;
-        conn.write.send(Message::Text(text.into())).await?;
+        conn.write.send(text).await?;
 
         loop {
-            let resp = conn.read.next().await;
-            match resp {
-                Some(Ok(Message::Text(text))) => {
-                    let v: Value = serde_json::from_str(&text)?;
-                    if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
-                        if let Some(err) = v.get("error") {
-                            anyhow::bail!("CDP error [{}]: {}", method, err);
-                        }
-                        return Ok(v.get("result").cloned().unwrap_or(json!({})));
-                    }
-                    // Event (no id). Network capture: while net_capture is set,
-                    // requestWillBeSent URLs are buffered (browsemind pattern).
-                    let ev_session = v.get("sessionId").and_then(|s| s.as_str());
-                    if ev_session == session {
-                        if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                            if m == "Network.requestWillBeSent" {
-                                if *self.net_capture.lock().await {
-                                    if let Some(u) = v
-                                        .get("params")
-                                        .and_then(|p| p.get("request"))
-                                        .and_then(|r| r.get("url"))
-                                        .and_then(|u| u.as_str())
-                                    {
-                                        self.net_urls.lock().await.push(u.to_string());
-                                    }
-                                }
+            let Some(text) = conn.read.recv().await else {
+                anyhow::bail!("CDP connection closed");
+            };
+            let v: Value = serde_json::from_str(&text)?;
+            if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+                if let Some(err) = v.get("error") {
+                    anyhow::bail!("CDP error [{}]: {}", method, err);
+                }
+                return Ok(v.get("result").cloned().unwrap_or(json!({})));
+            }
+            // Event (no id). Network capture: while net_capture is set,
+            // requestWillBeSent URLs are buffered (browsemind pattern).
+            let ev_session = v.get("sessionId").and_then(|s| s.as_str());
+            if ev_session == session {
+                if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
+                    if m == "Network.requestWillBeSent" {
+                        if *self.net_capture.lock().await {
+                            if let Some(u) = v
+                                .get("params")
+                                .and_then(|p| p.get("request"))
+                                .and_then(|r| r.get("url"))
+                                .and_then(|u| u.as_str())
+                            {
+                                self.net_urls.lock().await.push(u.to_string());
                             }
                         }
                     }
                 }
-                Some(Ok(_)) => continue,
-                Some(Err(e)) => anyhow::bail!("CDP read error: {e}"),
-                None => anyhow::bail!("CDP connection closed"),
             }
         }
     }
@@ -1602,6 +1695,48 @@ async fn resolve_node_id(b: &CdpBackend, index: usize) -> Option<i64> {
     Some(node_id)
 }
 
+/// Real-keystroke helpers for type_text_delayed: map a char to its
+/// Input.dispatchKeyEvent `code` (KeyA / Digit1 / Space ...) and Windows VK.
+fn char_key_code(c: char) -> String {
+    match c {
+        'a'..='z' => format!("Key{}", c.to_ascii_uppercase()),
+        'A'..='Z' => format!("Key{}", c),
+        '0'..='9' => format!("Digit{}", c),
+        ' ' => "Space".to_string(),
+        '-' => "Minus".to_string(),
+        '=' => "Equal".to_string(),
+        '[' => "BracketLeft".to_string(),
+        ']' => "BracketRight".to_string(),
+        '\\' => "Backslash".to_string(),
+        ';' => "Semicolon".to_string(),
+        '\'' => "Quote".to_string(),
+        ',' => "Comma".to_string(),
+        '.' => "Period".to_string(),
+        '/' => "Slash".to_string(),
+        '`' => "Backquote".to_string(),
+        _ => String::new(),
+    }
+}
+fn char_vk(c: char) -> i64 {
+    match c {
+        ' ' => 32,
+        '0'..='9' => c as i64,
+        'a'..='z' | 'A'..='Z' => c.to_ascii_uppercase() as i64,
+        '-' => 189,
+        '=' => 187,
+        '[' => 219,
+        ']' => 221,
+        '\\' => 220,
+        ';' => 186,
+        '\'' => 222,
+        ',' => 188,
+        '.' => 190,
+        '/' => 191,
+        '`' => 192,
+        _ => 0,
+    }
+}
+
 // ── agent-browser borrows: select / hover / check / dialog / wait / upload ──
 impl CdpBackend {
     /// Select a `<select>` option by value OR visible text (agent-browser
@@ -1946,17 +2081,34 @@ impl BrowserBackend for CdpBackend {
         delay_ms: u64,
     ) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
-        // Focus+clear once, then Input.insertText per character with a delay —
-        // human-like keystroke pacing (browsemind press_sequentially 40-120ms).
-        // Google flags a whole-string insertText as scripted.
+        // Focus+clear once, then REAL per-key keystrokes via
+        // Input.dispatchKeyEvent (browsemind press_sequentially). NOT
+        // Input.insertText: insertText is a paste/IME insert with NO
+        // keydown/keyup events — Chrome documents it as "text that doesn't
+        // come from a key press", and Google's controlled input flags it as
+        // non-human. Real typing = keyDown(key,text)+keyUp per character.
         if focus_clear(self, index).await.is_ok() {
             for c in text.chars() {
-                if self
-                    .send_cmd("Input.insertText", json!({ "text": c.to_string() }))
-                    .await
-                    .is_err()
+                let key = c.to_string();
+                let code = char_key_code(c);
+                let vk = char_vk(c);
+                let mut down = json!({
+                    "type": "keyDown", "key": key, "text": key, "unmodifiedText": key
+                });
+                let mut up = json!({ "type": "keyUp", "key": key });
+                if !code.is_empty() {
+                    down["code"] = json!(code);
+                    up["code"] = json!(code);
+                }
+                if vk > 0 {
+                    down["windowsVirtualKeyCode"] = json!(vk);
+                    down["nativeVirtualKeyCode"] = json!(vk);
+                    up["windowsVirtualKeyCode"] = json!(vk);
+                }
+                if self.send_cmd("Input.dispatchKeyEvent", down).await.is_err()
+                    || self.send_cmd("Input.dispatchKeyEvent", up).await.is_err()
                 {
-                    return self.type_text(index, text).await; // fallback
+                    return self.type_text(index, text).await; // fallback (no Input.* engine)
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }

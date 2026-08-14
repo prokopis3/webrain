@@ -33,10 +33,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engines paginate. Note: bing/ddg cap anonymous requests at ~10 and ignore
   `count`/`first`/`s` on a GeoIP-locked IP — route `--proxy <clean-IP>` for
   larger limits and deterministic markets.
+- **cli**: `webrain serp` **default = warm persistent profile + session** (the
+  skill's real google-bypass path) — the auto-launched Chrome now stays alive on
+  `9222` between runs (`std::mem::forget` the launch handle so `Drop::kill()`
+  never runs), warming consent/session cookies into a trusted Google profile.
+  `--fresh` becomes the explicit opt-out for deterministic consent every run.
 - **cli**: `webrain serp --fresh` (google) — always launches a **brand-new
   profile + cookies** on a free port (never attaches a warm browser), so the
   consent modal always renders and is always dismissed before the humanized
   flow (deterministic anti-bot; a stale profile's cookies are never trusted).
+- **core**: google browser path — browsemind-parity anti-bot hardening:
+  - **Consent dismissed by a TRUSTED CDP click**, language-independent
+    (browsemind `ConsentManager` recipe): phase 1 matches accept/reject buttons
+    by a broad multilingual list (never "Sign in"/"Σύνδεση"), phase 2 falls back
+    to the last button in `[role=dialog]` (Google's accept is last). Verified
+    live: clicks "Tout refuser" / "Απόρριψη όλων" in any locale.
+  - **Human-like behavior = browsemind's**: trusted CDP `Input.dispatchKeyEvent`
+    per-key typing (NOT `Input.insertText` — a paste/IME insert with no
+    keydown/keyup, flagged as non-human), trusted `Input.dispatchMouseEvent`
+    moves before/during/after consent + into the search box, and randomized
+    delays (`jitter()`, 40-120ms keystrokes / 1-2s reads) instead of fixed ones
+    (fixed timing is a fingerprint).
+  - **Plain Chrome launch** for google (no `--disable-blink-features=
+    AutomationControlled` suppression flags — detectable; CDP-level masking
+    covers webdriver). No hard-reload after navigate (bot pattern + doubled
+    requests). Retries run in a FRESH TAB.
+  - **False-success guard**: a walled `/search` (0 organic `#rso h3`) is no
+    longer reported as results (the old fake "Gmail" artifact); it tries one
+    direct `/search?q=` then falls back honestly.
+  - **`--hold`** keeps the launched Chrome open after the search so you can
+    watch it (press Enter to close).
+- **core, cli**: `--remote-debugging-pipe` support (`--fresh --pipe`) — launch
+  google via CDP-over-stdin/stdout with NO listening debugging port (the open
+  port is the automation fingerprint Google walls on `/sorry`). `connect_pipe`
+  shares the WS payload-channel abstraction. NOTE: Chrome's pipe CDP is broken
+  on Windows ("Remote debugging pipe file descriptors are not open") — works on
+  Linux/macOS; on Windows the flow falls back to the other engines.
+- **core**: `connect_default` treats an empty `CDP_URL` as unset (falls back to
+  `9222`) so a warm persistent session is actually re-attached instead of the
+  caller wrongly re-launching into a busy port.
 - **core, cli**: optional 2captcha CAPTCHA solving (open-serp recipe) — new
   `webrain_core::captcha` module (ureq only, no new dep): extract `data-sitekey`
   + `data-s` from a Google `/sorry` wall, solve via `2captcha.com` with the same

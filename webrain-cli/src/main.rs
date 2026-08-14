@@ -196,10 +196,10 @@ fn main() -> anyhow::Result<()> {
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 println!(
-                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh]"
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--hold]"
                 );
                 println!(
-                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached (CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to always start a brand-new profile + cookies so the consent modal always appears and is dismissed)"
+                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
                 );
                 return Ok(());
             }
@@ -225,6 +225,11 @@ fn main() -> anyhow::Result<()> {
             // attach a warm browser) so the consent modal ALWAYS appears and is
             // always dismissed — the deterministic anti-bot recipe.
             let fresh = args.contains(&"--fresh".to_string());
+            // --pipe: launch the fresh google Chrome via `--remote-debugging-pipe`
+            // (stdin/stdout, NO open debugging port) — an open debugging port is
+            // the automation fingerprint Google walls on /sorry; a pipe-launched
+            // Chrome has none. Only meaningful with --fresh.
+            let pipe = args.contains(&"--pipe".to_string());
             let opts = webrain_core::serp::SerpOpts {
                 query: query.trim().to_string(),
                 engine,
@@ -243,6 +248,11 @@ fn main() -> anyhow::Result<()> {
             // accumulates Google consent/session cookies over runs and becomes
             // trusted (the warm-up that made serp_test work), headed or
             // headless alike. The browser stays alive as a warm session.
+            // --hold keeps the FRESH browser alive past the search so you can
+            // watch it; only fresh holds — the warm 9222 profile keeps its
+            // warm-session persistence.
+            let hold = args.contains(&"--hold".to_string());
+            let mut _launched: Option<webrain_core::launch::Launched> = None;
             let backend = if opts.engine == "brave" || opts.engine == "google" {
                 if fresh && opts.engine == "google" {
                     // --fresh: a brand-new profile dir + unique port every run —
@@ -250,21 +260,45 @@ fn main() -> anyhow::Result<()> {
                     // CONSENT_DISMISS_JS always dismisses it before the humanized
                     // flow. Never touches a running 9222 chrome.
                     let prof_name = format!("google_fresh_{}_{}", chrono_now(), std::process::id());
-                    let port = pick_free_port(9230);
-                    let launched = match proxy.as_deref() {
-                        Some(p) => webrain_core::launch::launch_chrome_with_proxy(
-                            "serp", &prof_name, port, !headless, p,
-                        )?,
-                        None => webrain_core::launch::launch_chrome(
-                            "serp", &prof_name, port, !headless,
-                        )?,
-                    };
-                    println!(
-                        "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
-                        launched.profile_dir.display(),
-                        launched.cdp_url
-                    );
-                    Some(rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?)
+                    if pipe {
+                        // --remote-debugging-pipe: CDP over stdin/stdout, no
+                        // listening port -> no open-debugger fingerprint (the
+                        // thing that walls google). The child is owned by
+                        // connect_pipe and killed when the run ends.
+                        if proxy.is_some() {
+                            anyhow::bail!("--fresh --pipe does not support --proxy (pipe Chrome can't bake --proxy-server here)");
+                        }
+                        let child = rt.block_on(webrain_core::launch::launch_chrome_pipe(
+                            "serp", &prof_name, !headless,
+                        ))?;
+                        println!(
+                            "launched FRESH chrome via --remote-debugging-pipe (no debugging port -> no open-debugger fingerprint): profile serp/{}",
+                            prof_name
+                        );
+                        Some(rt.block_on(CdpBackend::connect_pipe(child))?)
+                    } else {
+                        let port = pick_free_port(9230);
+                        let launched = match proxy.as_deref() {
+                            Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
+                                "serp", &prof_name, port, !headless, p,
+                            )?,
+                            None => webrain_core::launch::launch_chrome_plain(
+                                "serp", &prof_name, port, !headless,
+                            )?,
+                        };
+                        println!(
+                            "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
+                            launched.profile_dir.display(),
+                            launched.cdp_url
+                        );
+                        // keep it alive for the whole run (+ --hold) so the headed
+                        // window actually stays visible — dropping `Launched` kills
+                        // Chrome, which was tearing the window down right after connect.
+                        _launched = Some(launched);
+                        Some(rt.block_on(CdpBackend::connect_with_url(
+                            _launched.as_ref().expect("fresh launched").cdp_url.as_str(),
+                        ))?)
+                    }
                 } else {
                     match rt.block_on(CdpBackend::connect_default()) {
                         Ok(b) => Some(b),
@@ -273,21 +307,28 @@ fn main() -> anyhow::Result<()> {
                             // the google browser path egresses through the proxy (IP rotation
                             // on a walled IP). No proxy -> plain persistent-profile launch.
                             let launched = match proxy.as_deref() {
-                                Some(p) => webrain_core::launch::launch_chrome_with_proxy(
+                                Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
                                     "serp", "google", 9222, !headless, p,
                                 )?,
-                                None => {
-                                    webrain_core::launch::launch_chrome("serp", "google", 9222, !headless)?
-                                }
+                                None => webrain_core::launch::launch_chrome_plain(
+                                    "serp", "google", 9222, !headless,
+                                )?,
                             };
                             println!(
                                 "launched chrome: {} (CDP_URL={})",
                                 launched.profile_dir.display(),
                                 launched.cdp_url
                             );
-                            // keep the child alive (dropping Child doesn't kill);
-                            // the profile dir persists and warms between runs.
-                            Some(rt.block_on(CdpBackend::connect_with_url(&launched.cdp_url))?)
+                            // WARM PERSISTENT SESSION — the skill's real
+                            // google-bypass path (references/challenges.md).
+                            // Forget the handle so Drop::kill() never runs: the
+                            // browser STAYS alive on 9222 between runs and warms
+                            // up (consent/session cookies accumulate until it's
+                            // "trusted"). `--fresh` is the explicit opt-out for
+                            // deterministic consent every run.
+                            let url = launched.cdp_url.clone();
+                            std::mem::forget(launched);
+                            Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
                         }
                         Err(e) => return Err(e),
                     }
@@ -321,6 +362,13 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => println!("error: {e}"),
+            }
+            // --hold: keep the fresh browser up so you can inspect it; close on
+            // Enter (dropping `_launched` kills Chrome).
+            if hold && _launched.is_some() {
+                println!("[--hold] browser open — inspect the Chrome window, then press Enter to close it");
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
             }
         }
         Some("install") => {
