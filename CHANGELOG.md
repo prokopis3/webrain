@@ -18,14 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **cli**: bare `webrain` (double-click the exe, no command) **and** `webrain
-  launch` with no args open the user's **default Chrome** at google.com —
-  exactly like double-clicking Chrome.exe: no automation flags, no
+- **cli**: `webrain launch` with no args opens the user's **default Chrome** at
+  google.com — exactly like double-clicking Chrome.exe: no automation flags, no
   temp/persistent profile, real profile (bookmarks/sign-in) so it does NOT look
-  incognito — instead of starting the MCP stdio server / printing usage.
-  Explicit `webrain launch <service> <profile>` keeps the persistent-profile
-  CDP launch (the `webrain login` flow); explicit `webrain mcp` is unchanged
-  (all MCP configs/docs/Docker pass `mcp` explicitly, so they're unaffected).
+  incognito. Bare `webrain` (no args) keeps the MCP stdio default (Docker's
+  `ENTRYPOINT ["webrain"]`); explicit `webrain launch <service> <profile>`
+  keeps the persistent-profile CDP launch (the `webrain login` flow). All MCP
+  configs/docs/Docker pass `mcp` explicitly, so they're unaffected.
 - **core**: SERP market defaulting — `engine_url` pins an **en-US market**
   when no `region` is given instead of letting the engine GeoIP the request (a
   localized IP turned `tokio rust` into Czech/Italian/Greek travel or banking

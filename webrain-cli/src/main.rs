@@ -27,9 +27,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("mcp") => {
-            // `webrain mcp` = stdio; `webrain mcp --http <port>` = HTTP transport
-            // with per-connection sessions (lightpanda mcp --port style).
+        Some("mcp") | None => {
+            // `webrain mcp` = stdio (also the no-arg default: Docker's
+            // `ENTRYPOINT ["webrain"]`); `webrain mcp --http <port>` = HTTP
+            // transport with per-connection sessions (lightpanda mcp --port style).
             let http_port: Option<String> = args
                 .iter()
                 .position(|a| a == "--http")
@@ -510,14 +511,13 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         }
-        Some("launch") | None => {
+        Some("launch") => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // Bare `webrain` (double-click the exe) or `webrain launch` with no
-            // args opens the user's DEFAULT Chrome at url — exactly like
-            // double-clicking Chrome.exe: no flags, no temp/persistent profile,
-            // real profile (bookmarks/sign-in) so it does NOT look incognito.
-            // Explicit service/profile = persistent-profile CDP launch (the
-            // Channel A login flow used by `webrain login`).
+            // `webrain launch` with no args opens the user's DEFAULT Chrome at
+            // url — exactly like double-clicking Chrome.exe: no flags, no
+            // temp/persistent profile, real profile (bookmarks/sign-in) so it
+            // does NOT look incognito. Explicit service/profile = persistent-
+            // profile CDP launch (the Channel A login flow used by `webrain login`).
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
             let url = args
