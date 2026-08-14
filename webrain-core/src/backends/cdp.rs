@@ -2536,8 +2536,32 @@ impl BrowserBackend for CdpBackend {
     /// pattern (accept/reject, language-independent — never "Sign in").
     /// Phase 2: the last visible button/link (Google's accept/reject sits at
     /// the dialog's end). Returns (x, y, tag).
+    ///
+    /// PONytail latency gate: getFullAXTree on a heavy page (Google SERP is a
+    /// huge DOM) serializes the ENTIRE accessibility tree over CDP — measured
+    /// ~3.5s/call. When there's no consent overlay that's pure waste, and the
+    /// caller may poll this many times. So first run a CHEAP DOM querySelector
+    /// gate (comma-list of known consent containers, ~1ms); only when an
+    /// overlay exists do the expensive full-AX-tree button hunt.
     async fn consent_button(&self, patterns: &[&str]) -> Option<(i64, i64, String)> {
         self.ensure_page_attached().await.ok()?;
+        // DOM gate: no consent container → no overlay → return fast, no AX walk.
+        let doc = self
+            .send_cmd("DOM.getDocument", json!({"depth": 0}))
+            .await
+            .ok()?;
+        let root = doc["root"]["nodeId"].as_i64()?;
+        let gate = "div[role='dialog'], #yDmH0d, form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent']";
+        let hit = self
+            .send_cmd(
+                "DOM.querySelector",
+                json!({"nodeId": root, "selector": gate}),
+            )
+            .await
+            .ok()?;
+        if hit["nodeId"].as_i64().unwrap_or(0) == 0 {
+            return None;
+        }
         let tree = self
             .send_cmd("Accessibility.getFullAXTree", json!({}))
             .await

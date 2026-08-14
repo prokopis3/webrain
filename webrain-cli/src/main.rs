@@ -315,11 +315,15 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     match rt.block_on(CdpBackend::connect_default()) {
                         Ok(b) => Some(b),
-                        Err(_) if opts.engine == "google" => {
-                            // GUEST MODE: fresh ephemeral google session every run
-                            // (--proxy bakes --proxy-server in when set).
+                        Err(_) if opts.engine == "google" || opts.engine == "brave" => {
+                            // GUEST MODE auto-launch for BOTH browser engines
+                            // (--proxy bakes --proxy-server in when set): fresh
+                            // ephemeral session every run — zero persisted
+                            // cookies/history. ddg/bing never reach this branch
+                            // (backend = None, pure HTTP).
+                            let prof = if opts.engine == "google" { "google" } else { "brave" };
                             let launched = webrain_core::launch::launch_chrome_guest(
-                                "serp", "google", 9222, !headless, proxy.as_deref(),
+                                "serp", prof, 9222, !headless, proxy.as_deref(),
                             )?;
                             println!(
                                 "launched chrome (guest): {} (CDP_URL={})",

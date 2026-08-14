@@ -18,6 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **core**: serp **google guest flow = direct search URL + pagination** — the
+  browser path navigates straight to `engine_url`'s `/search?q=..&start=..&num=..`
+  (no homepage→type→submit) and merges `start=(page*10)` pages exactly like
+  `http_search`, so `--limit 20` / `--page 2` return more than one 10-result
+  page (dedupe + renumber + truncate). Walled `/sorry` pages add nothing → stop
+  early → the existing retry/fallback chain takes over.
+- **core**: SERP **consent-dismissal latency fix** — `consent_button` now runs a
+  cheap DOM `querySelector` gate (known consent containers) before the expensive
+  `Accessibility.getFullAXTree` walk, and `dismiss_google_consent` fast-polls
+  (150ms, ≤1.2s) firing the TRUSTED click the instant the overlay renders.
+  Previously a no-consent page paid 12 × getFullAXTree ≈ **42s**; now ~1.2s max.
+  Also cut the google results wait beat to 1.2s (navigate already waits for
+  interactive). Verified: `serp --engine google --limit 10` ≈ **6s / 10 results**
+  (was ~45.5s).
+- **cli, mcp**: **brave guest auto-launch** — brave now auto-launches guest
+  Chrome on 9222 like google (ddg/bing stay pure HTTP, no browser). MCP
+  `webrain_serp` routes google|brave through the guest-browser backend
+  (auto-launch on connect failure; google sets `WEBRAIN_NO_STEALTH=1` like the
+  CLI), while ddg|bing|auto stay HTTP; tool descriptions + browser-required
+  guards updated.
+
 - **cli**: `webrain launch` with no args opens Chrome in **GUEST MODE**
   (`--guest`) at google.com — a clean, ephemeral session with no profile state
   (no bookmarks/sign-in/history, nothing persisted). The **serp google

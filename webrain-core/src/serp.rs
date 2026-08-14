@@ -668,7 +668,7 @@ fn jitter(a: u64, b: u64) -> u64 {
 /// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
 /// discovery goes through the accessibility tree + DOM quads
 /// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
-/// click itself is Input.dispatchMouseEvent. Waits up to ~5s for the overlay.
+/// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
 const CONSENT_PATTERNS: &[&str] = &[
     "accept", "agree", "consent", "allow", "got it", "i understand",
     "zustimmen", "akzeptieren", "accepter", "aceptar", "accetto", "aceitar",
@@ -678,26 +678,20 @@ const CONSENT_PATTERNS: &[&str] = &[
     "απόρριψη",
 ];
 async fn dismiss_google_consent<B: BrowserBackend>(backend: &B) -> String {
-    let mut consent = "none".to_string();
-    let mut dismissed = false;
-    for _ in 0..12 {
-        match backend.consent_button(CONSENT_PATTERNS).await {
-            Some((x, y, tag)) => {
-                let _ = backend.mouse_move_human(x, y).await;
-                let _ = backend.click_coords(x, y).await;
-                if !dismissed {
-                    dismissed = true;
-                    consent = format!("clicked:{}", tag.chars().take(24).collect::<String>());
-                }
-                tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // dialog closes
-            }
-            None if dismissed => break, // dialog gone -> done
-            None => {
-                tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // keep waiting
-            }
+    // ponytail ultra: fire the TRUSTED click the instant the overlay renders.
+    // consent_button is DOM-gated (~1ms when no overlay), so poll fast (150ms)
+    // up to ~1.2s and click the moment a button appears — no long waits, no
+    // 12× AX scans (that was ~42s). The dialog closes on its own; the caller's
+    // wait_for_results beat covers the close.
+    for _ in 0..8 {
+        if let Some((x, y, tag)) = backend.consent_button(CONSENT_PATTERNS).await {
+            let _ = backend.mouse_move_human(x, y).await;
+            let _ = backend.click_coords(x, y).await;
+            return format!("clicked:{}", tag.chars().take(24).collect::<String>());
         }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    consent
+    "none".to_string()
 }
 
 /// search URL for google. Then we WAIT for the results page before parsing
@@ -708,148 +702,79 @@ async fn browser_search<B: BrowserBackend>(
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
     if engine == "google" {
-        backend.navigate("https://www.google.com").await?;
-        // NO hard reload — a human opens the homepage once and searches. A
-        // Ctrl+Shift+R right after navigate is a blatant bot pattern AND
-        // doubles the request volume. Verified: a plain browser on this same
-        // IP gets real results with a single navigation (only the consent
-        // dialog appears, which the trusted two-phase click dismisses).
-        // The consent dialog + page JS render AFTER load — a human lets the
-        // page settle before touching it: a fixed beat instead of a readyState
-        // poll (no page-JS evaluate; trusted commands only).
-
-        // No 2captcha in-page solve here: it needs Runtime.evaluate (sitekey
-        // read + token inject) — this is the trusted-commands-only google flow.
-        // A walled /sorry just falls through to the retry/fallback chain.
-
-        // Trusted human-like pre-interaction (browsemind random_mouse_move) —
-        // CDP mouseMoved steps to random points, NOT synthetic
-        // document.dispatchEvent (isTrusted=false is a detectable automation
-        // marker). Runs on the loaded page BEFORE the consent click so the
-        // consent click reads as a human who already moved the mouse.
-        for _ in 0..3 {
-            let _ = backend
-                .mouse_move_human(jitter(120, 700) as i64, jitter(80, 400) as i64)
-                .await;
-            tokio::time::sleep(Duration::from_millis(jitter(120, 320))).await;
-        }
-        // TRUSTED wheel scroll (Input.dispatchMouseEvent mouseWheel) — a human
-        // scrolls with the wheel, not window.scrollTo (JS, non-human signal).
-        let _ = backend.scroll("down").await;
-        // Consent dismissal = TRUSTED CDP click (see dismiss_google_consent):
-        // browsemind's ConsentManager recipe, language-independent by structure.
-        let consent = dismiss_google_consent(backend).await;
-        // Self-heal via current_url (Page.getFrameTree — no evaluate): if a
-        // click ever lands on a sign-in/account page, go back to the homepage
-        // and let the flow continue instead of dead-ending into the fallback.
-        if let Some(u) = backend.current_url().await {
-            if u.contains("accounts.google") || u.contains("myaccount.google") {
-                backend.navigate("https://www.google.com").await?;
-                tokio::time::sleep(Duration::from_millis(1200)).await;
-            }
-        }
-        // Human-like mouse move AGAIN after the consent modal is gone — a real
-        // user closes the dialog, then drifts the cursor toward the search box.
-        for _ in 0..2 {
-            let _ = backend
-                .mouse_move_human(jitter(120, 700) as i64, jitter(80, 400) as i64)
-                .await;
-            tokio::time::sleep(Duration::from_millis(jitter(150, 350))).await;
-        }
-        tracing::debug!(%consent, "google consent dismiss");
-        // Human pacing: read the page a beat before typing. A script types in
-        // <1s after load; a human takes seconds — manual searches in the same
-        // browser/IP pass while the instant automation walls. This is the delay
-        // that was missing.
-        tokio::time::sleep(Duration::from_millis(jitter(1200, 2200))).await;
-
-        // Find the search box via the DOM domain (no evaluate) and click it
-        // like a human, then type with TRUSTED per-key Input.dispatchKeyEvent.
-        // JS .value= + synthetic Event is ignored by Google's controlled input.
-        if let Some((bx, by)) = backend
-            .element_center("textarea[name='q'], input[name='q'], [role='searchbox']")
-            .await
-        {
-            // Move the pointer to the box and click it like a human — a real
-            // CDP click into the field reads as a human; JS focus() alone is a
-            // weaker trust signal.
-            let _ = backend.mouse_move_human(bx, by).await;
-            let _ = backend.click_coords(bx, by).await;
-            tokio::time::sleep(Duration::from_millis(jitter(200, 400))).await;
-            // Type character-by-character with human keystroke pacing
-            // (40-120ms) into the focused field — no evaluate.
-            let _ = backend.type_focused(&opts.query, jitter(40, 120)).await;
-            // Pause after typing before committing (human reviews the query).
-            tokio::time::sleep(Duration::from_millis(jitter(300, 600))).await;
-        }
-
-        // The search button's label is localized in every language — never match
-        // it by name (a keyword list will always miss some locale). The UNIQUE
-        // language-independent handle is the search form's submit button:
-        // `type="submit"` is not localized anywhere. Google keeps a hidden
-        // JS-less submit (input[name=btnK]) BEFORE the visible one in the DOM,
-        // so iterate ALL candidates and take the first with a real rect. The
-        // button only renders after the query registers, so poll up to the same
-        // budget as wait_for_results below.
-        // Click the (localized-label-free) submit control until navigation
-        // actually starts — discovered via the DOM domain (no evaluate), the
-        // click itself trusted Input. The button reveals a beat after trusted
-        // typing; Google sometimes ignores the first click. Bound ~6s; stop
-        // early on the /sorry bot wall.
-        let submit_css = "form[action*='search'] input[type='submit'], form[action*='search'] button[type='submit'], input[type='submit'], button[type='submit'], [role='option']";
-        for _ in 0..20 {
-            if let Some(u) = backend.current_url().await {
-                if u.contains("/search") || u.contains("sorry") || u.contains("captcha") {
-                    break;
-                }
-            }
-            if let Some((x, y)) = backend.element_center(submit_css).await {
-                // Travel to the button like a human pointer, then trusted-click.
-                let _ = backend.mouse_move_human(x, y).await;
-                let _ = backend.click_coords(x, y).await;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-        // If the click never left the homepage, this attempt is a dead end
-        // (walled IP / swallowed click / consent redirect): a homepage has no
-        // results, and the 12s wait for a /search URL that will never come is
-        // the whole slowness. Return empty so the retry/fallback chain takes
-        // over immediately instead of burning the wait budget.
-        let on_results = backend
-            .current_url()
-            .await
-            .map(|u| u.contains("/search"))
-            .unwrap_or(false);
-        if !on_results {
-            return Ok(Vec::new());
-        }
-        wait_for_results(backend, "google").await?;
-        // A walled /search still matches `on_results` (URL has /search) but has
-        // 0 organic results — parsing it yields nav-link junk. Require REAL
-        // results; if absent, try ONE direct /search?q= navigation, else give
-        // up honestly (fallback chain takes over). The result-count check is
-        // the parse itself — no evaluate.
-        let html = backend.get_html().await?;
-        let results = dedupe_cap(parse_results("google", &html, opts.limit), opts.limit);
-        if results.is_empty() {
+        // Direct search-URL + pagination (the guest-google flow): navigate
+        // straight to engine_url's /search?q=..&start=..&num=.. (the same shape
+        // a human's Chrome address bar produces) instead of homepage→type→submit,
+        // and merge `start` pages exactly like http_search does for HTTP engines
+        // so `--limit 30` / `--page 2` return more than one 10-result page.
+        //
+        // Trusted-only: no page-JS evaluate (wait_for_results is a fixed beat
+        // for google), no injected stealth (CLI sets WEBRAIN_NO_STEALTH for
+        // google). Human-like mouse + wheel + consent stay trusted CDP input so
+        // the direct URL doesn't read as a script. Walled /sorry pages yield 0
+        // organic results → fresh==0 → stop early → the retry/fallback chain in
+        // specific_engine takes over.
+        let mut all: Vec<SerpResult> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        // 50 max / ~10 per page; bounded so a hostile wall can't loop forever.
+        let max_pages = (opts.limit / 10).clamp(1, 5);
+        for page in opts.page..opts.page + max_pages {
+            let t0 = std::time::Instant::now();
             let url = engine_url(
                 "google",
                 &opts.query,
-                opts.page,
+                page,
                 opts.safe,
                 opts.region.as_deref(),
                 opts.limit,
             )?;
             backend.navigate(&url).await?;
-            let _ = dismiss_google_consent(backend).await;
+            // Consent FIRST — fire the TRUSTED click the instant the overlay
+            // renders (fast poll, ~1.2s max, DOM-gated ~1ms when none). Never
+            // let a consent wall block the parse.
+            let consent = dismiss_google_consent(backend).await;
+            tracing::debug!(%consent, "google consent dismiss");
+            // Human settle beat before touching the page (no readyState eval).
+            tokio::time::sleep(Duration::from_millis(jitter(150, 250))).await;
+            // Trusted human-like pre-interaction (browsemind random_mouse_move)
+            // — CDP mouseMoved, NOT synthetic dispatch (isTrusted=false is a
+            // detectable automation marker), then TRUSTED wheel scroll.
+            let _ = backend
+                .mouse_move_human(jitter(120, 700) as i64, jitter(80, 400) as i64)
+                .await;
+            let _ = backend.scroll("down").await;
+            // Self-heal via current_url (Page.getFrameTree — no evaluate): never
+            // dead-end on a sign-in/account page.
+            if let Some(u) = backend.current_url().await {
+                if u.contains("accounts.google") || u.contains("myaccount.google") {
+                    backend.navigate("https://www.google.com").await?;
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                }
+            }
+            // Wait for the results DOM to render (fixed beat — no eval).
             wait_for_results(backend, "google").await?;
-            tokio::time::sleep(Duration::from_millis(jitter(800, 1400))).await;
             let html = backend.get_html().await?;
-            return Ok(dedupe_cap(parse_results("google", &html, opts.limit), opts.limit));
+            let rs = dedupe_cap(parse_results("google", &html, opts.limit), opts.limit);
+            let mut fresh = 0usize;
+            for r in rs {
+                if seen.insert(dedupe_key(&r.url)) {
+                    all.push(r);
+                    fresh += 1;
+                }
+            }
+            tracing::debug!(page, fresh, total = all.len(), html_len = html.len(), ms = t0.elapsed().as_millis(), "google serp page");
+            if all.len() >= opts.limit || fresh == 0 {
+                break; // enough results, or this page added nothing new (wall/repeat)
+            }
+            // Short human pacing between page turns (wall insurance on
+            // pagination, but keep it fast).
+            tokio::time::sleep(Duration::from_millis(jitter(500, 900))).await;
         }
-        // Google can render the same result in nested/duplicate containers —
-        // dedupe by normalized URL + renumber (dedupe_cap) like the HTTP paths.
-        return Ok(results);
+        for (i, r) in all.iter_mut().enumerate() {
+            r.position = i + 1;
+        }
+        all.truncate(opts.limit);
+        return Ok(all);
     }
 
     let url = engine_url(
@@ -874,10 +799,10 @@ async fn browser_search<B: BrowserBackend>(
 /// parse the wall (0 results) instead of waiting for the real results.
 async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyhow::Result<()> {
     if engine == "google" {
-        // TRUSTED (no page-JS evaluate): Google streams results in over ~1s —
-        // settle a fixed beat. The caller's parse-empty guard catches a
-        // still-wall/empty page.
-        tokio::time::sleep(Duration::from_millis(2500)).await;
+        // TRUSTED (no page-JS evaluate): navigate already waited for
+        // readyState=interactive; results stream ~1s later — a short fixed
+        // beat. The caller's parse-empty guard catches a still-wall/empty page.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
         return Ok(());
     }
     let sel = match engine {
