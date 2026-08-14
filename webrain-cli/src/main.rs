@@ -513,17 +513,15 @@ fn main() -> anyhow::Result<()> {
         Some("launch") | None => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
             // Spawns a Chrome with a persistent per-account profile and opens the
-            // site so the human can log in (Channel A). Bare `webrain` — i.e.
-            // double-clicking the exe with no command — does the same with
-            // defaults: service=web, profile=default, url=google.com.
-            let bare = args.get(1).is_none();
+            // site so the human can log in (Channel A). Bare `webrain` (double-click
+            // the exe) or `webrain launch` with no args both do the DEFAULT launch:
+            // service=web, profile=default, url=google.com.
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
-            let url = args.get(4).map(|s| s.as_str()).unwrap_or(if bare {
-                "https://www.google.com"
-            } else {
-                "https://accounts.google.com"
-            });
+            let url = args
+                .get(4)
+                .map(|s| s.as_str())
+                .unwrap_or("https://www.google.com");
             let headless = args.contains(&"--headless".to_string());
             let port: u16 = args
                 .iter()
@@ -531,10 +529,6 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(9222);
-            if (service.is_empty() || profile.is_empty()) && !bare {
-                println!("usage: webrain launch <service> <profile> [url] [--headless] [--port N]");
-                return Ok(());
-            }
             let service = if service.is_empty() { "web" } else { &service };
             let profile = if profile.is_empty() { "default" } else { &profile };
             let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;
