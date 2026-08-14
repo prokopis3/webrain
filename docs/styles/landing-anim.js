@@ -146,6 +146,8 @@
     { sel: '.landing .faq-item', anim: 'rise' },
     { sel: '.landing .bench-stats', anim: 'rise' },
     { sel: '.landing .benchmark-visual', anim: 'fade' },
+    { sel: '.landing .serp-cap', anim: 'cell' },
+    { sel: '.landing .serp-term', anim: 'fade' },
     { sel: '.landing .loop', anim: 'fade' },
     { sel: '.landing .steps-flow', anim: 'fade' },
     { sel: '.landing .cta-band', anim: 'rise' }
@@ -172,6 +174,7 @@
     if (el.classList.contains('shell')) revealCellInner(el, i);
     if (el.classList.contains('loop')) playLoopCircuit(el);
     if (el.classList.contains('steps-flow')) playStepsFlow(el);
+    if (el.classList.contains('serp-term')) playSerpTerm(el);
     if (type === 'check') {
       var p = el.querySelector('.tick svg path');
       if (p) {
@@ -181,7 +184,7 @@
         anime({ targets: p, strokeDashoffset: [len, 0], duration: 480, delay: i * 70 + 220, easing: 'easeOutCubic' });
       }
     }
-    if (el.classList.contains('bench-stats')) runCounters(el);
+    if (el.querySelector('.bench-stat, .serp-stat')) runCounters(el);
   }
 
   // Layered entrance inside a bento cell: icon pop, then a cascade of the
@@ -293,6 +296,54 @@
     }
   }
 
+  /* ---------------- the SERP terminal (structured search showcase) ----------------
+     Runs once per page load (serpPlayed guard, like the hero's `played`): hides
+     the animated internals, then streams command lines, cascades typed result
+     rows, pops the JSON card, and counts up the stat chips. Reduced-motion / no
+     anime / post-render passes leave the static markup fully visible. */
+  var serpPlayed = false;
+  function playSerpTerm(shell) {
+    if (REDUCE || !shell || !window.anime || serpPlayed) return;
+    serpPlayed = true;
+    var body = shell.querySelector('.serp-term-body') || shell;
+    var lines = body.querySelectorAll('.serp-lines .term-line');
+    var rows = body.querySelectorAll('.serp-row');
+    var json = body.querySelector('.serp-json');
+    var stats = body.querySelector('.serp-stats');
+    var animated = [].slice.call(lines).concat(Array.prototype.slice.call(rows));
+    if (json) animated.push(json);
+    if (stats) animated.push(stats);
+    anime.set(animated, { opacity: 0, translateY: 8 });
+    // stream the command lines, then cascade the results, then JSON + counters
+    anime({
+      targets: lines, opacity: [0, 1], translateY: [6, 0], duration: 380,
+      delay: anime.stagger(240), easing: 'easeOutCubic',
+      complete: function () {
+        anime({
+          targets: rows, opacity: [0, 1], translateY: [12, 0], duration: 420,
+          delay: anime.stagger(110), easing: 'easeOutCubic',
+          complete: function () {
+            if (json) {
+              anime({
+                targets: json, opacity: [0, 1], translateY: [10, 0], scale: [0.985, 1],
+                duration: 480, easing: 'easeOutCubic',
+                complete: function () {
+                  if (stats) {
+                    anime({ targets: stats, opacity: [0, 1], translateY: [10, 0], duration: 480, easing: 'easeOutCubic' });
+                    runCounters(stats);
+                  }
+                }
+              });
+            } else if (stats) {
+              anime({ targets: stats, opacity: [0, 1], translateY: [10, 0], duration: 480, easing: 'easeOutCubic' });
+              runCounters(stats);
+            }
+          }
+        });
+      }
+    });
+  }
+
   // Mintlify's React shell can rebuild the landing subtree after hydration
   // (wiping DOM-injected tags). This is idempotent and re-runnable: it re-tags
   // current nodes, pre-hides only ones not yet revealed, and re-observes. The
@@ -393,9 +444,9 @@
     el.replaceChildren(frag);
   }
 
-  // Count up a .bench-stat number (e.g. "42 products in 1.4s").
+  // Count up a .bench-stat / .serp-stat number (e.g. "42 products in 1.4s").
   function runCounters(scope) {
-    Array.prototype.forEach.call(scope.querySelectorAll('.bench-stat b[data-count]'), function (el) {
+    Array.prototype.forEach.call(scope.querySelectorAll('.bench-stat b[data-count], .serp-stat b[data-count]'), function (el) {
       var target = parseInt(el.getAttribute('data-count'), 10) || 0;
       var num = el.querySelector('.num') || el;
       var st = { v: 0 };
@@ -455,6 +506,18 @@
       card: {
         title: 'result.json · video',
         body: '{ "transcript": 47, "frames": 12, "vision": "Qwen3-VL-2B", "ok": true }'
+      }
+    },
+    serp: {
+      prompt: 'search "tokio rust" across 3 engines',
+      lines: [
+        { k: 'cmd', t: 'webrain_serp · engine=auto · limit=5', out: '→ duckduckgo + bing + google in parallel' },
+        { k: 'cmd', t: '… merged + deduped', out: '→ 5 unique · 2.1s · request_id serp-…' },
+        { k: 'cmd', t: 'webrain_serp · engine=brave', out: '→ rendered in the connected CDP engine' }
+      ],
+      card: {
+        title: 'result.json · 5 items',
+        body: '[ { "position": 1, "title": "Tokio", "url": "https://tokio.rs", "domain": "tokio.rs", "snippet": "…" }, … 4 more ]'
       }
     }
   };

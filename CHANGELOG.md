@@ -7,8 +7,193 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-15
+
+### Fixed
+
+- **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
+  `String::from_utf8_lossy` instead of ureq's charset-header-driven
+  `read_to_string`, which mis-decoded (latin-1) every non-ASCII char into
+  mojibake (`–` → `ΓÇô`). All engines serve UTF-8, so the lossy decode is
+  always correct; API/JSON consumers now get clean text (a legacy console/pipe
+  may still render UTF-8 as glyph soup — use `chcp 65001` or a UTF-8 terminal).
+- **core**: no more transient Chrome on HTTP serp runs — removed the
+  `chrome --version` UA probe (`chrome_ua_version` + `parse_chrome_ver`) that
+  spawned a visible Chrome window (with crashpad children) on every
+  duckduckgo/bing/auto invocation. UA/sec-ch-ua now use a static, internally
+  consistent `CHROME_UA_VER` constant: the probe's "real" version never matched
+  webrain's engine (Chrome for Testing, not system Chrome), and the HTTP path's
+  rustls TLS is identifiable regardless of UA. Also speeds up every no-browser
+  SERP call (no spawn + 5s watchdog).
+- **core**: serp **brave pagination fixed** — Brave's `offset` is page-indexed
+  (0, 1, 2, ...), not result-indexed: its own Next link is `offset=1` from
+  `offset=0`. The old `offset=page*10` (e.g. `offset=10` for page 1) landed on a
+  nonexistent page that Brave answers with a "no results" page, so `fresh==0`
+  stopped the loop at one page (21 results). Now `offset=page`; verified:
+  `--engine brave --limit 50` returns 50 results across 3 pages (fresh 21+20+15).
+- **core**: serp debug logs name the real engine and brave skips the consent
+  poll — the shared google/brave `browser_search` path hardcoded "google" in
+  the `consent dismiss` / `serp page` trace labels (misleading under
+  `--engine brave`), and it ran `dismiss_google_consent` (≤1.2s poll) on a
+  path that never shows a consent modal. Logs now emit `engine=brave` /
+  `engine=google`, and consent dismissal runs for google only.
+- **mcp**: removed dead `legacy_tool_schemas()` — ~748 lines of
+  `#[allow(dead_code)]` JSON schema data superseded by the consolidated
+  15-tool surface (`tools/list` already returns `list_tools()`; legacy names
+  still dispatch via `map_surface()` → executor arms, which are untouched).
+  Tool surface and dispatch are byte-identical.
+- **core**: serp/engines comments trimmed to `ponytail:`-style one-liners
+  (CHROME_UA_VER, brave offset, consent gate, brave-offset test).
+
 ### Added
 
+- **core**: serp **google guest flow = direct search URL + pagination** — the
+  browser path navigates straight to `engine_url`'s `/search?q=..&start=..&num=..`
+  (no homepage→type→submit) and merges `start=(page*10)` pages exactly like
+  `http_search`, so `--limit 20` / `--page 2` return more than one 10-result
+  page (dedupe + renumber + truncate). Walled `/sorry` pages add nothing → stop
+  early → the existing retry/fallback chain takes over.
+- **core**: SERP **consent-dismissal latency fix** — `consent_button` now runs a
+  cheap DOM `querySelector` gate (known consent containers) before the expensive
+  `Accessibility.getFullAXTree` walk, and `dismiss_google_consent` fast-polls
+  (150ms, ≤1.2s) firing the TRUSTED click the instant the overlay renders.
+  Previously a no-consent page paid 12 × getFullAXTree ≈ **42s**; now ~1.2s max.
+  Also cut the google results wait beat to 1.2s (navigate already waits for
+  interactive). Verified: `serp --engine google --limit 10` ≈ **6s / 10 results**
+  (was ~45.5s).
+- **core**: serp **google/brave pagination = sequential page turns** (direct
+  `/search?q=..&start=..` / `offset=..` URLs, merged like `http_search`). Page
+  turns are paced (~0.5-0.9s) rather than fired in parallel tabs: Google walls
+  simultaneous `/search` requests from one browser, so multi-tab pagination
+  returned FEWER results (measured 12 vs 30 sequential) — sequential pacing
+  wins on results. Keeps the fast consent gate + trusted flow. Bounded by
+  `max_pages` (≤4 pages). Verified: `--limit 30` ≈ 30 results / 13.5s on a
+  clean IP.
+- **core**: **brave guest-browser flow parity with google** — brave now runs
+  the same multi-tab trusted flow (consent dismiss incl. OneTrust gate, humanize,
+  walled-IP retry loop, `offset` pagination for limit > 10). Previously brave
+  rendered a single page with no consent handling → 0 results on a consent /
+  PoW-CAPTCHA wall. Note: brave PoW-captchas flagged IPs ("Verify you're not a
+  bot") — same class as google `/sorry`; the retry/fallback chain handles it.
+- **core**: fix **brave SERP parse** — Brave's current title link is the first
+  `a[href]` in `.snippet` with the title text in a nested `.title`/`h2`/`h3`;
+  the old `a.title, h2 a` matched nothing → 0 results on every brave page even
+  when results rendered. Added `brave_parse_typed_results` regression test.
+  `wait_for_results` also dropped its `innerText>500` shortcut (a captcha/consent
+  wall has >500 chars of body text → it bailed before real results rendered) and
+  the selector-poll budget is now 21s so Brave's PoW captcha has time to
+  auto-resolve in the browser. Verified: `serp --engine brave --limit 5` ≈
+  **5 results / 10.6s**.
+- **cli, mcp**: **brave guest auto-launch** — brave now auto-launches guest
+  Chrome on 9222 like google (ddg/bing stay pure HTTP, no browser). MCP
+  `webrain_serp` routes google|brave through the guest-browser backend
+  (auto-launch on connect failure; google sets `WEBRAIN_NO_STEALTH=1` like the
+  CLI), while ddg|bing|auto stay HTTP; tool descriptions + browser-required
+  guards updated.
+
+- **cli**: `webrain launch` with no args opens Chrome in **GUEST MODE**
+  (`--guest`) at google.com — a clean, ephemeral session with no profile state
+  (no bookmarks/sign-in/history, nothing persisted). The **serp google
+  auto-launch** (fresh + warm 9222) also uses guest mode now
+  (`launch_chrome_guest`) — a fresh ephemeral session every run, consent modal
+  always renders; the warm guest stays alive on 9222 for its in-memory session.
+  `--stealth` is a no-op (the launch-flag stealth was removed — detectable
+  fingerprint). Bare `webrain` (no args) keeps the MCP stdio default (Docker's
+  `ENTRYPOINT ["webrain"]`); explicit `webrain launch <service> <profile>`
+  keeps the persistent-profile CDP launch (the `webrain login` flow). All MCP
+  configs/docs/Docker pass `mcp` explicitly, so they're unaffected.
+- **core**: **trusted-commands-only google browser flow** — the serp google
+  path no longer injects stealth JS (`WEBRAIN_NO_STEALTH=1` skips
+  `stealth_js`) and runs **zero `Runtime.evaluate`**: page-JS polls (readyState,
+  wall/consent state, on_results, organic count) are gone (fixed beats /
+  `Page.getFrameTree` / the parse itself), the in-page 2captcha solve is
+  removed, and element discovery now uses the **DOM + Accessibility domains**
+  (`DOM.querySelectorAll`→`getContentQuads`, `Accessibility.getFullAXTree`→
+  `backendDOMNodeId`→`getContentQuads`) while all interaction stays **trusted
+  `Input.*`** (mouse moves, clicks, `mouseWheel`, per-key `dispatchKeyEvent`
+  typing). New trait primitives with defaults: `element_center`, `consent_button`,
+  `current_url`, `type_focused`. Guest launch remains google-only. Verified:
+  `serp --engine google` returns real results over the trusted flow.
+- **core**: SERP market defaulting — `engine_url` pins an **en-US market**
+  when no `region` is given instead of letting the engine GeoIP the request (a
+  localized IP turned `tokio rust` into Czech/Italian/Greek travel or banking
+  pages). Per-engine locale params now always sent: ddg `kl`, bing
+  `mkt`/`setlang`/`cc`, google/brave `hl`/`gl`/`lr`. Note: engines that
+  GeoIP-lock a flagged/rotating IP still localize regardless of params — route
+  through `--proxy <clean-IP>` for deterministic markets (the open-serp model).
+- **core**: SERP limit respected per engine — `engine_url` takes `limit` and
+  requests it (bing `count`, google `num`) instead of hard-capping at 10. Bing
+  `first` is sent only past page 0 (open-serp rule: bing ignores a custom
+  `count` while `first` is present). `http_search` now merges consecutive pages
+  (bounded, with a no-progress stop guard) so `limit` > ~10 is honored where
+  engines paginate. Note: bing/ddg cap anonymous requests at ~10 and ignore
+  `count`/`first`/`s` on a GeoIP-locked IP — route `--proxy <clean-IP>` for
+  larger limits and deterministic markets.
+- **cli**: `webrain serp` **default = warm persistent profile + session** (the
+  skill's real google-bypass path) — the auto-launched Chrome now stays alive on
+  `9222` between runs (`std::mem::forget` the launch handle so `Drop::kill()`
+  never runs), warming consent/session cookies into a trusted Google profile.
+  `--fresh` becomes the explicit opt-out for deterministic consent every run.
+- **cli**: `webrain serp --fresh` (google) — always launches a **brand-new
+  profile + cookies** on a free port (never attaches a warm browser), so the
+  consent modal always renders and is always dismissed before the humanized
+  flow (deterministic anti-bot; a stale profile's cookies are never trusted).
+- **core**: google browser path — browsemind-parity anti-bot hardening:
+  - **Consent dismissed by a TRUSTED CDP click**, language-independent
+    (browsemind `ConsentManager` recipe): phase 1 matches accept/reject buttons
+    by a broad multilingual list (never "Sign in"/"Σύνδεση"), phase 2 falls back
+    to the last button in `[role=dialog]` (Google's accept is last). Verified
+    live: clicks "Tout refuser" / "Απόρριψη όλων" in any locale.
+  - **Human-like behavior = browsemind's**: trusted CDP `Input.dispatchKeyEvent`
+    per-key typing (NOT `Input.insertText` — a paste/IME insert with no
+    keydown/keyup, flagged as non-human), trusted `Input.dispatchMouseEvent`
+    moves before/during/after consent + into the search box, and randomized
+    delays (`jitter()`, 40-120ms keystrokes / 1-2s reads) instead of fixed ones
+    (fixed timing is a fingerprint).
+  - **Plain Chrome launch** for google (no `--disable-blink-features=
+    AutomationControlled` suppression flags — detectable; CDP-level masking
+    covers webdriver). No hard-reload after navigate (bot pattern + doubled
+    requests). Retries run in a FRESH TAB.
+  - **False-success guard**: a walled `/search` (0 organic `#rso h3`) is no
+    longer reported as results (the old fake "Gmail" artifact); it tries one
+    direct `/search?q=` then falls back honestly.
+  - **`--hold`** keeps the launched Chrome open after the search so you can
+    watch it (press Enter to close).
+  - **`--stealth`** is now a NO-OP — the `--disable-blink-features=
+    AutomationControlled` launch flags were removed (Chrome shows an
+    "unsupported command-line flag" warning banner for them, a visible
+    fingerprint). All automation masking is CDP-level
+    (`attach_and_init`'s stealth_js).
+  - **Trusted scroll**: `CdpBackend::scroll` now dispatches a real CDP
+    `Input.dispatchMouseEvent mouseWheel` (isTrusted=true) instead of JS
+    `window.scrollBy` — every google human-like action is now trusted CDP input,
+    no JS-driven actions remain in the flow.
+  - **Auto-generated UA**: the HTTP engine headers derive `User-Agent` +
+    `sec-ch-ua` from the REAL installed Chrome version (`chrome --version`,
+    timeout-safe, cached) instead of a stale hardcoded `Chrome/145` — no
+    forged-version fingerprint tell. The browser path already auto-generates
+    its UA (no `Network.setUserAgentOverride`).
+- **core, cli**: `--remote-debugging-pipe` support (`--fresh --pipe`) — launch
+  google via CDP-over-stdin/stdout with NO listening debugging port (the open
+  port is the automation fingerprint Google walls on `/sorry`). `connect_pipe`
+  shares the WS payload-channel abstraction. NOTE: Chrome's pipe CDP is broken
+  on Windows ("Remote debugging pipe file descriptors are not open") — works on
+  Linux/macOS; on Windows the flow falls back to the other engines.
+- **core**: `connect_default` treats an empty `CDP_URL` as unset (falls back to
+  `9222`) so a warm persistent session is actually re-attached instead of the
+  caller wrongly re-launching into a busy port.
+- **core, cli**: optional 2captcha CAPTCHA solving (open-serp recipe) — new
+  `webrain_core::captcha` module (ureq only, no new dep): extract `data-sitekey`
+  + `data-s` from a Google `/sorry` wall, solve via `2captcha.com` with the same
+  proxy, inject the token + `submitCallback()`. Gated by the `WEBRAIN_2CAPTCHA_KEY`
+  env var; a failed solve falls through to the existing retry/fallback.
+- **core**: serpapi.com Google provider — the standard `SERPAPI_API_KEY` env var
+  routes google through the paid serpapi API (`/search.json`, engine=google),
+  honoring `num` up to 100. **Tried first when `limit > 10`** (the free engines
+  cap at ~10/page, so a high limit is best served by serpapi); a fallback for
+  `limit <= 10` and in `auto`/fallback chains. Unset key / quota / 4xx degrades
+  to fallback. Pure JSON parser is unit-tested.
+- **core, cli, mcp**: per-request proxy for the SERP API — `webrain serp ... --proxy URL` and `webrain_serp`'s `proxy` param route traffic through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`). HTTP engines (duckduckgo/bing/google/auto) get a proxied `ureq` agent; the google browser auto-launch bakes `--proxy-server` into the launched Chrome so the humanized flow egresses through the proxy (IP rotation on walled IPs). An attached CDP engine keeps whatever proxy it was started with.
 - **docs**: landing page (`docs/index.mdx`) bug fix + marketing sharpening:
   - **First-load flash fix** — the hero entrance now runs exactly once. When
     Mintlify's React shell re-renders after hydration and wipes the
@@ -25,6 +210,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     eyebrow rationed to one separator, and the capabilities bento carries
     verified specifics (reCAPTCHA + no Python sidecar, offline whisper + local
     vision, Lightpanda ~2-4 s/page).
+  - **Watch video preset** — the "Try the agent" playground gained a 4th demo
+    (`webrain_watch`): bundled ffmpeg/yt-dlp/whisper → timestamped transcript
+    → 12 frames + local Qwen3-VL-2B visual summary, all offline.
+- **mcp**: `webrain_interact` `action` now advertises `drag` (trusted
+  slider/drag CAPTCHA solving, `webrain_drag`) in the schema enum — the 0.6.2
+  capability was implemented in `map_surface`/`call_tool` but never exposed to
+  MCP clients, so no agent could discover it.
+- **docs**: `reference/tools.mdx` table now shows the real selector enums
+  (`what`/`action`/`op`/`mode`/`engine`) instead of legacy executor names
+  (e.g. `extract_json`, `pdf_page`, `list_session`, which are not valid
+  selector values and errored as `Unknown tool`), and gains a
+  `webrain_drag` accordion.
+- **core, mcp, cli**: structured SERP API — `webrain_serp` returns **typed**
+  results (`{position,title,url,domain,snippet}`) instead of a raw results
+  page. Engines: `duckduckgo` (default) · `bing` (plain HTML over the pooled
+  no-browser HTTP agent) · `google` (JS-gated — browser path, see below) ·
+  `brave` (JS SPA — renders in the
+  connected CDP engine, works on Chrome/obscura/lightpanda) · `auto` (fetches
+  all HTTP engines concurrently, merges + dedupes). Built-in recommended
+  features: provider fallback (`fallback`), URL dedupe, pagination (`page`),
+  safe search (`safe`) + region (`region`, e.g. `us-en`/`gr-el`), `request_id`
+  + `ms` in the reply, retry with backoff (`retries`). New CLI:
+  `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe]
+  [--region R] [--json] [--headless]`. MCP surface: `webrain_serp` (guide + tools
+  reference updated). Reference/inspiration: the standalone `rust-serp-api`
+  reference app, folded into webrain's single transport instead of a second
+  HTTP server.
+- **core, cli**: Google SERP over the browser path returns real results.
+  `google` is JS-gated over plain HTTP (Google serves a CAPTCHA "unusual
+  traffic" wall → `skipped: google`), so `webrain serp --engine google`
+  auto-launches a **persistent-profile** Chrome (AppData `profiles/serp/google`,
+  `--headless` for headless) when none is attached, then drives the homepage →
+  hard-refresh → type → submit flow like a real user:
+  - **Hard refresh first** (`Page.reload ignoreCache`, Ctrl+Shift+R) — drops
+    the anti-bot state the `/sorry` wall sets, so even a fresh profile can get
+    real results.
+  - **Humanized event order**: navigate → wait `readyState==="complete"` →
+    synthetic mousemove/down/up + hesitant scroll → consent dismiss (localized
+    Reject-all/I-agree) — human events fire *after* load, never during it.
+  - **Per-keystroke typing** (`type_text_delayed`, ~70 ms/char; Google flags a
+    whole-string `insertText`) and an **eased/jittered mouse travel**
+    (`mouse_move_human`) before the trusted click of the language-independent
+    submit button.
+  - **Stability wait** — `#rso h3` count flat across 3 polls, so the parse
+    never captures a half-streamed 1-result page; click-until-navigation +
+    dead-end guard bound the failure path (51s → ~20s).
+  - In-parse href dedupe (nested `div[data-hveid]` previously collapsed the
+    result set down to 1); 4× retry absorbs Google's intermittent IP CAPTCHA.
 
 ## [0.6.2] - 2026-08-12
 

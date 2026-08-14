@@ -118,12 +118,38 @@ pub trait BrowserBackend: Send + Sync {
     async fn evaluate(&self, js: &str) -> anyhow::Result<serde_json::Value>;
     async fn click(&self, index: usize) -> anyhow::Result<()>;
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()>;
+    /// Type text character-by-character with a per-keystroke delay (human-like
+    /// pacing; Google flags a whole-string insertText). Backends without
+    /// per-char input fall back to a single insertText.
+    async fn type_text_delayed(
+        &self,
+        index: usize,
+        text: &str,
+        _delay_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.type_text(index, text).await
+    }
     async fn scroll(&self, direction: &str) -> anyhow::Result<()>;
     /// Press a key (Enter, Tab, ArrowDown...) in the focused element. Trusted
     /// CDP Input when supported, JS fallback (Enter -> form.submit) otherwise.
     async fn press(&self, key: &str) -> anyhow::Result<()>;
     /// Trusted click at raw viewport coords (cross-origin iframes / reCAPTCHA).
     async fn click_coords(&self, x: i64, y: i64) -> anyhow::Result<()>;
+    /// Trace a human-like mouse path toward (x,y) (eased, jittered steps) before
+    /// a click — a real pointer travels, it doesn't teleport. Backends without
+    /// trusted input no-op (the click still lands).
+    async fn mouse_move_human(&self, _x: i64, _y: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Hard-reload the current page bypassing cache (Ctrl+Shift+R) — drops the
+    /// anti-bot state Google set on a flagged request; the manual recipe that
+    /// beats the /sorry wall. Default falls back to location.reload() (best-
+    /// effort; CDP backends override with Page.reload ignoreCache:true).
+    async fn reload_hard(&self) -> anyhow::Result<()> {
+        self.evaluate("location.reload(true); true")
+            .await
+            .map(|_| ())
+    }
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at
     /// x2,y2) for drag-and-drop / slider CAPTCHAs. Crosses cross-origin iframes.
@@ -157,6 +183,33 @@ pub trait BrowserBackend: Send + Sync {
     /// Accessibility-tree snapshot of the current page (read-only; interact via elements[]).
     async fn a11y(&self) -> anyhow::Result<serde_json::Value> {
         anyhow::bail!("a11y not supported by this backend")
+    }
+
+    /// TRUSTED, evaluate-free element discovery: viewport center of the FIRST
+    /// element matching `css` with a real layout rect, via the DOM domain
+    /// (DOM.querySelectorAll → DOM.getContentQuads) — no page JS runs.
+    /// None on backends without DOM/layout support (caller falls back).
+    async fn element_center(&self, _css: &str) -> Option<(i64, i64)> {
+        None
+    }
+
+    /// TRUSTED, evaluate-free consent-button discovery via the accessibility
+    /// tree (Accessibility.getFullAXTree → backendDOMNodeId → getContentQuads):
+    /// phase 1 = a button/link whose accessible name matches `patterns`;
+    /// phase 2 = the last visible button/link. Returns (x, y, tag).
+    async fn consent_button(&self, _patterns: &[&str]) -> Option<(i64, i64, String)> {
+        None
+    }
+
+    /// TRUSTED, evaluate-free current URL (Page.getFrameTree — no page JS).
+    async fn current_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Type into the FOCUSED element with real per-key Input.dispatchKeyEvent
+    /// (no evaluate; the target field must already be focused/clicked).
+    async fn type_focused(&self, _text: &str, _delay_ms: u64) -> anyhow::Result<()> {
+        anyhow::bail!("type_focused not supported by this backend")
     }
 
     /// Prefetch / discovery-only navigation: visit `url` and return its outbound

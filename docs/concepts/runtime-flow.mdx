@@ -75,8 +75,8 @@ to these executors up front by `tools::map_surface()`.
 ### 3. Tool registration — `webrain-mcp/src/tools.rs`
 
 - **`list_tools()`** — the **15 consolidated `webrain_*` schemas** the LLM
-  sees, with canonical descriptions (63 legacy one-action schemas are kept as
-  `legacy_tool_schemas()`).
+  sees, with canonical descriptions (63 legacy one-action names still dispatch
+  via `map_surface()`; their executor arms live in `call_tool()`).
 - **`call_tool()`** — the dispatch: `map_surface(name, args)` folds a
   consolidated `what`/`action`/`op`/`mode` selector into the legacy arm name,
   then `match tool_name` resolves a `BrowserBackend` (usually a `CdpBackend`)

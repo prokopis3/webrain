@@ -26,28 +26,30 @@ consolidated tool + selector into the legacy arm name, then the existing
 model is simple: **browser tools run through `CdpBackend`** (one shared
 WebSocket to the engine); a handful of tools skip the browser entirely.
 
-| Tool (selector) | Legacy capabilities folded in | Browser? |
+| Tool (selector) | Selector values (→ legacy arm) | Browser? |
 |---|---|---|
-| `webrain_navigate` | navigate, page state + challenge detection | ✅ CDP |
-| `webrain_observe` (`what=…`) | snapshot · a11y · semantic_tree · get_html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
-| `webrain_interact` (`action=…`) | click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
-| `webrain_extract` (`mode=…`) | autoschema · extract_json · extract_regex · table · jsonld · bm25 | ✅ CDP (in-page, zero-LLM) |
+| `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
+| `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
+| `webrain_interact` (`action=…`) | click · click_coords · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
+| `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
-| `webrain_batch` (`op=…`) | batch fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
-| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate_urls | 🔶 mixed |
-| `webrain_search` | search (ddg/google/bing/brave) | ❌ no browser |
-| `webrain_pdf` (`op=…`) | pdf_page · pdf_extract · pdf_render · pdf_images | ❌ no browser |
-| `webrain_download` (`engine=…`) | download (http/ytdlp), media, get_images | 🔶 mixed |
+| `webrain_batch` (`op=…`) | fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
+| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
+| `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
+| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto; optional proxy + 2captcha) | 🔶 mixed (HTTP engines no browser; google/brave use CDP) |
+| `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
+| `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
-| `webrain_session` (`op=…`) | open/close/list_session · cookies · setcookies · save/restore_state · profiles · login · close_launch | ✅ CDP + vault |
-| `webrain_vision` (`op=…`) | vision_index · vision_retrieve · ask (clip/tiles → vision answer) | ✅ CDP (screenshot) |
-| `webrain_eval` | eval (arbitrary JS) · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
+| `webrain_session` (`op=…`) | open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_vision` (`op=…`) | index · retrieve · ask | ✅ CDP (screenshot) |
+| `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_guide` | agent decision guide | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
 lightpanda, and obscura alike — the differences are capability (screenshots,
 challenge solving, a11y fidelity), not protocol. Tools with **no** browser
-dependency (`webrain_scrape`, `webrain_search`, `webrain_crawl` mode=sitemap,
+dependency (`webrain_scrape`, `webrain_search`, `webrain_serp` HTTP engines,
+`webrain_crawl` mode=sitemap,
 `webrain_download`, `webrain_pdf`, `webrain_watch`) are intercepted in
 `webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
 
@@ -183,6 +185,10 @@ Upload files to a file input by index via CDP `DOM.setFileInputFiles`. Index mus
 Trusted click at raw viewport coordinates. For cross-origin iframe content and reCAPTCHA checkboxes where JS clicks only focus the element. Get coords from a screenshot or `webrain_page_info`.
 </Accordion>
 
+<Accordion title="webrain_drag">
+Trusted drag across viewport coordinates (`x1,y1` → `x2,y2`): press → move with the button held → release, via CDP Input events. Built for slider/drag CAPTCHAs ("slide to unlock") and works across cross-origin iframes where synthetic JS events are ignored. Get coords from a screenshot (`webrain_observe what=screenshot`) or `webrain_page_info`.
+</Accordion>
+
 <Accordion title="webrain_add_init_script">
 Register a JS init script that runs before EVERY future navigation (`Page.addScriptToEvaluateOnNewDocument`). Use for closed-shadow-root piercing, API stubs, or route/UA overrides. Accumulates for the session.
 </Accordion>
@@ -297,6 +303,26 @@ Search the web and navigate to the results page. `duckduckgo` is HTML-lite and s
 ```json
 { "q": "product reviews", "engine": "duckduckgo" }
 ```
+</Accordion>
+
+<Accordion title="webrain_serp">
+Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML over the pooled no-browser HTTP agent; `google` is JS-gated over HTTP so it uses the browser path — `webrain serp --engine google` auto-launches a persistent-profile Chrome (headed by default, `--headless` for headless) and drives homepage → consent (trusted two-phase click) → humanized typing → trusted click; `brave` renders in the connected CDP engine; `auto` fetches HTTP engines concurrently and merges + dedupes.
+
+Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe (`safe`) + region (`region` — an **en-US market is pinned when unset**, because a GeoIP'd IP otherwise serves localized garbage), `request_id` + `ms`, retry with backoff (`retries`), and a **multi-page merge** so `limit` > ~10 is honored wherever engines paginate.
+
+**Proxy:** `proxy` routes the HTTP engines through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`) and bakes `--proxy-server` into the google auto-launch. Bing/Google GeoIP-lock flagged/rotating IPs and ignore market params, so a clean-IP proxy is the reliable way to get correct, larger result sets. An attached CDP engine keeps whatever proxy it started with.
+
+**CAPTCHA solving:** set `WEBRAIN_2CAPTCHA_KEY` (a 2captcha API key) and the google browser path auto-solves a `/sorry` reCAPTCHA wall — it extracts `data-sitekey` + `data-s`, submits to 2captcha with the same `proxy` (so the solving IP matches the browser's exit IP), injects the token, and submits. A failed solve falls through to the normal retry/fallback — it never blocks results.
+
+**serpapi.com:** set the standard `SERPAPI_API_KEY` env var. It's the reliable way to get MORE than the free engines' ~10-result cap — serpapi honors `num` up to 100 — so for `limit > 10` it's tried **first** for google (the full best result set); for `limit <= 10` the free browser path stays primary and serpapi is a fallback. Unset key / quota-exhausted / 4xx degrades to the normal fallback with no error.
+
+```json
+{ "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }
+```
+
+Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]`.
+
+**Default (google) = warm persistent profile + session** — the real bypass path (see `skills/webrain/references/challenges.md`): the auto-launched Chrome stays alive on `9222` between runs, accumulating consent/session cookies until it becomes a *trusted* Google profile. `--fresh` opts OUT of the warm session: it always launches a **brand-new profile + cookies** on a free port, so the consent modal always renders and is always dismissed before the humanized flow — use it when you want deterministic consent (e.g. a suspect/stale profile). `--hold` keeps the launched Chrome open after the search so you can watch it (press Enter to close). `--pipe` (with `--fresh`) launches that Chrome via `--remote-debugging-pipe` (NO open debugging port — the open port is the automation fingerprint Google walls on `/sorry`; note Chrome's pipe CDP is broken on Windows, works on Linux/macOS). `--stealth` opts IN to the launch-flag stealth (`--disable-blink-features=AutomationControlled`); the default is a plain launch + CDP-level masking (patchright/browsemind's recommended combo). All google human-like actions are trusted CDP input (`Input.dispatchMouseEvent`/`Input.dispatchKeyEvent`), never JS-driven.
 </Accordion>
 
 </AccordionGroup>

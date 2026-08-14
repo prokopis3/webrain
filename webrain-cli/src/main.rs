@@ -28,8 +28,9 @@ fn main() -> anyhow::Result<()> {
 
     match args.get(1).map(|s| s.as_str()) {
         Some("mcp") | None => {
-            // `webrain mcp` = stdio; `webrain mcp --http <port>` = HTTP transport
-            // with per-connection sessions (lightpanda mcp --port style).
+            // `webrain mcp` = stdio (also the no-arg default: Docker's
+            // `ENTRYPOINT ["webrain"]`); `webrain mcp --http <port>` = HTTP
+            // transport with per-connection sessions (lightpanda mcp --port style).
             let http_port: Option<String> = args
                 .iter()
                 .position(|a| a == "--http")
@@ -187,6 +188,214 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             eprintln!("watch done in {} ms", t0.elapsed().as_millis());
         }
+        Some("serp") => {
+            // webrain serp "query" [--engine duckduckgo|bing|google|brave|auto]
+            //   [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]
+            // Structured SERP JSON. duckduckgo/bing/google/auto need no browser;
+            // brave renders in the connected CDP engine (CDP_URL /
+            // --remote-debugging-port=9222).
+            let query = args.get(2).cloned().unwrap_or_default();
+            if query.trim().is_empty() {
+                println!(
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
+                );
+                println!(
+                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
+                );
+                return Ok(());
+            }
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let engine = flag("--engine").unwrap_or_else(|| "auto".to_string());
+            let limit: usize = flag("--limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10)
+                .clamp(1, 50);
+            let page: usize = flag("--page").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let safe = args.contains(&"--safe".to_string());
+            let region = flag("--region");
+            let fallback = !args.contains(&"--no-fallback".to_string());
+            let json_out = args.contains(&"--json".to_string());
+            let headless = args.contains(&"--headless".to_string());
+            let proxy = flag("--proxy");
+            // --fresh: always start a brand-new google profile + cookies (never
+            // attach a warm browser) so the consent modal ALWAYS appears and is
+            // always dismissed — the deterministic anti-bot recipe.
+            let fresh = args.contains(&"--fresh".to_string());
+            // --pipe: launch the fresh google Chrome via `--remote-debugging-pipe`
+            // (stdin/stdout, NO open debugging port) — an open debugging port is
+            // the automation fingerprint Google walls on /sorry; a pipe-launched
+            // Chrome has none. Only meaningful with --fresh.
+            let pipe = args.contains(&"--pipe".to_string());
+            // --stealth is accepted for CLI compat but is a no-op (the launch-flag
+            // stealth was removed — it's a detectable fingerprint). google now
+            // auto-launches in GUEST MODE (fresh ephemeral session, no persisted
+            // profile state) with CDP-level masking (stealth_js).
+            let _stealth = args.contains(&"--stealth".to_string());
+            let opts = webrain_core::serp::SerpOpts {
+                query: query.trim().to_string(),
+                engine,
+                limit,
+                page,
+                safe,
+                region,
+                retries: 2,
+                fallback,
+                proxy: proxy.clone(),
+            };
+            // google: trusted-commands-only flow — no injected stealth JS
+            // (WEBRAIN_NO_STEALTH) and no Runtime.evaluate in the page. Other
+            // engines (bing/ddg HTTP, brave attached browser) are untouched.
+            if opts.engine == "google" {
+                // edition-2024 unsafe: single-threaded main, set before any
+                // backend attaches.
+                unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
+            }
+            // google is JS-gated (consent/JS shell over plain HTTP) — same as
+            // brave, it needs a real browser. For google, if none is attached,
+            // auto-launch Chrome in GUEST MODE (fresh ephemeral session every
+            // run — zero persisted cookies/history, consent modal always renders)
+            // so the engine always exists, headed or headless alike. The browser
+            // stays alive as a warm session.
+            // --hold keeps the FRESH browser alive past the search so you can
+            // watch it; only fresh holds — the warm 9222 guest keeps its session.
+            let hold = args.contains(&"--hold".to_string());
+            let mut _launched: Option<webrain_core::launch::Launched> = None;
+            let backend = if opts.engine == "brave" || opts.engine == "google" {
+                if fresh && opts.engine == "google" {
+                    // --fresh: a brand-new profile dir + unique port every run —
+                    // zero cookies, so the consent modal always renders and
+                    // CONSENT_DISMISS_JS always dismisses it before the humanized
+                    // flow. Never touches a running 9222 chrome.
+                    let prof_name = format!("google_fresh_{}_{}", chrono_now(), std::process::id());
+                    if pipe {
+                        // --remote-debugging-pipe: CDP over stdin/stdout, no
+                        // listening port -> no open-debugger fingerprint (the
+                        // thing that walls google). The child is owned by
+                        // connect_pipe and killed when the run ends.
+                        if proxy.is_some() {
+                            anyhow::bail!(
+                                "--fresh --pipe does not support --proxy (pipe Chrome can't bake --proxy-server here)"
+                            );
+                        }
+                        let child = rt.block_on(webrain_core::launch::launch_chrome_pipe(
+                            "serp", &prof_name, !headless,
+                        ))?;
+                        println!(
+                            "launched FRESH chrome via --remote-debugging-pipe (no debugging port -> no open-debugger fingerprint): profile serp/{}",
+                            prof_name
+                        );
+                        Some(rt.block_on(CdpBackend::connect_pipe(child))?)
+                    } else {
+                        let port = pick_free_port(9230);
+                        // GUEST MODE: fresh ephemeral session every run — zero
+                        // cookies/history, consent modal always renders.
+                        let launched = webrain_core::launch::launch_chrome_guest(
+                            "serp",
+                            &prof_name,
+                            port,
+                            !headless,
+                            proxy.as_deref(),
+                        )?;
+                        println!(
+                            "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
+                            launched.profile_dir.display(),
+                            launched.cdp_url
+                        );
+                        // keep it alive for the whole run (+ --hold) so the headed
+                        // window actually stays visible — dropping `Launched` kills
+                        // Chrome, which was tearing the window down right after connect.
+                        _launched = Some(launched);
+                        Some(rt.block_on(CdpBackend::connect_with_url(
+                            _launched.as_ref().expect("fresh launched").cdp_url.as_str(),
+                        ))?)
+                    }
+                } else {
+                    match rt.block_on(CdpBackend::connect_default()) {
+                        Ok(b) => Some(b),
+                        Err(_) if opts.engine == "google" || opts.engine == "brave" => {
+                            // GUEST MODE auto-launch for BOTH browser engines
+                            // (--proxy bakes --proxy-server in when set): fresh
+                            // ephemeral session every run — zero persisted
+                            // cookies/history. ddg/bing never reach this branch
+                            // (backend = None, pure HTTP).
+                            let prof = if opts.engine == "google" {
+                                "google"
+                            } else {
+                                "brave"
+                            };
+                            let launched = webrain_core::launch::launch_chrome_guest(
+                                "serp",
+                                prof,
+                                9222,
+                                !headless,
+                                proxy.as_deref(),
+                            )?;
+                            println!(
+                                "launched chrome (guest): {} (CDP_URL={})",
+                                launched.profile_dir.display(),
+                                launched.cdp_url
+                            );
+                            // WARM SESSION — the guest Chrome stays alive on 9222
+                            // between runs (its in-memory session persists).
+                            // Forget the handle so Drop::kill() never runs.
+                            // `--fresh` is the explicit opt-out for a fresh guest.
+                            let url = launched.cdp_url.clone();
+                            std::mem::forget(launched);
+                            Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                // HTTP-only engines (duckduckgo|bing|auto): pure ureq HTTP —
+                // NEVER launch/connect a browser. Only google|brave get one.
+                if !json_out {
+                    println!("engine {}: pure HTTP — no browser launched", opts.engine);
+                }
+                None
+            };
+            match rt.block_on(webrain_core::serp::serp_search(&opts, backend.as_ref())) {
+                Ok(r) => {
+                    if json_out {
+                        println!("{}", serde_json::to_string_pretty(&r)?);
+                    } else {
+                        let mut head = format!(
+                            "query: {} | engine: {} | {} results ({}ms)",
+                            r.query,
+                            r.engine,
+                            r.results.len(),
+                            r.ms
+                        );
+                        if !r.skipped.is_empty() {
+                            head.push_str(&format!(" | skipped: {}", r.skipped.join(", ")));
+                        }
+                        println!("{head}");
+                        for x in &r.results {
+                            // plain ASCII separator — Windows consoles mangle the em-dash
+                            println!("{}. {} - {}", x.position, x.title, x.url);
+                            if !x.snippet.is_empty() {
+                                println!("   {}", x.snippet);
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("error: {e}"),
+            }
+            // --hold: keep the fresh browser up so you can inspect it; close on
+            // Enter (dropping `_launched` kills Chrome).
+            if hold && _launched.is_some() {
+                println!(
+                    "[--hold] browser open — inspect the Chrome window, then press Enter to close it"
+                );
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+            }
+        }
         Some("install") => {
             // webrain install [--force] [--engine chrome|obscura] [--stealth] [--no-render]
             // agent-browser-style: download the engine into a cache dir.
@@ -301,28 +510,38 @@ fn main() -> anyhow::Result<()> {
         }
         Some("launch") => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // Spawns a stealth Chrome with a persistent per-account profile and
-            // spawns a stealth Chrome with a persistent per-account profile and
-            // opens the site so the human can log in (Channel A).
+            // `webrain launch` with no args opens Chrome in GUEST MODE at url —
+            // a clean, ephemeral session with no profile state (no bookmarks,
+            // no sign-in, nothing persisted). Explicit service/profile = persistent-
+            // profile CDP launch (the Channel A login flow used by `webrain login`).
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
             let url = args
                 .get(4)
                 .map(|s| s.as_str())
-                .unwrap_or("https://accounts.google.com");
+                .unwrap_or("https://www.google.com");
+            if service.is_empty() && profile.is_empty() {
+                webrain_core::launch::launch_chrome_default(url)?;
+                println!("opened: {url} in Chrome GUEST mode");
+                return Ok(());
+            }
             let headless = args.contains(&"--headless".to_string());
-            let port: u16 = args
+            let explicit_port = args
                 .iter()
                 .position(|a| a == "--port")
                 .and_then(|i| args.get(i + 1))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(9222);
-            if service.is_empty() || profile.is_empty() {
-                println!("usage: webrain launch <service> <profile> [url] [--headless] [--port N]");
-                return Ok(());
-            }
-            let launched =
-                webrain_core::launch::launch_chrome(&service, &profile, port, !headless)?;
+                .and_then(|s| s.parse::<u16>().ok());
+            // Just launch & keep: without an explicit --port, pick the next free
+            // port from 9222 instead of failing when a warm/leftover Chrome is
+            // holding 9222.
+            let port = explicit_port.unwrap_or_else(|| pick_free_port(9222));
+            let service = if service.is_empty() { "web" } else { &service };
+            let profile = if profile.is_empty() {
+                "default"
+            } else {
+                &profile
+            };
+            let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;
             println!("profile: {}", launched.profile_dir.display());
             println!("CDP_URL={}", launched.cdp_url);
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
@@ -684,6 +903,17 @@ fn chrono_now() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", t.as_secs())
+}
+
+/// First free TCP port from `start` — used by `--fresh` to never collide with
+/// a warm 9222 chrome.
+fn pick_free_port(start: u16) -> u16 {
+    for p in start..start + 40 {
+        if std::net::TcpStream::connect(("127.0.0.1", p)).is_err() {
+            return p;
+        }
+    }
+    start
 }
 
 // ponytail: TCP connect probe — try opening, return true if port is listening.

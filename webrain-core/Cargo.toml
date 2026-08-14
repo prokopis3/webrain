@@ -29,6 +29,8 @@ getrandom = "0.4"
 hmac = "0.13"
 sha1 = "0.11"
 regex = "1"
+# Structured SERP parsing (webrain_serp): pure-Rust CSS selector extraction.
+scraper = "0.24"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
 # Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
 pdfium-render = { version = "0.9", optional = true }
