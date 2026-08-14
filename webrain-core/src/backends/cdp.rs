@@ -2402,12 +2402,6 @@ impl BrowserBackend for CdpBackend {
     async fn close_tab(&self, id: &str) -> anyhow::Result<()> {
         CdpBackend::close_tab(self, id).await
     }
-    async fn tab_session(&self, id: &str) -> anyhow::Result<String> {
-        CdpBackend::tab_session(self, id).await
-    }
-    async fn navigate_session(&self, sid: &str, url: &str) -> anyhow::Result<()> {
-        CdpBackend::navigate_session(self, sid, url).await
-    }
     async fn list_tabs(&self) -> anyhow::Result<Value> {
         CdpBackend::list_tabs(self).await
     }

@@ -344,7 +344,9 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
             break;
         }
         // The organic-result link is the first external <a> whose child h3 holds
-        // the title (ad/related links point at google.com internals).
+        // the title (ad/related links point at google.com internals). Title is
+        // the h3 ONLY — never the anchor's full text, which can include an
+        // inline <style> block (CSS-junk titles on google's denser layouts).
         let mut chosen: Option<(String, String)> = None; // (title, href)
         for a in el.select(&a_sel) {
             let Some(href) = a.value().attr("href") else {
@@ -358,10 +360,9 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
                 .select(&h3_sel)
                 .next()
                 .map(|h| clean(&h.text().collect::<Vec<_>>().join(" ")))
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| clean(&a.text().collect::<Vec<_>>().join(" ")));
-            if !title.is_empty() {
-                chosen = Some((title, url));
+                .filter(|t| !t.is_empty());
+            if let Some(t) = title {
+                chosen = Some((t, url));
                 break;
             }
         }
@@ -720,8 +721,11 @@ async fn browser_search<B: BrowserBackend>(
         // Direct search-URL + pagination (the guest-browser flow): navigate
         // straight to engine_url's search URL (google /search?q=..&start=..,
         // brave /search?q=..&offset=..) instead of homepage→type→submit, and
-        // merge `start`/`offset` pages exactly like http_search does for HTTP
-        // engines so `--limit 30` / `--page 2` return more than one page.
+        // merge `start`/`offset` pages SEQUENTIALLY exactly like http_search
+        // does for HTTP engines so `--limit 30` / `--page 2` return more than
+        // one page. Sequential, not parallel tabs: Google walls simultaneous
+        // /search requests from one browser, so parallel pagination returns
+        // FEWER results (measured 12 vs 30) — pacing pages like a human wins.
         //
         // Trusted-only: no page-JS evaluate (wait_for_results is a fixed beat
         // for google; brave uses its selector poll), no injected stealth for
@@ -732,99 +736,54 @@ async fn browser_search<B: BrowserBackend>(
         let mut seen: HashSet<String> = HashSet::new();
         // 50 max / ~10 per page; bounded so a hostile wall can't loop forever.
         let max_pages = (opts.limit / 10).clamp(1, 5);
-        // Build every page URL up front so the extra pages can load in PARALLEL
-        // background tabs while page 0 is humanized and harvested.
-        let mut urls: Vec<String> = Vec::with_capacity(max_pages);
         for page in opts.page..opts.page + max_pages {
-            urls.push(engine_url(
+            let t0 = std::time::Instant::now();
+            let url = engine_url(
                 engine,
                 &opts.query,
                 page,
                 opts.safe,
                 opts.region.as_deref(),
                 opts.limit,
-            )?);
-        }
-        // Run page 0's flow AND the extra tabs' navigation CONCURRENTLY
-        // (tokio::join! interleaves them at their awaits) — the background tabs
-        // load while page 0 is humanized, so the pagination overlap is hidden.
-        // ponytail: N parallel tabs to google is more bot-like than one human
-        // paging through; if this IP walls harder, drop back to sequential.
-        let (page0, tabs) = tokio::join!(
-            // Page 0: current tab, full humanized flow.
-            async {
-                let url = urls.first().cloned().unwrap_or_default();
-                let _ = backend.navigate(&url).await;
-                // Consent FIRST — trusted click the instant the overlay renders
-                // (fast poll, DOM-gated ~1ms when none). Never blocked by a wall.
-                let consent = dismiss_google_consent(backend).await;
-                tracing::debug!(%consent, "google consent dismiss");
-                tokio::time::sleep(Duration::from_millis(jitter(150, 250))).await;
-                let _ = backend
-                    .mouse_move_human(jitter(120, 700) as i64, jitter(80, 400) as i64)
-                    .await;
-                let _ = backend.scroll("down").await;
-                if let Some(u) = backend.current_url().await {
-                    if u.contains("accounts.google") || u.contains("myaccount.google") {
-                        let _ = backend.navigate("https://www.google.com").await;
-                        tokio::time::sleep(Duration::from_millis(1200)).await;
-                    }
+            )?;
+            backend.navigate(&url).await?;
+            // Consent FIRST — trusted click the instant the overlay renders
+            // (fast poll, DOM-gated ~1ms when none). Never blocked by a wall.
+            let consent = dismiss_google_consent(backend).await;
+            tracing::debug!(%consent, "google consent dismiss");
+            tokio::time::sleep(Duration::from_millis(jitter(150, 250))).await;
+            // Trusted human-like pre-interaction (browsemind random_mouse_move)
+            // — CDP mouseMoved, NOT synthetic dispatch, then TRUSTED wheel.
+            let _ = backend
+                .mouse_move_human(jitter(120, 700) as i64, jitter(80, 400) as i64)
+                .await;
+            let _ = backend.scroll("down").await;
+            // Self-heal via current_url (no evaluate): never dead-end on sign-in.
+            if let Some(u) = backend.current_url().await {
+                if u.contains("accounts.google") || u.contains("myaccount.google") {
+                    backend.navigate("https://www.google.com").await?;
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
                 }
-                let _ = wait_for_results(backend, engine).await;
-                let html = backend.get_html().await.unwrap_or_default();
-                dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit)
-            },
-            // Extra pages: one tab each, all navigated in PARALLEL
-            // (session-scoped navigate_session — no racing on the active tab).
-            async {
-                let mut tabs: Vec<(String, String, String)> = Vec::new();
-                for url in urls.iter().skip(1) {
-                    if let Ok(id) = backend.open_tab("about:blank").await {
-                        if let Ok(sid) = backend.tab_session(&id).await {
-                            tabs.push((id, sid, url.clone()));
-                        }
-                    }
-                }
-                let navs: Vec<_> = tabs
-                    .iter()
-                    .map(|(_, sid, url)| backend.navigate_session(sid, url))
-                    .collect();
-                futures_util::future::join_all(navs).await;
-                tabs
-            },
-        );
-        // Merge page 0.
-        let mut fresh = 0usize;
-        for r in page0 {
-            if seen.insert(dedupe_key(&r.url)) {
-                all.push(r);
-                fresh += 1;
             }
-        }
-        if fresh == 0 {
-            // Page 0 walled — close the tabs and let the retry/fallback chain
-            // take over instead of burning time harvesting walled tabs.
-            for (id, _, _) in &tabs {
-                let _ = backend.close_tab(id).await;
-            }
-            return Ok(Vec::new());
-        }
-        // Harvest each background tab (already loaded during page 0's flow).
-        for (id, _sid, _url) in &tabs {
-            let _ = backend.activate_tab(id).await;
-            let _ = dismiss_google_consent(backend).await;
-            let _ = wait_for_results(backend, engine).await;
-            let html = backend.get_html().await.unwrap_or_default();
+            // Wait for the results DOM to render (fixed beat — no eval).
+            wait_for_results(backend, engine).await?;
+            let html = backend.get_html().await?;
             let rs = dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit);
+            let mut fresh = 0usize;
             for r in rs {
                 if seen.insert(dedupe_key(&r.url)) {
                     all.push(r);
                     fresh += 1;
                 }
             }
-            let _ = backend.close_tab(id).await;
+            tracing::debug!(page, fresh, total = all.len(), ms = t0.elapsed().as_millis(), "google serp page");
+            if all.len() >= opts.limit || fresh == 0 {
+                break; // enough results, or this page added nothing new (wall/repeat)
+            }
+            // Short human pacing between page turns (wall insurance on
+            // pagination, but keep it fast).
+            tokio::time::sleep(Duration::from_millis(jitter(500, 900))).await;
         }
-        tracing::debug!(fresh, total = all.len(), "google serp multi-tab");
         for (i, r) in all.iter_mut().enumerate() {
             r.position = i + 1;
         }
