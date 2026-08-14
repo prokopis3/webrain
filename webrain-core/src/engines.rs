@@ -173,15 +173,24 @@ mod tests {
     // looks internally consistent (obscura's identity-alignment point).
     #[test]
     fn chrome_headers_agree_with_ua() {
-        assert!(super::CHROME_UA.contains("Chrome/145."));
-        assert!(super::SEC_CH_UA.contains("\"Google Chrome\";v=\"145\""));
-        assert!(super::SEC_CH_UA.contains("Not)A;Brand\";v=\"24\"")); // GREASE brand
+        let h = super::browser_headers();
+        let ua = h
+            .iter()
+            .find(|(k, _)| k == "User-Agent")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let sec = h
+            .iter()
+            .find(|(k, _)| k == "sec-ch-ua")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert!(ua.contains("Chrome/"), "derived UA is a Chrome UA: {ua}");
         assert!(
-            super::BROWSER_HEADERS
-                .iter()
-                .all(|(k, v)| !k.is_empty() && !v.is_empty())
+            sec.contains("\"Google Chrome\";v=\""),
+            "sec-ch-ua chrome brand: {sec}"
         );
-        assert!(super::SEC_CH_UA.contains("Chromium\";v=\"145\""));
+        assert!(sec.contains("Not)A;Brand\";v=\"24\""), "GREASE brand: {sec}");
+        assert!(h.iter().all(|(k, v)| !k.is_empty() && !v.is_empty()));
     }
 
     // ponytail: one check for the spider allow/deny filter (branchy logic).
@@ -1474,24 +1483,80 @@ pub async fn batch_screenshot(
 /// wreq) — rustls can't emit Chrome's extensions/GREASE. This kills the
 /// HTTP-header/UA tells WAFs check first. Add BoringSSL only when a WAF
 /// starts failing past this layer.
-const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-const SEC_CH_UA: &str =
-    "\"Google Chrome\";v=\"145\", \"Not)A;Brand\";v=\"24\", \"Chromium\";v=\"145\"";
-const BROWSER_HEADERS: &[(&str, &str)] = &[
-    ("User-Agent", CHROME_UA),
-    ("sec-ch-ua", SEC_CH_UA),
-    ("sec-ch-ua-mobile", "?0"),
-    ("sec-ch-ua-platform", "\"Windows\""),
-    (
-        "Accept",
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    ),
-    ("Accept-Language", "en-US,en;q=0.9"),
-    ("sec-fetch-site", "none"),
-    ("sec-fetch-mode", "navigate"),
-    ("sec-fetch-dest", "document"),
-    ("upgrade-insecure-requests", "1"),
-];
+/// Major version of the REAL installed Chrome (via `chrome --version`), cached
+/// per process. Fallback "145" only if the binary can't be queried. Using the
+/// real version means the UA/sec-ch-ua are never a stale/forged value (UA says
+/// 145 while the browser is 148 = a fingerprint tell a WAF can catch).
+/// Timeout-safe: on Windows `chrome --version` can hang when another instance
+/// holds the singleton lock, so poll try_wait with a 5s deadline + kill.
+fn chrome_ua_version() -> String {
+    static VER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VER.get_or_init(|| {
+        let mut child = match std::process::Command::new(crate::launch::chrome_path())
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return "145".to_string(),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(Some(_)) = child.try_wait() {
+                if let Ok(out) = child.wait_with_output() {
+                    let ver = parse_chrome_ver(&String::from_utf8(out.stdout).ok());
+                    if !ver.is_empty() {
+                        return ver;
+                    }
+                    let ver2 = parse_chrome_ver(&String::from_utf8(out.stderr).ok());
+                    if !ver2.is_empty() {
+                        return ver2;
+                    }
+                }
+                return "145".to_string();
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return "145".to_string();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    })
+    .clone()
+}
+
+fn parse_chrome_ver(s: &Option<String>) -> String {
+    s.as_deref()
+        .and_then(|s| {
+            // "Google Chrome 148.0.7778.280" -> "148"
+            s.split_whitespace()
+                .find(|t| t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                .map(|t| t.split('.').next().unwrap_or("").to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Chrome-identical HTTP headers for the no-browser fast path, with UA +
+/// sec-ch-ua derived from the REAL installed Chrome version (let it be
+/// auto-generated, not a stale hardcode).
+fn browser_headers() -> Vec<(String, String)> {
+    let ver = chrome_ua_version();
+    vec![
+        ("User-Agent".to_string(), format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36")),
+        ("sec-ch-ua".to_string(), format!("\"Google Chrome\";v=\"{ver}\", \"Not)A;Brand\";v=\"24\", \"Chromium\";v=\"{ver}\"")),
+        ("sec-ch-ua-mobile".to_string(), "?0".to_string()),
+        ("sec-ch-ua-platform".to_string(), "\"Windows\"".to_string()),
+        ("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".to_string()),
+        ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+        ("sec-fetch-site".to_string(), "none".to_string()),
+        ("sec-fetch-mode".to_string(), "navigate".to_string()),
+        ("sec-fetch-dest".to_string(), "document".to_string()),
+        ("upgrade-insecure-requests".to_string(), "1".to_string()),
+    ]
+}
 
 /// Shared HTTP agent — ONE connection pool for all no-browser fetches
 /// (http_fetch, validate_urls, download_files). Before, every call built a
@@ -1516,8 +1581,8 @@ pub(crate) fn browser_agent() -> ureq::Agent {
 /// Generic over the request body so we never name ureq's (re-)exported body
 /// types; `.header()` lives on `impl<Any> RequestBuilder<Any>`.
 fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
-    for (k, v) in BROWSER_HEADERS {
-        req = req.header(*k, *v);
+    for (k, v) in browser_headers() {
+        req = req.header(&k, &v);
     }
     req
 }

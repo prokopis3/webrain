@@ -70,6 +70,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Input.dispatchMouseEvent mouseWheel` (isTrusted=true) instead of JS
     `window.scrollBy` — every google human-like action is now trusted CDP input,
     no JS-driven actions remain in the flow.
+  - **Auto-generated UA**: the HTTP engine headers derive `User-Agent` +
+    `sec-ch-ua` from the REAL installed Chrome version (`chrome --version`,
+    timeout-safe, cached) instead of a stale hardcoded `Chrome/145` — no
+    forged-version fingerprint tell. The browser path already auto-generates
+    its UA (no `Network.setUserAgentOverride`).
 - **core, cli**: `--remote-debugging-pipe` support (`--fresh --pipe`) — launch
   google via CDP-over-stdin/stdout with NO listening debugging port (the open
   port is the automation fingerprint Google walls on `/sorry`). `connect_pipe`
