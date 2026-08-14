@@ -14,10 +14,10 @@
 //
 // Recommended features (from the reference app's list) that make sense for a
 // local portable tool: provider fallback, URL dedupe, pagination, safe search +
-// region, request ids, retry with backoff, parallel multi-provider. SaaS-only
-// concerns are deferred — Redis cache, API keys, rate limits, billing, metrics,
-// OTel, circuit breaker, proxy rotation (ponytail: name the ceiling, add when
-// this is hosted as a multi-tenant service).
+// region, request ids, retry with backoff, parallel multi-provider, per-request
+// proxy. SaaS-only concerns are deferred — Redis cache, API keys, rate limits,
+// billing, metrics, OTel, circuit breaker, proxy rotation pool (ponytail: name
+// the ceiling, add when this is hosted as a multi-tenant service).
 
 use crate::browser::BrowserBackend;
 use serde::Serialize;
@@ -71,6 +71,11 @@ pub struct SerpOpts {
     pub retries: u32,
     /// Allow provider fallback when a specific engine errors or returns zero.
     pub fallback: bool,
+    /// Route HTTP-engine fetches through this proxy URL (e.g. "http://user:pass@host:port"
+    /// or "socks5://host:port"). The google/brave browser path only honors a proxy when
+    /// the CDP engine was launched with one (CLI `--proxy` bakes it into `--proxy-server`
+    /// on google auto-launch; an attached browser keeps whatever proxy it was started with).
+    pub proxy: Option<String>,
 }
 
 impl Default for SerpOpts {
@@ -84,6 +89,7 @@ impl Default for SerpOpts {
             region: None,
             retries: 2,
             fallback: true,
+            proxy: None,
         }
     }
 }
@@ -98,7 +104,13 @@ fn engine_url(
     page: usize,
     safe: bool,
     region: Option<&str>,
+    limit: usize,
 ) -> anyhow::Result<String> {
+    // Accuracy: pin an en-US market when no region is given instead of letting
+    // the engine GeoIP the request — a localized IP turns "tokio rust" into
+    // Czech Tokyo travel pages. region format: "<country>-<lang>" e.g. us-en.
+    let region = region.unwrap_or("us-en");
+    let (cc, lang) = region.split_once('-').unwrap_or((region, region));
     match engine {
         "duckduckgo" => {
             let mut u = Url::parse("https://html.duckduckgo.com/html/")?;
@@ -110,9 +122,7 @@ fn engine_url(
             p.append_pair("k5", "1");
             // k1: -1 off, 1 moderate, 2 strict.
             p.append_pair("k1", if safe { "2" } else { "-1" });
-            if let Some(r) = region {
-                p.append_pair("kl", r);
-            }
+            p.append_pair("kl", region);
             drop(p);
             Ok(u.to_string())
         }
@@ -120,9 +130,21 @@ fn engine_url(
             let mut u = Url::parse("https://www.bing.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // bing paginates 10/page via `first` (1, 11, 21, ...).
-            p.append_pair("first", &(page * 10 + 1).to_string());
+            // Bing paginates 10/page via `first` (1, 11, 21, ...), but when
+            // `first` is present bing may ignore a custom `count` and return
+            // the default page size (10). So send `first` only past page 0 and
+            // let `count` drive page 0's result count (open-serp's bing rule).
+            if page > 0 {
+                p.append_pair("first", &(page * 10 + 1).to_string());
+            }
             p.append_pair("adlt", if safe { "strict" } else { "off" });
+            // Locale (mkt/setlang/cc) + request more than the 10-result page.
+            p.append_pair("mkt", &format!("{lang}-{}", cc.to_uppercase()));
+            p.append_pair("setlang", lang);
+            p.append_pair("cc", &cc.to_uppercase());
+            if limit > 10 {
+                p.append_pair("count", &limit.to_string());
+            }
             drop(p);
             Ok(u.to_string())
         }
@@ -131,14 +153,21 @@ fn engine_url(
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
             p.append_pair("start", &(page * 10).to_string());
-            p.append_pair("num", "10");
+            p.append_pair("num", &limit.to_string());
             p.append_pair("safe", if safe { "active" } else { "off" });
+            p.append_pair("hl", lang);
+            p.append_pair("gl", cc);
+            p.append_pair("lr", &format!("lang_{lang}"));
             drop(p);
             Ok(u.to_string())
         }
         "brave" => {
             let mut u = Url::parse("https://search.brave.com/search")?;
-            u.query_pairs_mut().append_pair("q", q);
+            let mut p = u.query_pairs_mut();
+            p.append_pair("q", q);
+            p.append_pair("hl", lang);
+            p.append_pair("gl", cc);
+            drop(p);
             Ok(u.to_string())
         }
         other => Err(anyhow::anyhow!(
@@ -543,17 +572,11 @@ fn request_id() -> String {
 }
 
 /// Fetch + parse one HTTP engine with retry + exponential backoff.
-async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
-    let url = engine_url(
-        engine,
-        &opts.query,
-        opts.page,
-        opts.safe,
-        opts.region.as_deref(),
-    )?;
+/// Fetch + parse ONE engine results page with retry + exponential backoff.
+async fn http_search_page(engine: &str, url: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     let mut attempt = 0u32;
     loop {
-        match crate::engines::serp_http_get(&url) {
+        match crate::engines::serp_http_get(url, opts.proxy.as_deref()) {
             Ok((status, body)) if (200..300).contains(&status) => {
                 return Ok(parse_results(engine, &body, opts.limit));
             }
@@ -569,6 +592,44 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
             }
         }
     }
+}
+
+/// Fetch + parse one HTTP engine, merging consecutive pages until `limit` is
+/// met (engines serve ~10 results/page; `count`/`first`/`s` unlock more on
+/// clean IPs). Stops the moment a page adds zero new unique results — engines
+/// on a GeoIP-locked IP often serve the same page every time, so this never
+/// burns requests on repeats. Positions are renumbered 1-based after the merge.
+async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
+    let mut all: Vec<SerpResult> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // 50 max / ~10 per page; bounded so a hostile engine can't loop forever.
+    let max_pages = (opts.limit / 10).clamp(1, 5);
+    for page in opts.page..opts.page + max_pages {
+        let url = engine_url(
+            engine,
+            &opts.query,
+            page,
+            opts.safe,
+            opts.region.as_deref(),
+            opts.limit,
+        )?;
+        let rs = http_search_page(engine, &url, opts).await?;
+        let mut fresh = 0usize;
+        for r in rs {
+            if seen.insert(dedupe_key(&r.url)) {
+                all.push(r);
+                fresh += 1;
+            }
+        }
+        if all.len() >= opts.limit || fresh == 0 {
+            break;
+        }
+    }
+    for (i, r) in all.iter_mut().enumerate() {
+        r.position = i + 1;
+    }
+    all.truncate(opts.limit);
+    Ok(all)
 }
 
 /// Human-like synthetic events for Google, injected as an init script so they
@@ -652,11 +713,82 @@ async fn browser_search<B: BrowserBackend>(
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Optional 2captcha solve (open-serp recipe): if the hard-reload left
+        // the /sorry wall up, read sitekey + data-s, solve via 2captcha (with
+        // the same proxy so the token matches the exit IP), inject the token +
+        // submit, then let the humanized flow continue. Gated by
+        // WEBRAIN_2CAPTCHA_KEY; a failed solve just falls through to the
+        // existing retry/fallback — it never blocks results.
+        if let Ok(api_key) = std::env::var("WEBRAIN_2CAPTCHA_KEY") {
+            let walled = backend
+                .evaluate(
+                    "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))",
+                )
+                .await
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            if walled {
+                let info = backend
+                    .evaluate(
+                        r#"(function(){ const d = document.querySelector('[data-sitekey]');
+                            return d ? JSON.stringify({k: d.getAttribute('data-sitekey') || '', s: d.getAttribute('data-s') || '', u: location.href}) : 'null'; })()"#,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                if let Some(info) = info {
+                    let sitekey = info.get("k").and_then(|v| v.as_str()).unwrap_or("");
+                    let data_s = info.get("s").and_then(|v| v.as_str()).unwrap_or("");
+                    let page_url = info.get("u").and_then(|v| v.as_str()).unwrap_or("");
+                    if !sitekey.is_empty() {
+                        if let Ok(token) = crate::captcha::solve_recaptcha2(
+                            &api_key,
+                            sitekey,
+                            page_url,
+                            data_s,
+                            opts.proxy.as_deref(),
+                        ) {
+                            let token = serde_json::json!(token).to_string();
+                            let js = format!(
+                                "document.getElementById('g-recaptcha-response').innerHTML={token}; if (window.submitCallback) submitCallback(); location.reload();"
+                            );
+                            let _ = backend.evaluate(&js).await;
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            tracing::debug!("2captcha solved + submitted /sorry wall");
+                        }
+                    }
+                }
+            }
+        }
+
         // Human-like events run on the LOADED page — after navigation, BEFORE
         // consent dismissal. evaluate() runs them on the real rendered DOM so
         // the consent click that follows reads as a human who moved the mouse.
         let _ = backend.evaluate(GOOGLE_HUMAN_JS).await;
-        let _ = backend.evaluate(CONSENT_DISMISS_JS).await;
+        let consent = backend
+            .evaluate(CONSENT_DISMISS_JS)
+            .await
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let state = backend
+            .evaluate(
+                r#"(function(){
+                    const t = document.body ? document.body.innerText : '';
+                    return JSON.stringify({
+                        wall: /sorry|unusual traffic|not a robot|captcha/i.test(location.href + ' ' + t),
+                        consent: !!document.querySelector('.LSCOAf') || /reject all|accept all|i agree/i.test(t),
+                        box: !!document.querySelector('textarea[name="q"],input[name="q"]')
+                    });
+                })()"#,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        tracing::debug!(%consent, %state, "google consent dismiss + page state");
         // Human pacing: read the page a beat before typing. A script types in
         // <1s after load; a human takes seconds — manual searches in the same
         // browser/IP pass while the instant automation walls. This is the delay
@@ -768,6 +900,7 @@ async fn browser_search<B: BrowserBackend>(
         opts.page,
         opts.safe,
         opts.region.as_deref(),
+        opts.limit,
     )?;
     backend.navigate(&url).await?;
     wait_for_results(backend, engine).await?;
@@ -1142,22 +1275,32 @@ mod tests {
 
     #[test]
     fn engine_url_encodes_params() {
-        let u = engine_url("duckduckgo", "rust & web", 1, true, Some("gb-en")).unwrap();
+        let u = engine_url("duckduckgo", "rust & web", 1, true, Some("gb-en"), 10).unwrap();
         assert!(u.contains("q=rust+%26+web"), "query percent-encoded: {u}");
         assert!(u.contains("s=30"), "page 1 offset: {u}");
         assert!(u.contains("k1=2"), "safe on: {u}");
         assert!(u.contains("kl=gb-en"), "region: {u}");
         assert!(u.contains("k5=1"), "no-redirect: {u}");
 
-        let b = engine_url("bing", "rust", 2, false, None).unwrap();
+        let b = engine_url("bing", "rust", 2, false, None, 10).unwrap();
         assert!(b.contains("first=21"), "bing page 2: {b}");
         assert!(b.contains("adlt=off"), "bing safe off: {b}");
+        // No region -> en-US market pinned (locale garbage fix).
+        assert!(b.contains("mkt=en-US"), "bing en-US market: {b}");
 
-        let g = engine_url("google", "rust", 1, true, None).unwrap();
+        let b20 = engine_url("bing", "rust", 0, false, None, 20).unwrap();
+        assert!(b20.contains("count=20"), "bing limit respected: {b20}");
+        assert!(
+            !b20.contains("first="),
+            "page 0 must omit `first` so bing honors `count`: {b20}"
+        );
+
+        let g = engine_url("google", "rust", 1, true, None, 10).unwrap();
         assert!(g.contains("start=10"));
         assert!(g.contains("safe=active"));
+        assert!(g.contains("hl=en"), "google en-US lang: {g}");
 
-        assert!(engine_url("nope", "x", 0, false, None).is_err());
+        assert!(engine_url("nope", "x", 0, false, None, 10).is_err());
     }
 
     #[test]

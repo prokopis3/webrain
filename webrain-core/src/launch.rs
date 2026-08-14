@@ -169,11 +169,12 @@ fn spawn_and_wait(
 /// Spawn real Chrome (headed by default) with a persistent per-account profile
 /// and stealth flags, wait for its CDP endpoint, and return a handle + CDP URL.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
-pub fn launch_chrome(
+fn launch_chrome_opt(
     service: &str,
     profile: &str,
     port: u16,
     headed: bool,
+    proxy: Option<&str>,
 ) -> anyhow::Result<Launched> {
     if port_open(port) {
         anyhow::bail!("port {port} already has a CDP endpoint — another Chrome is running there");
@@ -191,6 +192,9 @@ pub fn launch_chrome(
         "--disable-blink-features=AutomationControlled".to_string(),
         "--disable-features=AutomationControlled".to_string(),
     ];
+    if let Some(p) = proxy {
+        args.push(format!("--proxy-server={p}"));
+    }
     if !headed {
         args.push("--headless=new".to_string());
     }
@@ -203,6 +207,30 @@ pub fn launch_chrome(
         profile_dir,
         "Chrome",
     )
+}
+
+/// Spawn real Chrome with a persistent per-account profile and stealth flags,
+/// wait for its CDP endpoint, and return a handle + CDP URL (no proxy).
+/// Chrome locks `user-data-dir` — one instance per profile/port.
+pub fn launch_chrome(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+) -> anyhow::Result<Launched> {
+    launch_chrome_opt(service, profile, port, headed, None)
+}
+
+/// Spawn real Chrome routing through an HTTP(S)/SOCKS proxy (`--proxy-server`).
+/// Same persistent-profile semantics as [`launch_chrome`].
+pub fn launch_chrome_with_proxy(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+    proxy: &str,
+) -> anyhow::Result<Launched> {
+    launch_chrome_opt(service, profile, port, headed, Some(proxy))
 }
 
 /// Spawn the lightpanda CDP server (agent-browser `--engine lightpanda`).

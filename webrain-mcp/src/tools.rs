@@ -400,7 +400,8 @@ pub fn list_tools() -> Vec<Value> {
                 "safe": {"type": "boolean", "default": false},
                 "region": {"type": "string", "description": "locale/region, e.g. us-en, gb-en, gr-el, de-de"},
                 "fallback": {"type": "boolean", "default": true, "description": "fall back to another provider when the requested engine errors or returns zero"},
-                "retries": {"type": "integer", "default": 2, "description": "transient-failure retries with backoff, 0..=5"}
+                "retries": {"type": "integer", "default": 2, "description": "transient-failure retries with backoff, 0..=5"},
+                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL (e.g. http://user:pass@host:port) for the HTTP engines (duckduckgo/bing/google/auto). The brave browser path only uses a proxy if the connected CDP engine was launched with one."}
             }, "required": ["q"]}
         }),
         json!({
@@ -3121,6 +3122,10 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             .get("fallback")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        proxy: args
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
     // brave needs a browser — the lib.rs short-circuit routes HTTP engines
     // around the backend; here (call_tool) a backend may or may not be attached.

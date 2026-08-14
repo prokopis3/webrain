@@ -7,6 +7,7 @@
 
 pub mod backends;
 pub mod browser;
+pub mod captcha;
 pub mod engines;
 pub mod install;
 pub mod launch;

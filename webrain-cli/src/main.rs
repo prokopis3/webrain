@@ -196,10 +196,10 @@ fn main() -> anyhow::Result<()> {
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 println!(
-                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless]"
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL]"
                 );
                 println!(
-                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached (CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one)"
+                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached (CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy)"
                 );
                 return Ok(());
             }
@@ -220,6 +220,7 @@ fn main() -> anyhow::Result<()> {
             let fallback = !args.contains(&"--no-fallback".to_string());
             let json_out = args.contains(&"--json".to_string());
             let headless = args.contains(&"--headless".to_string());
+            let proxy = flag("--proxy");
             let opts = webrain_core::serp::SerpOpts {
                 query: query.trim().to_string(),
                 engine,
@@ -229,6 +230,7 @@ fn main() -> anyhow::Result<()> {
                 region,
                 retries: 2,
                 fallback,
+                proxy: proxy.clone(),
             };
             // google is JS-gated (consent/JS shell over plain HTTP) — same as
             // brave, it needs a real browser. For google, if none is attached,
@@ -241,12 +243,17 @@ fn main() -> anyhow::Result<()> {
                 match rt.block_on(CdpBackend::connect_default()) {
                     Ok(b) => Some(b),
                     Err(_) if opts.engine == "google" => {
-                        let launched = webrain_core::launch::launch_chrome(
-                            "serp",
-                            "google",
-                            9222,
-                            !headless,
-                        )?;
+                        // --proxy bakes --proxy-server into the auto-launched Chrome so
+                        // the google browser path egresses through the proxy (IP rotation
+                        // on a walled IP). No proxy -> plain persistent-profile launch.
+                        let launched = match proxy.as_deref() {
+                            Some(p) => webrain_core::launch::launch_chrome_with_proxy(
+                                "serp", "google", 9222, !headless, p,
+                            )?,
+                            None => {
+                                webrain_core::launch::launch_chrome("serp", "google", 9222, !headless)?
+                            }
+                        };
                         println!(
                             "launched chrome: {} (CDP_URL={})",
                             launched.profile_dir.display(),

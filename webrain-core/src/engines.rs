@@ -1526,10 +1526,30 @@ fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
 /// 3000 chars (fine for probes, useless for parsing a results page). Returns
 /// `(status, body)` with the FULL body. Reuses the pooled agent + Chrome headers.
 /// ponytail: one new fn instead of widening http_fetch's cap for every caller.
-pub(crate) fn serp_http_get(url: &str) -> anyhow::Result<(u16, String)> {
-    let resp = browser_req(browser_agent().get(url)).call()?;
+pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u16, String)> {
+    // ponytail: proxy = one-off agent (fresh pool per proxied call); the proxy-less
+    // hot path keeps the shared pooled agent. Per-proxy pool cache if SERP throughput
+    // ever matters.
+    let agent = match proxy {
+        Some(p) => {
+            let proxy = ureq::Proxy::new(p)?;
+            ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(30)))
+                    .proxy(Some(proxy))
+                    .build(),
+            )
+        }
+        None => browser_agent(),
+    };
+    let resp = browser_req(agent.get(url)).call()?;
     let status = resp.status().as_u16();
-    let text = resp.into_body().read_to_string()?;
+    // Decode as UTF-8 explicitly: ureq's read_to_string() keys off the response
+    // charset header, which the engines omit or mis-declare (latin-1), turning
+    // every non-ASCII char into mojibake ("–" -> "ΓÇô"). All three engines
+    // serve UTF-8, so a lossy UTF-8 decode is always correct.
+    let bytes = resp.into_body().read_to_vec()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     Ok((status, text))
 }
 

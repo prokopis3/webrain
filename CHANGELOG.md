@@ -7,8 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
+  `String::from_utf8_lossy` instead of ureq's charset-header-driven
+  `read_to_string`, which mis-decoded (latin-1) every non-ASCII char into
+  mojibake (`–` → `ΓÇô`). All engines serve UTF-8, so the lossy decode is
+  always correct; API/JSON consumers now get clean text (a legacy console/pipe
+  may still render UTF-8 as glyph soup — use `chcp 65001` or a UTF-8 terminal).
+
 ### Added
 
+- **core**: SERP market defaulting — `engine_url` pins an **en-US market**
+  when no `region` is given instead of letting the engine GeoIP the request (a
+  localized IP turned `tokio rust` into Czech/Italian/Greek travel or banking
+  pages). Per-engine locale params now always sent: ddg `kl`, bing
+  `mkt`/`setlang`/`cc`, google/brave `hl`/`gl`/`lr`. Note: engines that
+  GeoIP-lock a flagged/rotating IP still localize regardless of params — route
+  through `--proxy <clean-IP>` for deterministic markets (the open-serp model).
+- **core**: SERP limit respected per engine — `engine_url` takes `limit` and
+  requests it (bing `count`, google `num`) instead of hard-capping at 10. Bing
+  `first` is sent only past page 0 (open-serp rule: bing ignores a custom
+  `count` while `first` is present). `http_search` now merges consecutive pages
+  (bounded, with a no-progress stop guard) so `limit` > ~10 is honored where
+  engines paginate. Note: bing/ddg cap anonymous requests at ~10 and ignore
+  `count`/`first`/`s` on a GeoIP-locked IP — route `--proxy <clean-IP>` for
+  larger limits and deterministic markets.
+- **core, cli**: optional 2captcha CAPTCHA solving (open-serp recipe) — new
+  `webrain_core::captcha` module (ureq only, no new dep): extract `data-sitekey`
+  + `data-s` from a Google `/sorry` wall, solve via `2captcha.com` with the same
+  proxy, inject the token + `submitCallback()`. Gated by the `WEBRAIN_2CAPTCHA_KEY`
+  env var; a failed solve falls through to the existing retry/fallback.
+- **core, cli, mcp**: per-request proxy for the SERP API — `webrain serp ... --proxy URL` and `webrain_serp`'s `proxy` param route traffic through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`). HTTP engines (duckduckgo/bing/google/auto) get a proxied `ureq` agent; the google browser auto-launch bakes `--proxy-server` into the launched Chrome so the humanized flow egresses through the proxy (IP rotation on walled IPs). An attached CDP engine keeps whatever proxy it was started with.
 - **docs**: landing page (`docs/index.mdx`) bug fix + marketing sharpening:
   - **First-load flash fix** — the hero entrance now runs exactly once. When
     Mintlify's React shell re-renders after hydration and wipes the
