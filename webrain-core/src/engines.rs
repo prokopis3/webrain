@@ -1483,67 +1483,13 @@ pub async fn batch_screenshot(
 /// wreq) — rustls can't emit Chrome's extensions/GREASE. This kills the
 /// HTTP-header/UA tells WAFs check first. Add BoringSSL only when a WAF
 /// starts failing past this layer.
-/// Major version of the REAL installed Chrome (via `chrome --version`), cached
-/// per process. Fallback "145" only if the binary can't be queried. Using the
-/// real version means the UA/sec-ch-ua are never a stale/forged value (UA says
-/// 145 while the browser is 148 = a fingerprint tell a WAF can catch).
-/// Timeout-safe: on Windows `chrome --version` can hang when another instance
-/// holds the singleton lock, so poll try_wait with a 5s deadline + kill.
-fn chrome_ua_version() -> String {
-    static VER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    VER.get_or_init(|| {
-        let mut child = match std::process::Command::new(crate::launch::chrome_path())
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return "145".to_string(),
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Ok(Some(_)) = child.try_wait() {
-                if let Ok(out) = child.wait_with_output() {
-                    let ver = parse_chrome_ver(&String::from_utf8(out.stdout).ok());
-                    if !ver.is_empty() {
-                        return ver;
-                    }
-                    let ver2 = parse_chrome_ver(&String::from_utf8(out.stderr).ok());
-                    if !ver2.is_empty() {
-                        return ver2;
-                    }
-                }
-                return "145".to_string();
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return "145".to_string();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    })
-    .clone()
-}
+// ponytail: static Chrome major, must agree with sec-ch-ua. Probe spawned a
+// visible Chrome; rustls TLS already gives the fingerprint away. Bump when Chrome drifts.
+const CHROME_UA_VER: &str = "145";
 
-fn parse_chrome_ver(s: &Option<String>) -> String {
-    s.as_deref()
-        .and_then(|s| {
-            // "Google Chrome 148.0.7778.280" -> "148"
-            s.split_whitespace()
-                .find(|t| t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-                .map(|t| t.split('.').next().unwrap_or("").to_string())
-        })
-        .unwrap_or_default()
-}
-
-/// Chrome-identical HTTP headers for the no-browser fast path, with UA +
-/// sec-ch-ua derived from the REAL installed Chrome version (let it be
-/// auto-generated, not a stale hardcode).
+/// Chrome-identical HTTP headers for the no-browser fast path.
 fn browser_headers() -> Vec<(String, String)> {
-    let ver = chrome_ua_version();
+    let ver = CHROME_UA_VER;
     vec![
         ("User-Agent".to_string(), format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36")),
         ("sec-ch-ua".to_string(), format!("\"Google Chrome\";v=\"{ver}\", \"Not)A;Brand\";v=\"24\", \"Chromium\";v=\"{ver}\"")),
