@@ -2402,6 +2402,12 @@ impl BrowserBackend for CdpBackend {
     async fn close_tab(&self, id: &str) -> anyhow::Result<()> {
         CdpBackend::close_tab(self, id).await
     }
+    async fn tab_session(&self, id: &str) -> anyhow::Result<String> {
+        CdpBackend::tab_session(self, id).await
+    }
+    async fn navigate_session(&self, sid: &str, url: &str) -> anyhow::Result<()> {
+        CdpBackend::navigate_session(self, sid, url).await
+    }
     async fn list_tabs(&self) -> anyhow::Result<Value> {
         CdpBackend::list_tabs(self).await
     }
@@ -2551,7 +2557,7 @@ impl BrowserBackend for CdpBackend {
             .await
             .ok()?;
         let root = doc["root"]["nodeId"].as_i64()?;
-        let gate = "div[role='dialog'], #yDmH0d, form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent']";
+        let gate = "div[role='dialog'], #yDmH0d, form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
         let hit = self
             .send_cmd(
                 "DOM.querySelector",

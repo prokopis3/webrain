@@ -174,6 +174,16 @@ pub trait BrowserBackend: Send + Sync {
     async fn close_tab(&self, _id: &str) -> anyhow::Result<()> {
         anyhow::bail!("close_tab not supported by this backend")
     }
+    /// CDP session id for a tab — lets a concurrent task drive its OWN tab via
+    /// session-scoped commands without racing on the global active tab.
+    async fn tab_session(&self, _id: &str) -> anyhow::Result<String> {
+        anyhow::bail!("tab_session not supported by this backend")
+    }
+    /// Navigate a specific tab (session-scoped, not the global active) and wait
+    /// for interactive/complete. Multiple tabs load in PARALLEL in the browser.
+    async fn navigate_session(&self, _sid: &str, _url: &str) -> anyhow::Result<()> {
+        anyhow::bail!("navigate_session not supported by this backend")
+    }
     /// List open tabs: [{id, url, active}].
     async fn list_tabs(&self) -> anyhow::Result<serde_json::Value> {
         anyhow::bail!("list_tabs not supported by this backend")

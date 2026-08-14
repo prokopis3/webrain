@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Also cut the google results wait beat to 1.2s (navigate already waits for
   interactive). Verified: `serp --engine google --limit 10` ≈ **6s / 10 results**
   (was ~45.5s).
+- **core**: serp **google/brave multi-tab pagination** — result pages now load
+  in PARALLEL background tabs (new trait methods `tab_session` +
+  `navigate_session`, CdpBackend-only; `tokio::join!` runs page 0's humanized
+  flow concurrently with `futures_util::future::join_all` over the extra tabs'
+  session-scoped navigations) — the pagination overlap is hidden behind page 0.
+  Bounded by `max_pages` (≤4 tabs); no semaphore needed (unlike `batch`, whose
+  URL list is unbounded). Verified: `--limit 30` ≈ 13.5s.
+- **core**: **brave guest-browser flow parity with google** — brave now runs
+  the same multi-tab trusted flow (consent dismiss incl. OneTrust gate, humanize,
+  walled-IP retry loop, `offset` pagination for limit > 10). Previously brave
+  rendered a single page with no consent handling → 0 results on a consent /
+  PoW-CAPTCHA wall. Note: brave PoW-captchas flagged IPs ("Verify you're not a
+  bot") — same class as google `/sorry`; the retry/fallback chain handles it.
 - **cli, mcp**: **brave guest auto-launch** — brave now auto-launches guest
   Chrome on 9222 like google (ddg/bing stay pure HTTP, no browser). MCP
   `webrain_serp` routes google|brave through the guest-browser backend
