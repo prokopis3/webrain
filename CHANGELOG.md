@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **cli**: bare `webrain` (double-click the exe, no command) now **launches a
+  headed Chrome** — persistent profile `web/default` (port 9222) opened to
+  google.com — instead of silently starting the MCP stdio server. Same code
+  path as `webrain launch` with defaults; explicit `webrain mcp` is unchanged
+  (all MCP configs/docs/Docker pass `mcp` explicitly, so they're unaffected).
 - **core**: SERP market defaulting — `engine_url` pins an **en-US market**
   when no `region` is given instead of letting the engine GeoIP the request (a
   localized IP turned `tokio rust` into Czech/Italian/Greek travel or banking

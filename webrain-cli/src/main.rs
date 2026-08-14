@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("mcp") | None => {
+        Some("mcp") => {
             // `webrain mcp` = stdio; `webrain mcp --http <port>` = HTTP transport
             // with per-connection sessions (lightpanda mcp --port style).
             let http_port: Option<String> = args
@@ -510,17 +510,20 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         }
-        Some("launch") => {
+        Some("launch") | None => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // Spawns a stealth Chrome with a persistent per-account profile and
-            // spawns a stealth Chrome with a persistent per-account profile and
-            // opens the site so the human can log in (Channel A).
+            // Spawns a Chrome with a persistent per-account profile and opens the
+            // site so the human can log in (Channel A). Bare `webrain` — i.e.
+            // double-clicking the exe with no command — does the same with
+            // defaults: service=web, profile=default, url=google.com.
+            let bare = args.get(1).is_none();
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
-            let url = args
-                .get(4)
-                .map(|s| s.as_str())
-                .unwrap_or("https://accounts.google.com");
+            let url = args.get(4).map(|s| s.as_str()).unwrap_or(if bare {
+                "https://www.google.com"
+            } else {
+                "https://accounts.google.com"
+            });
             let headless = args.contains(&"--headless".to_string());
             let port: u16 = args
                 .iter()
@@ -528,12 +531,13 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(9222);
-            if service.is_empty() || profile.is_empty() {
+            if (service.is_empty() || profile.is_empty()) && !bare {
                 println!("usage: webrain launch <service> <profile> [url] [--headless] [--port N]");
                 return Ok(());
             }
-            let launched =
-                webrain_core::launch::launch_chrome(&service, &profile, port, !headless)?;
+            let service = if service.is_empty() { "web" } else { &service };
+            let profile = if profile.is_empty() { "default" } else { &profile };
+            let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;
             println!("profile: {}", launched.profile_dir.display());
             println!("CDP_URL={}", launched.cdp_url);
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
