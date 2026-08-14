@@ -512,23 +512,33 @@ fn main() -> anyhow::Result<()> {
         }
         Some("launch") | None => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // Spawns a Chrome with a persistent per-account profile and opens the
-            // site so the human can log in (Channel A). Bare `webrain` (double-click
-            // the exe) or `webrain launch` with no args both do the DEFAULT launch:
-            // service=web, profile=default, url=google.com.
+            // Bare `webrain` (double-click the exe) or `webrain launch` with no
+            // args opens the user's DEFAULT Chrome at url — exactly like
+            // double-clicking Chrome.exe: no flags, no temp/persistent profile,
+            // real profile (bookmarks/sign-in) so it does NOT look incognito.
+            // Explicit service/profile = persistent-profile CDP launch (the
+            // Channel A login flow used by `webrain login`).
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
             let url = args
                 .get(4)
                 .map(|s| s.as_str())
                 .unwrap_or("https://www.google.com");
+            if service.is_empty() && profile.is_empty() {
+                webrain_core::launch::launch_chrome_default(url)?;
+                println!("opened: {url} in your default Chrome");
+                return Ok(());
+            }
             let headless = args.contains(&"--headless".to_string());
-            let port: u16 = args
+            let explicit_port = args
                 .iter()
                 .position(|a| a == "--port")
                 .and_then(|i| args.get(i + 1))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(9222);
+                .and_then(|s| s.parse::<u16>().ok());
+            // Just launch & keep: without an explicit --port, pick the next free
+            // port from 9222 instead of failing when a warm/leftover Chrome is
+            // holding 9222.
+            let port = explicit_port.unwrap_or_else(|| pick_free_port(9222));
             let service = if service.is_empty() { "web" } else { &service };
             let profile = if profile.is_empty() { "default" } else { &profile };
             let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;

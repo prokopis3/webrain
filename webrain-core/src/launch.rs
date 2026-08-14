@@ -261,6 +261,20 @@ pub fn launch_chrome_plain_with_proxy(
     launch_chrome_opt(service, profile, port, headed, false, Some(proxy))
 }
 
+/// Open the user's DEFAULT Chrome like double-clicking the exe: no automation
+/// flags, no user-data-dir, no CDP — the real profile (bookmarks, sign-in,
+/// extensions), so it looks like a normal browser, NOT incognito. Chrome stays
+/// open on its own; if Chrome is already running it opens a new tab. This is
+/// the bare `webrain` / `webrain launch` (no args) default path.
+pub fn launch_chrome_default(url: &str) -> anyhow::Result<()> {
+    let bin = chrome_path();
+    std::process::Command::new(&bin)
+        .arg(url)
+        .spawn()
+        .with_context(|| format!("failed to spawn Chrome at {}", bin.display()))?;
+    Ok(())
+}
+
 /// Spawn a Chrome over `--remote-debugging-pipe` (stdin/stdout, NO listening
 /// port) — the undetectable-CDP path for google: an open debugging port is the
 /// automation fingerprint Google flags on `/sorry`, and a pipe-launched Chrome
