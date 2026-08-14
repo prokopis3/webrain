@@ -2373,10 +2373,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             .get("fallback")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        proxy: args
-            .get("proxy")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        proxy: args.get("proxy").and_then(|v| v.as_str()).map(String::from),
     };
     // google/brave need a browser — the lib.rs short-circuit routes HTTP engines
     // around the backend; here (call_tool) a backend may or may not be attached,

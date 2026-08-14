@@ -146,7 +146,9 @@ pub trait BrowserBackend: Send + Sync {
     /// beats the /sorry wall. Default falls back to location.reload() (best-
     /// effort; CDP backends override with Page.reload ignoreCache:true).
     async fn reload_hard(&self) -> anyhow::Result<()> {
-        self.evaluate("location.reload(true); true").await.map(|_| ())
+        self.evaluate("location.reload(true); true")
+            .await
+            .map(|_| ())
     }
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at

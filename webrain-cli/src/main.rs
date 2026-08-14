@@ -278,7 +278,9 @@ fn main() -> anyhow::Result<()> {
                         // thing that walls google). The child is owned by
                         // connect_pipe and killed when the run ends.
                         if proxy.is_some() {
-                            anyhow::bail!("--fresh --pipe does not support --proxy (pipe Chrome can't bake --proxy-server here)");
+                            anyhow::bail!(
+                                "--fresh --pipe does not support --proxy (pipe Chrome can't bake --proxy-server here)"
+                            );
                         }
                         let child = rt.block_on(webrain_core::launch::launch_chrome_pipe(
                             "serp", &prof_name, !headless,
@@ -321,9 +323,17 @@ fn main() -> anyhow::Result<()> {
                             // ephemeral session every run — zero persisted
                             // cookies/history. ddg/bing never reach this branch
                             // (backend = None, pure HTTP).
-                            let prof = if opts.engine == "google" { "google" } else { "brave" };
+                            let prof = if opts.engine == "google" {
+                                "google"
+                            } else {
+                                "brave"
+                            };
                             let launched = webrain_core::launch::launch_chrome_guest(
-                                "serp", prof, 9222, !headless, proxy.as_deref(),
+                                "serp",
+                                prof,
+                                9222,
+                                !headless,
+                                proxy.as_deref(),
                             )?;
                             println!(
                                 "launched chrome (guest): {} (CDP_URL={})",
@@ -379,7 +389,9 @@ fn main() -> anyhow::Result<()> {
             // --hold: keep the fresh browser up so you can inspect it; close on
             // Enter (dropping `_launched` kills Chrome).
             if hold && _launched.is_some() {
-                println!("[--hold] browser open — inspect the Chrome window, then press Enter to close it");
+                println!(
+                    "[--hold] browser open — inspect the Chrome window, then press Enter to close it"
+                );
                 let mut line = String::new();
                 let _ = std::io::stdin().read_line(&mut line);
             }
@@ -524,7 +536,11 @@ fn main() -> anyhow::Result<()> {
             // holding 9222.
             let port = explicit_port.unwrap_or_else(|| pick_free_port(9222));
             let service = if service.is_empty() { "web" } else { &service };
-            let profile = if profile.is_empty() { "default" } else { &profile };
+            let profile = if profile.is_empty() {
+                "default"
+            } else {
+                &profile
+            };
             let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;
             println!("profile: {}", launched.profile_dir.display());
             println!("CDP_URL={}", launched.cdp_url);

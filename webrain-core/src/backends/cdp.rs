@@ -509,8 +509,14 @@ impl CdpBackend {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let mut child = child;
-        let mut stdin = child.stdin.take().context("pipe: browser stdin not piped")?;
-        let stdout = child.stdout.take().context("pipe: browser stdout not piped")?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("pipe: browser stdin not piped")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("pipe: browser stdout not piped")?;
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
         let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(64);
 
@@ -518,8 +524,7 @@ impl CdpBackend {
         tokio::spawn(async move {
             while let Some(text) = out_rx.recv().await {
                 let framed = format!("{}\n{}", text.len(), text);
-                if stdin.write_all(framed.as_bytes()).await.is_err()
-                    || stdin.flush().await.is_err()
+                if stdin.write_all(framed.as_bytes()).await.is_err() || stdin.flush().await.is_err()
                 {
                     break;
                 }
@@ -807,7 +812,10 @@ impl CdpBackend {
         // WEBRAIN_NO_STEALTH=1 (the serp google flow) skips the injected
         // stealth — a human's Chrome runs no anti-bot script; the flow then
         // keeps only trusted commands (no Runtime.evaluate, no injected JS).
-        if std::env::var("WEBRAIN_NO_STEALTH").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("WEBRAIN_NO_STEALTH")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             tracing::debug!("WEBRAIN_NO_STEALTH=1 — skipping stealth_js injection");
         } else {
             self.send_cmd_with(

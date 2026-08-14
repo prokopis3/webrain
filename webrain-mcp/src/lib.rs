@@ -277,13 +277,21 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     match res {
                         Ok(b) => *backend = Some(b),
                         Err(_) => {
-                            let prof = if engine == "google" { "google" } else { "brave" };
+                            let prof = if engine == "google" {
+                                "google"
+                            } else {
+                                "brave"
+                            };
                             let proxy = arguments
                                 .get("proxy")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
                             match webrain_core::launch::launch_chrome_guest(
-                                "serp", prof, 9222, true, proxy.as_deref(),
+                                "serp",
+                                prof,
+                                9222,
+                                true,
+                                proxy.as_deref(),
                             ) {
                                 Ok(l) => {
                                     let url = l.cdp_url.clone();
@@ -294,16 +302,20 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                         Err(e) => {
                                             return tool_error(
                                                 id,
-                                                &format!("guest-launched browser at {url} but attach failed: {e}"),
-                                            )
+                                                &format!(
+                                                    "guest-launched browser at {url} but attach failed: {e}"
+                                                ),
+                                            );
                                         }
                                     }
                                 }
                                 Err(e) => {
                                     return tool_error(
                                         id,
-                                        &format!("cannot connect to a browser and guest-launch failed: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222."),
-                                    )
+                                        &format!(
+                                            "cannot connect to a browser and guest-launch failed: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222."
+                                        ),
+                                    );
                                 }
                             }
                         }

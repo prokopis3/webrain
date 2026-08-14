@@ -95,7 +95,7 @@ impl Default for SerpOpts {
 }
 
 /// HTTP-renderable engines, in fallback/auto preference order.
-const HTTP_ENGINES: [&str; 4] = ["bing","duckduckgo", "brave", "google"];
+const HTTP_ENGINES: [&str; 4] = ["bing", "duckduckgo", "brave", "google"];
 
 /// Build the provider URL for one engine + params.
 fn engine_url(
@@ -417,12 +417,10 @@ fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
     let Ok(a_sel) = scraper::Selector::parse("a[href]") else {
         return Vec::new();
     };
-    let Ok(title_sel) = scraper::Selector::parse("a[href] .title, a[href] h2, a[href] h3")
-    else {
+    let Ok(title_sel) = scraper::Selector::parse("a[href] .title, a[href] h2, a[href] h3") else {
         return Vec::new();
     };
-    let Ok(snip_sel) = scraper::Selector::parse(".snippet-description, .snippet-content")
-    else {
+    let Ok(snip_sel) = scraper::Selector::parse(".snippet-description, .snippet-content") else {
         return Vec::new();
     };
 
@@ -589,7 +587,11 @@ fn request_id() -> String {
 
 /// Fetch + parse one HTTP engine with retry + exponential backoff.
 /// Fetch + parse ONE engine results page with retry + exponential backoff.
-async fn http_search_page(engine: &str, url: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
+async fn http_search_page(
+    engine: &str,
+    url: &str,
+    opts: &SerpOpts,
+) -> anyhow::Result<Vec<SerpResult>> {
     let mut attempt = 0u32;
     loop {
         match crate::engines::serp_http_get(url, opts.proxy.as_deref()) {
@@ -686,11 +688,37 @@ fn jitter(a: u64, b: u64) -> u64 {
 /// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
 /// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
 const CONSENT_PATTERNS: &[&str] = &[
-    "accept", "agree", "consent", "allow", "got it", "i understand",
-    "zustimmen", "akzeptieren", "accepter", "aceptar", "accetto", "aceitar",
-    "akkoord", "zgadzam", "согласен", "同意", "接受", "承認", "동의",
-    "αποδοχή", "αποδέχομαι", "reject", "deny", "decline", "refuse",
-    "rechazar", "rifiutare", "ablehnen", "weigeren", "odrzuć", "отклонить",
+    "accept",
+    "agree",
+    "consent",
+    "allow",
+    "got it",
+    "i understand",
+    "zustimmen",
+    "akzeptieren",
+    "accepter",
+    "aceptar",
+    "accetto",
+    "aceitar",
+    "akkoord",
+    "zgadzam",
+    "согласен",
+    "同意",
+    "接受",
+    "承認",
+    "동의",
+    "αποδοχή",
+    "αποδέχομαι",
+    "reject",
+    "deny",
+    "decline",
+    "refuse",
+    "rechazar",
+    "rifiutare",
+    "ablehnen",
+    "weigeren",
+    "odrzuć",
+    "отклонить",
     "απόρριψη",
 ];
 async fn dismiss_google_consent<B: BrowserBackend>(backend: &B) -> String {
@@ -780,7 +808,14 @@ async fn browser_search<B: BrowserBackend>(
                     fresh += 1;
                 }
             }
-            tracing::debug!(engine, page, fresh, total = all.len(), ms = t0.elapsed().as_millis(), "serp page");
+            tracing::debug!(
+                engine,
+                page,
+                fresh,
+                total = all.len(),
+                ms = t0.elapsed().as_millis(),
+                "serp page"
+            );
             if all.len() >= opts.limit || fresh == 0 {
                 break; // enough results, or this page added nothing new (wall/repeat)
             }
@@ -806,7 +841,10 @@ async fn browser_search<B: BrowserBackend>(
     backend.navigate(&url).await?;
     wait_for_results(backend, engine).await?;
     let html = backend.get_html().await?;
-    Ok(dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit))
+    Ok(dedupe_cap(
+        parse_results(engine, &html, opts.limit),
+        opts.limit,
+    ))
 }
 
 /// Wait (bounded) for an engine's results container to render before parsing,
@@ -885,8 +923,7 @@ async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
 /// falls back). serpapi honors `num` up to 100, so `limit` here is the real
 /// result count (unlike the free engines' ~10-per-page cap).
 fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
-    let v: serde_json::Value =
-        serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
     if v.get("error").is_some() || v.get("organic_results").is_none() {
         return Vec::new();
     }
@@ -896,9 +933,21 @@ fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
             if out.len() >= limit {
                 break;
             }
-            let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let url = r.get("link").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let snippet = r.get("snippet").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let title = r
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = r
+                .get("link")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = r
+                .get("snippet")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if title.is_empty() || url.is_empty() {
                 continue;
             }
@@ -1150,7 +1199,10 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].position, 1);
         assert_eq!(rs[0].title, "Trannos - Spotify Top Songs");
-        assert_eq!(rs[0].url, "https://kworb.net/spotify/artist/6WzxopGY3sy97IeNFaDELc_songs.html");
+        assert_eq!(
+            rs[0].url,
+            "https://kworb.net/spotify/artist/6WzxopGY3sy97IeNFaDELc_songs.html"
+        );
         assert_eq!(rs[0].domain, "kworb.net");
         assert_eq!(rs[0].snippet, "Current charts, last updated 2026/05/30.");
         assert_eq!(rs[1].title, "Trannos: albums, songs");
@@ -1337,7 +1389,10 @@ mod tests {
 
         let br = engine_url("brave", "rust", 2, false, None, 10).unwrap();
         assert!(br.contains("offset=2"), "brave page-indexed offset: {br}");
-        assert!(!br.contains("offset=20"), "brave must NOT scale offset by 10: {br}");
+        assert!(
+            !br.contains("offset=20"),
+            "brave must NOT scale offset by 10: {br}"
+        );
 
         assert!(engine_url("nope", "x", 0, false, None, 10).is_err());
     }
@@ -1372,7 +1427,10 @@ mod tests {
         assert_eq!(rs[0].domain, "tokio.rs");
         assert_eq!(rs[0].snippet, "Async runtime.");
         assert_eq!(rs[1].url, "https://docs.rs/tokio");
-        assert!(!rs.iter().any(|r| r.url.is_empty()), "empty-link rows skipped");
+        assert!(
+            !rs.iter().any(|r| r.url.is_empty()),
+            "empty-link rows skipped"
+        );
         assert_eq!(parse_serpapi_json(body, 1).len(), 1, "limit respected");
         assert!(parse_serpapi_json(r#"{"error":"bad"}"#, 10).is_empty());
         assert!(parse_serpapi_json("not json", 10).is_empty());

@@ -189,7 +189,10 @@ mod tests {
             sec.contains("\"Google Chrome\";v=\""),
             "sec-ch-ua chrome brand: {sec}"
         );
-        assert!(sec.contains("Not)A;Brand\";v=\"24\""), "GREASE brand: {sec}");
+        assert!(
+            sec.contains("Not)A;Brand\";v=\"24\""),
+            "GREASE brand: {sec}"
+        );
         assert!(h.iter().all(|(k, v)| !k.is_empty() && !v.is_empty()));
     }
 
