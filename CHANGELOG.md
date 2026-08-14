@@ -15,6 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mojibake (`–` → `ΓÇô`). All engines serve UTF-8, so the lossy decode is
   always correct; API/JSON consumers now get clean text (a legacy console/pipe
   may still render UTF-8 as glyph soup — use `chcp 65001` or a UTF-8 terminal).
+- **core**: no more transient Chrome on HTTP serp runs — removed the
+  `chrome --version` UA probe (`chrome_ua_version` + `parse_chrome_ver`) that
+  spawned a visible Chrome window (with crashpad children) on every
+  duckduckgo/bing/auto invocation. UA/sec-ch-ua now use a static, internally
+  consistent `CHROME_UA_VER` constant: the probe's "real" version never matched
+  webrain's engine (Chrome for Testing, not system Chrome), and the HTTP path's
+  rustls TLS is identifiable regardless of UA. Also speeds up every no-browser
+  SERP call (no spawn + 5s watchdog).
+- **core**: serp **brave pagination fixed** — Brave's `offset` is page-indexed
+  (0, 1, 2, ...), not result-indexed: its own Next link is `offset=1` from
+  `offset=0`. The old `offset=page*10` (e.g. `offset=10` for page 1) landed on a
+  nonexistent page that Brave answers with a "no results" page, so `fresh==0`
+  stopped the loop at one page (21 results). Now `offset=page`; verified:
+  `--engine brave --limit 50` returns 50 results across 3 pages (fresh 21+20+15).
+- **core**: serp debug logs name the real engine and brave skips the consent
+  poll — the shared google/brave `browser_search` path hardcoded "google" in
+  the `consent dismiss` / `serp page` trace labels (misleading under
+  `--engine brave`), and it ran `dismiss_google_consent` (≤1.2s poll) on a
+  path that never shows a consent modal. Logs now emit `engine=brave` /
+  `engine=google`, and consent dismissal runs for google only.
+- **mcp**: removed dead `legacy_tool_schemas()` — ~748 lines of
+  `#[allow(dead_code)]` JSON schema data superseded by the consolidated
+  15-tool surface (`tools/list` already returns `list_tools()`; legacy names
+  still dispatch via `map_surface()` → executor arms, which are untouched).
+  Tool surface and dispatch are byte-identical.
+- **core**: serp/engines comments trimmed to `ponytail:`-style one-liners
+  (CHROME_UA_VER, brave offset, consent gate, brave-offset test).
 
 ### Added
 
