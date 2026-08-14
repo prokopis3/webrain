@@ -410,10 +410,18 @@ fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
     let Ok(cont_sel) = scraper::Selector::parse(".snippet") else {
         return Vec::new();
     };
-    let Ok(a_sel) = scraper::Selector::parse("a.title, h2 a") else {
+    // Brave's current title link is the first `a[href]` in the snippet (class
+    // `svelte-* l1`); the real title text sits in a nested `.title` (or h2/h3).
+    // The old `a.title, h2 a` matched nothing → 0 results on every brave page.
+    let Ok(a_sel) = scraper::Selector::parse("a[href]") else {
         return Vec::new();
     };
-    let Ok(snip_sel) = scraper::Selector::parse(".snippet-description, .snippet-content") else {
+    let Ok(title_sel) = scraper::Selector::parse("a[href] .title, a[href] h2, a[href] h3")
+    else {
+        return Vec::new();
+    };
+    let Ok(snip_sel) = scraper::Selector::parse(".snippet-description, .snippet-content")
+    else {
         return Vec::new();
     };
 
@@ -425,7 +433,12 @@ fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
         let Some(a) = el.select(&a_sel).next() else {
             continue;
         };
-        let title = clean(&a.text().collect::<Vec<_>>().join(" "));
+        let title = el
+            .select(&title_sel)
+            .next()
+            .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
+            .or_else(|| Some(clean(&a.text().collect::<Vec<_>>().join(" "))))
+            .unwrap_or_default();
         let Some(href) = a.value().attr("href") else {
             continue;
         };
@@ -854,10 +867,16 @@ async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyho
         _ => return Ok(()),
     };
     let js = format!(
-        "(document.querySelectorAll({sel}).length > 0 || (document.body && document.body.innerText.length > 500))",
+        "(document.querySelectorAll({sel}).length > 0)",
         sel = serde_json::to_string(sel)?
     );
-    for _ in 0..40 {
+    // Poll ONLY the results selector for the full budget — no innerText-length
+    // shortcut. A captcha/consent wall has >500 chars of body text, so that
+    // shortcut bailed the instant a wall rendered and never saw real results.
+    // Brave's PoW captcha ("Verify you're not a bot") auto-resolves in a real
+    // browser — a fresh guest profile gets re-captcha'd every launch, and the
+    // hash can take ~10-20s, so the budget is generous (21s).
+    for _ in 0..70 {
         if let Ok(v) = backend.evaluate(&js).await {
             let ok = v.as_bool().unwrap_or(false) || v.as_str() == Some("true");
             if ok {
@@ -1141,6 +1160,37 @@ mod tests {
         assert_eq!(rs[0].domain, "example.com");
         assert_eq!(rs[0].snippet, "This is an example snippet.");
         assert_eq!(rs[1].url, "https://cdn.example.net/docs");
+    }
+
+    #[test]
+    fn brave_parse_typed_results() {
+        // Current Brave HTML (2026): the title link is `a[href]` (svelte `l1`)
+        // and the real title text lives in a nested `.title` — not `a.title`/`h2`.
+        let html = r#"
+        <html><body>
+            <div class="snippet">
+                <a href="https://kworb.net/spotify/artist/6WzxopGY3sy97IeNFaDELc_songs.html">
+                    <div class="site-name-wrapper"><span>Kworb</span></div>
+                    <div class="title search-snippet-title">Trannos - Spotify Top Songs</div>
+                </a>
+                <div class="snippet-description">Current charts, last updated 2026/05/30.</div>
+            </div>
+            <div class="snippet">
+                <a href="https://deezer.com/en/artist/90670822">
+                    <div class="title">Trannos: albums, songs</div>
+                </a>
+                <div class="snippet-content">His reputation grew in 2023.</div>
+            </div>
+        </body></html>
+        "#;
+        let rs = parse_brave(html, 10);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].position, 1);
+        assert_eq!(rs[0].title, "Trannos - Spotify Top Songs");
+        assert_eq!(rs[0].url, "https://kworb.net/spotify/artist/6WzxopGY3sy97IeNFaDELc_songs.html");
+        assert_eq!(rs[0].domain, "kworb.net");
+        assert_eq!(rs[0].snippet, "Current charts, last updated 2026/05/30.");
+        assert_eq!(rs[1].title, "Trannos: albums, songs");
     }
 
     #[test]

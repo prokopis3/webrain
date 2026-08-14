@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rendered a single page with no consent handling → 0 results on a consent /
   PoW-CAPTCHA wall. Note: brave PoW-captchas flagged IPs ("Verify you're not a
   bot") — same class as google `/sorry`; the retry/fallback chain handles it.
+- **core**: fix **brave SERP parse** — Brave's current title link is the first
+  `a[href]` in `.snippet` with the title text in a nested `.title`/`h2`/`h3`;
+  the old `a.title, h2 a` matched nothing → 0 results on every brave page even
+  when results rendered. Added `brave_parse_typed_results` regression test.
+  `wait_for_results` also dropped its `innerText>500` shortcut (a captcha/consent
+  wall has >500 chars of body text → it bailed before real results rendered) and
+  the selector-poll budget is now 21s so Brave's PoW captcha has time to
+  auto-resolve in the browser. Verified: `serp --engine brave --limit 5` ≈
+  **5 results / 10.6s**.
 - **cli, mcp**: **brave guest auto-launch** — brave now auto-launches guest
   Chrome on 9222 like google (ddg/bing stay pure HTTP, no browser). MCP
   `webrain_serp` routes google|brave through the guest-browser backend
