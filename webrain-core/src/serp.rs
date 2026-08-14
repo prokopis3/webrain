@@ -956,6 +956,61 @@ async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyho
     Ok(())
 }
 
+/// serpapi.com as a paid Google provider — the standard `SERPAPI_API_KEY` env
+/// var gates it (unset → empty with no network, so the normal fallback chain
+/// is untouched). Returns typed organic results; 4xx/quota/parse failures also
+/// surface as empty so a dead or quota-exhausted key degrades to fallback.
+async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
+    let key = match std::env::var("SERPAPI_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => return Ok(Vec::new()),
+    };
+    let region = opts.region.as_deref().unwrap_or("us-en");
+    let (cc, lang) = region.split_once('-').unwrap_or(("us", "en"));
+    let mut u = Url::parse("https://serpapi.com/search.json")?;
+    {
+        let mut p = u.query_pairs_mut();
+        p.append_pair("engine", "google");
+        p.append_pair("q", &opts.query);
+        p.append_pair("num", &opts.limit.clamp(1, 100).to_string());
+        p.append_pair("hl", lang);
+        p.append_pair("gl", cc);
+        p.append_pair("safe", if opts.safe { "active" } else { "off" });
+        p.append_pair("api_key", &key);
+    }
+    let (status, body) = crate::engines::serp_http_get(u.as_str(), opts.proxy.as_deref())?;
+    if !(200..300).contains(&status) {
+        return Ok(Vec::new());
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    if v.get("error").is_some() || v.get("organic_results").is_none() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    if let Some(org) = v["organic_results"].as_array() {
+        for r in org {
+            if out.len() >= opts.limit {
+                break;
+            }
+            let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let url = r.get("link").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let snippet = r.get("snippet").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            out.push(SerpResult {
+                position: out.len() + 1,
+                title,
+                domain: domain(&url),
+                url,
+                snippet,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Search one specific HTTP engine (duckduckgo/bing/google). Google is JS-gated
 /// over plain HTTP (consent/JS shell → zero results), so when a browser is
 /// attached it goes straight to the browser path — the only one that returns
@@ -997,6 +1052,16 @@ async fn specific_engine<B: BrowserBackend>(
             tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
         }
     }
+    // serpapi.com paid Google provider (SERPAPI_API_KEY) — a clean fallback
+    // when the browser path walls. Empty when the key is unset; errors are
+    // swallowed so a dead/quota key just falls through to the chain below.
+    if engine == "google" {
+        if let Ok(rs) = serpapi_google(opts).await {
+            if !rs.is_empty() {
+                return Ok((rs, Vec::new()));
+            }
+        }
+    }
     match http_search(engine, opts).await {
         Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new())),
         Ok(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
@@ -1022,6 +1087,16 @@ async fn fallback_chain<B: BrowserBackend>(
             Ok(rs) if !rs.is_empty() => return (rs, skipped),
             Ok(_) => skipped.push(e.to_string()),
             Err(_) => skipped.push(e.to_string()),
+        }
+    }
+    // serpapi.com paid Google provider when the key is set (covers auto +
+    // fallback paths) — before spending a browser render on a walled IP.
+    if exclude == "google" {
+        if let Ok(rs) = serpapi_google(opts).await {
+            if !rs.is_empty() {
+                skipped.retain(|s| s != exclude);
+                return (rs, skipped);
+            }
         }
     }
     if let Some(b) = backend {

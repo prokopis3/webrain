@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   + `data-s` from a Google `/sorry` wall, solve via `2captcha.com` with the same
   proxy, inject the token + `submitCallback()`. Gated by the `WEBRAIN_2CAPTCHA_KEY`
   env var; a failed solve falls through to the existing retry/fallback.
+- **core**: serpapi.com Google fallback — the standard `SERPAPI_API_KEY` env var
+  routes google through the paid serpapi API (`/search.json`, engine=google) as
+  a clean no-browser provider whenever the browser path walls (`--engine google`,
+  `auto`, and fallback chains). Unset key / quota / 4xx degrades to fallback.
 - **core, cli, mcp**: per-request proxy for the SERP API — `webrain serp ... --proxy URL` and `webrain_serp`'s `proxy` param route traffic through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`). HTTP engines (duckduckgo/bing/google/auto) get a proxied `ureq` agent; the google browser auto-launch bakes `--proxy-server` into the launched Chrome so the humanized flow egresses through the proxy (IP rotation on walled IPs). An attached CDP engine keeps whatever proxy it was started with.
 - **docs**: landing page (`docs/index.mdx`) bug fix + marketing sharpening:
   - **First-load flash fix** — the hero entrance now runs exactly once. When
