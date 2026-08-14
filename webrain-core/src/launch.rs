@@ -191,12 +191,18 @@ fn launch_chrome_opt(
     let mut args = vec![
         format!("--remote-debugging-port={port}"),
         "--remote-debugging-address=127.0.0.1".to_string(),
-        format!("--user-data-dir={}", profile_dir.display()),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
     ];
     if guest {
+        // Guest mode is a temporary in-memory profile — it does NOT take a
+        // custom `--user-data-dir`; Chrome shows the "Choose a profile" picker
+        // instead of opening straight into guest. Let `--guest` use its native
+        // ephemeral profile; the warm session still lives in the process on the
+        // port (in-memory state persists between runs while it stays alive).
         args.push("--guest".to_string());
+    } else {
+        args.insert(1, format!("--user-data-dir={}", profile_dir.display()));
     }
     if let Some(p) = proxy {
         args.push(format!("--proxy-server={p}"));

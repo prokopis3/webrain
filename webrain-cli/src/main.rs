@@ -342,6 +342,11 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             } else {
+                // HTTP-only engines (duckduckgo|bing|auto): pure ureq HTTP —
+                // NEVER launch/connect a browser. Only google|brave get one.
+                if !json_out {
+                    println!("engine {}: pure HTTP — no browser launched", opts.engine);
+                }
                 None
             };
             match rt.block_on(webrain_core::serp::serp_search(&opts, backend.as_ref())) {
