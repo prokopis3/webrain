@@ -18,10 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **cli**: `webrain launch` with no args opens the user's **default Chrome** at
-  google.com — exactly like double-clicking Chrome.exe: no automation flags, no
-  temp/persistent profile, real profile (bookmarks/sign-in) so it does NOT look
-  incognito. Bare `webrain` (no args) keeps the MCP stdio default (Docker's
+- **cli**: `webrain launch` with no args opens Chrome in **GUEST MODE**
+  (`--guest`) at google.com — a clean, ephemeral session with no profile state
+  (no bookmarks/sign-in/history, nothing persisted). The **serp google
+  auto-launch** (fresh + warm 9222) also uses guest mode now
+  (`launch_chrome_guest`) — a fresh ephemeral session every run, consent modal
+  always renders; the warm guest stays alive on 9222 for its in-memory session.
+  `--stealth` is a no-op (the launch-flag stealth was removed — detectable
+  fingerprint). Bare `webrain` (no args) keeps the MCP stdio default (Docker's
   `ENTRYPOINT ["webrain"]`); explicit `webrain launch <service> <profile>`
   keeps the persistent-profile CDP launch (the `webrain login` flow). All MCP
   configs/docs/Docker pass `mcp` explicitly, so they're unaffected.

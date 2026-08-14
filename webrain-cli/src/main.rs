@@ -231,11 +231,11 @@ fn main() -> anyhow::Result<()> {
             // the automation fingerprint Google walls on /sorry; a pipe-launched
             // Chrome has none. Only meaningful with --fresh.
             let pipe = args.contains(&"--pipe".to_string());
-            // --stealth: launch with the AutomationControlled suppression flags
-            // (the detectable launch-flag stealth). Default is a PLAIN launch +
-            // CDP-level masking (stealth_js) — the patchright/browsemind
-            // recommended combo for google. Opt-in for parity with `webrain launch`.
-            let stealth = args.contains(&"--stealth".to_string());
+            // --stealth is accepted for CLI compat but is a no-op (the launch-flag
+            // stealth was removed — it's a detectable fingerprint). google now
+            // auto-launches in GUEST MODE (fresh ephemeral session, no persisted
+            // profile state) with CDP-level masking (stealth_js).
+            let _stealth = args.contains(&"--stealth".to_string());
             let opts = webrain_core::serp::SerpOpts {
                 query: query.trim().to_string(),
                 engine,
@@ -249,14 +249,12 @@ fn main() -> anyhow::Result<()> {
             };
             // google is JS-gated (consent/JS shell over plain HTTP) — same as
             // brave, it needs a real browser. For google, if none is attached,
-            // auto-launch a stealth Chrome with a PERSISTENT profile
-            // (profiles/serp/google) so the engine always exists; that profile
-            // accumulates Google consent/session cookies over runs and becomes
-            // trusted (the warm-up that made serp_test work), headed or
-            // headless alike. The browser stays alive as a warm session.
+            // auto-launch Chrome in GUEST MODE (fresh ephemeral session every
+            // run — zero persisted cookies/history, consent modal always renders)
+            // so the engine always exists, headed or headless alike. The browser
+            // stays alive as a warm session.
             // --hold keeps the FRESH browser alive past the search so you can
-            // watch it; only fresh holds — the warm 9222 profile keeps its
-            // warm-session persistence.
+            // watch it; only fresh holds — the warm 9222 guest keeps its session.
             let hold = args.contains(&"--hold".to_string());
             let mut _launched: Option<webrain_core::launch::Launched> = None;
             let backend = if opts.engine == "brave" || opts.engine == "google" {
@@ -284,25 +282,15 @@ fn main() -> anyhow::Result<()> {
                         Some(rt.block_on(CdpBackend::connect_pipe(child))?)
                     } else {
                         let port = pick_free_port(9230);
-                        let launched = if stealth {
-                            match proxy.as_deref() {
-                                Some(p) => webrain_core::launch::launch_chrome_with_proxy(
-                                    "serp", &prof_name, port, !headless, p,
-                                )?,
-                                None => webrain_core::launch::launch_chrome(
-                                    "serp", &prof_name, port, !headless,
-                                )?,
-                            }
-                        } else {
-                            match proxy.as_deref() {
-                                Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
-                                    "serp", &prof_name, port, !headless, p,
-                                )?,
-                                None => webrain_core::launch::launch_chrome_plain(
-                                    "serp", &prof_name, port, !headless,
-                                )?,
-                            }
-                        };
+                        // GUEST MODE: fresh ephemeral session every run — zero
+                        // cookies/history, consent modal always renders.
+                        let launched = webrain_core::launch::launch_chrome_guest(
+                            "serp",
+                            &prof_name,
+                            port,
+                            !headless,
+                            proxy.as_deref(),
+                        )?;
                         println!(
                             "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
                             launched.profile_dir.display(),
@@ -320,40 +308,20 @@ fn main() -> anyhow::Result<()> {
                     match rt.block_on(CdpBackend::connect_default()) {
                         Ok(b) => Some(b),
                         Err(_) if opts.engine == "google" => {
-                            // --proxy bakes --proxy-server into the auto-launched Chrome so
-                            // the google browser path egresses through the proxy (IP rotation
-                            // on a walled IP). No proxy -> plain persistent-profile launch.
-                            let launched = if stealth {
-                                match proxy.as_deref() {
-                                    Some(p) => webrain_core::launch::launch_chrome_with_proxy(
-                                        "serp", "google", 9222, !headless, p,
-                                    )?,
-                                    None => webrain_core::launch::launch_chrome(
-                                        "serp", "google", 9222, !headless,
-                                    )?,
-                                }
-                            } else {
-                                match proxy.as_deref() {
-                                    Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
-                                        "serp", "google", 9222, !headless, p,
-                                    )?,
-                                    None => webrain_core::launch::launch_chrome_plain(
-                                        "serp", "google", 9222, !headless,
-                                    )?,
-                                }
-                            };
+                            // GUEST MODE: fresh ephemeral google session every run
+                            // (--proxy bakes --proxy-server in when set).
+                            let launched = webrain_core::launch::launch_chrome_guest(
+                                "serp", "google", 9222, !headless, proxy.as_deref(),
+                            )?;
                             println!(
-                                "launched chrome: {} (CDP_URL={})",
+                                "launched chrome (guest): {} (CDP_URL={})",
                                 launched.profile_dir.display(),
                                 launched.cdp_url
                             );
-                            // WARM PERSISTENT SESSION — the skill's real
-                            // google-bypass path (references/challenges.md).
-                            // Forget the handle so Drop::kill() never runs: the
-                            // browser STAYS alive on 9222 between runs and warms
-                            // up (consent/session cookies accumulate until it's
-                            // "trusted"). `--fresh` is the explicit opt-out for
-                            // deterministic consent every run.
+                            // WARM SESSION — the guest Chrome stays alive on 9222
+                            // between runs (its in-memory session persists).
+                            // Forget the handle so Drop::kill() never runs.
+                            // `--fresh` is the explicit opt-out for a fresh guest.
                             let url = launched.cdp_url.clone();
                             std::mem::forget(launched);
                             Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
@@ -513,10 +481,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("launch") => {
             // webrain launch <service> <profile> [url] [--headless] [--port N]
-            // `webrain launch` with no args opens the user's DEFAULT Chrome at
-            // url — exactly like double-clicking Chrome.exe: no flags, no
-            // temp/persistent profile, real profile (bookmarks/sign-in) so it
-            // does NOT look incognito. Explicit service/profile = persistent-
+            // `webrain launch` with no args opens Chrome in GUEST MODE at url —
+            // a clean, ephemeral session with no profile state (no bookmarks,
+            // no sign-in, nothing persisted). Explicit service/profile = persistent-
             // profile CDP launch (the Channel A login flow used by `webrain login`).
             let service = args.get(2).cloned().unwrap_or_default();
             let profile = args.get(3).cloned().unwrap_or_default();
@@ -526,7 +493,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or("https://www.google.com");
             if service.is_empty() && profile.is_empty() {
                 webrain_core::launch::launch_chrome_default(url)?;
-                println!("opened: {url} in your default Chrome");
+                println!("opened: {url} in Chrome GUEST mode");
                 return Ok(());
             }
             let headless = args.contains(&"--headless".to_string());

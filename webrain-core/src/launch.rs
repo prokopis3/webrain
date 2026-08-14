@@ -180,6 +180,7 @@ fn launch_chrome_opt(
     headed: bool,
     _stealth: bool,
     proxy: Option<&str>,
+    guest: bool,
 ) -> anyhow::Result<Launched> {
     if port_open(port) {
         anyhow::bail!("port {port} already has a CDP endpoint — another Chrome is running there");
@@ -194,6 +195,9 @@ fn launch_chrome_opt(
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
     ];
+    if guest {
+        args.push("--guest".to_string());
+    }
     if let Some(p) = proxy {
         args.push(format!("--proxy-server={p}"));
     }
@@ -220,7 +224,7 @@ pub fn launch_chrome(
     port: u16,
     headed: bool,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, true, None)
+    launch_chrome_opt(service, profile, port, headed, true, None, false)
 }
 
 /// Spawn real Chrome routing through an HTTP(S)/SOCKS proxy (`--proxy-server`).
@@ -232,7 +236,7 @@ pub fn launch_chrome_with_proxy(
     headed: bool,
     proxy: &str,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, true, Some(proxy))
+    launch_chrome_opt(service, profile, port, headed, true, Some(proxy), false)
 }
 
 /// Spawn a PLAIN Chrome (no AutomationControlled suppression flags) — the
@@ -246,7 +250,7 @@ pub fn launch_chrome_plain(
     port: u16,
     headed: bool,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, false, None)
+    launch_chrome_opt(service, profile, port, headed, false, None, false)
 }
 
 /// Plain Chrome through an HTTP(S)/SOCKS proxy (`--proxy-server`).
@@ -258,17 +262,35 @@ pub fn launch_chrome_plain_with_proxy(
     headed: bool,
     proxy: &str,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, false, Some(proxy))
+    launch_chrome_opt(service, profile, port, headed, false, Some(proxy), false)
 }
 
-/// Open the user's DEFAULT Chrome like double-clicking the exe: no automation
-/// flags, no user-data-dir, no CDP — the real profile (bookmarks, sign-in,
-/// extensions), so it looks like a normal browser, NOT incognito. Chrome stays
-/// open on its own; if Chrome is already running it opens a new tab. This is
-/// the bare `webrain` / `webrain launch` (no args) default path.
+/// Spawn Chrome in GUEST MODE (`--guest`) — a fresh ephemeral session, no
+/// persisted profile state (no cookies/history/sign-in leak between runs) —
+/// the serp google auto-launch variant. Same CDP semantics as the persistent
+/// launches; `--proxy` still bakes `--proxy-server` when set.
+/// ponytail: guest is ephemeral, so there's no warm-profile trust to accumulate
+/// — add a persistent guest session (keep Chrome alive across runs) if the
+/// wall returns.
+pub fn launch_chrome_guest(
+    service: &str,
+    profile: &str,
+    port: u16,
+    headed: bool,
+    proxy: Option<&str>,
+) -> anyhow::Result<Launched> {
+    launch_chrome_opt(service, profile, port, headed, false, proxy, true)
+}
+
+/// Open Chrome in GUEST MODE like launching a fresh guest window: `--guest` — a
+/// clean, ephemeral session with NO profile state (nothing persisted, no
+/// bookmarks/sign-in/history), the laziest "no profile, nothing" mode. Chrome
+/// stays open on its own; this is the bare `webrain` / `webrain launch` (no
+/// args) default path.
 pub fn launch_chrome_default(url: &str) -> anyhow::Result<()> {
     let bin = chrome_path();
     std::process::Command::new(&bin)
+        .arg("--guest")
         .arg(url)
         .spawn()
         .with_context(|| format!("failed to spawn Chrome at {}", bin.display()))?;
