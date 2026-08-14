@@ -822,9 +822,9 @@ async fn browser_search<B: BrowserBackend>(
                 .await;
             tokio::time::sleep(Duration::from_millis(jitter(120, 320))).await;
         }
-        let _ = backend
-            .evaluate("window.scrollTo(0, Math.floor(Math.random() * 220))")
-            .await;
+        // TRUSTED wheel scroll (Input.dispatchMouseEvent mouseWheel) — a human
+        // scrolls with the wheel, not window.scrollTo (JS, non-human signal).
+        let _ = backend.scroll("down").await;
         // Consent dismissal = TRUSTED CDP click (see dismiss_google_consent):
         // browsemind's ConsentManager recipe, language-independent by structure.
         let consent = dismiss_google_consent(backend).await;
@@ -976,21 +976,6 @@ async fn browser_search<B: BrowserBackend>(
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        // TEMP DIAG: did the query land + did the click navigate?
-        let diag_url = backend
-            .evaluate("location.href")
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let diag_typed = backend
-            .evaluate("(document.querySelector('textarea[name=q]') || document.querySelector('input[name=q]') || {}).value || ''")
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        tracing::debug!(url=%diag_url, typed=%diag_typed, "google after submit click");
-
         // If the click never left the homepage, this attempt is a dead end
         // (walled IP / swallowed click / consent redirect): a homepage has no
         // results, and the 12s wait for a /search URL that will never come is

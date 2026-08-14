@@ -2248,8 +2248,19 @@ impl BrowserBackend for CdpBackend {
 
     async fn scroll(&self, direction: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
-        let amount = if direction == "down" { 500 } else { -500 };
-        self.eval_js(&format!("window.scrollBy(0, {amount})"))
+        // TRUSTED wheel scroll — Input.dispatchMouseEvent mouseWheel is a real
+        // mouse-wheel event (isTrusted=true); window.scrollBy (JS) is a
+        // detectable non-human signal. JS fallback only for engines without
+        // Input.* (lightpanda).
+        let delta_y = if direction == "down" { 500.0 } else { -500.0 };
+        let p = json!({
+            "type": "mouseWheel", "x": 640, "y": 400,
+            "deltaX": 0, "deltaY": delta_y
+        });
+        if self.send_cmd("Input.dispatchMouseEvent", p).await.is_ok() {
+            return Ok(());
+        }
+        self.eval_js(&format!("window.scrollBy(0, {delta_y})"))
             .await?;
         Ok(())
     }

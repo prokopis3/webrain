@@ -196,7 +196,7 @@ fn main() -> anyhow::Result<()> {
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 println!(
-                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--hold]"
+                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
                 );
                 println!(
                     "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
@@ -230,6 +230,11 @@ fn main() -> anyhow::Result<()> {
             // the automation fingerprint Google walls on /sorry; a pipe-launched
             // Chrome has none. Only meaningful with --fresh.
             let pipe = args.contains(&"--pipe".to_string());
+            // --stealth: launch with the AutomationControlled suppression flags
+            // (the detectable launch-flag stealth). Default is a PLAIN launch +
+            // CDP-level masking (stealth_js) — the patchright/browsemind
+            // recommended combo for google. Opt-in for parity with `webrain launch`.
+            let stealth = args.contains(&"--stealth".to_string());
             let opts = webrain_core::serp::SerpOpts {
                 query: query.trim().to_string(),
                 engine,
@@ -278,13 +283,24 @@ fn main() -> anyhow::Result<()> {
                         Some(rt.block_on(CdpBackend::connect_pipe(child))?)
                     } else {
                         let port = pick_free_port(9230);
-                        let launched = match proxy.as_deref() {
-                            Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
-                                "serp", &prof_name, port, !headless, p,
-                            )?,
-                            None => webrain_core::launch::launch_chrome_plain(
-                                "serp", &prof_name, port, !headless,
-                            )?,
+                        let launched = if stealth {
+                            match proxy.as_deref() {
+                                Some(p) => webrain_core::launch::launch_chrome_with_proxy(
+                                    "serp", &prof_name, port, !headless, p,
+                                )?,
+                                None => webrain_core::launch::launch_chrome(
+                                    "serp", &prof_name, port, !headless,
+                                )?,
+                            }
+                        } else {
+                            match proxy.as_deref() {
+                                Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
+                                    "serp", &prof_name, port, !headless, p,
+                                )?,
+                                None => webrain_core::launch::launch_chrome_plain(
+                                    "serp", &prof_name, port, !headless,
+                                )?,
+                            }
                         };
                         println!(
                             "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
@@ -306,13 +322,24 @@ fn main() -> anyhow::Result<()> {
                             // --proxy bakes --proxy-server into the auto-launched Chrome so
                             // the google browser path egresses through the proxy (IP rotation
                             // on a walled IP). No proxy -> plain persistent-profile launch.
-                            let launched = match proxy.as_deref() {
-                                Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
-                                    "serp", "google", 9222, !headless, p,
-                                )?,
-                                None => webrain_core::launch::launch_chrome_plain(
-                                    "serp", "google", 9222, !headless,
-                                )?,
+                            let launched = if stealth {
+                                match proxy.as_deref() {
+                                    Some(p) => webrain_core::launch::launch_chrome_with_proxy(
+                                        "serp", "google", 9222, !headless, p,
+                                    )?,
+                                    None => webrain_core::launch::launch_chrome(
+                                        "serp", "google", 9222, !headless,
+                                    )?,
+                                }
+                            } else {
+                                match proxy.as_deref() {
+                                    Some(p) => webrain_core::launch::launch_chrome_plain_with_proxy(
+                                        "serp", "google", 9222, !headless, p,
+                                    )?,
+                                    None => webrain_core::launch::launch_chrome_plain(
+                                        "serp", "google", 9222, !headless,
+                                    )?,
+                                }
                             };
                             println!(
                                 "launched chrome: {} (CDP_URL={})",

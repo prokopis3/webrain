@@ -306,7 +306,7 @@ Search the web and navigate to the results page. `duckduckgo` is HTML-lite and s
 </Accordion>
 
 <Accordion title="webrain_serp">
-Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML over the pooled no-browser HTTP agent; `google` is JS-gated over HTTP so it uses the browser path — `webrain serp --engine google` auto-launches a persistent-profile Chrome (headed by default, `--headless` for headless) and drives homepage → hard-refresh (Ctrl+Shift+R drops the `/sorry` anti-bot state) → humanized typing → trusted click; `brave` renders in the connected CDP engine; `auto` fetches HTTP engines concurrently and merges + dedupes.
+Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML over the pooled no-browser HTTP agent; `google` is JS-gated over HTTP so it uses the browser path — `webrain serp --engine google` auto-launches a persistent-profile Chrome (headed by default, `--headless` for headless) and drives homepage → consent (trusted two-phase click) → humanized typing → trusted click; `brave` renders in the connected CDP engine; `auto` fetches HTTP engines concurrently and merges + dedupes.
 
 Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe (`safe`) + region (`region` — an **en-US market is pinned when unset**, because a GeoIP'd IP otherwise serves localized garbage), `request_id` + `ms`, retry with backoff (`retries`), and a **multi-page merge** so `limit` > ~10 is honored wherever engines paginate.
 
@@ -320,9 +320,9 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 { "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }
 ```
 
-Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--hold]`.
+Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]`.
 
-**Default (google) = warm persistent profile + session** — the real bypass path (see `skills/webrain/references/challenges.md`): the auto-launched Chrome stays alive on `9222` between runs, accumulating consent/session cookies until it becomes a *trusted* Google profile. `--fresh` opts OUT of the warm session: it always launches a **brand-new profile + cookies** on a free port, so the consent modal always renders and is always dismissed before the humanized flow — use it when you want deterministic consent (e.g. a suspect/stale profile). `--hold` keeps the launched Chrome open after the search so you can watch it (press Enter to close).
+**Default (google) = warm persistent profile + session** — the real bypass path (see `skills/webrain/references/challenges.md`): the auto-launched Chrome stays alive on `9222` between runs, accumulating consent/session cookies until it becomes a *trusted* Google profile. `--fresh` opts OUT of the warm session: it always launches a **brand-new profile + cookies** on a free port, so the consent modal always renders and is always dismissed before the humanized flow — use it when you want deterministic consent (e.g. a suspect/stale profile). `--hold` keeps the launched Chrome open after the search so you can watch it (press Enter to close). `--pipe` (with `--fresh`) launches that Chrome via `--remote-debugging-pipe` (NO open debugging port — the open port is the automation fingerprint Google walls on `/sorry`; note Chrome's pipe CDP is broken on Windows, works on Linux/macOS). `--stealth` opts IN to the launch-flag stealth (`--disable-blink-features=AutomationControlled`); the default is a plain launch + CDP-level masking (patchright/browsemind's recommended combo). All google human-like actions are trusted CDP input (`Input.dispatchMouseEvent`/`Input.dispatchKeyEvent`), never JS-driven.
 </Accordion>
 
 </AccordionGroup>
