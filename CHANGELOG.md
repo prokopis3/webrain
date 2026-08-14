@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-15
+
 ### Fixed
 
 - **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
