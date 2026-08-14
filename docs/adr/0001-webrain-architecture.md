@@ -35,10 +35,11 @@ autoschema/BM25) is zero-LLM by design.
   browser state cleanly isolated behind the backend trait; concurrency via shared-WS clone.
 - **Negative**: MCP layer is coupled to CDP specifics (owns the connection); HTTP session
   map adds transport complexity.
-- **Graph note (2026-08-14)**: 2207 nodes / 4689 edges indexed; 1 entry point
-  (`webrain-cli/src/main.rs`); hotspots `video.Detail.as_str` (fan-in 70), `vault.get` (57),
-  `VectorStore.len` (52), `TileEngine.new` (46), `VectorStore.new` (32), `CdpBackend.eval_js` (25),
-  `vault.now` (25), `CdpBackend.ensure_page_attached` (22).
+- **Graph note (2026-08-14)**: 2261 nodes / 5032 edges indexed (profiles/ re-included); 1
+  entry point (`webrain-cli/src/main.rs`); hotspots `video.Detail.as_str` (fan-in 75),
+  `VectorStore.len` (60), `vault.get` (60), `VectorStore.new` (53), `TileEngine.new` (42),
+  `CdpBackend.ensure_page_attached` (29), `vault.now` (28), `CdpBackend.send_cmd` (27),
+  `CdpBackend.eval_js` (25), `video.Detail.parse` (18).
   Since the original record: `vault` module; `video` module + `webrain_watch` tool;
   SERP API (feat/serp-api) — `webrain_serp` tool + `webrain serp` CLI subcommand;
   72 MCP tools (up from 63 — added v2 observe/interact/extract/scrape/crawl/session/vision,
