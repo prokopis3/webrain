@@ -95,7 +95,7 @@ impl Default for SerpOpts {
 }
 
 /// HTTP-renderable engines, in fallback/auto preference order.
-const HTTP_ENGINES: [&str; 3] = ["duckduckgo", "bing", "google"];
+const HTTP_ENGINES: [&str; 4] = ["bing","duckduckgo", "brave", "google"];
 
 /// Build the provider URL for one engine + params.
 fn engine_url(
@@ -165,8 +165,8 @@ fn engine_url(
             let mut u = Url::parse("https://search.brave.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // Brave paginates ~10/page via `offset` (0, 10, 20, ...).
-            p.append_pair("offset", &(page * 10).to_string());
+            // ponytail: Brave offset is page-indexed (0,1,2...): page*10 = nonexistent page (no-results).
+            p.append_pair("offset", &page.to_string());
             p.append_pair("hl", lang);
             p.append_pair("gl", cc);
             drop(p);
@@ -749,8 +749,12 @@ async fn browser_search<B: BrowserBackend>(
             backend.navigate(&url).await?;
             // Consent FIRST — trusted click the instant the overlay renders
             // (fast poll, DOM-gated ~1ms when none). Never blocked by a wall.
-            let consent = dismiss_google_consent(backend).await;
-            tracing::debug!(%consent, "google consent dismiss");
+            let consent = if engine == "google" {
+                dismiss_google_consent(backend).await
+            } else {
+                "none".to_string()
+            };
+            tracing::debug!(engine, %consent, "serp consent dismiss");
             tokio::time::sleep(Duration::from_millis(jitter(150, 250))).await;
             // Trusted human-like pre-interaction (browsemind random_mouse_move)
             // — CDP mouseMoved, NOT synthetic dispatch, then TRUSTED wheel.
@@ -776,7 +780,7 @@ async fn browser_search<B: BrowserBackend>(
                     fresh += 1;
                 }
             }
-            tracing::debug!(page, fresh, total = all.len(), ms = t0.elapsed().as_millis(), "google serp page");
+            tracing::debug!(engine, page, fresh, total = all.len(), ms = t0.elapsed().as_millis(), "serp page");
             if all.len() >= opts.limit || fresh == 0 {
                 break; // enough results, or this page added nothing new (wall/repeat)
             }
@@ -1330,6 +1334,10 @@ mod tests {
         assert!(g.contains("start=10"));
         assert!(g.contains("safe=active"));
         assert!(g.contains("hl=en"), "google en-US lang: {g}");
+
+        let br = engine_url("brave", "rust", 2, false, None, 10).unwrap();
+        assert!(br.contains("offset=2"), "brave page-indexed offset: {br}");
+        assert!(!br.contains("offset=20"), "brave must NOT scale offset by 10: {br}");
 
         assert!(engine_url("nope", "x", 0, false, None, 10).is_err());
     }
