@@ -314,7 +314,7 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 
 **CAPTCHA solving:** set `WEBRAIN_2CAPTCHA_KEY` (a 2captcha API key) and the google browser path auto-solves a `/sorry` reCAPTCHA wall — it extracts `data-sitekey` + `data-s`, submits to 2captcha with the same `proxy` (so the solving IP matches the browser's exit IP), injects the token, and submits. A failed solve falls through to the normal retry/fallback — it never blocks results.
 
-**serpapi.com fallback:** set the standard `SERPAPI_API_KEY` env var and google falls back to the paid serpapi.com API (`/search.json`, engine=google) whenever the browser path walls — a clean, no-browser Google provider for `--engine google`, `auto`, and fallback chains. Unset key / quota-exhausted / 4xx degrades to the normal fallback with no error.
+**serpapi.com:** set the standard `SERPAPI_API_KEY` env var. It's the reliable way to get MORE than the free engines' ~10-result cap — serpapi honors `num` up to 100 — so for `limit > 10` it's tried **first** for google (the full best result set); for `limit <= 10` the free browser path stays primary and serpapi is a fallback. Unset key / quota-exhausted / 4xx degrades to the normal fallback with no error.
 
 ```json
 { "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }

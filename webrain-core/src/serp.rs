@@ -982,15 +982,23 @@ async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     if !(200..300).contains(&status) {
         return Ok(Vec::new());
     }
+    Ok(parse_serpapi_json(&body, opts.limit))
+}
+
+/// Parse serpapi `/search.json` organic results into typed results. Pure —
+/// unit-tested below. Error / missing organic_results yield empty (caller
+/// falls back). serpapi honors `num` up to 100, so `limit` here is the real
+/// result count (unlike the free engines' ~10-per-page cap).
+fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
     let v: serde_json::Value =
-        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
     if v.get("error").is_some() || v.get("organic_results").is_none() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let mut out = Vec::new();
     if let Some(org) = v["organic_results"].as_array() {
         for r in org {
-            if out.len() >= opts.limit {
+            if out.len() >= limit {
                 break;
             }
             let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -1008,7 +1016,7 @@ async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
             });
         }
     }
-    Ok(out)
+    out
 }
 
 /// Search one specific HTTP engine (duckduckgo/bing/google). Google is JS-gated
@@ -1020,6 +1028,24 @@ async fn specific_engine<B: BrowserBackend>(
     opts: &SerpOpts,
     backend: Option<&B>,
 ) -> anyhow::Result<(Vec<SerpResult>, Vec<String>)> {
+    // serpapi.com paid Google provider (SERPAPI_API_KEY): the reliable way to
+    // get MORE than the free engines' ~10-per-page cap — serpapi honors `num`
+    // up to 100, so a high limit is best served by serpapi FIRST. For small
+    // limits (or no key) the free browser path stays primary and serpapi is a
+    // fallback. Empty on unset key; errors are swallowed so a dead/quota key
+    // just falls through to the chain below.
+    let serpapi_ready = engine == "google"
+        && std::env::var("SERPAPI_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+    let serpapi_first = serpapi_ready && opts.limit > 10;
+    if serpapi_first {
+        if let Ok(rs) = serpapi_google(opts).await {
+            if !rs.is_empty() {
+                return Ok((rs, Vec::new()));
+            }
+        }
+    }
     // Google is JS-gated over plain HTTP (consent/JS shell → zero results), so
     // when a browser is attached it goes straight to the browser path — the only
     // one that returns real Google results (browsemind recipe: real Chrome +
@@ -1052,10 +1078,8 @@ async fn specific_engine<B: BrowserBackend>(
             tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
         }
     }
-    // serpapi.com paid Google provider (SERPAPI_API_KEY) — a clean fallback
-    // when the browser path walls. Empty when the key is unset; errors are
-    // swallowed so a dead/quota key just falls through to the chain below.
-    if engine == "google" {
+    // serpapi as a post-browser fallback (only when it wasn't tried first).
+    if serpapi_ready && !serpapi_first {
         if let Ok(rs) = serpapi_google(opts).await {
             if !rs.is_empty() {
                 return Ok((rs, Vec::new()));
@@ -1389,5 +1413,28 @@ mod tests {
         };
         assert_eq!(opts.limit, 1);
         assert!(request_id().len() > 10);
+    }
+
+    #[test]
+    fn serpapi_parse_organic_results() {
+        // serpapi /search.json organic_results → typed SerpResult; empty-link
+        // rows skipped, limit + error handled.
+        let body = r#"{"organic_results":[
+            {"position":1,"title":"Tokio","link":"https://tokio.rs/","snippet":"Async runtime."},
+            {"position":2,"title":"tokio - Rust","link":"https://docs.rs/tokio","snippet":"Docs."},
+            {"position":3,"title":"bad","link":"","snippet":"skipped"}
+        ]}"#;
+        let rs = parse_serpapi_json(body, 10);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].position, 1);
+        assert_eq!(rs[0].title, "Tokio");
+        assert_eq!(rs[0].url, "https://tokio.rs/");
+        assert_eq!(rs[0].domain, "tokio.rs");
+        assert_eq!(rs[0].snippet, "Async runtime.");
+        assert_eq!(rs[1].url, "https://docs.rs/tokio");
+        assert!(!rs.iter().any(|r| r.url.is_empty()), "empty-link rows skipped");
+        assert_eq!(parse_serpapi_json(body, 1).len(), 1, "limit respected");
+        assert!(parse_serpapi_json(r#"{"error":"bad"}"#, 10).is_empty());
+        assert!(parse_serpapi_json("not json", 10).is_empty());
     }
 }
