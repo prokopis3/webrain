@@ -247,6 +247,14 @@ fn main() -> anyhow::Result<()> {
                 fallback,
                 proxy: proxy.clone(),
             };
+            // google: trusted-commands-only flow — no injected stealth JS
+            // (WEBRAIN_NO_STEALTH) and no Runtime.evaluate in the page. Other
+            // engines (bing/ddg HTTP, brave attached browser) are untouched.
+            if opts.engine == "google" {
+                // edition-2024 unsafe: single-threaded main, set before any
+                // backend attaches.
+                unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
+            }
             // google is JS-gated (consent/JS shell over plain HTTP) — same as
             // brave, it needs a real browser. For google, if none is attached,
             // auto-launch Chrome in GUEST MODE (fresh ephemeral session every

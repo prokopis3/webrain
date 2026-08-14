@@ -665,67 +665,36 @@ fn jitter(a: u64, b: u64) -> u64 {
 /// reliably trips Google's "unusual traffic" page, so we never use the direct
 /// Dismiss a Google consent wall/regional dialog with a TRUSTED CDP click —
 /// browsemind's ConsentManager recipe: Phase 1 multilingual accept/reject text
-/// (never matches "Sign in"/"Σύνδεση"), Phase 2 last-button-in-dialog
-/// fallback. Scope = the WHOLE dialog only, never page-wide. Waits up to ~5s
-/// for the overlay to render, clicks, stops once it's gone. Returns a debug
-/// description ("clicked:<target>" / "none").
+/// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
+/// discovery goes through the accessibility tree + DOM quads
+/// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
+/// click itself is Input.dispatchMouseEvent. Waits up to ~5s for the overlay.
+const CONSENT_PATTERNS: &[&str] = &[
+    "accept", "agree", "consent", "allow", "got it", "i understand",
+    "zustimmen", "akzeptieren", "accepter", "aceptar", "accetto", "aceitar",
+    "akkoord", "zgadzam", "согласен", "同意", "接受", "承認", "동의",
+    "αποδοχή", "αποδέχομαι", "reject", "deny", "decline", "refuse",
+    "rechazar", "rifiutare", "ablehnen", "weigeren", "odrzuć", "отклонить",
+    "απόρριψη",
+];
 async fn dismiss_google_consent<B: BrowserBackend>(backend: &B) -> String {
-    let consent_target_js = r#"(function() {
-        const scopes = document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog, form[action*="consent"]');
-        if (!scopes.length) return null;
-        const root = scopes[scopes.length - 1];
-        const btns = Array.from(root.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]'));
-        const patterns = [/accept/i, /agree/i, /consent/i, /allow/i, /got it/i, /i understand/i,
-            /Zustimmen/i, /Akzeptieren/i, /Accepter/i, /Aceptar/i, /Accetto/i, /Aceitar/i,
-            /Akkoord/i, /Zgadzam/i, /Согласен/i, /同意/i, /接受/i, /承認/i, /동의/i,
-            /Αποδοχή/i, /αποδέχομαι/i, /reject/i, /deny/i, /decline/i, /refuse/i,
-            /rechazar/i, /rifiutare/i, /ablehnen/i, /weigeren/i, /odrzucić/i, /отклонить/i,
-            /Απόρριψη/i];
-        for (const b of btns) {
-            const r = b.getBoundingClientRect();
-            if (!r || r.width === 0 || r.height === 0) continue;
-            const t = (b.innerText || b.value || '').trim();
-            if (!t) continue;
-            for (const p of patterns) {
-                if (p.test(t)) {
-                    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), t: 'text:' + t.slice(0, 24) };
-                }
-            }
-        }
-        for (let i = btns.length - 1; i >= 0; i--) {
-            const b = btns[i];
-            const r = b.getBoundingClientRect();
-            if (r && (r.width > 0 || r.height > 0)) {
-                return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), t: 'last:' + (b.innerText || b.value || '').trim().slice(0, 24) };
-            }
-        }
-        return null;
-    })()"#;
     let mut consent = "none".to_string();
     let mut dismissed = false;
     for _ in 0..12 {
-        let v = backend.evaluate(consent_target_js).await.ok();
-        let tag = v
-            .as_ref()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str()))
-            .map(|s| s.to_string());
-        let coords = v.as_ref().and_then(|v| {
-            v.get("x")
-                .and_then(|x| x.as_i64())
-                .zip(v.get("y").and_then(|y| y.as_i64()))
-        });
-        if let Some((x, y)) = coords {
-            let _ = backend.mouse_move_human(x, y).await;
-            let _ = backend.click_coords(x, y).await;
-            if !dismissed {
-                dismissed = true;
-                consent = format!("clicked:{}", tag.as_deref().unwrap_or("?"));
+        match backend.consent_button(CONSENT_PATTERNS).await {
+            Some((x, y, tag)) => {
+                let _ = backend.mouse_move_human(x, y).await;
+                let _ = backend.click_coords(x, y).await;
+                if !dismissed {
+                    dismissed = true;
+                    consent = format!("clicked:{}", tag.chars().take(24).collect::<String>());
+                }
+                tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // dialog closes
             }
-            tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // dialog closes
-        } else if dismissed {
-            break; // dialog gone -> done
-        } else {
-            tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // keep waiting for it
+            None if dismissed => break, // dialog gone -> done
+            None => {
+                tokio::time::sleep(Duration::from_millis(jitter(250, 450))).await; // keep waiting
+            }
         }
     }
     consent
@@ -745,71 +714,13 @@ async fn browser_search<B: BrowserBackend>(
         // doubles the request volume. Verified: a plain browser on this same
         // IP gets real results with a single navigation (only the consent
         // dialog appears, which the trusted two-phase click dismisses).
-        // The consent dialog + page JS render AFTER load — wait for a fully
-        // loaded document (readyState complete, then a beat for the overlay)
-        // BEFORE running the human-like events and consent dismissal, or both
-        // fire on the empty shell and miss the live DOM (no consent seen).
-        for _ in 0..20 {
-            let ready = backend
-                .evaluate("document.readyState")
-                .await
-                .map(|v| v.as_str().unwrap_or("").to_string())
-                .unwrap_or_default();
-            if ready == "complete" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // The consent dialog + page JS render AFTER load — a human lets the
+        // page settle before touching it: a fixed beat instead of a readyState
+        // poll (no page-JS evaluate; trusted commands only).
 
-        // Optional 2captcha solve (open-serp recipe): if the hard-reload left
-        // the /sorry wall up, read sitekey + data-s, solve via 2captcha (with
-        // the same proxy so the token matches the exit IP), inject the token +
-        // submit, then let the humanized flow continue. Gated by
-        // WEBRAIN_2CAPTCHA_KEY; a failed solve just falls through to the
-        // existing retry/fallback — it never blocks results.
-        if let Ok(api_key) = std::env::var("WEBRAIN_2CAPTCHA_KEY") {
-            let walled = backend
-                .evaluate(
-                    "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))",
-                )
-                .await
-                .map(|v| v.as_bool().unwrap_or(false))
-                .unwrap_or(false);
-            if walled {
-                let info = backend
-                    .evaluate(
-                        r#"(function(){ const d = document.querySelector('[data-sitekey]');
-                            return d ? JSON.stringify({k: d.getAttribute('data-sitekey') || '', s: d.getAttribute('data-s') || '', u: location.href}) : 'null'; })()"#,
-                    )
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-                if let Some(info) = info {
-                    let sitekey = info.get("k").and_then(|v| v.as_str()).unwrap_or("");
-                    let data_s = info.get("s").and_then(|v| v.as_str()).unwrap_or("");
-                    let page_url = info.get("u").and_then(|v| v.as_str()).unwrap_or("");
-                    if !sitekey.is_empty() {
-                        if let Ok(token) = crate::captcha::solve_recaptcha2(
-                            &api_key,
-                            sitekey,
-                            page_url,
-                            data_s,
-                            opts.proxy.as_deref(),
-                        ) {
-                            let token = serde_json::json!(token).to_string();
-                            let js = format!(
-                                "document.getElementById('g-recaptcha-response').innerHTML={token}; if (window.submitCallback) submitCallback(); location.reload();"
-                            );
-                            let _ = backend.evaluate(&js).await;
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            tracing::debug!("2captcha solved + submitted /sorry wall");
-                        }
-                    }
-                }
-            }
-        }
+        // No 2captcha in-page solve here: it needs Runtime.evaluate (sitekey
+        // read + token inject) — this is the trusted-commands-only google flow.
+        // A walled /sorry just falls through to the retry/fallback chain.
 
         // Trusted human-like pre-interaction (browsemind random_mouse_move) —
         // CDP mouseMoved steps to random points, NOT synthetic
@@ -828,20 +739,14 @@ async fn browser_search<B: BrowserBackend>(
         // Consent dismissal = TRUSTED CDP click (see dismiss_google_consent):
         // browsemind's ConsentManager recipe, language-independent by structure.
         let consent = dismiss_google_consent(backend).await;
-        // Self-heal: if a trusted click ever lands on a sign-in/account page
-        // (should not happen with the scope guard, but a stale consent dialog
-        // can redirect there), go back to the homepage and let the flow
-        // continue instead of dead-ending into the fallback chain.
-        let on_signin = backend
-            .evaluate(
-                "location.hostname.indexOf('accounts.google') >= 0 || location.hostname.indexOf('myaccount.google') >= 0",
-            )
-            .await
-            .map(|v| v.as_bool().unwrap_or(false))
-            .unwrap_or(false);
-        if on_signin {
-            backend.navigate("https://www.google.com").await?;
-            tokio::time::sleep(Duration::from_millis(1200)).await;
+        // Self-heal via current_url (Page.getFrameTree — no evaluate): if a
+        // click ever lands on a sign-in/account page, go back to the homepage
+        // and let the flow continue instead of dead-ending into the fallback.
+        if let Some(u) = backend.current_url().await {
+            if u.contains("accounts.google") || u.contains("myaccount.google") {
+                backend.navigate("https://www.google.com").await?;
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+            }
         }
         // Human-like mouse move AGAIN after the consent modal is gone — a real
         // user closes the dialog, then drifts the cursor toward the search box.
@@ -851,76 +756,29 @@ async fn browser_search<B: BrowserBackend>(
                 .await;
             tokio::time::sleep(Duration::from_millis(jitter(150, 350))).await;
         }
-        let state = backend
-            .evaluate(
-                r#"(function(){
-                    const t = document.body ? document.body.innerText : '';
-                    return JSON.stringify({
-                        wall: /sorry|unusual traffic|not a robot|captcha/i.test(location.href + ' ' + t),
-                        consent: !!document.querySelector('.LSCOAf') || /reject all|accept all|i agree/i.test(t),
-                        box: !!document.querySelector('textarea[name="q"],input[name="q"]')
-                    });
-                })()"#,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        tracing::debug!(%consent, %state, "google consent dismiss + page state");
+        tracing::debug!(%consent, "google consent dismiss");
         // Human pacing: read the page a beat before typing. A script types in
         // <1s after load; a human takes seconds — manual searches in the same
         // browser/IP pass while the instant automation walls. This is the delay
         // that was missing.
         tokio::time::sleep(Duration::from_millis(jitter(1200, 2200))).await;
 
-        // Find the search box in webrain's interactive-element index, then type
-        // the query with TRUSTED CDP Input.insertText (type_text). JS .value= +
-        // synthetic Event is ignored by Google's controlled input — without
-        // trusted keys the "Google Search" button never reveals.
-        let idx_js = r#"(function() {
-            const els = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
-            for (let i = 0; i < els.length; i++) {
-                if (els[i].matches('textarea[name="q"], input[name="q"], [role="searchbox"]')) return i;
-            }
-            return -1;
-        })()"#;
-        let idx = backend.evaluate(idx_js).await?.as_i64().unwrap_or(-1);
-        if idx >= 0 {
-            // Move the pointer to the search box and click it like a human
-            // (browsemind: mouse.move to the box with steps, then click) — a
-            // real CDP click into the field reads as a human; JS focus() alone
-            // is a weaker trust signal.
-            let box_rect = backend
-                .evaluate(
-                    r#"(function() {
-                        const els = document.querySelectorAll('textarea[name="q"], input[name="q"], [role="searchbox"]');
-                        for (const el of els) {
-                            const r = el.getBoundingClientRect();
-                            if (r && r.width > 0 && r.height > 0) {
-                                return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-                            }
-                        }
-                        return null;
-                    })()"#,
-                )
-                .await
-                .ok()
-                .and_then(|v| {
-                    v.get("x")
-                        .and_then(|x| x.as_i64())
-                        .zip(v.get("y").and_then(|y| y.as_i64()))
-                });
-            if let Some((bx, by)) = box_rect {
-                let _ = backend.mouse_move_human(bx, by).await;
-                let _ = backend.click_coords(bx, by).await;
-                tokio::time::sleep(Duration::from_millis(jitter(200, 400))).await;
-            }
+        // Find the search box via the DOM domain (no evaluate) and click it
+        // like a human, then type with TRUSTED per-key Input.dispatchKeyEvent.
+        // JS .value= + synthetic Event is ignored by Google's controlled input.
+        if let Some((bx, by)) = backend
+            .element_center("textarea[name='q'], input[name='q'], [role='searchbox']")
+            .await
+        {
+            // Move the pointer to the box and click it like a human — a real
+            // CDP click into the field reads as a human; JS focus() alone is a
+            // weaker trust signal.
+            let _ = backend.mouse_move_human(bx, by).await;
+            let _ = backend.click_coords(bx, by).await;
+            tokio::time::sleep(Duration::from_millis(jitter(200, 400))).await;
             // Type character-by-character with human keystroke pacing
-            // (browsemind press_sequentially 40-120ms) — Google flags a
-            // whole-string insertText as scripted.
-            let _ = backend
-                .type_text_delayed(idx as usize, &opts.query, jitter(40, 120))
-                .await;
+            // (40-120ms) into the focused field — no evaluate.
+            let _ = backend.type_focused(&opts.query, jitter(40, 120)).await;
             // Pause after typing before committing (human reviews the query).
             tokio::time::sleep(Duration::from_millis(jitter(300, 600))).await;
         }
@@ -933,43 +791,19 @@ async fn browser_search<B: BrowserBackend>(
         // so iterate ALL candidates and take the first with a real rect. The
         // button only renders after the query registers, so poll up to the same
         // budget as wait_for_results below.
-        let rect_js = r#"(function() {
-            const cand = [
-                'form[action*="search"] input[type="submit"], form[action*="search"] button[type="submit"]',
-                'input[type="submit"], button[type="submit"]',
-                '[role="option"]'
-            ];
-            for (const s of cand) {
-                const els = document.querySelectorAll(s);
-                for (const el of els) {
-                    if (!el) continue;
-                    const r = el.getBoundingClientRect();
-                    if (!r || (r.width === 0 && r.height === 0)) continue;
-                    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        // Click the (localized-label-free) submit control until navigation
+        // actually starts — discovered via the DOM domain (no evaluate), the
+        // click itself trusted Input. The button reveals a beat after trusted
+        // typing; Google sometimes ignores the first click. Bound ~6s; stop
+        // early on the /sorry bot wall.
+        let submit_css = "form[action*='search'] input[type='submit'], form[action*='search'] button[type='submit'], input[type='submit'], button[type='submit'], [role='option']";
+        for _ in 0..20 {
+            if let Some(u) = backend.current_url().await {
+                if u.contains("/search") || u.contains("sorry") || u.contains("captcha") {
+                    break;
                 }
             }
-            return null;
-        })()"#;
-        // Click the search button until navigation actually starts (the button
-        // reveals a beat after trusted typing; Google sometimes ignores the
-        // first click). Bound ~6s — a real Google navigation lands in 1-3s, so
-        // anything past that is a swallowed click / wall, not slow rendering.
-        // Stop early on the /sorry bot wall.
-        let nav_js = "location.pathname.indexOf('/search') >= 0 || /sorry|unusual traffic|not a robot|captcha/i.test(location.href)";
-        for _ in 0..20 {
-            if backend
-                .evaluate(nav_js)
-                .await
-                .map(|v| v.as_bool().unwrap_or(false))
-                .unwrap_or(false)
-            {
-                break;
-            }
-            if let Some((x, y)) = backend.evaluate(rect_js).await.ok().and_then(|v| {
-                v.get("x")
-                    .and_then(|x| x.as_i64())
-                    .zip(v.get("y").and_then(|y| y.as_i64()))
-            }) {
+            if let Some((x, y)) = backend.element_center(submit_css).await {
                 // Travel to the button like a human pointer, then trusted-click.
                 let _ = backend.mouse_move_human(x, y).await;
                 let _ = backend.click_coords(x, y).await;
@@ -982,27 +816,22 @@ async fn browser_search<B: BrowserBackend>(
         // the whole slowness. Return empty so the retry/fallback chain takes
         // over immediately instead of burning the wait budget.
         let on_results = backend
-            .evaluate("location.href.indexOf('/search') >= 0")
+            .current_url()
             .await
-            .map(|v| v.as_bool().unwrap_or(false))
+            .map(|u| u.contains("/search"))
             .unwrap_or(false);
         if !on_results {
             return Ok(Vec::new());
         }
         wait_for_results(backend, "google").await?;
         // A walled /search still matches `on_results` (URL has /search) but has
-        // 0 organic results — parsing it yields nav-link junk (the fake "Gmail"
-        // result we were reporting as success). Require REAL organic results;
-        // if absent, try ONE direct /search?q= navigation — a plain browser on
-        // this same IP returned a full SERP via direct /search — else give up
-        // honestly (fallback chain takes over).
-        if backend
-            .evaluate("document.querySelectorAll('#rso h3, #search .g').length")
-            .await
-            .map(|v| v.as_i64().unwrap_or(0))
-            .unwrap_or(0)
-            == 0
-        {
+        // 0 organic results — parsing it yields nav-link junk. Require REAL
+        // results; if absent, try ONE direct /search?q= navigation, else give
+        // up honestly (fallback chain takes over). The result-count check is
+        // the parse itself — no evaluate.
+        let html = backend.get_html().await?;
+        let results = dedupe_cap(parse_results("google", &html, opts.limit), opts.limit);
+        if results.is_empty() {
             let url = engine_url(
                 "google",
                 &opts.query,
@@ -1015,26 +844,12 @@ async fn browser_search<B: BrowserBackend>(
             let _ = dismiss_google_consent(backend).await;
             wait_for_results(backend, "google").await?;
             tokio::time::sleep(Duration::from_millis(jitter(800, 1400))).await;
-            if backend
-                .evaluate("document.querySelectorAll('#rso h3, #search .g').length")
-                .await
-                .map(|v| v.as_i64().unwrap_or(0))
-                .unwrap_or(0)
-                == 0
-            {
-                return Ok(Vec::new()); // still walled/empty -> honest fallback
-            }
             let html = backend.get_html().await?;
             return Ok(dedupe_cap(parse_results("google", &html, opts.limit), opts.limit));
         }
-        // Google streams results in over ~1s; the wait returns as soon as the
-        // first result block renders — settle so the full set is in the DOM
-        // before get_html (else we parse a 1-result page).
-        tokio::time::sleep(Duration::from_millis(jitter(800, 1200))).await;
-        let html = backend.get_html().await?;
         // Google can render the same result in nested/duplicate containers —
         // dedupe by normalized URL + renumber (dedupe_cap) like the HTTP paths.
-        return Ok(dedupe_cap(parse_results("google", &html, opts.limit), opts.limit));
+        return Ok(results);
     }
 
     let url = engine_url(
@@ -1058,35 +873,23 @@ async fn browser_search<B: BrowserBackend>(
 /// wall carries enough body text that a length heuristic would return early and
 /// parse the wall (0 results) instead of waiting for the real results.
 async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyhow::Result<()> {
+    if engine == "google" {
+        // TRUSTED (no page-JS evaluate): Google streams results in over ~1s —
+        // settle a fixed beat. The caller's parse-empty guard catches a
+        // still-wall/empty page.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        return Ok(());
+    }
     let sel = match engine {
-        "google" => "#search, div[data-hveid], #rso",
         "duckduckgo" => ".result",
         "bing" => "li.b_algo",
         "brave" => ".snippet",
         _ => return Ok(()),
     };
-    let js = if engine == "google" {
-        // Real results = #rso h3 present AND the count has stopped growing
-        // across consecutive polls (Google streams results — the first block
-        // arrives before the rest, so a single check parses a 1-result page;
-        // the header Gmail link has no #rso h3, so it can't false-positive).
-        // Bot-wall markers short-circuit so the retry re-navigates fast.
-        format!(
-            r#"(function() {{
-                if (/unusual traffic|not a robot|captcha|sorry/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))) return true;
-                if (location.href.indexOf('/search') < 0) {{ window.__serp_n = -1; window.__serp_flat = 0; return false; }}
-                const n = document.querySelectorAll('#rso h3').length;
-                if (n === (window.__serp_n || -1)) {{ window.__serp_flat = (window.__serp_flat || 0) + 1; }}
-                else {{ window.__serp_n = n; window.__serp_flat = 0; }}
-                return n > 0 && (window.__serp_flat || 0) >= 3;
-            }})()"#,
-        )
-    } else {
-        format!(
-            "(document.querySelectorAll({sel}).length > 0 || (document.body && document.body.innerText.length > 500))",
-            sel = serde_json::to_string(sel)?
-        )
-    };
+    let js = format!(
+        "(document.querySelectorAll({sel}).length > 0 || (document.body && document.body.innerText.length > 500))",
+        sel = serde_json::to_string(sel)?
+    );
     for _ in 0..40 {
         if let Ok(v) = backend.evaluate(&js).await {
             let ok = v.as_bool().unwrap_or(false) || v.as_str() == Some("true");

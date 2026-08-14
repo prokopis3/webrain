@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ENTRYPOINT ["webrain"]`); explicit `webrain launch <service> <profile>`
   keeps the persistent-profile CDP launch (the `webrain login` flow). All MCP
   configs/docs/Docker pass `mcp` explicitly, so they're unaffected.
+- **core**: **trusted-commands-only google browser flow** — the serp google
+  path no longer injects stealth JS (`WEBRAIN_NO_STEALTH=1` skips
+  `stealth_js`) and runs **zero `Runtime.evaluate`**: page-JS polls (readyState,
+  wall/consent state, on_results, organic count) are gone (fixed beats /
+  `Page.getFrameTree` / the parse itself), the in-page 2captcha solve is
+  removed, and element discovery now uses the **DOM + Accessibility domains**
+  (`DOM.querySelectorAll`→`getContentQuads`, `Accessibility.getFullAXTree`→
+  `backendDOMNodeId`→`getContentQuads`) while all interaction stays **trusted
+  `Input.*`** (mouse moves, clicks, `mouseWheel`, per-key `dispatchKeyEvent`
+  typing). New trait primitives with defaults: `element_center`, `consent_button`,
+  `current_url`, `type_focused`. Guest launch remains google-only. Verified:
+  `serp --engine google` returns real results over the trusted flow.
 - **core**: SERP market defaulting — `engine_url` pins an **en-US market**
   when no `region` is given instead of letting the engine GeoIP the request (a
   localized IP turned `tokio rust` into Czech/Italian/Greek travel or banking

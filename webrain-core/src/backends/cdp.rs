@@ -804,12 +804,19 @@ impl CdpBackend {
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
         self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
         // Stealth: mask automation markers before any page script runs.
-        self.send_cmd_with(
-            Some(&sid),
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": stealth_js()}),
-        )
-        .await?;
+        // WEBRAIN_NO_STEALTH=1 (the serp google flow) skips the injected
+        // stealth — a human's Chrome runs no anti-bot script; the flow then
+        // keeps only trusted commands (no Runtime.evaluate, no injected JS).
+        if std::env::var("WEBRAIN_NO_STEALTH").map(|v| v == "1").unwrap_or(false) {
+            tracing::debug!("WEBRAIN_NO_STEALTH=1 — skipping stealth_js injection");
+        } else {
+            self.send_cmd_with(
+                Some(&sid),
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": stealth_js()}),
+            )
+            .await?;
+        }
         // User init scripts (agent-browser --init-script borrow): replay on every
         // newly attached tab so they survive per-tab session creation. Best-effort
         // (a bad user script must not kill the attach).
@@ -2492,6 +2499,156 @@ impl BrowserBackend for CdpBackend {
             .collect();
         Ok(json!(flat))
     }
+
+    /// TRUSTED (no page JS): DOM.querySelectorAll → getContentQuads → first
+    /// element with a real rect. Used by the serp google flow to keep only
+    /// trusted commands (no Runtime.evaluate).
+    async fn element_center(&self, css: &str) -> Option<(i64, i64)> {
+        self.ensure_page_attached().await.ok()?;
+        let _ = self.send_cmd("DOM.enable", json!({})).await;
+        let doc = self
+            .send_cmd("DOM.getDocument", json!({"depth": 0}))
+            .await
+            .ok()?;
+        let root = doc["root"]["nodeId"].as_i64()?;
+        let q = self
+            .send_cmd(
+                "DOM.querySelectorAll",
+                json!({"nodeId": root, "selector": css}),
+            )
+            .await
+            .ok()?;
+        for id in q["nodeIds"].as_array()? {
+            let node_id = id.as_i64()?;
+            let quads = self
+                .send_cmd("DOM.getContentQuads", json!({"nodeId": node_id}))
+                .await
+                .ok()?;
+            if let Some(c) = quad_center(&quads) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// TRUSTED (no page JS): Accessibility.getFullAXTree → backendDOMNodeId →
+    /// getContentQuads. Phase 1: a button/link whose accessible name matches a
+    /// pattern (accept/reject, language-independent — never "Sign in").
+    /// Phase 2: the last visible button/link (Google's accept/reject sits at
+    /// the dialog's end). Returns (x, y, tag).
+    async fn consent_button(&self, patterns: &[&str]) -> Option<(i64, i64, String)> {
+        self.ensure_page_attached().await.ok()?;
+        let tree = self
+            .send_cmd("Accessibility.getFullAXTree", json!({}))
+            .await
+            .ok()?;
+        let nodes = tree["nodes"].as_array()?.clone();
+        let mut last_btn: Option<(i64, i64, String)> = None;
+        for n in &nodes {
+            let role = n
+                .get("role")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if role != "button" && role != "link" && role != "menuitem" {
+                continue;
+            }
+            let name = n
+                .get("name")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(bid) = n.get("backendDOMNodeId").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let quads = self
+                .send_cmd("DOM.getContentQuads", json!({"nodeId": bid}))
+                .await
+                .ok()?;
+            let Some((x, y)) = quad_center(&quads) else {
+                continue;
+            };
+            let lower = name.to_lowercase();
+            if patterns.iter().any(|p| lower.contains(&p.to_lowercase())) {
+                return Some((x, y, name));
+            }
+            last_btn = Some((x, y, name));
+        }
+        last_btn
+    }
+
+    /// TRUSTED (no page JS): Page.getFrameTree → main-frame URL.
+    async fn current_url(&self) -> Option<String> {
+        self.ensure_page_attached().await.ok()?;
+        self.send_cmd("Page.getFrameTree", json!({}))
+            .await
+            .ok()
+            .and_then(|v| {
+                v.pointer("/frameTree/frame/url")
+                    .and_then(|u| u.as_str())
+                    .map(|s| s.to_string())
+            })
+    }
+
+    /// TRUSTED (no page JS): real per-key Input.dispatchKeyEvent into the
+    /// FOCUSED element (the caller clicks the field first). Google's controlled
+    /// input accepts trusted keys; a whole-string insertText/paste is flagged.
+    async fn type_focused(&self, text: &str, delay_ms: u64) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        for c in text.chars() {
+            let key = c.to_string();
+            let code = char_key_code(c);
+            let vk = char_vk(c);
+            let mut down = json!({
+                "type": "keyDown", "key": key, "text": key, "unmodifiedText": key
+            });
+            let mut up = json!({ "type": "keyUp", "key": key });
+            if !code.is_empty() {
+                down["code"] = json!(code);
+                up["code"] = json!(code);
+            }
+            if vk > 0 {
+                down["windowsVirtualKeyCode"] = json!(vk);
+                down["nativeVirtualKeyCode"] = json!(vk);
+                up["windowsVirtualKeyCode"] = json!(vk);
+            }
+            if self.send_cmd("Input.dispatchKeyEvent", down).await.is_err()
+                || self.send_cmd("Input.dispatchKeyEvent", up).await.is_err()
+            {
+                return Err(anyhow::anyhow!(
+                    "type_focused: Input.dispatchKeyEvent unsupported"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        Ok(())
+    }
+}
+
+/// First content-quad center from a DOM.getContentQuads result (8 numbers per
+/// quad: x0,y0,x1,y1,x2,y2,x3,y3). None when there's no real layout quad.
+fn quad_center(quads: &Value) -> Option<(i64, i64)> {
+    let first = quads["quads"].as_array()?.first()?;
+    let xs: Vec<f64> = (0..4)
+        .filter_map(|i| first.get(i * 2).and_then(|v| v.as_f64()))
+        .collect();
+    let ys: Vec<f64> = (0..4)
+        .filter_map(|i| first.get(i * 2 + 1).and_then(|v| v.as_f64()))
+        .collect();
+    if xs.len() != 4 || ys.len() != 4 {
+        return None;
+    }
+    let cx = ((xs[0] + xs[1] + xs[2] + xs[3]) / 4.0).round() as i64;
+    let cy = ((ys[0] + ys[1] + ys[2] + ys[3]) / 4.0).round() as i64;
+    if cx <= 0 || cy <= 0 {
+        return None;
+    }
+    Some((cx, cy))
 }
 
 /// Walk a DOM children slice, emitting a css_path (nth-of-type chain, id-shortcut)

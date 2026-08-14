@@ -183,6 +183,33 @@ pub trait BrowserBackend: Send + Sync {
         anyhow::bail!("a11y not supported by this backend")
     }
 
+    /// TRUSTED, evaluate-free element discovery: viewport center of the FIRST
+    /// element matching `css` with a real layout rect, via the DOM domain
+    /// (DOM.querySelectorAll → DOM.getContentQuads) — no page JS runs.
+    /// None on backends without DOM/layout support (caller falls back).
+    async fn element_center(&self, _css: &str) -> Option<(i64, i64)> {
+        None
+    }
+
+    /// TRUSTED, evaluate-free consent-button discovery via the accessibility
+    /// tree (Accessibility.getFullAXTree → backendDOMNodeId → getContentQuads):
+    /// phase 1 = a button/link whose accessible name matches `patterns`;
+    /// phase 2 = the last visible button/link. Returns (x, y, tag).
+    async fn consent_button(&self, _patterns: &[&str]) -> Option<(i64, i64, String)> {
+        None
+    }
+
+    /// TRUSTED, evaluate-free current URL (Page.getFrameTree — no page JS).
+    async fn current_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Type into the FOCUSED element with real per-key Input.dispatchKeyEvent
+    /// (no evaluate; the target field must already be focused/clicked).
+    async fn type_focused(&self, _text: &str, _delay_ms: u64) -> anyhow::Result<()> {
+        anyhow::bail!("type_focused not supported by this backend")
+    }
+
     /// Prefetch / discovery-only navigation: visit `url` and return its outbound
     /// links, skipping full content extraction. Fast path for site-mapping
     /// (crawl4ai `prefetch=True`). Default impl falls back to navigate+evaluate.
