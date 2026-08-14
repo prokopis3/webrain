@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engines paginate. Note: bing/ddg cap anonymous requests at ~10 and ignore
   `count`/`first`/`s` on a GeoIP-locked IP — route `--proxy <clean-IP>` for
   larger limits and deterministic markets.
+- **cli**: `webrain serp --fresh` (google) — always launches a **brand-new
+  profile + cookies** on a free port (never attaches a warm browser), so the
+  consent modal always renders and is always dismissed before the humanized
+  flow (deterministic anti-bot; a stale profile's cookies are never trusted).
 - **core, cli**: optional 2captcha CAPTCHA solving (open-serp recipe) — new
   `webrain_core::captcha` module (ureq only, no new dep): extract `data-sitekey`
   + `data-s` from a Google `/sorry` wall, solve via `2captcha.com` with the same

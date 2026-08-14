@@ -320,7 +320,9 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 { "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }
 ```
 
-Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL]`.
+Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh]`.
+
+`--fresh` (google) always launches a **brand-new profile + cookies** on a free port (never reuses a warm browser), so the consent modal always renders and is always dismissed before the humanized flow — the deterministic anti-bot recipe when a stale profile's trust signals are suspect.
 </Accordion>
 
 </AccordionGroup>
