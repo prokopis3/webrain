@@ -169,16 +169,15 @@ fn spawn_and_wait(
 /// Spawn real Chrome (headed by default) with a persistent per-account profile,
 /// wait for its CDP endpoint, and return a handle + CDP URL.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
-/// `stealth` is currently a NO-OP: the AutomationControlled suppression launch
-/// flags were removed — Chrome shows an "unsupported command-line flag" warning
-/// banner for them (a visible fingerprint) and they're detectable. All
-/// automation masking is CDP-level (attach_and_init's stealth_js).
+/// No stealth launch flags: the AutomationControlled suppression flags were
+/// removed — Chrome shows an "unsupported command-line flag" warning banner for
+/// them (a visible fingerprint) and they're detectable. All automation masking
+/// is CDP-level (attach_and_init's stealth_js).
 fn launch_chrome_opt(
     service: &str,
     profile: &str,
     port: u16,
     headed: bool,
-    _stealth: bool,
     proxy: Option<&str>,
     guest: bool,
 ) -> anyhow::Result<Launched> {
@@ -224,45 +223,7 @@ pub fn launch_chrome(
     port: u16,
     headed: bool,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, true, None, false)
-}
-
-/// Spawn real Chrome routing through an HTTP(S)/SOCKS proxy (`--proxy-server`).
-/// Same persistent-profile semantics as [`launch_chrome`].
-pub fn launch_chrome_with_proxy(
-    service: &str,
-    profile: &str,
-    port: u16,
-    headed: bool,
-    proxy: &str,
-) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, true, Some(proxy), false)
-}
-
-/// Spawn a PLAIN Chrome (no AutomationControlled suppression flags) — the
-/// google-SERP auto-launch path. A human's Chrome has no such flags, and
-/// Google fingerprints the stealth-tuned launch; CDP-level masking
-/// (stealth_js via Page.addScriptToEvaluateOnNewDocument) hides the
-/// automation markers instead. Keeps remote-debugging + user-data-dir.
-pub fn launch_chrome_plain(
-    service: &str,
-    profile: &str,
-    port: u16,
-    headed: bool,
-) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, false, None, false)
-}
-
-/// Plain Chrome through an HTTP(S)/SOCKS proxy (`--proxy-server`).
-/// Same no-stealth-flags semantics as [`launch_chrome_plain`].
-pub fn launch_chrome_plain_with_proxy(
-    service: &str,
-    profile: &str,
-    port: u16,
-    headed: bool,
-    proxy: &str,
-) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, false, Some(proxy), false)
+    launch_chrome_opt(service, profile, port, headed, None, false)
 }
 
 /// Spawn Chrome in GUEST MODE (`--guest`) — a fresh ephemeral session, no
@@ -279,7 +240,7 @@ pub fn launch_chrome_guest(
     headed: bool,
     proxy: Option<&str>,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, false, proxy, true)
+    launch_chrome_opt(service, profile, port, headed, proxy, true)
 }
 
 /// Open Chrome in GUEST MODE like launching a fresh guest window: `--guest` — a
