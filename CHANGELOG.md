@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.3] - 2026-08-15
+## [0.7.3] - 2026-08-15
 
 ### Fixed
 
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine=google`, and consent dismissal runs for google only.
 - **mcp**: removed dead `legacy_tool_schemas()` — ~748 lines of
   `#[allow(dead_code)]` JSON schema data superseded by the consolidated
-  15-tool surface (`tools/list` already returns `list_tools()`; legacy names
+  16-tool surface (`tools/list` already returns `list_tools()`; legacy names
   still dispatch via `map_surface()` → executor arms, which are untouched).
   Tool surface and dispatch are byte-identical.
 - **core**: serp/engines comments trimmed to `ponytail:`-style one-liners
@@ -273,7 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **You say / webrain does** — prompt→tool dispatch rows (grounded in the
     agent decision guide) linking to `/guides/agent-decision-guide`.
   - **Benchmark** section — animated counters (42 products in 1.4s, 3 engines,
-    15 tools, up to 100× faster) + the extraction benchmark art.
+    16 tools, up to 100× faster) + the extraction benchmark art.
   - Hero choreography — word-split headline reveal, staggered entrance
     timeline, typed install command (per-OS), all via
     `docs/styles/landing-anim.js` (self-healing against React rebuilds;
@@ -392,7 +392,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **docs**: tool surface synced to the **15-tool intent-based surface** — the
+- **docs**: tool surface synced to the **16-tool intent-based surface** — the
   Mintlify site (overview, quickstart, browsers, runtime-flow, scrape-at-scale,
   structured-extraction, troubleshooting, CLI reference) now teaches the
   consolidated `observe` / `interact` / `extract` / `crawl` / `scrape` / `pdf`
@@ -403,12 +403,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs (SEO/AI discoverability)**: new **Agent Decision Guide**
   (`docs/guides/agent-decision-guide.mdx`), **MCP client guides** (`mcp/server`,
   `mcp/claude`, `mcp/cursor`, `mcp/copilot`), and honest **comparison pages**
-  (vs Playwright, Browser Use, Firecrawl, Crawl4AI); canonical **15-tool**
+  (vs Playwright, Browser Use, Firecrawl, Crawl4AI); canonical **16-tool**
   terminology in overview/quickstart; stronger page descriptions; `llms-full`
   enabled in `docs.json`; `.mintignore` hygiene (audit file + `arch_diagram.mmd`).
 - **docs (landing page)**: custom **landing page** for the docs site
   (`docs/landing.mdx` — `mode: custom`, dark-tech taste design, asymmetric
-  hero, 15-tool bento, engines, terminal + pipeline visuals as SVG in
+  hero, 16-tool bento, engines, terminal + pipeline visuals as SVG in
   `docs/images/landing/`; styles in `docs/styles/global.css` scoped under
   `.landing`). Served at `/` by making it the first page in navigation — the
   hosted build ignores the `landingPage` config key because the Mintlify
@@ -517,7 +517,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **build(deps)**: `Cargo.lock` synced to the 0.5.0 workspace crate versions
   (`webrain-core`/`webrain-mcp`) — the v0.5.0 release commit bumped `Cargo.toml`
   but dropped the lock update.
-- **tools**: compressed the MCP surface from **63 → 15 intent-based tools**
+- **tools**: compressed the MCP surface from **63 → 16 intent-based tools**
   (firecrawl-style): `navigate / observe / interact / extract / scrape /
   batch / crawl / search / pdf / download / watch / session / vision / eval /
   guide`. Every capability is preserved as a `what` / `action` / `op` / `mode`
