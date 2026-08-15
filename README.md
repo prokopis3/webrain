@@ -6,7 +6,7 @@
 
 **A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.**
 
-Webrain exposes 15 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
+Webrain exposes 16 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
 
 [![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -27,7 +27,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 |---|---|---|
 | **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
 | **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
-| **LLM-ready** | MCP server, 15 tools, built-in decision guide | you hand-roll tool functions |
+| **LLM-ready** | MCP server, 16 tools, built-in decision guide | you hand-roll tool functions |
 | **Anti-bot** | challenge detection + persistent profile + native login | manual |
 | **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
 | **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
@@ -281,7 +281,7 @@ webrain watch <video-url-or-file> [--vision]       # transcript + frames (no bro
 webrain install watch|whisper|vision [--model]     # local AI stack (whisper + Qwen3-VL-2B)
 ```
 
-The 15-tool MCP surface is discovered dynamically — `webrain_guide` lists
+The 16-tool MCP surface is discovered dynamically — `webrain_guide` lists
 it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## Browser Engines
@@ -301,7 +301,7 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## MCP Tools
 
-The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 15 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
+The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 16 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
 
 | Tool | What it does |
 |---|---|
@@ -378,7 +378,7 @@ anything's missing.
 
 ## Marketplace / IDE Plugins
 
-Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 15 tools appear.
+Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 16 tools appear.
 
 Both transports work in every client: **stdio** (`webrain mcp`) or **HTTP**
 (`webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`).

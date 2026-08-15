@@ -223,7 +223,7 @@ MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
   webrain_batch concurrency inside their own shard.
 "#;
 
-/// Consolidated MCP surface — 15 intent-based tools (firecrawl-style), each
+/// Consolidated MCP surface — 16 intent-based tools (firecrawl-style), each
 /// with a `what`/`action`/`op`/`mode` selector + when-to-use guidance so the
 /// LLM picks the right boundary. `call_tool` routes each call to the legacy
 /// per-primitive executor via `map_surface()` (legacy names still dispatch).
@@ -674,7 +674,7 @@ fn arr_len(v: &Value) -> usize {
     v.as_array().map(|a| a.len()).unwrap_or(0)
 }
 
-/// Map the consolidated 15-tool surface to the legacy per-primitive executor.
+/// Map the consolidated 16-tool surface to the legacy per-primitive executor.
 /// Each tool's `what`/`action`/`op`/`mode` selects the legacy arm; the rest of
 /// the args pass through unchanged (legacy arms read the same param names).
 /// Legacy tool names map to None → handled by their own arm (backward compat).
@@ -949,7 +949,7 @@ mod surface_tests {
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
 
-    // Consolidated 15-tool surface → legacy executor. Legacy tool names pass
+    // Consolidated 16-tool surface → legacy executor. Legacy tool names pass
     // through (their own arms still match) — old agents keep working.
     let mapped = map_surface(name, args);
     let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);

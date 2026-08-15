@@ -20,7 +20,7 @@
     "timeline_breakdown": [
       {
         "time_range": "0-1.5s",
-        "action": "Static dark terminal window exactly as the first frame: macOS dots, TOOLS sidebar with navigate and extract highlighted, '$ webrain mcp', 'Starting MCP server on stdio... 15 tools loaded', an empty 'agent>' prompt. The blue block cursor blinks. Nothing else moves."
+        "action": "Static dark terminal window exactly as the first frame: macOS dots, TOOLS sidebar with navigate and extract highlighted, '$ webrain mcp', 'Starting MCP server on stdio... 16 tools loaded', an empty 'agent>' prompt. The blue block cursor blinks. Nothing else moves."
       },
       {
         "time_range": "1.5-3.5s",

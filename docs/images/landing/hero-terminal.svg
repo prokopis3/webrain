@@ -54,7 +54,7 @@
   <g font-family="ui-monospace, 'Geist Mono', monospace" font-size="13">
     <text x="236" y="120" fill="#60a5fa">$</text>
     <text x="252" y="120" fill="#f5f5f4">webrain mcp</text>
-    <text x="236" y="146" fill="#52525b">Starting MCP server on stdio... 15 tools loaded</text>
+    <text x="236" y="146" fill="#52525b">Starting MCP server on stdio... 16 tools loaded</text>
     <text x="236" y="180" fill="#60a5fa">agent&gt;</text>
     <text x="300" y="180" fill="#f5f5f4">scrape product prices from URL X</text>
     <text x="236" y="210" fill="#71717a">  webrain_navigate</text>

@@ -23,7 +23,7 @@ red, yellow and green macOS dots and monospace text 'webrain mcp'. Left sidebar
 titled 'TOOLS' lists navigate, observe, interact, extract, crawl, watch,
 session, vision in monospace, with 'navigate' and 'extract' highlighted in
 electric blue. Main terminal area shows a '$ webrain mcp' line, then 'Starting
-MCP server on stdio... 15 tools loaded', then an 'agent>' prompt where the
+MCP server on stdio... 16 tools loaded', then an 'agent>' prompt where the
 command 'scrape product prices from URL X' types itself in character by
 character; then three tool log lines appear one by one each with a green
 success tag: 'webrain_navigate' with green '→ ok', 'webrain_extract

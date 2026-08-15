@@ -1,6 +1,6 @@
 ---
 title: Changelog
-description: Version history for webrain — the 15-tool MCP surface, watch/video, bundled local vision (Qwen3-VL-2B), stealth login, and every release.
+description: Version history for webrain — the 16-tool MCP surface, watch/video, bundled local vision (Qwen3-VL-2B), stealth login, and every release.
 ---
 
 # Changelog
@@ -11,6 +11,28 @@ All notable changes, in reverse chronological order. The full version lives in
 ## Unreleased
 
 _No unreleased changes yet._
+
+## v0.7.3
+
+<p className="text-[#888] text-sm">August 15, 2026</p>
+
+### Added
+
+- **Structured SERP API** — `webrain_serp` + `webrain serp` return **typed**
+  results `{position,title,url,domain,snippet}` across 5 engines (duckduckgo ·
+  bing · google · brave · auto) with provider fallback, URL dedupe,
+  pagination, safe/region, retries, `request_id`+`ms`.
+- **Google/brave trusted browser flows** — trusted-commands-only (no stealth
+  JS, zero `Runtime.evaluate`; DOM + Accessibility discovery, trusted
+  `Input.*`), consent dismissal (TRUSTED click, ~42s → ~1.2s), sequential
+  page-turn pagination, guest-mode + warm persistent-profile launches,
+  `--remote-debugging-pipe`, market defaulting, per-engine `limit`.
+- **Anti-bot hardening** — optional **2captcha** solving (`WEBRAIN_2CAPTCHA_KEY`),
+  **serpapi.com** provider (used first when `limit > 10`), per-request
+  **proxy** for HTTP engines + launched Chrome, honest wall/fallback handling.
+- **MCP surface 15 → 16 tools** — `webrain_serp` added; `interact` advertises
+  the `drag` action.
+- **docs** — landing first-load flash fix, verified-results proof band.
 
 ## v0.6.2
 
@@ -64,7 +86,7 @@ _No unreleased changes yet._
 
 ### Changed
 
-- **MCP surface — 63 → 15 intent-based tools** (`map_surface` router):
+- **MCP surface — 63 → 16 intent-based tools** (`map_surface` router):
   `navigate / observe / interact / extract / scrape / batch / crawl / search /
   pdf / download / watch / session / vision / eval / guide`, each with a
   `what` / `action` / `op` / `mode` selector. Every capability is preserved;
