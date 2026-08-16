@@ -25,6 +25,9 @@ $domains = $r.Content -split "`n" | ForEach-Object {
     $labels = $_.Split('.')
     $labels.Count -ge 2 -and ($labels | Where-Object { $_ -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' -or $_.Length -gt 63 }).Count -eq 0
 } | Sort-Object -Unique
+# ponytail: alphabetical crop to the 3500-slot cap — the tail of the alphabet is
+# always dropped. Deterministic (good for reproducibility/diffing); a stable
+# shuffle would be more representative if coverage per letter matters.
 $take = $domains | Select-Object -First 3500
 # Sanity guard: a transiently empty/404/HTML response must not clobber the
 # production blocklist (the previous good list would be unrecoverable).
