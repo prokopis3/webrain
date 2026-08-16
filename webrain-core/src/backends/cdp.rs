@@ -2570,7 +2570,13 @@ impl BrowserBackend for CdpBackend {
             .await
             .ok()?;
         let root = doc["root"]["nodeId"].as_i64()?;
-        let gate = "div[role='dialog'], #yDmH0d, form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
+        // NOTE: `#yDmH0d` (Google's app shell) is deliberately NOT in the gate —
+        // it exists on EVERY google page, so it used to authorize the blind
+        // last-button fallback on a plain results page and CLICK A RESULT LINK
+        // ("consent=clicked:Tokyo provides an asynch" — the tab navigated to
+        // YouTube mid-search, parse → 0, fresh=0). A real consent overlay is a
+        // dialog/banner container; only that may authorize a click.
+        let gate = "div[role='dialog'], form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
         let hit = self
             .send_cmd(
                 "DOM.querySelector",
@@ -2581,6 +2587,21 @@ impl BrowserBackend for CdpBackend {
         if hit["nodeId"].as_i64().unwrap_or(0) == 0 {
             return None;
         }
+        // A REAL overlay (dialog/banner/form) is required before the Phase-2
+        // blind last-button fallback may click anything; a loose consent-ish
+        // container alone ([id*='consent'], #cnsw, .consent-bump) only
+        // authorizes pattern-matched buttons. Without this, a page with a
+        // stray `consent`-named element but no dialog could still get an
+        // arbitrary last-link click.
+        let strict = "div[role='dialog'], [aria-modal='true'], form[action*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
+        let strict_hit = self
+            .send_cmd(
+                "DOM.querySelector",
+                json!({"nodeId": root, "selector": strict}),
+            )
+            .await
+            .ok()?;
+        let overlay = strict_hit["nodeId"].as_i64().unwrap_or(0) != 0;
         let tree = self
             .send_cmd("Accessibility.getFullAXTree", json!({}))
             .await
@@ -2609,14 +2630,18 @@ impl BrowserBackend for CdpBackend {
             let Some(bid) = n.get("backendDOMNodeId").and_then(|v| v.as_i64()) else {
                 continue;
             };
-            let quads = self
-                // bid is a browser-global backendDOMNodeId — pass it via
-                // backendNodeId (nodeId expects a document-scoped DOM id, so
-                // the old call always failed and consent buttons were never
-                // clicked).
+            // bid is a browser-global backendDOMNodeId — pass it via
+            // backendNodeId (nodeId expects a document-scoped DOM id, so the
+            // old call always failed and consent buttons were never clicked).
+            let Ok(quads) = self
                 .send_cmd("DOM.getContentQuads", json!({"backendNodeId": bid}))
                 .await
-                .ok()?;
+            else {
+                // A stale AX node (detached since the snapshot, or bid==0) must
+                // NOT abort the whole hunt — skip it and keep scanning so a
+                // valid consent button later in the list still gets clicked.
+                continue;
+            };
             let Some((x, y)) = quad_center(&quads) else {
                 continue;
             };
@@ -2626,7 +2651,11 @@ impl BrowserBackend for CdpBackend {
             }
             last_btn = Some((x, y, name));
         }
-        last_btn
+        if overlay {
+            last_btn
+        } else {
+            None
+        }
     }
 
     /// TRUSTED (no page JS): Page.getFrameTree → main-frame URL.

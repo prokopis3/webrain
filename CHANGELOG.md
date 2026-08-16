@@ -240,6 +240,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **core**: `vision::index_current_page` runs the blocking embed/store off the
   executor (`spawn_blocking`) — a large page no longer stalls other MCP
   requests on the tokio worker (#99).
+- **core/cdp**: the consent-button hunt is hardened — `#yDmH0d` (Google's app
+  shell, present on every results page) is out of the gate so a plain SERP no
+  longer authorizes a blind last-button click that navigates mid-search; the
+  blind fallback now requires a real dialog/banner/form overlay; and a stale
+  AX node (detached since the snapshot, or `backendDOMNodeId` 0) is skipped
+  instead of aborting the whole scan.
 
 ### Changed
 
