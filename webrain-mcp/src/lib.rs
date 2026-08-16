@@ -99,7 +99,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             }
             // ponytail: fetch_http uses ureq (no browser), so skip CDP connect too.
             if tool_name == "webrain_fetch_http" {
-                let url = arguments.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let url = arguments
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if url.is_empty() {
                     return json!({
                         "jsonrpc": "2.0",
@@ -110,18 +114,26 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         }
                     });
                 }
-                let result = match webrain_core::engines::http_fetch(url) {
-                    Ok(mut v) => {
-                        // spider-rs `smart` borrow (lazy slice): probe whether the
-                        // raw HTML is a JS shell so the LLM can upgrade to the
-                        // browser instead of scraping an empty page.
-                        let html = v["text"].as_str().unwrap_or("").to_string();
-                        v["visible_chars"] = json!(crate::tools::visible_text_len(&html));
-                        v["needs_js"] = json!(crate::tools::probe_needs_js(&html));
-                        json!({"status": "ok", "result": v})
+                // ponytail: ureq is blocking — run off the executor so a slow
+                // fetch can't stall other sessions on the multi-threaded server.
+                let result = tokio::task::spawn_blocking(move || {
+                    match webrain_core::engines::http_fetch(&url) {
+                        Ok(mut v) => {
+                            // spider-rs `smart` borrow (lazy slice): probe whether the
+                            // raw HTML is a JS shell so the LLM can upgrade to the
+                            // browser instead of scraping an empty page.
+                            let html = v["text"].as_str().unwrap_or("").to_string();
+                            v["visible_chars"] = json!(crate::tools::visible_text_len(&html));
+                            v["needs_js"] = json!(crate::tools::probe_needs_js(&html));
+                            json!({"status": "ok", "result": v})
+                        }
+                        Err(e) => json!({"status": "error", "message": e.to_string()}),
                     }
-                    Err(e) => json!({"status": "error", "message": e.to_string()}),
-                };
+                })
+                .await
+                .unwrap_or_else(
+                    |e| json!({"status": "error", "message": format!("fetch task failed: {e}")}),
+                );
                 return json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -189,19 +201,30 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     let results = webrain_core::engines::download_files(&urls, &dir);
                     json!({"status": "ok", "count": results.len(), "results": results})
                 };
+                let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
                 return json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {
                         "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": false
+                        "isError": is_err
                     }
                 });
             }
             // ponytail: webrain_watch shells out to yt-dlp/ffmpeg/ffprobe (no
             // browser), so skip CDP connect too — same shared helper as the tool
             // dispatch (tools::watch_from_args), one implementation, two callers.
+            // It can run for minutes, so keep it OFF the executor.
             if tool_name == "webrain_watch" {
-                let result = crate::tools::watch_from_args(&arguments);
+                let args = arguments.clone();
+                let result =
+                    match tokio::task::spawn_blocking(move || crate::tools::watch_from_args(&args))
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            json!({"status": "error", "message": format!("watch task failed: {e}")})
+                        }
+                    };
                 let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
                 return json!({
                     "jsonrpc": "2.0", "id": id,
@@ -221,25 +244,36 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .get("engine")
                     .and_then(|v| v.as_str())
                     .unwrap_or("duckduckgo");
-                let encoded = q.replace(' ', "+");
+                // Percent-encode the query — space→+ lets &/#/% inject params or
+                // truncate the query ("C++" became ambiguous "C+++").
+                let encoded: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
                 let url = match engine {
                     "bing" => format!("https://www.bing.com/search?q={encoded}"),
                     "brave" => format!("https://search.brave.com/search?q={encoded}"),
                     "google" => format!("https://www.google.com/search?q={encoded}"),
                     _ => format!("https://html.duckduckgo.com/html/?q={encoded}"),
                 };
-                let result = match webrain_core::engines::http_fetch(&url) {
-                    Ok(v) => {
-                        json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()})
+                let engine = engine.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    match webrain_core::engines::http_fetch(&url) {
+                        Ok(v) => {
+                            json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()})
+                        }
+                        Err(e) => json!({"status":"error","message":e.to_string()}),
                     }
-                    Err(e) => json!({"status":"error","message":e.to_string()}),
-                };
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    json!({"status":"error","message":format!("search task failed: {e}")})
+                });
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
             }
-            // ponytail: serp HTTP engines (duckduckgo/bing/google/auto) use ureq —
-            // no browser, so skip CDP connect too. `brave` is a JS SPA → it needs
-            // a connected CDP engine (Chrome/obscura/lightpanda) and falls through
-            // to the backend connect + call_tool dispatch below.
+            // ponytail: serp HTTP engines (duckduckgo/bing/auto) use ureq — no
+            // browser, so skip CDP connect too. `google`/`brave` are JS-gated →
+            // they need a connected CDP engine (Chrome/obscura/lightpanda) and
+            // fall through to the backend connect + call_tool dispatch below.
+            // `auto` is HTTP-only by default, but joins google/brave when a
+            // backend is already attached (passed through below).
             if tool_name == "webrain_serp" {
                 let engine = arguments
                     .get("engine")
@@ -250,7 +284,19 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 // backend (ensured below).
                 let needs_browser = engine == "google" || engine == "brave";
                 if !needs_browser {
-                    let result = crate::tools::serp_from_args(&arguments, None).await;
+                    // `auto` also runs HTTP-only, but when a backend is already
+                    // attached it joins google/brave into the merge (the core's
+                    // browser-join path) — pass it through and mark it trusted
+                    // (no stealth injection for the google render).
+                    let backend_ref = if engine == "auto" {
+                        backend.as_ref()
+                    } else {
+                        None
+                    };
+                    if let Some(b) = backend_ref {
+                        b.set_no_stealth(true);
+                    }
+                    let result = crate::tools::serp_from_args(&arguments, backend_ref).await;
                     let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
                     return json!({
                         "jsonrpc": "2.0", "id": id,
@@ -261,13 +307,12 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     });
                 }
                 // google|brave → guest-browser flow (mirrors the CLI). google
-                // disables the stealth_js injection (trusted-commands-only); then
-                // ensure a backend — attach to CDP_URL/9222 if one is up, else
-                // guest-launch Chrome (warm session kept alive between calls).
-                if engine == "google" {
-                    // edition-2024 unsafe; mirrors webrain-cli's serp arm.
-                    unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
-                }
+                // disables the stealth_js injection on ITS backend
+                // (trusted-commands-only) — per-backend, not a process-global
+                // set_var (that's an edition-2024 data race from a concurrent
+                // handler and leaks to every session). Then ensure a backend:
+                // attach to CDP_URL/9222 if one is up, else guest-launch Chrome
+                // (warm session kept alive between calls).
                 if backend.is_none() {
                     let res = if let Some(url) = cdp_url {
                         CdpBackend::connect_with_url(url).await
@@ -295,10 +340,16 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                             ) {
                                 Ok(l) => {
                                     let url = l.cdp_url.clone();
-                                    // Warm session — keep the guest alive between calls.
-                                    std::mem::forget(l);
                                     match CdpBackend::connect_with_url(&url).await {
-                                        Ok(b) => *backend = Some(b),
+                                        Ok(b) => {
+                                            // Attach succeeded — keep the guest alive
+                                            // between calls (warm session). Only forget
+                                            // AFTER attach, so a failed attach drops the
+                                            // guard and the guest Chrome is killed
+                                            // (no orphan process).
+                                            std::mem::forget(l);
+                                            *backend = Some(b);
+                                        }
                                         Err(e) => {
                                             return tool_error(
                                                 id,
@@ -319,6 +370,13 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                 }
                             }
                         }
+                    }
+                }
+                // Stealth-off is per-backend: mark the resolved backend so
+                // attach_and_init skips the anti-bot injection for this session.
+                if engine == "google" {
+                    if let Some(b) = backend.as_ref() {
+                        b.set_no_stealth(true);
                     }
                 }
                 // google|brave → continue to the shared backend connect + call_tool
@@ -374,9 +432,19 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                             .filter_map(|x| x.as_u64().map(|n| n as u32))
                             .collect()
                     });
-                let result = match webrain_core::engines::pdf_images(path, pages.as_deref()) {
-                    Ok(v) => json!({"status":"ok","result":v}),
-                    Err(e) => json!({"status":"error","message":e.to_string()}),
+                let path = path.to_string();
+                let result = match tokio::task::spawn_blocking(move || {
+                    webrain_core::engines::pdf_images(&path, pages.as_deref())
+                })
+                .await
+                {
+                    Ok(v) => match v {
+                        Ok(v) => json!({"status":"ok","result":v}),
+                        Err(e) => json!({"status":"error","message":e.to_string()}),
+                    },
+                    Err(e) => {
+                        json!({"status":"error","message":format!("pdf_images task failed: {e}")})
+                    }
                 };
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
             }
@@ -424,11 +492,14 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             }
             // ponytail: vault listing needs no browser — serve without a CDP backend.
             if tool_name == "webrain_profiles" {
-                let result = match webrain_core::vault::list() {
-                    Ok(profiles) => {
+                let result = match tokio::task::spawn_blocking(webrain_core::vault::list).await {
+                    Ok(Ok(profiles)) => {
                         json!({"status": "ok", "count": profiles.len(), "profiles": profiles})
                     }
-                    Err(e) => json!({"status": "error", "message": e.to_string()}),
+                    Ok(Err(e)) => json!({"status": "error", "message": e.to_string()}),
+                    Err(e) => {
+                        json!({"status": "error", "message": format!("vault list task failed: {e}")})
+                    }
                 };
                 return json!({
                     "jsonrpc": "2.0", "id": id,
@@ -465,7 +536,9 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 let port: u16 = arguments
                     .get("port")
                     .and_then(|v| v.as_u64())
-                    .map(|n| n as u16)
+                    // u16::try_from rejects >65535 instead of silently truncating
+                    // (e.g. 70000 → 4464) to an unintended local port.
+                    .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
                 let result = match webrain_core::launch::launch_chrome(
                     &service, &profile, port, !headless,
@@ -519,7 +592,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 let port: u16 = arguments
                     .get("port")
                     .and_then(|v| v.as_u64())
-                    .map(|n| n as u16)
+                    // u16::try_from rejects >65535 instead of silently truncating.
+                    .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
                 // Creds: vault first (in-process decrypt), else env — never argv/logs.
                 let (user, pass, totp) = match webrain_core::vault::get(&service, &profile) {
@@ -605,7 +679,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 let port: u16 = arguments
                     .get("port")
                     .and_then(|v| v.as_u64())
-                    .map(|n| n as u16)
+                    // u16::try_from rejects >65535 instead of silently truncating.
+                    .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
                 let dir = webrain_core::launch::profiles_dir()
                     .join(service)
@@ -845,6 +920,10 @@ struct HttpState {
     next_id: std::sync::atomic::AtomicU64,
 }
 
+/// Max accepted HTTP request body. MCP tool args are small; anything bigger is
+/// a broken/malicious client — reject it instead of buffering until OOM.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 pub async fn run_http(addr: &str) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let state = Arc::new(HttpState {
@@ -895,6 +974,18 @@ async fn handle_http_conn(
                     session_id = Some(rest.trim().to_string());
                 }
             }
+            // Bound the request body: a malicious/broken client can declare a
+            // huge Content-Length and stream bytes — without a cap this grows
+            // `buf` until memory exhaustion (the 64 KiB guard below only covers
+            // the header phase, never the body read).
+            if content_length > MAX_BODY_BYTES {
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                break;
+            }
             while buf.len() < head_end + 4 + content_length {
                 let m = socket.read(&mut tmp).await?;
                 if m == 0 {
@@ -914,11 +1005,17 @@ async fn handle_http_conn(
                         .next_id
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 );
-                state
-                    .sessions
-                    .lock()
-                    .await
-                    .insert(id.clone(), Arc::new(Default::default()));
+                let mut map = state.sessions.lock().await;
+                // Bound the map: a long-lived server must not leak one session
+                // (and its CDP backend) per initialize forever. Evict an entry
+                // when the cap is hit — cooperative clients use webrain_close_session.
+                const MAX_SESSIONS: usize = 64;
+                if map.len() >= MAX_SESSIONS {
+                    if let Some(stale) = map.keys().next().cloned() {
+                        map.remove(&stale);
+                    }
+                }
+                map.insert(id.clone(), Arc::new(Default::default()));
                 id
             } else {
                 session_id.unwrap_or_else(|| "default".to_string())

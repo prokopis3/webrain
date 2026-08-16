@@ -62,7 +62,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-17 TOOLS — match the request to a boundary:
+16 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      console|flatten|fit|clean|screenshot|pixel|page_info|annotate|media)
@@ -77,8 +77,9 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
   webrain_search     web search (duckduckgo|google|bing|brave)
   webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
-                     engine; duckduckgo/bing/google/auto need no browser, brave uses
-                     the connected CDP engine; dedupes + paginates + falls back
+                     engine; duckduckgo|bing|auto are pure HTTP (no browser),
+                     google|brave render in the connected CDP engine (auto-launched
+                     guest Chrome); relevance-filtered + deduped + paginated + falls back
   webrain_pdf        pdf work (op: page|extract|render|images)
   webrain_download   files/media (engine: http|ytdlp)
   webrain_watch      video → transcript + frames
@@ -87,8 +88,9 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_vision     screenshot-tile vision index (op: index|retrieve)
   webrain_eval       arbitrary JS (the escape hatch)
   webrain_guide      this guide
-  webrain_eval_in_frame  run JS inside a cross-origin iframe (isolated world) →
-                     exact reCAPTCHA/hCaptcha grid + verify geometry
+  (hidden executor — not in tools/list) webrain_eval_in_frame: run JS inside a
+                     cross-origin iframe (isolated world) → exact reCAPTCHA/
+                     hCaptcha grid + verify geometry
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Browser identity, profile, and session are EXECUTION STATE. Never treat a
@@ -242,6 +244,14 @@ pub fn list_tools() -> Vec<Value> {
             }, "required": ["js"]}
         }),
         json!({
+            "name": "webrain_eval_in_frame",
+            "description": "Run JS inside a cross-origin iframe (isolated world). url_contains selects the iframe by src substring; js runs in that frame and returns the JSON result.",
+            "inputSchema": {"type": "object", "properties": {
+                "url_contains": {"type": "string", "description": "Substring of the target iframe's src to select it"},
+                "js": {"type": "string", "description": "JS expression to run inside the iframe"}
+            }, "required": ["url_contains", "js"]}
+        }),
+        json!({
             "name": "webrain_navigate",
             "description": "Navigate to a URL and return page state (title, visible text, interactive elements, same-origin links) plus `challenge` (cloudflare_challenge|blocked|captcha) when gated. THE entry point. Optional request-quality params: disable_resources, block_trackers, network_idle, wait_selector(+state), wait_timeout_secs, css_selector. Use `links` for one-call crawl discovery.",
             "inputSchema": {"type": "object", "properties": {
@@ -286,6 +296,10 @@ pub fn list_tools() -> Vec<Value> {
                 "direction": {"type": "string", "enum": ["up","down"], "default": "down", "description": "scroll"},
                 "x": {"type": "number", "description": "click_coords: viewport x"},
                 "y": {"type": "number", "description": "click_coords: viewport y"},
+                "x1": {"type": "number", "description": "drag: start x"},
+                "y1": {"type": "number", "description": "drag: start y"},
+                "x2": {"type": "number", "description": "drag: end x"},
+                "y2": {"type": "number", "description": "drag: end y"},
                 "nav": {"type": "string", "enum": ["back","forward","reload"], "default": "back"},
                 "tab": {"type": "string", "enum": ["new","switch","close","list"], "default": "list"},
                 "url": {"type": "string", "description": "tab new: URL"},
@@ -331,6 +345,7 @@ pub fn list_tools() -> Vec<Value> {
                 "op": {"type": "string", "enum": ["fetch","extract","interact","eval","screenshot"]},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "cdp_urls": {"type": "array", "items": {"type": "string"}, "description": "Round-robin URLs across these CDP backends (per-proxy isolation)"},
+                "js": {"type": "string", "description": "eval: JS extractor to run in each tab (required when op=eval)"},
                 "interaction": {"type": "string", "description": "interact: async JS to run in each tab"},
                 "base_selector": {"type": "string", "description": "extract/interact: repeated-item selector"},
                 "fields": {"type": "array", "items": {"type": "object"}, "description": "extract/interact: schema"},
@@ -390,7 +405,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_serp",
-            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms in the reply, retry with backoff. Returns {status, query, engine, results[], request_id, ms, skipped[]}.",
+            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached), relevance-filters junk pages, merges + dedupes, limit 1..=50. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown in the reply, retry with backoff. Returns {status, query, engine, results[], per_engine[], request_id, ms, skipped[]}.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
                 "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); google|brave = guest-browser flow"},
@@ -588,11 +603,37 @@ const ANNOTATE_JS: &str = r#"(() => {
 pub(crate) fn visible_text_len(html: &str) -> usize {
     let mut out = 0usize;
     let mut in_tag = false;
+    // Skip the BODIES of <script>/<style>/<noscript>: the old stripper counted
+    // them as "visible text", so a JS shell with a long inline <script> looked
+    // like it had content and was classified as needing no browser.
+    let mut skip = 0usize;
+    let mut tag = String::new();
     for ch in html.chars() {
         match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out += 1,
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                let raw = tag.trim();
+                let closing = raw.starts_with('/');
+                let name = raw
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(name.as_str(), "script" | "style" | "noscript") {
+                    if closing {
+                        skip = skip.saturating_sub(1);
+                    } else {
+                        skip += 1;
+                    }
+                }
+            }
+            _ if in_tag => tag.push(ch),
+            _ if skip == 0 => out += 1,
             _ => {}
         }
     }
@@ -1965,7 +2006,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .get("engine")
                 .and_then(|v| v.as_str())
                 .unwrap_or("duckduckgo");
-            let encoded = q.replace(' ', "+");
+            // Percent-encode the query — space→+ lets &/#/% inject params.
+            let encoded: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
             let url = match engine {
                 "bing" => format!("https://www.bing.com/search?q={encoded}"),
                 "brave" => format!("https://search.brave.com/search?q={encoded}"),
@@ -2387,6 +2429,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             "query": r.query,
             "engine": r.engine,
             "results": r.results,
+            "per_engine": r.per_engine,
             "request_id": r.request_id,
             "ms": r.ms,
             "skipped": r.skipped,
