@@ -37,22 +37,45 @@ pub struct PageState {
 /// ponytail: tiny marker list; add structural HTML markers if sites evade it.
 pub fn detect_antibot(title: &str, text: &str) -> Option<String> {
     let hay = format!("{title}\n{text}").to_ascii_lowercase();
-    const MARKERS: &[(&str, &str)] = &[
-        ("cloudflare_challenge", "checking your browser"),
-        ("cloudflare_challenge", "just a moment"),
-        ("cloudflare_challenge", "verify you are human"),
+    // Strong technical markers — near-certain challenge signals (a legit page
+    // doesn't contain "__cf_chl" / "challenge-platform" / a captcha id in its
+    // visible text). Single match is enough.
+    const STRONG: &[(&str, &str)] = &[
         ("cloudflare_challenge", "__cf_chl"),
         ("cloudflare_challenge", "challenge-platform"),
-        ("blocked", "access denied"),
-        ("blocked", "forbidden"),
         ("blocked", "cf-error-code"),
         ("captcha", "h-captcha"),
         ("captcha", "g-recaptcha"),
     ];
-    MARKERS
+    for (kind, m) in STRONG {
+        if hay.contains(m) {
+            return Some(kind.to_string());
+        }
+    }
+    // Generic phrases that can appear in legitimate prose ("forbidden",
+    // "access denied", "just a moment") — require TWO corroborating markers
+    // before declaring a challenge, so a support article that merely mentions
+    // one isn't misread as a blocked page (challenge gates whether the LLM
+    // keeps scraping).
+    const WEAK: &[(&str, &str)] = &[
+        ("cloudflare_challenge", "checking your browser"),
+        ("cloudflare_challenge", "just a moment"),
+        ("cloudflare_challenge", "verify you are human"),
+        ("blocked", "access denied"),
+        ("blocked", "forbidden"),
+    ];
+    let hits: Vec<&str> = WEAK
         .iter()
-        .find(|(_, m)| hay.contains(m))
-        .map(|(kind, _)| kind.to_string())
+        .filter(|(_, m)| hay.contains(m))
+        .map(|(kind, _)| *kind)
+        .collect();
+    if hits.len() >= 2 {
+        if hits.contains(&"cloudflare_challenge") {
+            return Some("cloudflare_challenge".to_string());
+        }
+        return Some(hits[0].to_string());
+    }
+    None
 }
 
 /// A page Chrome rendered for a dead/cert/5xx URL (spider-rs
@@ -64,16 +87,23 @@ pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
     let hay = format!("{title}\n{text}");
     // Chrome error pages carry a code — ERR_NAME_NOT_RESOLVED, DNS_PROBE_STARTED,
     // NET::ERR_CERT_* … grab the first one.
-    for marker in ["ERR_", "DNS_"] {
-        if let Some(i) = hay.find(marker) {
-            let code: String = hay[i..]
-                .chars()
-                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
-                .collect();
-            if !code.is_empty() {
-                return Some(code);
+    let extract = |region: &str| -> Option<String> {
+        for marker in ["ERR_", "DNS_"] {
+            if let Some(i) = region.find(marker) {
+                let code: String = region[i..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                if !code.is_empty() {
+                    return Some(code);
+                }
             }
         }
+        None
+    };
+    // A code in the <title> is authoritative — real interstitials put it there.
+    if let Some(code) = extract(title) {
+        return Some(code);
     }
     // Interstitials without a bare code (apostrophe may be curly — match both).
     let l = hay.to_ascii_lowercase();
@@ -85,10 +115,15 @@ pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
         "your connection is not private",
         "no internet",
     ];
-    PHRASES
-        .iter()
-        .find(|p| l.contains(*p))
-        .map(|_| "CHROME_ERROR".to_string())
+    // A body-only code needs a corroborating interstitial phrase — an ordinary
+    // support article that merely mentions "ERR_*" must not be flagged as dead.
+    if PHRASES.iter().any(|p| l.contains(*p)) {
+        if let Some(code) = extract(&hay) {
+            return Some(code);
+        }
+        return Some("CHROME_ERROR".to_string());
+    }
+    None
 }
 
 /// A loaded page with almost no interactive elements and no challenge is likely
@@ -144,11 +179,10 @@ pub trait BrowserBackend: Send + Sync {
     /// Hard-reload the current page bypassing cache (Ctrl+Shift+R) — drops the
     /// anti-bot state Google set on a flagged request; the manual recipe that
     /// beats the /sorry wall. Default falls back to location.reload() (best-
-    /// effort; CDP backends override with Page.reload ignoreCache:true).
+    /// effort; CDP backends override with Page.reload ignoreCache:true — the
+    /// boolean is non-standard and ignored by browsers).
     async fn reload_hard(&self) -> anyhow::Result<()> {
-        self.evaluate("location.reload(true); true")
-            .await
-            .map(|_| ())
+        self.evaluate("location.reload(); true").await.map(|_| ())
     }
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at
@@ -282,14 +316,17 @@ pub trait BrowserBackend: Send + Sync {
             .as_str()
             .unwrap_or("")
             .to_string();
+        let elements_val = self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?;
+        // An empty `elements` from a failed eval (Null / wrong shape) must not
+        // mislabel a healthy page as a bot-limited "crippled" shell.
+        let elements_ok = elements_val.is_array();
         let elements: Vec<InteractiveElement> =
-            serde_json::from_value(self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?)
-                .unwrap_or_default();
+            serde_json::from_value(elements_val).unwrap_or_default();
         let links: Vec<String> =
             serde_json::from_value(self.evaluate(crate::backends::cdp::LINKS_JS).await?)
                 .unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
-        let crippled = detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
         let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url,
