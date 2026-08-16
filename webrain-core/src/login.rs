@@ -91,27 +91,40 @@ async fn has_session(b: &CdpBackend) -> anyhow::Result<bool> {
 }
 
 async fn gate_up(b: &CdpBackend) -> bool {
-    b.evaluate(twofa_js())
-        .await
-        .map(|v| v.as_bool().unwrap_or(false))
-        .unwrap_or(false)
+    // ponytail: a transient "Execution context was destroyed" right after submit
+    // navigation is expected — treat it as "no gate yet" and keep polling (the
+    // loop re-probes every 3s). But surface the failure in the log so a
+    // PERSISTENT probe error isn't indistinguishable from "no gate".
+    match b.evaluate(twofa_js()).await {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(e) => {
+            tracing::debug!(error = %e, "login gate probe failed — treating as no gate");
+            false
+        }
+    }
 }
 
 /// reCAPTCHA / anti-bot challenge — creds were accepted, a human must solve.
 /// Distinct from the 2FA gate: URL/iframe markers only, not the 2FA vocabulary.
 async fn captcha_up(b: &CdpBackend) -> bool {
-    b.evaluate(
-        r#"(() => {
+    let r = b
+        .evaluate(
+            r#"(() => {
   const u = location.href.toLowerCase();
   if (/recaptcha|captcha|auth_platform/.test(u)) return true;
   if (document.getElementById('captcha-recaptcha')) return true;
   const t = (document.body ? document.body.innerText : '').toLowerCase();
   return /unusual traffic|verify you are human|complete the security check/.test(t);
 })()"#,
-    )
-    .await
-    .map(|v| v.as_bool().unwrap_or(false))
-    .unwrap_or(false)
+        )
+        .await;
+    match r {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(e) => {
+            tracing::debug!(error = %e, "captcha probe failed — treating as no challenge");
+            false
+        }
+    }
 }
 
 /// One login attempt: fill+submit, poll briefly for a session cookie, and if a
