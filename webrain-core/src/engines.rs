@@ -155,6 +155,26 @@ mod tests {
         assert!(exact.contains("JSON.stringify(Array.from"));
     }
 
+    // ponytail: regression for the clean-text selector list — a trailing comma
+    // makes querySelectorAll throw SyntaxError, so the default (exclude_social
+    // = false) must produce a valid list and the social form a leading comma.
+    #[test]
+    fn clean_js_selector_list_is_valid() {
+        let plain = super::build_clean_js(2, false);
+        // The default selector list must not end in a trailing comma.
+        assert!(!plain.contains("header,aside,"));
+        assert!(!plain.contains("aside,)"));
+        assert!(
+            plain.contains(
+                "querySelectorAll('script,style,noscript,iframe,nav,footer,header,aside')"
+            )
+        );
+        let social = super::build_clean_js(2, true);
+        // Social selectors are a LEADING comma append, still valid when empty.
+        assert!(social.contains("aside,[href*=\"facebook.com\"]"));
+        assert!(social.contains("[href*=\"youtube.com\"]"));
+    }
+
     // ponytail: one check for BM25 — query "rust" ranks the rust doc first.
     #[test]
     fn bm25_ranks_relevant_first() {
@@ -166,6 +186,47 @@ mod tests {
         let r = super::bm25_filter(&items, "rust documentation", 2);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0]["index"], 1); // rust doc scores highest
+    }
+
+    // ponytail: one check for the op=markdown pipeline — htmd converts HTML to
+    // real Markdown (script/style skipped) and bm25 prunes to the query-relevant
+    // chunks (the batch_markdown path, minus the CDP hop).
+    #[test]
+    fn markdown_convert_and_prune() {
+        let html = r#"<html><head><script>let x=1;</script><style>body{}</style></head>
+<body><h1>ESP32 Drone</h1><p>Wiring the motors to the ESC and MPU6050 IMU.</p>
+<pre><code>pinMode(13,OUTPUT);
+
+still code inside the fence</code></pre>
+<p>Unrelated cooking tips for pasta.</p></body></html>"#;
+        let conv = htmd::HtmlToMarkdown::builder()
+            .skip_tags(vec!["script", "style", "noscript"])
+            .build();
+        let md = conv.convert(html).unwrap();
+        assert!(md.contains("# ESP32 Drone"));
+        assert!(md.contains("Wiring the motors"));
+        assert!(!md.contains("let x=1")); // script skipped, no JS dump
+        // fence-aware chunking: the blank line inside the code block must NOT
+        // split the fence — one chunk holds both opener and closer.
+        let chunks = super::markdown_chunks(&md);
+        let fenced = chunks
+            .iter()
+            .find(|c| c.contains("```"))
+            .expect("fenced chunk");
+        assert_eq!(fenced.matches("```").count(), 2);
+        // prune + restore original order (index sort), drop the pasta chunk
+        let mut kept = super::bm25_filter(&chunks, "motor wiring", 2);
+        kept.sort_by_key(|v| v.get("index").and_then(|i| i.as_u64()).unwrap_or(u64::MAX));
+        let joined = kept
+            .iter()
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(joined.contains("Wiring the motors"));
+        assert!(!joined.contains("pasta")); // pruned as irrelevant
+        let h = joined.find("# ESP32 Drone");
+        let w = joined.find("Wiring the motors");
+        assert!(h.is_some() && w.is_some() && h.unwrap() < w.unwrap()); // doc order kept
     }
 
     // ponytail: one check for the Chrome header contract — sec-ch-ua GREASE
@@ -438,12 +499,12 @@ impl SpiderEngine {
             .get(domain)
             .unwrap_or(&self.autothrottle_start_delay_ms);
         let new_delay = if ok {
-            // Latency-driven: move halfway toward the server's real response time.
+            // Latency-driven: move halfway toward the server's real response
+            // time (a slow server then steps toward `target` instead of jumping
+            // straight to it — the old expression simplified to max(avg,target)).
             let target = latency_ms.max(floor);
             let avg = (cur + target) / 2;
-            avg.max(target.min(avg.max(target)))
-                .min(self.autothrottle_max_delay_ms)
-                .max(floor)
+            avg.min(self.autothrottle_max_delay_ms).max(floor)
         } else {
             // Blocked/challenge: double (or wait longer if the site already
             // slowed us down). A block never speeds the crawl up.
@@ -566,10 +627,19 @@ impl SpiderEngine {
         // multi-domain crawls when same_domain is disabled.
         let seed_origin = seed_url.split('/').take(3).collect::<Vec<_>>().join("/");
         let disallowed: Vec<String> = if self.respect_robots {
-            ureq::get(&format!("{seed_origin}/robots.txt"))
-                .call()
-                .ok()
-                .and_then(|r| r.into_body().read_to_string().ok())
+            // robots.txt fetch is blocking ureq — run it off the executor with
+            // the 30s-timed pooled agent (a bare `ureq::get` had NO timeout, so
+            // a hung robots server stalled the async worker forever).
+            let robots_url = format!("{seed_origin}/robots.txt");
+            let robots = tokio::task::spawn_blocking(move || {
+                browser_req(browser_agent().get(&robots_url))
+                    .call()
+                    .ok()
+                    .and_then(|r| r.into_body().read_to_string().ok())
+            })
+            .await
+            .unwrap_or(None);
+            robots
                 .map(|s| {
                     s.lines()
                         .filter_map(|l| {
@@ -589,11 +659,13 @@ impl SpiderEngine {
             if disallowed.is_empty() {
                 return true;
             }
-            let path = link
-                .splitn(3, '/')
-                .nth(2)
-                .map(|p| p.to_lowercase())
-                .unwrap_or_default();
+            // Match against the URL PATH only — splitn(3,'/').nth(2) kept the
+            // host ("https://x/product/1" → "x/product/1"), so a Disallow
+            // prefix like "/product" never matched an absolute link and
+            // respect_robots silently blocked nothing.
+            let path = url::Url::parse(link)
+                .map(|u| u.path().to_lowercase())
+                .unwrap_or_else(|_| link.to_lowercase());
             !disallowed.iter().any(|p| path.starts_with(p))
         };
 
@@ -1233,6 +1305,11 @@ where
         + Send
         + 'static,
 {
+    // Empty input: every public batch entry point indexes urls[0] on the probe
+    // failure path — bail before any indexing instead of panicking.
+    if urls.is_empty() {
+        return Vec::new();
+    }
     // Capability probe (raw CDP — sees the real single-target behavior even
     // when a target already exists): lightpanda errors TargetAlreadyLoaded on
     // any 2nd createTarget → sequential reuse; obscura/Chrome → parallel.
@@ -1328,6 +1405,86 @@ pub async fn batch_fetch(
             Ok((title, text.chars().take(3000).collect(), None))
         },
     )
+    .await
+}
+
+/// Split Markdown into chunks on blank lines, but NOT inside fenced code
+/// blocks (``` … ```) — a blank line inside a fence is code, not a boundary,
+/// so pruning can't orphan an opener. ponytail: minimal fence-state scanner.
+fn markdown_chunks(md: &str) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_fence = false;
+    for line in md.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if line.trim().is_empty() && !in_fence {
+            if !cur.is_empty() {
+                chunks.push(cur.trim().to_string());
+                cur.clear();
+            }
+            continue;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur.trim().to_string());
+    }
+    chunks
+}
+
+/// Batch markdown: convert each URL's page HTML to Markdown via htmd (pure
+/// Rust — the turndown.js-equivalent). Surpasses batch_fetch's 3000-char
+/// innerText cap with the FULL page as Markdown. Optional `query` bm25-prunes
+/// the markdown to top_k chunks (crawl4ai fit/prune style). Zero LLM.
+pub async fn batch_markdown(
+    browser: &CdpBackend,
+    urls: &[String],
+    query: &str,
+    top_k: usize,
+    concurrency: usize,
+    opts: &crate::backends::cdp::NavOpts,
+) -> Vec<BatchResult> {
+    let query = query.to_string();
+    let converter = std::sync::Arc::new(
+        htmd::HtmlToMarkdown::builder()
+            .skip_tags(vec!["script", "style", "noscript"])
+            .build(),
+    );
+    batch_map(browser, urls, concurrency, opts, move |b, sid, _url| {
+        let query = query.clone();
+        let converter = converter.clone();
+        async move {
+            let html = b
+                .eval_session(
+                    &sid,
+                    "document.documentElement ? document.documentElement.outerHTML || '' : ''",
+                )
+                .await?
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let mut md = converter
+                .convert(&html)
+                .map_err(|e| anyhow::anyhow!("htmd markdown conversion failed: {e}"))?;
+            if !query.trim().is_empty() && top_k > 0 {
+                // ponytail: fence-aware chunk + existing bm25_filter (the same
+                // prune crawl4ai's fit_markdown does, zero LLM). Restore original
+                // order (sort by index) and never split inside ``` fences.
+                let chunks = markdown_chunks(&md);
+                let mut kept = bm25_filter(&chunks, &query, top_k);
+                kept.sort_by_key(|v| v.get("index").and_then(|i| i.as_u64()).unwrap_or(u64::MAX));
+                md = kept
+                    .into_iter()
+                    .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+            }
+            Ok((String::new(), md, None))
+        }
+    })
     .await
 }
 
@@ -1541,10 +1698,37 @@ fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
 /// `(status, body)` with the FULL body. Reuses the pooled agent + Chrome headers.
 /// ponytail: one new fn instead of widening http_fetch's cap for every caller.
 pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u16, String)> {
-    // ponytail: proxy = one-off agent (fresh pool per proxied call); the proxy-less
-    // hot path keeps the shared pooled agent. Per-proxy pool cache if SERP throughput
-    // ever matters.
-    let agent = match proxy {
+    let agent = http_agent(proxy)?;
+    let resp = browser_req(agent.get(url)).call()?;
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().read_to_vec()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((status, text))
+}
+
+/// Form-POST variant of `serp_http_get` for endpoints that must not leak
+/// secrets into the URL (2captcha: the API key + proxy credentials would land
+/// in access logs / reverse proxies if sent as query params). Same pooled agent
+/// + Chrome headers, `application/x-www-form-urlencoded` body.
+pub(crate) fn serp_http_post(
+    url: &str,
+    form: &[(String, String)],
+    proxy: Option<&str>,
+) -> anyhow::Result<(u16, String)> {
+    let agent = http_agent(proxy)?;
+    let pairs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // send_form consumes by-value tuples (Item = (K, V)), so use into_iter().
+    let resp = browser_req(agent.post(url)).send_form(pairs.into_iter())?;
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().read_to_vec()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((status, text))
+}
+
+/// Shared ureq agent for the serp helpers: one-off proxied agent when a proxy
+/// is set (fresh pool per proxied call), otherwise the shared pooled agent.
+fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
+    Ok(match proxy {
         Some(p) => {
             let proxy = ureq::Proxy::new(p)?;
             ureq::Agent::new_with_config(
@@ -1555,16 +1739,7 @@ pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u
             )
         }
         None => browser_agent(),
-    };
-    let resp = browser_req(agent.get(url)).call()?;
-    let status = resp.status().as_u16();
-    // Decode as UTF-8 explicitly: ureq's read_to_string() keys off the response
-    // charset header, which the engines omit or mis-declare (latin-1), turning
-    // every non-ASCII char into mojibake ("–" -> "ΓÇô"). All three engines
-    // serve UTF-8, so a lossy UTF-8 decode is always correct.
-    let bytes = resp.into_body().read_to_vec()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok((status, text))
+    })
 }
 
 /// No-browser HTTP fetch (browsemind `http_crawl`): GET a URL, return status +
@@ -1728,10 +1903,16 @@ pub fn bm25_filter(items: &[String], query: &str, top_k: usize) -> Vec<Value> {
     // ponytail: precompute per-term doc frequency once (O(docs·terms)) instead of
     // re-scanning all docs for every (doc, term) inside the score loop (O(docs²·terms)).
     // Fixes the flagged O(n²) hot path — was linear_scan_in_loop=1 on bm25_filter.
+    // df = number of DOCS containing the term (counted once per doc), not raw
+    // occurrences — a term repeated inside one doc must not inflate df past n/2
+    // and flip IDF negative (which would penalize its own matches).
     let mut df: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for d in &docs {
+        let mut seen = std::collections::HashSet::new();
         for t in d {
-            *df.entry(t.clone()).or_insert(0.0) += 1.0;
+            if seen.insert(t) {
+                *df.entry(t.clone()).or_insert(0.0) += 1.0;
+            }
         }
     }
 
@@ -1872,13 +2053,15 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
 // via vision tiles). Returns JS string to pass to evaluate().
 
 pub fn build_clean_js(word_threshold: usize, exclude_social: bool) -> String {
+    // LEADING comma (not trailing): a selector list ending in a comma is a
+    // SyntaxError, so the default (exclude_social=false → empty) must stay valid.
     let social = if exclude_social {
-        r#"[href*="facebook.com"],[href*="twitter.com"],[href*="instagram.com"],[href*="linkedin.com"],[href*="youtube.com"]"#
+        r#",[href*="facebook.com"],[href*="twitter.com"],[href*="instagram.com"],[href*="linkedin.com"],[href*="youtube.com"]"#
     } else {
         ""
     };
     format!(
-        r#"(()=>{{const w=document.createElement('div');w.innerHTML=document.body.innerHTML;for(const s of w.querySelectorAll('script,style,noscript,iframe,nav,footer,header,aside,{social}'))s.remove();const t=w.textContent||'';return t.split(/\s+/).filter(w=>w.length>={word_threshold}).join(' ').slice(0,8192);}})()"#
+        r#"(()=>{{const w=document.createElement('div');w.innerHTML=document.body.innerHTML;for(const s of w.querySelectorAll('script,style,noscript,iframe,nav,footer,header,aside{social}'))s.remove();const t=w.textContent||'';return t.split(/\s+/).filter(w=>w.length>={word_threshold}).join(' ').slice(0,8192);}})()"#
     )
 }
 
@@ -2117,6 +2300,9 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
 /// across cores — capped at `available_parallelism()` for massive batches.
 /// Returns one JSON object per file, input order preserved.
 pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
+    if paths.is_empty() {
+        return Vec::new(); // empty batch → empty result, no chunks(0) panic
+    }
     let n = std::thread::available_parallelism()
         .map(|x| x.get())
         .unwrap_or(4);
