@@ -146,6 +146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty page. Results are honest about provider: a fallback reply carries
   `source` (actual provider, e.g. `engine: google, source: duckduckgo`) in the
   JSON, CLI, and MCP envelope, so substituted results can never be mislabeled.
+- **core**: **consent dismissal can no longer click a search result** — Google's
+  app shell `#yDmH0d` (present on every google page) was in the consent-gate
+  selector, and the AX last-button fallback then clicked an arbitrary result
+  link on dialog-less pages ("consent=clicked:Tokyo provides an asynch" — the
+  tab navigated to YouTube mid-search → parse 0). The gate now requires a real
+  dialog/banner container, and the blind last-button fallback fires only when a
+  strict overlay (role=dialog / aria-modal / consent form / onetrust) matched.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
@@ -240,12 +247,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **core**: `vision::index_current_page` runs the blocking embed/store off the
   executor (`spawn_blocking`) — a large page no longer stalls other MCP
   requests on the tokio worker (#99).
-- **core/cdp**: the consent-button hunt is hardened — `#yDmH0d` (Google's app
-  shell, present on every results page) is out of the gate so a plain SERP no
-  longer authorizes a blind last-button click that navigates mid-search; the
-  blind fallback now requires a real dialog/banner/form overlay; and a stale
-  AX node (detached since the snapshot, or `backendDOMNodeId` 0) is skipped
-  instead of aborting the whole scan.
 
 ### Changed
 
