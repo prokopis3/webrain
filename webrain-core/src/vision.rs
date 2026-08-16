@@ -560,57 +560,67 @@ pub async fn index_current_page(
         .as_str()
         .unwrap_or("")
         .to_string();
+    let indexed = tiles.len();
+    let url_for = url.clone();
+    let tag_for = tag.to_string();
     let client = EmbeddingClient::from_env();
     let inputs: Vec<EmbedInput> = tiles
         .iter()
         .map(|t| EmbedInput::Image(t.png_b64.clone()))
         .collect();
-    let mut store = VectorStore::new(tag, "vision");
-    store.load()?;
-    let (mode, vision): (&str, Option<String>) = match client.embed(&inputs) {
-        Ok(vecs) => {
-            // An embedder must return exactly one vector per input, in order —
-            // fewer (rate-limit/partial error) would panic on vecs[i].
-            if vecs.len() != tiles.len() {
-                anyhow::bail!(
-                    "embedder returned {} vectors for {} inputs — refusing to index",
-                    vecs.len(),
-                    tiles.len()
-                );
-            }
-            for (i, t) in tiles.iter().enumerate() {
-                store.add(&format!("{url}#tile{}", t.index), vecs[i].clone());
-            }
-            let v = crate::install::vision_local()
-                .is_some()
-                .then(|| {
-                    let t: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
-                    describe_tiles(&t).ok()
-                })
-                .flatten();
-            ("embed", v)
-        }
-        Err(_) => {
-            // ponytail: offline fallback — caption each tile with the bundled
-            // local Qwen3-VL so webrain_vision works without a cloud embed key.
-            if crate::install::vision_local().is_some() {
-                let b: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
-                let caps = caption_tiles(&b)?;
-                for (i, t) in tiles.iter().enumerate() {
-                    store.add_text(&format!("{url}#tile{}", t.index), &caps[i]);
+    // Blocking ureq embed + caption HTTP (with 5s retry sleeps) + store fs IO —
+    // off the executor so a slow embedder/captioner can't tie up a tokio worker.
+    let (mode, vision, total) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Option<String>, usize)> {
+        let mut store = VectorStore::new(&tag_for, "vision");
+        store.load()?;
+        let (mode, vision): (&str, Option<String>) = match client.embed(&inputs) {
+            Ok(vecs) => {
+                // An embedder must return exactly one vector per input, in order —
+                // fewer (rate-limit/partial error) would panic on vecs[i].
+                if vecs.len() != indexed {
+                    anyhow::bail!(
+                        "embedder returned {} vectors for {} inputs — refusing to index",
+                        vecs.len(),
+                        indexed
+                    );
                 }
-                ("captions", Some(caps.join(" | ")))
-            } else {
-                anyhow::bail!(
-                    "no embedding backend (set EMBED_URL/EMBED_API_KEY) and no local vision (run `webrain install vision`)"
-                );
+                for (i, t) in tiles.iter().enumerate() {
+                    store.add(&format!("{url_for}#tile{}", t.index), vecs[i].clone());
+                }
+                let v = crate::install::vision_local()
+                    .is_some()
+                    .then(|| {
+                        let t: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
+                        describe_tiles(&t).ok()
+                    })
+                    .flatten();
+                ("embed", v)
             }
-        }
-    };
-    let total = store.len();
-    store.save()?;
+            Err(_) => {
+                // ponytail: offline fallback — caption each tile with the bundled
+                // local Qwen3-VL so webrain_vision works without a cloud embed key.
+                if crate::install::vision_local().is_some() {
+                    let b: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
+                    let caps = caption_tiles(&b)?;
+                    for (i, t) in tiles.iter().enumerate() {
+                        store.add_text(&format!("{url_for}#tile{}", t.index), &caps[i]);
+                    }
+                    ("captions", Some(caps.join(" | ")))
+                } else {
+                    anyhow::bail!(
+                        "no embedding backend (set EMBED_URL/EMBED_API_KEY) and no local vision (run `webrain install vision`)"
+                    );
+                }
+            }
+        };
+        let total = store.len();
+        store.save()?;
+        Ok((mode.to_string(), vision, total))
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("vision index task failed: {e}")))?;
     Ok(json!({
-        "status": "ok", "mode": mode, "tag": tag, "indexed": tiles.len(), "total": total,
+        "status": "ok", "mode": mode, "tag": tag, "indexed": indexed, "total": total,
         "url": url, "vision": vision
     }))
 }
