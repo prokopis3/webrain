@@ -153,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tab navigated to YouTube mid-search → parse 0). The gate now requires a real
   dialog/banner container, and the blind last-button fallback fires only when a
   strict overlay (role=dialog / aria-modal / consent form / onetrust) matched.
+- **core**: `serp` HTTP engines retry a 2xx page that parses to zero results —
+  engines under rate-limit pressure (bing intermittently) serve an empty /
+  JS-shell page with HTTP 200, which used to short-circuit straight to
+  "0 results → provider fallback" on the first try. The shared
+  `http_search_page` now retries within the existing budget before giving up,
+  so a transient empty page doesn't immediately mislabel the engine as broken.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username

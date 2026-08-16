@@ -716,7 +716,19 @@ async fn http_search_page(
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("serp task failed: {e}")));
         match res {
             Ok((status, body)) if (200..300).contains(&status) => {
-                return Ok(parse_results(engine, &body, opts.limit));
+                let parsed = parse_results(engine, &body, opts.limit);
+                // A 2xx body that parses to ZERO is usually a flaky empty /
+                // JS-shell page an engine serves under rate-limit pressure
+                // (bing intermittently returns one for an otherwise-fine
+                // query), not a genuinely-empty result set. Retry within the
+                // existing budget before giving up; the caller's relevance +
+                // dedupe still handle real empties.
+                if parsed.is_empty() && attempt < opts.retries {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(200 * (1 << attempt))).await;
+                    continue;
+                }
+                return Ok(parsed);
             }
             Ok((status, _)) if attempt >= opts.retries => {
                 return Err(anyhow::anyhow!("{engine} returned HTTP {status}"));
