@@ -9,18 +9,24 @@
 
 name: Release
 
+# Two runs for the same tag must not race on changelog commits / release assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: Build ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -36,8 +42,10 @@ jobs:
             out: webrain-macos
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Supply-chain hardening: third-party actions are pinned to the full commit
+      # SHA of the tag they resolved at (mutable tags can be force-moved).
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Build release binary
         run: cargo build --release --bin webrain
@@ -59,6 +67,10 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only this job writes to the repo (changelog commit + release assets).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -76,6 +88,12 @@ jobs:
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
+          # workflow_dispatch on a branch (e.g. main) is not a version tag — bail
+          # instead of generating a malformed '## [main]' entry / bad asset URLs.
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::expected a version tag (vX.Y.Z), got '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
           if grep -q "^## \\[${VER}\\]" CHANGELOG.md; then
             echo "changelog entry exists for ${VER}"
           else
@@ -89,14 +107,18 @@ jobs:
             if not m:
                 sys.exit('no [Unreleased] section in CHANGELOG.md')
             released = f'## [{ver}] - {date}' + m.group(1)
-            out = '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + t[:m.start()] + released
+            # Keep EVERYTHING after the old [Unreleased] block (all previously
+            # released entries). Omitting t[m.end():] destroyed release history.
+            out = '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + t[:m.start()] + released + t[m.end():]
             p.write_text(out, encoding='utf-8')
             " "$VER" "$(date +%F)"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add CHANGELOG.md
             git commit -m "chore(release): changelog for ${VER}" || true
-            git push origin main || echo "changelog push skipped"
+            # A tag push leaves the workspace on detached HEAD (no local main) —
+            # push the current commit explicitly instead of a nonexistent ref.
+            git push origin HEAD:main
           fi
 
       - name: Extract release body from changelog
@@ -109,8 +131,16 @@ jobs:
           ' CHANGELOG.md > body.md
           test -s body.md || { echo "empty release body for ${VER}"; exit 1; }
 
+      # Publish a checksums.txt alongside the binaries so installers and
+      # `webrain self-update` can verify downloads (supply-chain integrity).
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum webrain-linux webrain-windows.exe webrain-macos > checksums.txt
+          cat checksums.txt
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           files: dist/*
           body_path: body.md
@@ -142,6 +172,10 @@ jobs:
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::expected a version tag (vX.Y.Z), got '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
           WIN_SHA="$(sha256sum dist/webrain-windows.exe | awk '{print toupper($1)}')"
           MAC_SHA="$(sha256sum dist/webrain-macos | awk '{print $1}')"
 
