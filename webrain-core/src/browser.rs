@@ -144,6 +144,90 @@ pub struct InteractiveElement {
     pub visible: bool,
 }
 
+/// JS that indexes interactive elements for click/type tools (shared by
+/// navigate and snapshot so both produce identical element lists).
+/// Interaction is index-based only (querySelectorAll order); precise
+/// selectors for extraction come from webrain_a11y (css_path/xpath).
+/// Housed here (not in a backend module) so the backend-agnostic
+/// `BrowserBackend::snapshot` default doesn't depend on a concrete backend.
+pub const ELEMENTS_JS: &str = r#"
+        (() => {
+            const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/([^a-zA-Z0-9_-])/g, '\\$1');
+            // Index-stable unique selector: id → class → nth-of-type chain from
+            // body. A bare tag name ("input") is NOT used — DOM.querySelector
+            // would resolve it to the FIRST match, not the element at `index`
+            // (broke DOM.setFileInputFiles for id/class-less <input type=file>).
+            const uniqSel = (el) => {
+                if (el.id) return '#' + esc(el.id);
+                if (el.className && typeof el.className === 'string' && el.className.trim()) return '.' + esc(el.className.trim().split(/\s+/)[0]);
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+                    let nth = 1, sib = cur.previousElementSibling;
+                    while (sib) { if (sib.tagName === cur.tagName) nth++; sib = sib.previousElementSibling; }
+                    parts.unshift(cur.tagName.toLowerCase() + ':nth-of-type(' + nth + ')');
+                    cur = cur.parentNode;
+                }
+                return parts.join(' > ') || el.tagName.toLowerCase();
+            };
+            const elems = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
+            return Array.from(elems).slice(0, 60).map((el, i) => ({
+                index: i,
+                tag: el.tagName.toLowerCase(),
+                text: (el.type === 'password' ? '' : (el.textContent || el.value || '')).trim().substring(0, 80),
+                selector: uniqSel(el),
+                visible: el.offsetParent !== null
+            }));
+        })()
+        "#;
+
+/// JS that collects deduped same-origin links (capped) for the PageState `links`
+/// field. Scrapling LinkExtractor-level quality: canonicalize, filter non-http
+/// schemes, strip fragments, drop content-obvious extensions (images, fonts,
+/// pdf, archives, ico, css/js), dedupe in insertion order. Turns "crawl +
+/// internal links" into a single navigate call.
+/// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
+/// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
+pub const LINKS_JS: &str = r#"
+    (() => {
+        try {
+            const origin = location.origin;
+            const skipExt = new Set(['pdf','zip','rar','7z','tar','gz','xz','bz2',
+                'jpg','jpeg','png','gif','webp','avif','svg','ico','bmp','tif','tiff',
+                'woff','woff2','ttf','otf','eot',
+                'mp4','webm','mp3','ogg','wav','mov','avi','m4a',
+                'css','js','json','xml','rss',
+                'exe','dmg','iso','apk','msi']);
+            const seen = new Set();
+            const out = [];
+            for (const el of document.querySelectorAll('a[href], area[href]')) {
+                const raw = el.href || '';
+                if (!raw) continue;
+                // strip fragment + trailing slash; drop non-http
+                let u = raw;
+                const hash = u.indexOf('#');
+                if (hash > -1) u = u.slice(0, hash);
+                // drop non-http(s) schemes (mailto, javascript, tel, file, etc.)
+                if (!u.startsWith('http://') && !u.startsWith('https://')) continue;
+                // same-origin only
+                if (!u.startsWith(origin)) continue;
+                // trailing-slash normalise
+                const qp = u.indexOf('?');
+                let path = qp > -1 ? u.slice(0, qp) : u;
+                if (path.endsWith('/')) u = u.slice(0, path.length - 1) + (qp > -1 ? u.slice(qp) : '');
+                // drop known non-content extensions
+                const seg = u.split('/').pop() || '';
+                const dot = seg.lastIndexOf('.');
+                if (dot > -1 && skipExt.has(seg.slice(dot + 1).toLowerCase())) continue;
+                if (seen.has(u)) continue;
+                seen.add(u);
+                if (out.push(u) >= 200) break;
+            }
+            return out;
+        } catch (e) { return []; }
+    })()
+    "#;
+
 /// Abstraction over a browser backend.
 /// ponytail: trait with async_trait when needed; dyn dispatch for now.
 #[async_trait::async_trait]
@@ -316,15 +400,14 @@ pub trait BrowserBackend: Send + Sync {
             .as_str()
             .unwrap_or("")
             .to_string();
-        let elements_val = self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?;
+        let elements_val = self.evaluate(ELEMENTS_JS).await?;
         // An empty `elements` from a failed eval (Null / wrong shape) must not
         // mislabel a healthy page as a bot-limited "crippled" shell.
         let elements_ok = elements_val.is_array();
         let elements: Vec<InteractiveElement> =
             serde_json::from_value(elements_val).unwrap_or_default();
         let links: Vec<String> =
-            serde_json::from_value(self.evaluate(crate::backends::cdp::LINKS_JS).await?)
-                .unwrap_or_default();
+            serde_json::from_value(self.evaluate(LINKS_JS).await?).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
         let crippled = elements_ok && detect_crippled(&challenge, elements.len());
         let chrome_error = detect_chrome_error(&title, &text);
