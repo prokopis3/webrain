@@ -8,6 +8,10 @@ module.exports = {
       'test', 'build', 'ci', 'chore', 'revert',
     ]],
     'scope-enum': [2, 'always', [
+      // NOTE: the overlap with type-enum (docs/build/ci/style/perf/test) is
+      // DELIBERATE — housekeeping commits like `docs(docs):` or `ci(ci):` are
+      // valid and read clearly. Keep both lists in sync manually (they mirror
+      // the scope list in AGENTS.md + the PR-lint scopes block).
       // code layers
       'core', 'engines', 'mcp', 'tools', 'cli',
       // core subsystems
