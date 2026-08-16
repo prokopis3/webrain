@@ -83,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `documentElement` fallback), the nav bindings react to keyboard (`Tab`
   counts as a user click so the poll doesn't steal focus), and the loader
   bails out early once the block is settled.
+- **docs/config**: commitlint's type/scope overlap is documented as deliberate
+  (the `.md`-scope templates and the `docs` type intentionally overlap) so a
+  future reader doesn't "fix" it (#7).
+- **docs/script**: `port_blocklist.ps1` documents its alphabetical crop to the
+  3500-slot blocklist cap (#27).
 
 ### Fixed
 
@@ -133,6 +138,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /search requests; 20s-capped each; never HTTP-polled pointlessly) and are
   reported `skipped` otherwise; a failed/empty single engine now reports the
   fallback winner as its source.
+- **core**: `serp` — **google's URL is now a real-browser URL**: `num` and `lr`
+  (language-restrict) are gone — google answers those with an empty "did not
+  match any documents. Reset search tools" page on automated/flagged sessions —
+  and `start` is omitted on page 0 (canonical). That soft-block is now detected
+  as a wall so the retry loop fails fast instead of burning 4 attempts on an
+  empty page. Results are honest about provider: a fallback reply carries
+  `source` (actual provider, e.g. `engine: google, source: duckduckgo`) in the
+  JSON, CLI, and MCP envelope, so substituted results can never be mislabeled.
+- **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
+  budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
   containing "PASS" no longer gets corrupted), a missing captcha token bails
   with `waiting_for_human` instead of submitting a guaranteed-403 empty token,
@@ -214,6 +229,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CdpBackend` — the old `std::env::set_var("WEBRAIN_NO_STEALTH")` from a
   concurrent handler was an edition-2024 data race and permanently disabled
   stealth for every session in the process.
+- **core/cdp**: `ELEMENTS_JS`/`LINKS_JS` now live on the `BrowserBackend`
+  trait (`browser.rs`) instead of inside the CDP backend — the shared
+  `snapshot` path no longer reaches into `backends::cdp`, so any backend can
+  supply its own extraction script and the crippled gate sees the trait's
+  contract (#38).
+- **core**: `login` gate/captcha probe failures are observable — the evaluate
+  result is matched and the error is logged (`tracing::debug!(error=…)`)
+  instead of being silently dropped behind an `unwrap_or(false)` (#46).
+- **core**: `vision::index_current_page` runs the blocking embed/store off the
+  executor (`spawn_blocking`) — a large page no longer stalls other MCP
+  requests on the tokio worker (#99).
 
 ### Changed
 
