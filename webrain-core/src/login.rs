@@ -52,8 +52,13 @@ pub fn login_js(user: &str, pass: &str) -> String {
   passEl.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
   return {ok:true, clicked:false};
 })()"#;
-    TPL.replace("USER", &jstr(user))
-        .replace("PASS", &jstr(pass))
+    // Two-phase replacement via control-char sentinels: each substitution runs
+    // over the OTHER placeholder's token, so a username containing "PASS" (or a
+    // password containing "USER") can't corrupt the other field's JSON.
+    TPL.replace("USER", "\u{1}")
+        .replace("PASS", "\u{2}")
+        .replace("\u{1}", &jstr(user))
+        .replace("\u{2}", &jstr(pass))
 }
 
 /// True when a 2FA / approval / device-verification gate needs the human.
@@ -143,7 +148,17 @@ pub async fn run_login(
         .map(|v| v.as_bool().unwrap_or(false))
         .unwrap_or(false)
     {
-        let _tok = backend.wait_turnstile_token(30).await;
+        // Submitting with an EMPTY token is a guaranteed 403 that gets misread
+        // as a credentials problem — bail for the human if the widget never
+        // populated.
+        if !backend.wait_turnstile_token(30).await {
+            return Ok(json!({
+                "logged_in": false,
+                "waiting_for_human": true,
+                "challenge": "captcha",
+                "message": "captcha token did not populate — solve the widget in the headed browser, then call login again",
+            }));
+        }
     }
     let submitted = backend.evaluate(&login_js(user, pass)).await?;
     // no form found => page is a tablet/app interstitial or not the login form;
@@ -172,11 +187,17 @@ pub async fn run_login(
         }
         if gate_up(backend).await {
             // TOTP auto-fill if a seed is stored; the human still confirms submit.
+            // Report whether the code actually landed (vs. a missing OTP field
+            // or a failed injection) so the caller can distinguish "entered"
+            // from "injection failed".
+            let mut totp_filled = false;
             if let Some(seed) = totp {
                 if let Ok(code) = vault::totp_code(seed) {
-                    let _ = backend
+                    totp_filled = backend
                         .evaluate(&vault::fill_js(otp_selector(), &code))
-                        .await;
+                        .await
+                        .map(|v| v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false))
+                        .unwrap_or(false);
                 }
             }
             return Ok(json!({
@@ -184,6 +205,7 @@ pub async fn run_login(
                 "waiting_for_human": true,
                 "message": "2FA/approval gate — approve or enter the code in the browser, then call login again",
                 "submitted": submitted,
+                "totp_filled": totp_filled,
             }));
         }
         if t0.elapsed().as_secs() > 15 {

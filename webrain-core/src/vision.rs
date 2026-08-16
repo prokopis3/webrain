@@ -81,7 +81,9 @@ impl Endpoint {
                 .as_array()
                 .context("embedding item missing vector")?
             {
-                v.push(n.as_f64().unwrap_or(0.0) as f32);
+                // Non-numeric elements were silently coerced to 0.0, producing a
+                // plausible-but-garbage index — error instead.
+                v.push(n.as_f64().context("embedding value is not a number")? as f32);
             }
             out.push(v);
         }
@@ -195,12 +197,17 @@ impl VectorStore {
     }
 
     pub fn add(&mut self, id: &str, vec: Vec<f32>) {
+        // Mutually exclusive per id: a vector entry evicts any caption for the
+        // same id (and vice-versa), so has_text()/len()/save() never mix modes
+        // or double-count an id.
+        self.texts.remove(id);
         self.map.insert(id.to_string(), vec);
         self.dirty = true;
     }
 
     /// Add a caption-only entry (offline mode — no embedding vector).
     pub fn add_text(&mut self, id: &str, text: &str) {
+        self.map.remove(id);
         self.texts.insert(id.to_string(), text.to_string());
         self.dirty = true;
     }
@@ -219,7 +226,7 @@ impl VectorStore {
             return Ok(());
         }
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).ok();
+            std::fs::create_dir_all(dir)?;
         }
         let mut s = String::new();
         for (id, vec) in &self.map {
@@ -230,7 +237,11 @@ impl VectorStore {
             s.push_str(&json!({ "id": id, "text": text }).to_string());
             s.push('\n');
         }
-        std::fs::write(&self.path, s)?;
+        // Atomic replace: write a temp file then rename, so a crash mid-write
+        // can't corrupt the whole JSONL index.
+        let tmp = self.path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp, s)?;
+        std::fs::rename(&tmp, &self.path)?;
         self.dirty = false;
         Ok(())
     }
@@ -360,40 +371,50 @@ pub async fn ask_viewport(
             .timeout_global(Some(std::time::Duration::from_secs(120)))
             .build(),
     );
-    // Failover: first provider that returns content wins; try the next on error.
-    let mut last_err = None;
-    for t in &targets {
-        let (endpoint, auth, model_name): (String, Option<String>, String) = match t {
-            crate::video::VisionTarget::Cloud {
-                endpoint,
-                model,
-                key,
-            } => (endpoint.clone(), Some(key.clone()), model.clone()),
-            crate::video::VisionTarget::Local { model, mmproj } => {
-                let e = crate::video::llama_vision_endpoint(&s, model, mmproj)?;
-                let n = model
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "qwen3-vl-2b".to_string());
-                (e, None, n)
+    // post_vision is blocking ureq with up to a 120s timeout — run the whole
+    // failover chain off the executor so one slow/dead provider can't stall
+    // the runtime, and the call stays cancellable at the single await point.
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Failover: first provider that returns content wins; try the next on
+        // error. (Only providers whose API key is set are in `targets` — the
+        // env-key gate IS the consent for cloud upload; no key, no cloud.)
+        let mut last_err = None;
+        for t in &targets {
+            let (endpoint, auth, model_name): (String, Option<String>, String) = match t {
+                crate::video::VisionTarget::Cloud {
+                    endpoint,
+                    model,
+                    key,
+                } => (endpoint.clone(), Some(key.clone()), model.clone()),
+                crate::video::VisionTarget::Local { model, mmproj } => {
+                    let e = crate::video::llama_vision_endpoint(&s, model, mmproj)?;
+                    let n = model
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "qwen3-vl-2b".to_string());
+                    (e, None, n)
+                }
+            };
+            let body = json!({
+                "model": model_name,
+                "messages": [{"role":"user","content": content.clone()}],
+                "max_tokens": 512
+            });
+            match crate::video::post_vision(&agent, &endpoint, auth.as_deref(), &body) {
+                Ok(ans) => return Ok(ans),
+                Err(e) => last_err = Some(e),
             }
-        };
-        let body = json!({
-            "model": model_name,
-            "messages": [{"role":"user","content": content.clone()}],
-            "max_tokens": 512
-        });
-        match crate::video::post_vision(&agent, &endpoint, auth.as_deref(), &body) {
-            Ok(ans) => return Ok(ans),
-            Err(e) => last_err = Some(e),
         }
-    }
-    Err(anyhow::anyhow!(
-        "vision ask: {}",
-        last_err
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "all vision providers failed".to_string())
-    ))
+        Err(anyhow::anyhow!(
+            "vision ask: {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "all vision providers failed".to_string())
+        ))
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("vision task failed: {e}")))?;
+    Ok(outcome)
 }
 
 /// Caption a batch of base64 tile PNGs with the bundled LOCAL vision model
@@ -548,6 +569,15 @@ pub async fn index_current_page(
     store.load()?;
     let (mode, vision): (&str, Option<String>) = match client.embed(&inputs) {
         Ok(vecs) => {
+            // An embedder must return exactly one vector per input, in order —
+            // fewer (rate-limit/partial error) would panic on vecs[i].
+            if vecs.len() != tiles.len() {
+                anyhow::bail!(
+                    "embedder returned {} vectors for {} inputs — refusing to index",
+                    vecs.len(),
+                    tiles.len()
+                );
+            }
             for (i, t) in tiles.iter().enumerate() {
                 store.add(&format!("{url}#tile{}", t.index), vecs[i].clone());
             }
@@ -603,7 +633,10 @@ pub fn retrieve(tag: &str, query: &str, k: usize) -> anyhow::Result<Value> {
     }
     let client = EmbeddingClient::from_env();
     let vecs = client.embed(&[EmbedInput::Text(query.to_string())])?;
-    let q = vecs.into_iter().next().unwrap_or_default();
+    let q = vecs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("embedder returned no vector for the query"))?;
     let top = store.search(&q, k);
     let results: Vec<Value> = top
         .into_iter()
