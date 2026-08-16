@@ -18,6 +18,17 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = env::args().collect();
+    // google serp runs with no injected stealth JS. edition-2024 set_var is
+    // unsafe because concurrent env reads (in tokio's worker pool) are a data
+    // race — set it HERE, before Runtime::new() spawns any threads.
+    if args.get(1).map(|s| s.as_str()) == Some("serp")
+        && args
+            .windows(2)
+            .any(|w| w[0] == "--engine" && (w[1] == "google" || w[1] == "auto"))
+    {
+        // auto can join google via the browser path when one is attached.
+        unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
+    }
     let rt = tokio::runtime::Runtime::new()?;
 
     // `webrain doctor` / `--doctor`: diagnose install — MCP, CDP ports, engines,
@@ -38,7 +49,12 @@ fn main() -> anyhow::Result<()> {
                 .cloned();
             match http_port {
                 Some(port) => {
-                    let addr = format!("127.0.0.1:{port}");
+                    // Default to loopback only. Override with WEBRAIN_HTTP_ADDR
+                    // (e.g. "0.0.0.0:9223" inside Docker, where the host publishes
+                    // 127.0.0.1:9223 → container). Never bind the unauthenticated
+                    // MCP endpoint to a LAN by default.
+                    let addr = std::env::var("WEBRAIN_HTTP_ADDR")
+                        .unwrap_or_else(|_| format!("127.0.0.1:{port}"));
                     tracing::info!("Starting webrain MCP server over HTTP on {addr}...");
                     rt.block_on(webrain_mcp::run_http(&addr))?;
                 }
@@ -54,7 +70,10 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("Fetching: {url}");
             let state = rt.block_on(backend.navigate(url))?;
             println!("Title: {}", state.title);
-            println!("Text:  {}", &state.text[..state.text.len().min(2000)]);
+            // floor_char_boundary: slicing at an arbitrary byte offset panics if
+            // the cut lands mid multi-byte UTF-8 (any non-ASCII page > 2000 B).
+            let end = state.text.floor_char_boundary(state.text.len().min(2000));
+            println!("Text:  {}", &state.text[..end]);
             println!("Elements: {} interactive", state.elements.len());
         }
         Some("screenshot") => {
@@ -62,7 +81,16 @@ fn main() -> anyhow::Result<()> {
             let backend = rt.block_on(CdpBackend::connect_default())?;
             rt.block_on(backend.navigate(url))?;
             let png = rt.block_on(backend.screenshot(true))?;
-            let out = format!("screenshot_{}.png", chrono_now());
+            // Sub-second precision so two runs in the same second don't
+            // silently overwrite each other's screenshot.
+            let out = format!(
+                "screenshot_{}_{}.png",
+                chrono_now(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_millis())
+                    .unwrap_or(0)
+            );
             std::fs::write(&out, &png)?;
             println!("Saved: {out} ({} bytes)", png.len());
         }
@@ -191,9 +219,9 @@ fn main() -> anyhow::Result<()> {
         Some("serp") => {
             // webrain serp "query" [--engine duckduckgo|bing|google|brave|auto]
             //   [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]
-            // Structured SERP JSON. duckduckgo/bing/google/auto need no browser;
-            // brave renders in the connected CDP engine (CDP_URL /
-            // --remote-debugging-port=9222).
+            // Structured SERP JSON. duckduckgo/bing/auto need no browser;
+            // google/brave render in the connected CDP engine (CDP_URL /
+            // --remote-debugging-port=9222, google auto-launches guest Chrome).
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 println!(
@@ -248,13 +276,9 @@ fn main() -> anyhow::Result<()> {
                 proxy: proxy.clone(),
             };
             // google: trusted-commands-only flow — no injected stealth JS
-            // (WEBRAIN_NO_STEALTH) and no Runtime.evaluate in the page. Other
-            // engines (bing/ddg HTTP, brave attached browser) are untouched.
-            if opts.engine == "google" {
-                // edition-2024 unsafe: single-threaded main, set before any
-                // backend attaches.
-                unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
-            }
+            // (WEBRAIN_NO_STEALTH, set before the runtime at the top of main)
+            // and no Runtime.evaluate in the page. Other engines (bing/ddg HTTP,
+            // brave attached browser) are untouched.
             // google is JS-gated (consent/JS shell over plain HTTP) — same as
             // brave, it needs a real browser. For google, if none is attached,
             // auto-launch Chrome in GUEST MODE (fresh ephemeral session every
@@ -285,10 +309,12 @@ fn main() -> anyhow::Result<()> {
                         let child = rt.block_on(webrain_core::launch::launch_chrome_pipe(
                             "serp", &prof_name, !headless,
                         ))?;
-                        println!(
-                            "launched FRESH chrome via --remote-debugging-pipe (no debugging port -> no open-debugger fingerprint): profile serp/{}",
-                            prof_name
-                        );
+                        if !json_out {
+                            println!(
+                                "launched FRESH chrome via --remote-debugging-pipe (no debugging port -> no open-debugger fingerprint): profile serp/{}",
+                                prof_name
+                            );
+                        }
                         Some(rt.block_on(CdpBackend::connect_pipe(child))?)
                     } else {
                         let port = pick_free_port(9230);
@@ -301,11 +327,13 @@ fn main() -> anyhow::Result<()> {
                             !headless,
                             proxy.as_deref(),
                         )?;
-                        println!(
-                            "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
-                            launched.profile_dir.display(),
-                            launched.cdp_url
-                        );
+                        if !json_out {
+                            println!(
+                                "launched FRESH chrome (no cookies -> consent modal handled): {} (CDP_URL={})",
+                                launched.profile_dir.display(),
+                                launched.cdp_url
+                            );
+                        }
                         // keep it alive for the whole run (+ --hold) so the headed
                         // window actually stays visible — dropping `Launched` kills
                         // Chrome, which was tearing the window down right after connect.
@@ -351,9 +379,17 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => return Err(e),
                     }
                 }
+            } else if opts.engine == "auto" {
+                // auto: HTTP engines (ddg+bing) need no browser, but when one is
+                // already attached (CDP_URL / 9222) google+brave join the merge.
+                // Fast probe — connection refused is instant, never launches.
+                if !json_out {
+                    println!("engine auto: HTTP (ddg+bing) — browser join if one is attached");
+                }
+                rt.block_on(CdpBackend::connect_default()).ok()
             } else {
-                // HTTP-only engines (duckduckgo|bing|auto): pure ureq HTTP —
-                // NEVER launch/connect a browser. Only google|brave get one.
+                // HTTP-only engines (duckduckgo|bing): pure ureq HTTP — NEVER
+                // launch/connect a browser (auto probes for an attached one above).
                 if !json_out {
                     println!("engine {}: pure HTTP — no browser launched", opts.engine);
                 }
@@ -375,6 +411,15 @@ fn main() -> anyhow::Result<()> {
                             head.push_str(&format!(" | skipped: {}", r.skipped.join(", ")));
                         }
                         println!("{head}");
+                        if !r.per_engine.is_empty() {
+                            let pe = r
+                                .per_engine
+                                .iter()
+                                .map(|p| format!("{}={}({})", p.engine, p.status, p.count))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            println!("engines: {pe}");
+                        }
                         for x in &r.results {
                             // plain ASCII separator — Windows consoles mangle the em-dash
                             println!("{}. {} - {}", x.position, x.title, x.url);
@@ -384,7 +429,12 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Err(e) => println!("error: {e}"),
+                Err(e) => {
+                    // stderr + non-zero exit: scripts must be able to detect a
+                    // failed search, and --json stdout must stay pure JSON.
+                    eprintln!("serp failed: {e}");
+                    std::process::exit(1);
+                }
             }
             // --hold: keep the fresh browser up so you can inspect it; close on
             // Enter (dropping `_launched` kills Chrome).
@@ -691,7 +741,14 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(9222);
             let data: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-            let cookies: Vec<serde_json::Value> = data.as_array().cloned().unwrap_or_default();
+            // Accept both the bare array AND the `webrain cookies` stdout shape
+            // ({"count": N, "cookies": [...]}) so piping cookies → setcookies
+            // round-trips instead of silently setting 0 cookies.
+            let cookies: Vec<serde_json::Value> = data
+                .as_array()
+                .cloned()
+                .or_else(|| data.get("cookies").and_then(|c| c.as_array()).cloned())
+                .unwrap_or_default();
             let backend = rt.block_on(CdpBackend::connect_with_url(&format!(
                 "http://127.0.0.1:{port}"
             )))?;
@@ -804,44 +861,125 @@ fn main() -> anyhow::Result<()> {
 // ── webrain upgrade ──────────────────────────────────────────────
 // Delegates to the package manager when installed through one (Homebrew /
 // Scoop), otherwise self-updates the running binary in place.
+// ── webrain upgrade ──────────────────────────────────────────────
+// ONE command for every install method. Homebrew / Scoop delegate to the
+// package manager (spawned detached, then this process exits so it never
+// holds the binary); a raw install self-updates in place. Careful when
+// webrain is genuinely running on any OS:
+//   • Windows: a running exe is locked — only OTHER instances of THIS exact
+//     binary are stopped (never an unrelated `webrain*` process or a second
+//     install), and this process exits right after spawning the update.
+//   • Unix: the swap is atomic (rename) and a running server keeps the old
+//     inode, so nothing is killed — we only warn it's stale until restarted.
 fn upgrade() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     if cmd_exists("brew") {
         println!("webrain: installed via Homebrew \u{2014} running `brew upgrade webrain`");
-        // ponytail: spawn detached + exit, never block-wait. If this process stays
-        // alive while the package manager runs, Scoop sees the upgrade command
-        // itself as a running instance of webrain and refuses to replace the exe.
-        // Detach so the binary is free when brew/scoop swap it.
         std::process::Command::new("brew")
             .args(["upgrade", "webrain"])
             .spawn()?;
         return Ok(());
     }
     #[cfg(target_os = "windows")]
-    if cmd_exists("scoop")
-        && std::path::Path::new(&std::env::var("USERPROFILE").unwrap_or_default())
-            .join("scoop/apps/webrain")
-            .exists()
-    {
+    if cmd_exists("scoop") && scoop_installed() {
         println!("webrain: installed via Scoop \u{2014} running `scoop update webrain`");
-        // Windows locks a running exe, so Scoop refuses to replace webrain while
-        // ANY instance is up — the MCP server keeps one alive and blocks every
-        // upgrade. Close the other instances first (self exits right after
-        // spawning scoop, so it's never locked), then update detached.
-        let ps = format!(
-            "Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {} }} | Stop-Process -Force",
-            std::process::id()
-        );
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-            .output();
-        // scoop is a .cmd/.ps1 shim, not scoop.exe — spawn it through cmd.exe
+        // Windows locks a running exe, so Scoop refuses to replace webrain
+        // while ANY instance of this binary is up. Stop only same-path
+        // siblings; this process then exits, so it's never in the way.
+        stop_same_exe_webrain();
         std::process::Command::new("cmd")
             .args(["/c", "scoop", "update", "webrain"])
             .spawn()?;
         return Ok(());
     }
-    self_update()
+    self_update()?;
+    warn_stale_running();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn scoop_installed() -> bool {
+    std::path::Path::new(&std::env::var("USERPROFILE").unwrap_or_default())
+        .join("scoop/apps/webrain")
+        .exists()
+}
+
+/// Stop sibling webrain processes that point at THIS exact binary. Scoop
+/// can't replace an exe any instance holds open; same-path-only means a
+/// different webrain install or an unrelated process named `webrain*` is
+/// left alone. This process exits right after (it's never a sibling to kill).
+#[cfg(target_os = "windows")]
+fn stop_same_exe_webrain() {
+    let self_pid = std::process::id();
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    // Escape single quotes in the exe path so a path containing `'` can't
+    // terminate the PowerShell string and inject arbitrary commands.
+    let exe_esc = exe.replace('\'', "''");
+    let ps = format!(
+        "Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {self_pid} -and $_.Path -eq '{exe_esc}' }} | Stop-Process -Force"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .output();
+}
+
+/// Best-effort list of OTHER running webrain processes (self excluded).
+/// On Unix this is a warning-only signal: an in-place rename doesn't disturb
+/// a running server, it just leaves it on the old inode until a restart.
+fn other_webrain_pids() -> Vec<u32> {
+    let self_pid = std::process::id();
+    let mut out = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        let ps = format!(
+            "Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {self_pid} }} | Select-Object -ExpandProperty Id"
+        );
+        if let Ok(o) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    out.push(pid);
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        // pgrep -x matches the exact process name; fails silently if absent.
+        if let Ok(o) = std::process::Command::new("pgrep")
+            .args(["-x", "webrain"])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    if pid != self_pid {
+                        out.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn warn_stale_running() {
+    let pids = other_webrain_pids();
+    if !pids.is_empty() {
+        let head = pids
+            .iter()
+            .take(3)
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "webrain: {} other instance(s) running (PID {head}\u{2026}) \u{2014} they keep the old version until restarted.",
+            pids.len()
+        );
+    }
 }
 
 fn cmd_exists(name: &str) -> bool {
@@ -849,6 +987,47 @@ fn cmd_exists(name: &str) -> bool {
         std::env::split_paths(&p)
             .any(|d| d.join(name).exists() || d.join(format!("{name}.exe")).exists())
     })
+}
+
+/// Fetch the release `checksums.txt` and return the expected SHA-256 (lower hex)
+/// for `asset`, or `None` if the file/entry is missing on this release.
+fn fetch_expected_sha256(sums_url: &str, asset: &str) -> anyhow::Result<Option<String>> {
+    let out = std::process::Command::new("curl")
+        .arg("-fsSL")
+        .arg(sums_url)
+        .output()?;
+    if !out.status.success() {
+        return Ok(None); // no checksums.txt published for this release
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        // sha256sum format: "<hex>  <name>"
+        let mut it = line.split_whitespace();
+        let (Some(sum), Some(name)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if name == asset {
+            return Ok(Some(sum.to_ascii_lowercase()));
+        }
+    }
+    Ok(None)
+}
+
+/// SHA-256 (lower hex) of a file.
+fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut h = sha2::Sha256::new();
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn self_update() -> anyhow::Result<()> {
@@ -861,6 +1040,8 @@ fn self_update() -> anyhow::Result<()> {
         "webrain-windows.exe"
     };
     let url = format!("https://github.com/prokopis3/webrain/releases/latest/download/{asset}");
+    let sums_url =
+        "https://github.com/prokopis3/webrain/releases/latest/download/checksums.txt".to_string();
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("no parent directory for current binary"))?;
@@ -875,6 +1056,20 @@ fn self_update() -> anyhow::Result<()> {
     if !st.success() {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::anyhow!("download failed (curl exit {st})"));
+    }
+    // Supply-chain guard: verify the SHA-256 of the downloaded binary against
+    // the release's checksums.txt BEFORE replacing the running executable.
+    // Fail closed — a missing/mismatched checksum aborts the self-update.
+    let expected = fetch_expected_sha256(&sums_url, asset)?;
+    let actual = sha256_hex(&tmp)?;
+    match expected {
+        Some(e) if e.eq_ignore_ascii_case(&actual) => {}
+        _ => {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!(
+                "checksum verification failed for {asset}: got {actual}, expected {expected:?} — aborting self-update"
+            );
+        }
     }
     #[cfg(unix)]
     {
