@@ -7,6 +7,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."          # skills/webrain
 mkdir -p dist
 # ponytail: git archive only — no Python fallback. Needs a committed skill dir.
-git archive --format=zip --prefix=webrain/ --output=dist/webrain.skill HEAD:skills/webrain 2>/dev/null \
-  || { echo "not a git clone — git archive needs the repo (commit the skill first)"; exit 1; }
+# git archive packages HEAD — warn if the working tree has newer changes that
+# would be silently excluded from the bundle.
+if git status --porcelain -- skills/webrain | grep -q .; then
+  echo "warning: uncommitted changes in skills/webrain are NOT included in the bundle" >&2
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "not a git clone — git archive needs the repo (commit the skill first)" >&2
+  exit 1
+fi
+
+# Don't swallow git archive's real failure (2>/dev/null masked every error as
+# "not a git clone").
+if ! git archive --format=zip --prefix=webrain/ --output=dist/webrain.skill HEAD:skills/webrain; then
+  echo "git archive failed — is skills/webrain committed at HEAD?" >&2
+  exit 1
+fi
+
+# Integrity + layout: the contract is one SKILL.md + scripts/, nothing else.
+unzip -t dist/webrain.skill >/dev/null || { echo "invalid archive produced"; exit 1; }
+EXTRA=$(unzip -Z1 dist/webrain.skill | grep -vE '^webrain/$|^webrain/SKILL\.md$|^webrain/scripts/')
+if [ -n "$EXTRA" ]; then
+  echo "unexpected files in bundle: $EXTRA" >&2
+  exit 1
+fi
+
 echo "wrote dist/webrain.skill"

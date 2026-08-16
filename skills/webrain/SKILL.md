@@ -44,6 +44,8 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 |---|---|
 | Which browser? (engine × page-state) | `references/browser-selection.md` |
 | Anti-bot challenge / gated page | `references/challenges.md` |
+| Hard block / `crippled:true` / "Attention Required!" | `workflows/feed-and-news.md` §D + `references/challenges.md` §5b |
+| RSS / news feeds / blocked `/rss/` endpoint | `workflows/feed-and-news.md` |
 | Solve a CAPTCHA (generic tool flow: claim → scaled vision → exact geometry via `webrain_eval_in_frame` → parallel clicks → token) | `workflows/captcha-solve.md` |
 | Auth / login / persistent session / cookie transfer | `references/profiles.md` |
 | Structured extraction / pagination / scale | `references/extraction.md` |
@@ -82,6 +84,9 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 ## Challenge rule (summary — full: `references/challenges.md`)
 
 - `challenge: null` → extract.
+- `crippled: true` (block page, no challenge) → real HEADED Chrome + persistent
+  profile (headless is detectable); still blocked on the same IP → clean-IP proxy
+  or report.
 - `challenge` set (`cloudflare_challenge`/`blocked`/`captcha`) → obscura/lightpanda
   CANNOT pass it (the challenge JS crashes). **Native fix:** persistent profile + real Chrome +
   session — `webrain_session(op=login, service, profile, url)` (vault + TOTP) or CLI

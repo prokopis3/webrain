@@ -11,9 +11,15 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     image: webrain
-    container_name: webrain
+    container_name: ${CONTAINER_NAME:-webrain}
+    # webrain mcp --http binds 127.0.0.1 inside the container by default, which a
+    # published port cannot reach (Docker forwards to the bridge IP). Bind the
+    # container to 0.0.0.0 via WEBRAIN_HTTP_ADDR, but publish on the HOST
+    # loopback only — the unauthenticated MCP endpoint must never reach the LAN.
     ports:
-      - "9223:9223" # HTTP MCP transport (webrain mcp --http 9223)
+      - "127.0.0.1:9223:9223" # HTTP MCP transport (webrain mcp --http 9223)
+    environment:
+      - WEBRAIN_HTTP_ADDR=0.0.0.0:9223
     volumes:
       - webrain-config:/root/.config/webrain # encrypted vault + browser profiles
       - webrain-cache:/root/.cache/webrain   # engine cache (Chrome for Testing / Obscura)

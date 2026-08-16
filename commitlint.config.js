@@ -19,6 +19,11 @@ module.exports = {
       'docs', 'build', 'ci', 'style', 'perf', 'dist',
       'deps', 'config', 'test', 'skill', 'script', 'release',
     ]],
-    'scope-empty': [0],
+    // Scopes are mandatory (the copilot-instructions + this header require
+    // `<type>(<scope>):`), so an empty scope is an error, not a warning.
+    'scope-empty': [2, 'never'],
+    'type-case': [2, 'always', 'lower-case'],
+    'subject-empty': [2, 'never'],
+    'header-max-length': [2, 'always', 100],
   },
 };
