@@ -405,11 +405,11 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_serp",
-            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached), relevance-filters junk pages, merges + dedupes, limit 1..=50. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown in the reply, retry with backoff. Returns {status, query, engine, results[], per_engine[], request_id, ms, skipped[]}.",
+            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached, sequential), relevance-filters junk pages, merges + dedupes, limit 1..=100. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown + source (actual provider after a fallback) in the reply, retry with backoff. Returns {status, query, engine, source, results[], per_engine[], request_id, ms, skipped[]}.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
                 "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); google|brave = guest-browser flow"},
-                "limit": {"type": "integer", "default": 10, "description": "max results, 1..=50"},
+                "limit": {"type": "integer", "default": 10, "description": "max results, 1..=100"},
                 "page": {"type": "integer", "default": 0, "description": "0-based results page"},
                 "safe": {"type": "boolean", "default": false},
                 "region": {"type": "string", "description": "locale/region, e.g. us-en, gb-en, gr-el, de-de"},
@@ -2394,7 +2394,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .unwrap_or(10)
-            .clamp(1, 50),
+            .clamp(1, 100),
         page: args
             .get("page")
             .and_then(|v| v.as_u64())
@@ -2428,6 +2428,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             "status": "ok",
             "query": r.query,
             "engine": r.engine,
+            "source": r.source,
             "results": r.results,
             "per_engine": r.per_engine,
             "request_id": r.request_id,

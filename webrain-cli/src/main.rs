@@ -242,7 +242,7 @@ fn main() -> anyhow::Result<()> {
             let limit: usize = flag("--limit")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10)
-                .clamp(1, 50);
+                .clamp(1, 100);
             let page: usize = flag("--page").and_then(|v| v.parse().ok()).unwrap_or(0);
             let safe = args.contains(&"--safe".to_string());
             let region = flag("--region");
@@ -409,6 +409,9 @@ fn main() -> anyhow::Result<()> {
                         );
                         if !r.skipped.is_empty() {
                             head.push_str(&format!(" | skipped: {}", r.skipped.join(", ")));
+                        }
+                        if !r.source.is_empty() && r.source != r.engine {
+                            head.push_str(&format!(" | source: {} (fallback)", r.source));
                         }
                         println!("{head}");
                         if !r.per_engine.is_empty() {

@@ -54,6 +54,11 @@ pub struct SerpResponse {
     /// Engines that returned zero/errored and were skipped (auto + fallback).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Actual provider that supplied the results — differs from `engine` only
+    /// after a provider fallback (e.g. engine=google, source=duckduckgo).
+    /// Empty for `auto` (the reply is a merged aggregate).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
     /// Per-engine outcome breakdown — which engines contributed how many
     /// results, and which were skipped/empty. Populated for `auto` always;
     /// single-engine calls report the winner plus any skipped fallbacks.
@@ -79,7 +84,7 @@ pub struct SerpOpts {
     pub query: String,
     /// duckduckgo | bing | google | brave | auto (all HTTP engines, merged).
     pub engine: String,
-    /// Max results to return, 1..=50.
+    /// Max results to return, 1..=100.
     pub limit: usize,
     /// 0-based results page (per-engine offset).
     pub page: usize,
@@ -189,12 +194,18 @@ fn engine_url(
             let mut u = Url::parse("https://www.google.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            p.append_pair("start", &(page * 10).to_string());
-            p.append_pair("num", &limit.to_string());
+            // Real-browser google URL: NO `num` (10/page default; `num>10` is a
+            // bot signal and often ignored) and NO `lr` (the language-restrict
+            // filter makes google serve "did not match any documents" on
+            // flagged/automated sessions — verified live). `start` only past
+            // page 0 (google's canonical page 0 omits it). `hl`/`gl` pin the
+            // locale without the aggressive `lr` restriction.
+            if page > 0 {
+                p.append_pair("start", &(page * 10).to_string());
+            }
             p.append_pair("safe", if safe { "active" } else { "off" });
             p.append_pair("hl", lang);
             p.append_pair("gl", cc);
-            p.append_pair("lr", &format!("lang_{lang}"));
             drop(p);
             Ok(u.to_string())
         }
@@ -729,8 +740,8 @@ async fn http_search_page(
 async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     let mut all: Vec<SerpResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // 50 max / ~10 per page; bounded so a hostile engine can't loop forever.
-    let max_pages = (opts.limit / 10).clamp(1, 5);
+    // 100 max / ~10 per page; bounded so a hostile engine can't loop forever.
+    let max_pages = (opts.limit / 10).clamp(1, 10);
     for page in opts.page..opts.page + max_pages {
         let url = engine_url(
             engine,
@@ -875,8 +886,8 @@ async fn browser_search<B: BrowserBackend>(
         // → fresh==0 → stop early → the retry/fallback chain takes over.
         let mut all: Vec<SerpResult> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // 50 max / ~10 per page; bounded so a hostile wall can't loop forever.
-        let max_pages = (opts.limit / 10).clamp(1, 5);
+        // 100 max / ~10 per page; bounded so a hostile wall can't loop forever.
+        let max_pages = (opts.limit / 10).clamp(1, 10);
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
             let url = engine_url(
@@ -1132,7 +1143,11 @@ async fn specific_engine<B: BrowserBackend>(
         // walled for minutes — retrying that 4× burns ~60s for nothing. So: two
         // consecutive walled attempts = IP blocked for this session → fall back
         // to the other engines instead of wasting more navigations.
-        let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha|not a bot/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
+        // Google's soft-block for automation is an EMPTY results page
+        // ("did not match any documents. Reset search tools") — not a /sorry
+        // CAPTCHA — so it must count as a wall too, or the retry loop burns 4
+        // attempts (minutes) re-fetching the same empty page.
+        let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha|not a bot|did not match any documents|reset search tools/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
         let mut walls = 0u32;
         for attempt in 0..4 {
             // Retry in a FRESH TAB — a failed first attempt can poison the
@@ -1238,12 +1253,13 @@ pub async fn serp_search<B: BrowserBackend>(
     let request_id = request_id();
     let engine = opts.engine.to_lowercase();
 
-    let (results, skipped, per_engine) = match engine.as_str() {
+    let (results, skipped, per_engine, source) = match engine.as_str() {
         // auto: fire the no-browser engines (duckduckgo, bing) concurrently over
         // HTTP, then merge + relevance-filter + dedupe + cap. When a CDP backend
-        // is attached, google/brave ALSO render in the browser concurrently and
-        // join the merge (the documented "google joins via the browser path");
-        // without one they're reported skipped, never HTTP-polled pointlessly.
+        // is attached, google/brave ALSO render in the browser (sequentially —
+        // one active tab, and Google walls simultaneous /search requests) and
+        // join the merge; without one they're reported skipped, never
+        // HTTP-polled pointlessly.
         "auto" => {
             let mut per_engine: Vec<SerpEngineReport> = Vec::new();
             let mut skipped: Vec<String> = Vec::new();
@@ -1315,6 +1331,7 @@ pub async fn serp_search<B: BrowserBackend>(
                 dedupe_cap(filter_relevant(merged, &opts.query), opts.limit),
                 skipped,
                 per_engine,
+                String::new(), // auto = merged aggregate, no single source
             )
         }
         "brave" => {
@@ -1334,6 +1351,7 @@ pub async fn serp_search<B: BrowserBackend>(
                     status: if count > 0 { "ok" } else { "empty" }.to_string(),
                     count,
                 }],
+                "brave".to_string(),
             )
         }
         e if HTTP_ENGINES.contains(&e) => {
@@ -1371,7 +1389,7 @@ pub async fn serp_search<B: BrowserBackend>(
                     }
                 }
             }
-            (results, skipped, per_engine)
+            (results, skipped, per_engine, source)
         }
         other => {
             return Err(anyhow::anyhow!(
@@ -1388,6 +1406,7 @@ pub async fn serp_search<B: BrowserBackend>(
         ms: start.elapsed().as_millis() as u64,
         skipped,
         per_engine,
+        source,
     })
 }
 
@@ -1636,6 +1655,18 @@ mod tests {
         assert!(g.contains("start=10"));
         assert!(g.contains("safe=active"));
         assert!(g.contains("hl=en"), "google en-US lang: {g}");
+
+        // Real-browser google URL (the "did not match any documents" fix):
+        // page 0 must omit `start`, and NO `num`/`lr` ever — both are bot
+        // signals that google answers with an empty-results page.
+        let g0 = engine_url("google", "rust", 0, false, None, 100).unwrap();
+        assert!(!g0.contains("start="), "page 0 omits start: {g0}");
+        assert!(!g0.contains("num="), "no num param: {g0}");
+        assert!(!g0.contains("lr="), "no lr language-restrict: {g0}");
+        assert!(g0.contains("q=rust"), "query kept: {g0}");
+        let g1 = engine_url("google", "rust", 1, false, None, 100).unwrap();
+        assert!(g1.contains("start=10"), "page 1 start offset: {g1}");
+        assert!(!g1.contains("num="), "no num on later pages either: {g1}");
 
         let br = engine_url("brave", "rust", 2, false, None, 10).unwrap();
         assert!(br.contains("offset=2"), "brave page-indexed offset: {br}");
