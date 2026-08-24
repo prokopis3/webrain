@@ -268,6 +268,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **core/mcp/cli**: clippy `--workspace --all-targets` is clean (zero warnings)
+  — doc-comment list/continuation fixes, `sort_by_key` for engine discovery,
+  explicit `.truncate(false)` on the pre-allocated `.part`, `VectorStore::is_empty`,
+  `#[allow(clippy::too_many_arguments)]` on the two 8-arg public APIs, and the
+  `surface_tests` module moved to the end of `tools.rs` (items-after-test-module).
 - **docker**: base images pinned to concrete minors (`rust:1.85-alpine`,
   `alpine:3.21`), the build copies only the workspace manifests + crate
   sources instead of the whole repo, and BuildKit cache mounts reuse the

@@ -118,7 +118,7 @@ fn find_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 /// Chrome downloaded by `webrain install`, newest `chrome-<version>` first.
 pub fn find_cft_chrome() -> Option<PathBuf> {
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by(|a, b| dir_version(&b.file_name()).cmp(&dir_version(&a.file_name())));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("chrome-") {
@@ -162,7 +162,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
         }
     }
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by(|a, b| dir_version(&b.file_name()).cmp(&dir_version(&a.file_name())));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("lightpanda-") {
@@ -198,7 +198,7 @@ pub fn find_obscura() -> Option<PathBuf> {
         }
     }
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by(|a, b| dir_version(&b.file_name()).cmp(&dir_version(&a.file_name())));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("obscura-") {
@@ -898,6 +898,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         let f = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false) // pre-allocated .part: never truncate parallel chunks
             .open(&part)?;
         f.set_len(total)?;
     }

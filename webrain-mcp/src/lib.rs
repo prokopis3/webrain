@@ -544,7 +544,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
                 let result = match webrain_core::launch::launch_chrome(
-                    &service, &profile, port, !headless,
+                    service, profile, port, !headless,
                 ) {
                     Ok(l) => {
                         let cdp_url = l.cdp_url.clone();
@@ -599,7 +599,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
                 // Creds: vault first (in-process decrypt), else env — never argv/logs.
-                let (user, pass, totp) = match webrain_core::vault::get(&service, &profile) {
+                let (user, pass, totp) = match webrain_core::vault::get(service, profile) {
                     Ok(c) => (c.username, c.password, c.totp),
                     Err(_) => (
                         std::env::var("WEBRAIN_USER").unwrap_or_default(),
@@ -900,7 +900,6 @@ pub async fn run_stdio() -> anyhow::Result<()> {
 /// `Mcp-Session-Id` header routing. Each session owns one CdpBackend, so a
 /// client's navigate→extract sequence persists across separate HTTP requests.
 /// ponytail: session = minted on initialize, reused via header, one backend each.
-
 struct SessionMeta {
     backend: tokio::sync::Mutex<Option<CdpBackend>>,
     /// CDP_URL this session was opened with (None = inherited from env).

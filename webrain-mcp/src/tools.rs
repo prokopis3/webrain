@@ -880,111 +880,6 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
     }
 }
 
-#[cfg(test)]
-mod surface_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn fold(name: &str, args: Value) -> (&'static str, Value) {
-        map_surface(name, &args).expect("should fold")
-    }
-
-    #[test]
-    fn folds_observe_selectors() {
-        for (what, legacy) in [
-            ("state", "webrain_snapshot"),
-            ("a11y", "webrain_a11y"),
-            ("semantic", "webrain_semantic_tree"),
-            ("html", "webrain_get_html"),
-            ("images", "webrain_get_images"),
-            ("console", "webrain_console"),
-            ("flatten", "webrain_flatten"),
-            ("fit", "webrain_fit"),
-            ("clean", "webrain_clean"),
-            ("screenshot", "webrain_screenshot"),
-            ("pixel", "webrain_pixel"),
-            ("page_info", "webrain_page_info"),
-            ("annotate", "webrain_annotate"),
-            ("media", "webrain_media"),
-        ] {
-            let (n, a) = fold("webrain_observe", json!({"what": what}));
-            assert_eq!(n, legacy, "observe {what}");
-            assert!(a.get("what").is_none(), "selector dropped");
-        }
-    }
-
-    #[test]
-    fn folds_interact_actions() {
-        let (n, a) = fold("webrain_interact", json!({"action": "click", "index": 0}));
-        assert_eq!(n, "webrain_click");
-        assert_eq!(a["index"], 0);
-        assert!(a.get("action").is_none());
-        // nav renames its param to the legacy arm's `op` key.
-        let (n, a) = fold(
-            "webrain_interact",
-            json!({"action": "nav", "nav": "forward"}),
-        );
-        assert_eq!(n, "webrain_nav");
-        assert_eq!(a["op"], "forward");
-    }
-
-    #[test]
-    fn folds_extract_and_crawl_modes() {
-        assert_eq!(
-            fold("webrain_extract", json!({"mode": "schema"})).0,
-            "webrain_extract_json"
-        );
-        assert_eq!(
-            fold("webrain_extract", json!({"mode": "autoschema"})).0,
-            "webrain_autoschema"
-        );
-        assert_eq!(
-            fold("webrain_crawl", json!({"mode": "spider"})).0,
-            "webrain_spider"
-        );
-        assert_eq!(
-            fold("webrain_crawl", json!({"mode": "validate"})).0,
-            "webrain_validate_urls"
-        );
-    }
-
-    #[test]
-    fn folds_session_and_pdf_ops() {
-        assert_eq!(
-            fold("webrain_session", json!({"op": "open"})).0,
-            "webrain_open_session"
-        );
-        assert_eq!(
-            fold("webrain_session", json!({"op": "list"})).0,
-            "webrain_list_sessions"
-        );
-        assert_eq!(
-            fold("webrain_session", json!({"op": "cookies"})).0,
-            "webrain_cookies"
-        );
-        assert_eq!(
-            fold("webrain_pdf", json!({"op": "extract"})).0,
-            "webrain_pdf_extract"
-        );
-        assert_eq!(
-            fold("webrain_pdf", json!({"op": "render"})).0,
-            "webrain_pdf_render"
-        );
-        assert_eq!(
-            fold("webrain_vision", json!({"op": "retrieve"})).0,
-            "webrain_vision_retrieve"
-        );
-    }
-
-    #[test]
-    fn single_tool_names_pass_through() {
-        assert!(map_surface("webrain_scrape", &json!({"url": "x"})).is_some());
-        assert!(map_surface("webrain_navigate", &json!({})).is_none());
-        assert!(map_surface("webrain_guide", &json!({})).is_none());
-        assert!(map_surface("webrain_observe", &json!({})).is_none()); // missing selector
-    }
-}
-
 /// Dispatch tool calls to the shared CDP backend.
 /// ponytail: match arm, no registry pattern.
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
@@ -1382,9 +1277,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let js = if adaptive {
-                build_adaptive_extract_js(&base, &base_fields, &fields)
+                build_adaptive_extract_js(base, &base_fields, &fields)
             } else {
-                build_extract_js(&base, &base_fields, &fields)
+                build_extract_js(base, &base_fields, &fields)
             };
             match backend.evaluate(&js).await {
                 Ok(v) => {
@@ -1846,7 +1741,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .map(|n| n.max(1) as usize)
                 .unwrap_or(concurrency);
             let results = if cdp_urls.is_empty() {
-                run_batch(backend, &op, &urls, args, &opts, concurrency).await
+                run_batch(backend, op, &urls, args, &opts, concurrency).await
             } else {
                 let mut all = Vec::new();
                 let mut backends = Vec::new();
@@ -1877,7 +1772,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         .collect();
                     if !share.is_empty() {
                         all.extend(
-                            run_batch(b, &op, &share, args, &opts, per_backend_concurrency).await,
+                            run_batch(b, op, &share, args, &opts, per_backend_concurrency).await,
                         );
                     }
                 }
@@ -1979,13 +1874,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .map(|s| s.trim_start_matches('.').to_lowercase())
                 .filter(|e| !e.is_empty())
             {
-                urls = urls
-                    .into_iter()
-                    .filter(|u| {
-                        let path = u.split('?').next().unwrap_or(u);
-                        path.to_lowercase().ends_with(&format!(".{ext}"))
-                    })
-                    .collect();
+                urls.retain(|u| {
+                    let path = u.split('?').next().unwrap_or(u);
+                    path.to_lowercase().ends_with(&format!(".{ext}"))
+                });
                 if urls.is_empty() {
                     return json!({"status": "error", "message": format!("no URLs match extension '.{ext}'")});
                 }
@@ -2026,7 +1918,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         // Structured SERP API — shared helper used by BOTH this dispatch (browser
         // available for brave) and the lib.rs no-browser short-circuit (HTTP only).
-        "webrain_serp" => serp_from_args(&args, Some(backend)).await,
+        "webrain_serp" => serp_from_args(args, Some(backend)).await,
         "webrain_nav" => {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("back");
             let js = match op {
@@ -2043,7 +1935,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("Enter");
             // Trusted CDP Input.dispatchKeyEvent (browsemind cdp_session_press),
             // JS fallback. Enter routes through the JS path to get form.submit().
-            match backend.press(&key).await {
+            match backend.press(key).await {
                 Ok(_) => json!({"status": "ok", "pressed": key}),
                 Err(e) => err(e),
             }
@@ -2436,5 +2328,110 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             "skipped": r.skipped,
         }),
         Err(e) => json!({"status": "error", "message": e.to_string()}),
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fold(name: &str, args: Value) -> (&'static str, Value) {
+        map_surface(name, &args).expect("should fold")
+    }
+
+    #[test]
+    fn folds_observe_selectors() {
+        for (what, legacy) in [
+            ("state", "webrain_snapshot"),
+            ("a11y", "webrain_a11y"),
+            ("semantic", "webrain_semantic_tree"),
+            ("html", "webrain_get_html"),
+            ("images", "webrain_get_images"),
+            ("console", "webrain_console"),
+            ("flatten", "webrain_flatten"),
+            ("fit", "webrain_fit"),
+            ("clean", "webrain_clean"),
+            ("screenshot", "webrain_screenshot"),
+            ("pixel", "webrain_pixel"),
+            ("page_info", "webrain_page_info"),
+            ("annotate", "webrain_annotate"),
+            ("media", "webrain_media"),
+        ] {
+            let (n, a) = fold("webrain_observe", json!({"what": what}));
+            assert_eq!(n, legacy, "observe {what}");
+            assert!(a.get("what").is_none(), "selector dropped");
+        }
+    }
+
+    #[test]
+    fn folds_interact_actions() {
+        let (n, a) = fold("webrain_interact", json!({"action": "click", "index": 0}));
+        assert_eq!(n, "webrain_click");
+        assert_eq!(a["index"], 0);
+        assert!(a.get("action").is_none());
+        // nav renames its param to the legacy arm's `op` key.
+        let (n, a) = fold(
+            "webrain_interact",
+            json!({"action": "nav", "nav": "forward"}),
+        );
+        assert_eq!(n, "webrain_nav");
+        assert_eq!(a["op"], "forward");
+    }
+
+    #[test]
+    fn folds_extract_and_crawl_modes() {
+        assert_eq!(
+            fold("webrain_extract", json!({"mode": "schema"})).0,
+            "webrain_extract_json"
+        );
+        assert_eq!(
+            fold("webrain_extract", json!({"mode": "autoschema"})).0,
+            "webrain_autoschema"
+        );
+        assert_eq!(
+            fold("webrain_crawl", json!({"mode": "spider"})).0,
+            "webrain_spider"
+        );
+        assert_eq!(
+            fold("webrain_crawl", json!({"mode": "validate"})).0,
+            "webrain_validate_urls"
+        );
+    }
+
+    #[test]
+    fn folds_session_and_pdf_ops() {
+        assert_eq!(
+            fold("webrain_session", json!({"op": "open"})).0,
+            "webrain_open_session"
+        );
+        assert_eq!(
+            fold("webrain_session", json!({"op": "list"})).0,
+            "webrain_list_sessions"
+        );
+        assert_eq!(
+            fold("webrain_session", json!({"op": "cookies"})).0,
+            "webrain_cookies"
+        );
+        assert_eq!(
+            fold("webrain_pdf", json!({"op": "extract"})).0,
+            "webrain_pdf_extract"
+        );
+        assert_eq!(
+            fold("webrain_pdf", json!({"op": "render"})).0,
+            "webrain_pdf_render"
+        );
+        assert_eq!(
+            fold("webrain_vision", json!({"op": "retrieve"})).0,
+            "webrain_vision_retrieve"
+        );
+    }
+
+    #[test]
+    fn single_tool_names_pass_through() {
+        assert!(map_surface("webrain_scrape", &json!({"url": "x"})).is_some());
+        assert!(map_surface("webrain_navigate", &json!({})).is_none());
+        assert!(map_surface("webrain_guide", &json!({})).is_none());
+        assert!(map_surface("webrain_observe", &json!({})).is_none()); // missing selector
     }
 }

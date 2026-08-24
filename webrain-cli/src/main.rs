@@ -1154,24 +1154,24 @@ async fn cdp_info(port: u16) -> CdpInfo {
             let n = s.read(&mut buf).await.unwrap_or(0);
             let body = String::from_utf8_lossy(&buf[..n]);
             // find \r\n\r\n separator, take JSON after it
-            if let Some(pos) = body.find("\r\n\r\n") {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body[pos + 4..]) {
-                    info.name = v
-                        .get("Browser")
-                        .and_then(|b| b.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    if let Some(ws) = v.get("webSocketDebuggerUrl").and_then(|w| w.as_str()) {
-                        // ws://host:PORT/devtools/browser
-                        info.ws_port = ws
-                            .split(':')
-                            .nth(2)
-                            .and_then(|s| s.split('/').next())
-                            .and_then(|s| s.parse().ok());
-                    }
-                    let ua = v.get("User-Agent").and_then(|u| u.as_str()).unwrap_or("");
-                    info.headless = ua.contains("HeadlessChrome");
+            if let Some(pos) = body.find("\r\n\r\n")
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&body[pos + 4..])
+            {
+                info.name = v
+                    .get("Browser")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                if let Some(ws) = v.get("webSocketDebuggerUrl").and_then(|w| w.as_str()) {
+                    // ws://host:PORT/devtools/browser
+                    info.ws_port = ws
+                        .split(':')
+                        .nth(2)
+                        .and_then(|s| s.split('/').next())
+                        .and_then(|s| s.parse().ok());
                 }
+                let ua = v.get("User-Agent").and_then(|u| u.as_str()).unwrap_or("");
+                info.headless = ua.contains("HeadlessChrome");
             }
         }
     }
@@ -1205,10 +1205,10 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
         }
         let info = rt.block_on(async { cdp_info(port).await });
         let mut label = format!("✅ ({})", info.name);
-        if let Some(ws) = info.ws_port {
-            if ws != port {
-                label.push_str(&format!(" ⚠️ relay/tunnel (ws→:{ws})"));
-            }
+        if let Some(ws) = info.ws_port
+            && ws != port
+        {
+            label.push_str(&format!(" ⚠️ relay/tunnel (ws→:{ws})"));
         }
         if info.headless {
             label.push_str(" ⚠️ headless — cannot pass login challenges");
@@ -1242,7 +1242,7 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
         if webrain_core::vault::vault_dir().join("vault.json").exists() {
             "✅ present"
         } else {
-            "⚠️ empty — `webrain vault set`".into()
+            "⚠️ empty — `webrain vault set`"
         }
     );
     let rec = if rt.block_on(async { check_tcp("127.0.0.1", 9222).await }) {

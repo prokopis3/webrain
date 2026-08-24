@@ -384,7 +384,7 @@ impl CdpBackend {
         tokio::spawn(async move {
             let mut sink = write;
             while let Some(text) = out_rx.recv().await {
-                if sink.send(Message::Text(text.into())).await.is_err() {
+                if sink.send(Message::Text(text)).await.is_err() {
                     break;
                 }
             }
@@ -622,16 +622,14 @@ impl CdpBackend {
                 let ev_session = v.get("sessionId").and_then(|s| s.as_str());
                 if ev_session == session {
                     if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                        if m == "Network.requestWillBeSent" {
-                            if *self.net_capture.lock().await {
-                                if let Some(u) = v
-                                    .get("params")
-                                    .and_then(|p| p.get("request"))
-                                    .and_then(|r| r.get("url"))
-                                    .and_then(|u| u.as_str())
-                                {
-                                    self.net_urls.lock().await.push(u.to_string());
-                                }
+                        if m == "Network.requestWillBeSent" && *self.net_capture.lock().await {
+                            if let Some(u) = v
+                                .get("params")
+                                .and_then(|p| p.get("request"))
+                                .and_then(|r| r.get("url"))
+                                .and_then(|u| u.as_str())
+                            {
+                                self.net_urls.lock().await.push(u.to_string());
                             }
                         }
                     }
@@ -786,7 +784,7 @@ impl CdpBackend {
         // domain untouched — that's what patchright does.
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
-        self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
+        self.set_blocked_urls(Some(&sid), BLOCKED_URLS).await?;
         // Stealth: mask automation markers before any page script runs.
         // The serp google flow sets no_stealth on the backend (a human's Chrome
         // runs no anti-bot script; the flow then keeps only trusted commands —
@@ -1140,6 +1138,7 @@ impl CdpBackend {
     ///   2. CDP-click its center via Input.dispatchMouseEvent — crosses the
     ///      cross-origin iframe barrier real reCAPTCHA/Turnstile checkboxes
     ///      live behind (a JS el.click() alone can't reach them)
+    ///
     /// Then poll until a captcha token populates (`*-response`), or the block
     /// page redirects away (Google /sorry auto-continues on pass). Returns
     /// true when cleared.
@@ -1520,7 +1519,7 @@ async fn element_center(b: &CdpBackend, index: usize) -> anyhow::Result<Option<(
     );
     let v = b.eval_js(&js).await?;
     Ok(v.as_array()
-        .and_then(|a| Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))))
+        .and_then(|a| Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))))
 }
 
 /// True when `elementFromPoint(x,y)` resolves to the element at `index` (or a
@@ -2062,14 +2061,13 @@ impl BrowserBackend for CdpBackend {
         // Trusted CDP path (browsemind cdp_session_type): focus+clear then
         // Input.insertText — React/Vue detect isTrusted=true (JS .value= +
         // synthetic Event is ignored by controlled inputs).
-        if focus_clear(self, index).await.is_ok() {
-            if self
+        if focus_clear(self, index).await.is_ok()
+            && self
                 .send_cmd("Input.insertText", json!({"text": text}))
                 .await
                 .is_ok()
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
         // JS fallback
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");

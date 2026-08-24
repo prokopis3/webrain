@@ -1086,10 +1086,10 @@ fn spawn_llama_server_impl(
 }
 
 /// Send evenly-sampled frames to a vision LLM and return per-frame captions
-/// + an overall visual summary as text.
-/// ponytail: cloud targets (Groq qwen3.6-27b) cap at 3 frames (hard limit).
-/// Local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage;
-/// ~256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
+/// plus an overall visual summary as text.
+/// ponytail: cloud targets (Groq qwen3.6-27b) cap at 3 frames (hard limit);
+/// local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage,
+/// about 256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
 fn describe_frames(frames: &[Frame]) -> Result<String> {
     let openrouter = std::env::var("OPENROUTER_API_KEY").ok();
     let openai = std::env::var("OPENAI_API_KEY").ok();
@@ -1240,12 +1240,11 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
                             && !segs.is_empty()
                         {
                             return (segs, "local".to_string());
-                        } else if opts.stt_backend == SttBackend::Whisper {
-                            if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                                && !segs.is_empty()
-                            {
-                                return (segs, "whisper".to_string());
-                            }
+                        } else if opts.stt_backend == SttBackend::Whisper
+                            && let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
+                            && !segs.is_empty()
+                        {
+                            return (segs, "whisper".to_string());
                         }
                     }
                 }
@@ -1278,13 +1277,12 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
             {
                 whisper_segments = segs;
                 whisper_source = "local";
-            } else if opts.stt_backend == SttBackend::Whisper {
-                if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                    && !segs.is_empty()
-                {
-                    whisper_segments = segs;
-                    whisper_source = "whisper";
-                }
+            } else if opts.stt_backend == SttBackend::Whisper
+                && let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
+                && !segs.is_empty()
+            {
+                whisper_segments = segs;
+                whisper_source = "whisper";
             }
         }
     }
@@ -1321,6 +1319,7 @@ fn probe_placeholder() -> Probe {
     Probe::default()
 }
 
+#[allow(clippy::too_many_arguments)] // watch summary: 8 distinct report fields
 fn finish_json(
     source: &str,
     dl: &Path,

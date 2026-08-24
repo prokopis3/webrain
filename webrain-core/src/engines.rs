@@ -284,10 +284,10 @@ still code inside the fence</code></pre>
         let mut d = std::collections::HashMap::new();
         // fast server (50ms latency): delay moves down toward ~50, floored at 100
         let d1 = s.throttle_tick(&mut d, "fast.com", 50, true);
-        assert!(d1 >= 100 && d1 < 200);
+        assert!((100..200).contains(&d1));
         // slow-but-ok server (800ms): delay rises toward 800
         let d2 = s.throttle_tick(&mut d, "slow.com", 800, true);
-        assert!(d2 >= 400 && d2 <= 800);
+        assert!((400..=800).contains(&d2));
         // blocked: doubles each time, capped at max
         let d3 = s.throttle_tick(&mut d, "blocked.com", 5, false);
         let d4 = s.throttle_tick(&mut d, "blocked.com", 5, false);
@@ -994,7 +994,7 @@ fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
                     .unwrap_or_default();
                 let mut inner = String::new();
                 for (j, nff) in nf.iter().enumerate() {
-                    let nj = js_name(&nff, j);
+                    let nj = js_name(nff, j);
                     let ns = nff.get("selector").and_then(|v| v.as_str()).unwrap_or("");
                     let nt = nff.get("type").and_then(|v| v.as_str()).unwrap_or("text");
                     let na = nff.get("attr").and_then(|v| v.as_str()).unwrap_or("");
@@ -1022,7 +1022,7 @@ fn build_field_js(base_fields: &[Value], fields: &[Value]) -> String {
                     .unwrap_or_default();
                 let mut inner = String::new();
                 for (j, nff) in nf.iter().enumerate() {
-                    let nj = js_name(&nff, j);
+                    let nj = js_name(nff, j);
                     let ns = nff.get("selector").and_then(|v| v.as_str()).unwrap_or("");
                     let nt = nff.get("type").and_then(|v| v.as_str()).unwrap_or("text");
                     let na = nff.get("attr").and_then(|v| v.as_str()).unwrap_or("");
@@ -1556,6 +1556,7 @@ pub async fn batch_eval(
 ///
 /// `interaction` is async JS that returns nothing (side effects only). If
 /// `base_selector` is non-empty, a schema extract runs after the interaction.
+#[allow(clippy::too_many_arguments)] // public batch API: 8 genuinely-distinct params
 pub async fn batch_interact(
     browser: &CdpBackend,
     urls: &[String],
@@ -1718,7 +1719,7 @@ pub(crate) fn serp_http_post(
     let agent = http_agent(proxy)?;
     let pairs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     // send_form consumes by-value tuples (Item = (K, V)), so use into_iter().
-    let resp = browser_req(agent.post(url)).send_form(pairs.into_iter())?;
+    let resp = browser_req(agent.post(url)).send_form(pairs)?;
     let status = resp.status().as_u16();
     let bytes = resp.into_body().read_to_vec()?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -2311,7 +2312,7 @@ pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
     // thrash on huge batches. Add a concurrency knob only if measured needs it.
     std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(workers);
-        for chunk in paths.chunks((paths.len() + workers - 1) / workers) {
+        for chunk in paths.chunks(paths.len().div_ceil(workers)) {
             let chunk: Vec<String> = chunk.to_vec();
             handles.push(s.spawn(move || {
                 chunk

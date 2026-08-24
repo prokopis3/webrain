@@ -216,6 +216,11 @@ impl VectorStore {
         self.map.len() + self.texts.len()
     }
 
+    /// True when this index holds no entries at all.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// True when this index holds caption text (offline mode) rather than vectors.
     pub fn has_text(&self) -> bool {
         !self.texts.is_empty()
@@ -522,7 +527,7 @@ fn parse_numbered(raw: &str, n: usize) -> Vec<String> {
                 if let Ok(k) = t[..ne].parse::<usize>() {
                     if (1..=n).contains(&k) {
                         let cap = t[ne..]
-                            .trim_start_matches(|c| c == '.' || c == ':' || c == '-' || c == ')')
+                            .trim_start_matches(['.', ':', '-', ')'])
                             .trim()
                             .to_string();
                         caps[k - 1] = Some(cap);

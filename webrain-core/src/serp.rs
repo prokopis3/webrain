@@ -799,30 +799,9 @@ fn jitter(a: u64, b: u64) -> u64 {
     a + x % (b - a + 1)
 }
 
-/// Dismiss a Google consent wall / regional dialog is done as a TRUSTED CDP
-/// click on a structurally-picked button (see browser_search) — never JS
-/// `.click()` / DOM removal, and never text matching (localized in every
-/// language).
-
-/// Register the Google human-like init script once per backend process (it is
-/// Render an engine's results page in an attached browser and parse the DOM —
-/// works on every CDP engine (Chrome/obscura/lightpanda); needed for `brave`
-/// and the only path that beats Google's consent/JS wall.
-///
-/// Google goes through the HOMEPAGE → search-box flow (browsemind recipe):
-/// loading the homepage, human-like events (after navigation, before consent),
-/// dismissing consent, TYPING the
-/// query with trusted CDP Input.insertText (Google's controlled input ignores
-/// JS `.value=` + synthetic Event — trusted keys are required to reveal the
-/// search button) and TRUSTED-clicking "Google Search" (never JS Enter, which
-/// Google penalizes). Hitting `/search?q=` directly is a strong bot signal that
-/// reliably trips Google's "unusual traffic" page, so we never use the direct
-/// Dismiss a Google consent wall/regional dialog with a TRUSTED CDP click —
-/// browsemind's ConsentManager recipe: Phase 1 multilingual accept/reject text
-/// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
-/// discovery goes through the accessibility tree + DOM quads
-/// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
-/// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
+/// Multilingual accept/reject strings for Google's consent dialog
+/// (browsemind ConsentManager Phase 1 — never "Sign in"). Scanned by
+/// `consent_button`; see `dismiss_google_consent`.
 const CONSENT_PATTERNS: &[&str] = &[
     "accept",
     "agree",
@@ -857,6 +836,12 @@ const CONSENT_PATTERNS: &[&str] = &[
     "отклонить",
     "απόρριψη",
 ];
+/// Dismiss a Google consent wall/regional dialog with a TRUSTED CDP click —
+/// browsemind's ConsentManager recipe: Phase 1 multilingual accept/reject text
+/// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
+/// discovery goes through the accessibility tree + DOM quads
+/// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
+/// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
 async fn dismiss_google_consent<B: BrowserBackend>(backend: &B) -> String {
     // ponytail ultra: fire the TRUSTED click the instant the overlay renders.
     // consent_button is DOM-gated (~1ms when no overlay), so poll fast (150ms)
