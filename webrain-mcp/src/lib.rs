@@ -279,10 +279,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .get("engine")
                     .and_then(|v| v.as_str())
                     .unwrap_or("duckduckgo");
-                // ddg|bing|auto are pure HTTP (no browser). google|brave are
-                // JS-gated and go through the guest-browser flow — they need a
+                // ddg|auto are pure HTTP (no browser). bing|google|brave go
+                // through the guest-browser flow (bing's HTTP caps at ~10/page)
+                // — they need a
                 // backend (ensured below).
-                let needs_browser = engine == "google" || engine == "brave";
+                let needs_browser = engine == "google" || engine == "brave" || engine == "bing";
                 if !needs_browser {
                     // `auto` also runs HTTP-only, but when a backend is already
                     // attached it joins google/brave into the merge (the core's
@@ -324,6 +325,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         Err(_) => {
                             let prof = if engine == "google" {
                                 "google"
+                            } else if engine == "bing" {
+                                "bing"
                             } else {
                                 "brave"
                             };

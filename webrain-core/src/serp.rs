@@ -881,7 +881,7 @@ async fn browser_search<B: BrowserBackend>(
     engine: &str,
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
-    if engine == "google" || engine == "brave" {
+    if engine == "google" || engine == "brave" || engine == "bing" {
         // Direct search-URL + pagination (the guest-browser flow): navigate
         // straight to engine_url's search URL (google /search?q=..&start=..,
         // brave /search?q=..&offset=..) instead of homepage→type→submit, and
@@ -903,7 +903,13 @@ async fn browser_search<B: BrowserBackend>(
         // not 10 or --limit 20 stalls at ~13 (2 pages × 6.5). Ceiling division
         // so --limit 20 gets 3 pages (20→~19-20), --limit 50 gets 8. fresh==0 /
         // the limit check bound the loop; this is just the ceiling.
-        let max_pages = ((opts.limit + 6) / 7).clamp(1, 15);
+        // bing paginates 10/page via `first` (1, 11, 21…), so budget /10
+        // (google ~6.5-7/page stays /7).
+        let max_pages = if engine == "bing" {
+            (opts.limit / 10).clamp(1, 10)
+        } else {
+            opts.limit.div_ceil(7).clamp(1, 15)
+        };
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
             let url = engine_url(
@@ -1151,7 +1157,7 @@ async fn specific_engine<B: BrowserBackend>(
     // when a browser is attached it goes straight to the browser path — the only
     // one that returns real Google results (browsemind recipe: real Chrome +
     // human-like init + wait-for-results + consent dismiss + data-hveid parse).
-    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave") {
+    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave" || engine == "bing") {
         // Google/Brave intermittently serve a "unusual traffic / not a robot"
         // CAPTCHA page (rate-limited IP — Google /sorry, Brave's PoW "Verify
         // you're not a bot"). A persistent-profile wall usually clears in ~10s

@@ -219,8 +219,8 @@ fn main() -> anyhow::Result<()> {
         Some("serp") => {
             // webrain serp "query" [--engine duckduckgo|bing|google|brave|auto]
             //   [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]
-            // Structured SERP JSON. duckduckgo/bing/auto need no browser;
-            // google/brave render in the connected CDP engine (CDP_URL /
+            // Structured SERP JSON. duckduckgo/auto need no browser;
+            // bing/google/brave render in the connected CDP engine (CDP_URL /
             // --remote-debugging-port=9222, google auto-launches guest Chrome).
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
@@ -228,7 +228,7 @@ fn main() -> anyhow::Result<()> {
                     "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
                 );
                 println!(
-                    "  duckduckgo|bing|auto need no browser; brave uses the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
+                    "  duckduckgo|auto need no browser; bing/brave use the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
                 );
                 return Ok(());
             }
@@ -289,7 +289,7 @@ fn main() -> anyhow::Result<()> {
             // watch it; only fresh holds — the warm 9222 guest keeps its session.
             let hold = args.contains(&"--hold".to_string());
             let mut _launched: Option<webrain_core::launch::Launched> = None;
-            let backend = if opts.engine == "brave" || opts.engine == "google" {
+            let backend = if opts.engine == "brave" || opts.engine == "google" || opts.engine == "bing" {
                 if fresh && opts.engine == "google" {
                     // --fresh: a brand-new profile dir + unique port every run —
                     // zero cookies, so the consent modal always renders and
@@ -345,14 +345,16 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     match rt.block_on(CdpBackend::connect_default()) {
                         Ok(b) => Some(b),
-                        Err(_) if opts.engine == "google" || opts.engine == "brave" => {
-                            // GUEST MODE auto-launch for BOTH browser engines
+                        Err(_) if opts.engine == "google" || opts.engine == "brave" || opts.engine == "bing" => {
+                            // GUEST MODE auto-launch for all browser engines
                             // (--proxy bakes --proxy-server in when set): fresh
                             // ephemeral session every run — zero persisted
-                            // cookies/history. ddg/bing never reach this branch
+                            // cookies/history. ddg never reaches this branch
                             // (backend = None, pure HTTP).
                             let prof = if opts.engine == "google" {
                                 "google"
+                            } else if opts.engine == "bing" {
+                                "bing"
                             } else {
                                 "brave"
                             };
@@ -388,7 +390,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 rt.block_on(CdpBackend::connect_default()).ok()
             } else {
-                // HTTP-only engines (duckduckgo|bing): pure ureq HTTP — NEVER
+                // HTTP-only engine (duckduckgo): pure ureq HTTP — NEVER
                 // launch/connect a browser (auto probes for an attached one above).
                 if !json_out {
                     println!("engine {}: pure HTTP — no browser launched", opts.engine);

@@ -164,6 +164,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AI overviews / featured snippets crowd the SERP, so `--limit 20` used to
   stall at ~13 (2 pages × 6.5). Ceiling division now fetches enough pages to
   reach the limit (20 → ~19, 50 → ~50).
+- **core/mcp/cli**: `serp` bing is now browser-backed like google/brave —
+  bing's plain-HTTP endpoint caps at ~10 results/page and ignores `first` on
+  rate-limited/GeoIP'd IPs (anomaly page or same-page repeat), so bing now
+  routes through the real-browser backend (`first=1,11,21…` pagination) and
+  auto-launches/attaches Chrome like the other browser engines. On an
+  unblocked IP bing paginates; on a locked IP it still returns the real page-1
+  results and falls back cleanly.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
