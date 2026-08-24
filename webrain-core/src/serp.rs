@@ -1157,7 +1157,12 @@ async fn specific_engine<B: BrowserBackend>(
         // attempts (minutes) re-fetching the same empty page.
         let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha|not a bot|did not match any documents|reset search tools/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
         let mut walls = 0u32;
-        for attempt in 0..4 {
+        // bing: ONE browser attempt. An empty bing page usually means "no
+        // results for this query/IP", not a transient wall (the HTTP fallback
+        // retries those) — so don't burn the 4×~25s google/brave wall-clearing
+        // loop on a query bing simply has nothing for.
+        let attempts = if engine == "bing" { 1 } else { 4 };
+        for attempt in 0..attempts {
             // Retry in a FRESH TAB — a failed first attempt can poison the
             // tab's session state (per-tab JS/history/risk flags). A human
             // opens a new window/tab after a failed search instead of
@@ -1182,7 +1187,9 @@ async fn specific_engine<B: BrowserBackend>(
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+            if attempt + 1 < attempts {
+                tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+            }
         }
     }
     // serpapi as a post-browser fallback (only when it wasn't tried first AND

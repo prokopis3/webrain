@@ -176,6 +176,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error for bing; google/brave still require a browser). The Linux-only
   dead-code warning on `cmd_exists` is gone (cfg-gated to its macOS/Windows
   callers).
+- **core**: `serp` bing's browser path makes ONE attempt (not 4) — an empty
+  bing page usually means "no results for this query/IP" rather than a
+  transient wall (the HTTP fallback retries those), so a no-result bing query
+  now falls back to the chain in ~6s instead of burning ~30s in the
+  google/brave wall-clearing loop.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
