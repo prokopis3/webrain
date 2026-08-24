@@ -898,8 +898,12 @@ async fn browser_search<B: BrowserBackend>(
         // → fresh==0 → stop early → the retry/fallback chain takes over.
         let mut all: Vec<SerpResult> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // 100 max / ~10 per page; bounded so a hostile wall can't loop forever.
-        let max_pages = (opts.limit / 10).clamp(1, 10);
+        // google serves ~6-7 organic results per page (video carousels, AI
+        // overviews, featured snippets crowd the rest), so budget pages on ~7
+        // not 10 or --limit 20 stalls at ~13 (2 pages × 6.5). Ceiling division
+        // so --limit 20 gets 3 pages (20→~19-20), --limit 50 gets 8. fresh==0 /
+        // the limit check bound the loop; this is just the ceiling.
+        let max_pages = ((opts.limit + 6) / 7).clamp(1, 15);
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
             let url = engine_url(

@@ -159,6 +159,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "0 results → provider fallback" on the first try. The shared
   `http_search_page` now retries within the existing budget before giving up,
   so a transient empty page doesn't immediately mislabel the engine as broken.
+- **core**: `serp` google pagination budgets pages on ~7 results/page instead
+  of 10 — google serves ~6-7 organic results per page once video carousels /
+  AI overviews / featured snippets crowd the SERP, so `--limit 20` used to
+  stall at ~13 (2 pages × 6.5). Ceiling division now fetches enough pages to
+  reach the limit (20 → ~19, 50 → ~50).
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
