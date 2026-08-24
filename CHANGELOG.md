@@ -171,6 +171,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-launches/attaches Chrome like the other browser engines. On an
   unblocked IP bing paginates; on a locked IP it still returns the real page-1
   results and falls back cleanly.
+- **core/mcp/cli**: `serp` bing falls back to pure HTTP when no Chrome can be
+  launched (verified on WSL Linux — `failed to spawn Chrome` no longer a hard
+  error for bing; google/brave still require a browser). The Linux-only
+  dead-code warning on `cmd_exists` is gone (cfg-gated to its macOS/Windows
+  callers).
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username

@@ -363,6 +363,14 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                         }
                                     }
                                 }
+                                // bing has a working pure-HTTP path — no Chrome →
+                                // leave the backend None so serp falls back to HTTP
+                                // (google/brave NEED a browser, so they error out).
+                                Err(e) if engine == "bing" => {
+                                    tracing::debug!(
+                                        "no Chrome for bing browser path ({e}); falling back to pure HTTP"
+                                    );
+                                }
                                 Err(e) => {
                                     return tool_error(
                                         id,

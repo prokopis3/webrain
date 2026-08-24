@@ -365,25 +365,40 @@ fn main() -> anyhow::Result<()> {
                             } else {
                                 "brave"
                             };
-                            let launched = webrain_core::launch::launch_chrome_guest(
+                            match webrain_core::launch::launch_chrome_guest(
                                 "serp",
                                 prof,
                                 9222,
                                 !headless,
                                 proxy.as_deref(),
-                            )?;
-                            println!(
-                                "launched chrome (guest): {} (CDP_URL={})",
-                                launched.profile_dir.display(),
-                                launched.cdp_url
-                            );
-                            // WARM SESSION — the guest Chrome stays alive on 9222
-                            // between runs (its in-memory session persists).
-                            // Forget the handle so Drop::kill() never runs.
-                            // `--fresh` is the explicit opt-out for a fresh guest.
-                            let url = launched.cdp_url.clone();
-                            std::mem::forget(launched);
-                            Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
+                            ) {
+                                Ok(launched) => {
+                                    println!(
+                                        "launched chrome (guest): {} (CDP_URL={})",
+                                        launched.profile_dir.display(),
+                                        launched.cdp_url
+                                    );
+                                    // WARM SESSION — the guest Chrome stays alive on 9222
+                                    // between runs (its in-memory session persists).
+                                    // Forget the handle so Drop::kill() never runs.
+                                    // `--fresh` is the explicit opt-out for a fresh guest.
+                                    let url = launched.cdp_url.clone();
+                                    std::mem::forget(launched);
+                                    Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
+                                }
+                                // bing has a working pure-HTTP path — no Chrome →
+                                // fall back to HTTP (google/brave NEED a browser, so
+                                // their launch error still propagates).
+                                Err(e) if opts.engine == "bing" => {
+                                    if !json_out {
+                                        eprintln!(
+                                            "no Chrome for bing browser path ({e}); falling back to pure HTTP"
+                                        );
+                                    }
+                                    None
+                                }
+                                Err(e) => return Err(e),
+                            }
                         }
                         Err(e) => return Err(e),
                     }
@@ -994,6 +1009,7 @@ fn warn_stale_running() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn cmd_exists(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| {
         std::env::split_paths(&p)
