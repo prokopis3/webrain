@@ -1157,7 +1157,8 @@ async fn specific_engine<B: BrowserBackend>(
     // when a browser is attached it goes straight to the browser path — the only
     // one that returns real Google results (browsemind recipe: real Chrome +
     // human-like init + wait-for-results + consent dismiss + data-hveid parse).
-    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave" || engine == "bing") {
+    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave" || engine == "bing")
+    {
         // Google/Brave intermittently serve a "unusual traffic / not a robot"
         // CAPTCHA page (rate-limited IP — Google /sorry, Brave's PoW "Verify
         // you're not a bot"). A persistent-profile wall usually clears in ~10s

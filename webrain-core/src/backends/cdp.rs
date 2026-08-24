@@ -2651,11 +2651,7 @@ impl BrowserBackend for CdpBackend {
             }
             last_btn = Some((x, y, name));
         }
-        if overlay {
-            last_btn
-        } else {
-            None
-        }
+        if overlay { last_btn } else { None }
     }
 
     /// TRUSTED (no page JS): Page.getFrameTree → main-frame URL.

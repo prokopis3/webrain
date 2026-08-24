@@ -289,7 +289,10 @@ fn main() -> anyhow::Result<()> {
             // watch it; only fresh holds — the warm 9222 guest keeps its session.
             let hold = args.contains(&"--hold".to_string());
             let mut _launched: Option<webrain_core::launch::Launched> = None;
-            let backend = if opts.engine == "brave" || opts.engine == "google" || opts.engine == "bing" {
+            let backend = if opts.engine == "brave"
+                || opts.engine == "google"
+                || opts.engine == "bing"
+            {
                 if fresh && opts.engine == "google" {
                     // --fresh: a brand-new profile dir + unique port every run —
                     // zero cookies, so the consent modal always renders and
@@ -345,7 +348,11 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     match rt.block_on(CdpBackend::connect_default()) {
                         Ok(b) => Some(b),
-                        Err(_) if opts.engine == "google" || opts.engine == "brave" || opts.engine == "bing" => {
+                        Err(_)
+                            if opts.engine == "google"
+                                || opts.engine == "brave"
+                                || opts.engine == "bing" =>
+                        {
                             // GUEST MODE auto-launch for all browser engines
                             // (--proxy bakes --proxy-server in when set): fresh
                             // ephemeral session every run — zero persisted
