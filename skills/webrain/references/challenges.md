@@ -12,6 +12,10 @@ detect it, understand it, apply only what the runtime supports, verify.
 - `cloudflare_challenge` — "Just a moment…" interstitial / Turnstile / `_cf_chl*`.
 - `blocked` — 403 / forbidden page.
 - `captcha` — reCAPTCHA / hCaptcha / interactive widget.
+- `crippled: true` — HARD BLOCK page ("Attention Required!" / "you have been
+  blocked"). NOT a solvable challenge: a WAF rule (usually IP/ASN) refused the
+  request. Signs: `crippled:true` + `challenge:null` + only Cloudflare footer
+  elements (`#cf-footer-ip-reveal`, `#brand_link`). See §5b.
 
 ## 3. State
 The challenge is part of the browser's page state. Profile + session + cookies
@@ -36,6 +40,26 @@ When `challenge != null`:
 3. Re-navigate the protected URL → expect `challenge: null`.
 4. If a 2FA/approval gate: the human acts in the headed browser, then login again
    (`waiting_for_human:false`).
+
+## 5b. Hard block (`crippled:true`) — bypass recipe
+1. **Headless is detectable.** Launched Chrome headless → Cloudflare hard-blocks
+   instead of challenging. Relaunch real HEADED Chrome with a persistent profile:
+   `--user-data-dir=<persistent dir>` + `--disable-blink-features=AutomationControlled`
+   on `--remote-debugging-port=9222`.
+2. **Scope first.** A path can be blocked while the site loads — test the
+   homepage before assuming the whole domain is gone. A blocked `/rss/` is often
+   an ABSENT feed path that is ALSO explicitly WAF/nginx-blocked (you can't even
+   see its 404). Verify with a control: a random nonexistent path should return
+   a normal 404 — if `/rss/` returns a Cloudflare block / nginx 403 instead, the
+   block is path-specific, AND there is simply no feed there. The real feed
+   lives OFF-domain (FeedBurner/CDN). Find it: `webrain_eval` →
+   `JSON.stringify([...document.querySelectorAll('link[rel="alternate"]')].map(l=>({type:l.type,href:l.href})))`
+   or a spider filtered to `(?i)rss|feed|atom|\.xml`; then fetch that off-domain
+   URL plain-HTTP (`webrain_download`) — it is NOT blocked.
+3. **Same IP keeps blocking = IP/ASN block.** No browser change helps. Route a
+   clean-IP proxy (`proxy` param) or report the gate to the user. Do NOT loop.
+4. Re-navigate the TARGET after the fix → expect `challenge:null` +
+   `crippled:false` + real content → extract.
 
 ## 6. Verify
 Re-navigate and confirm the TARGET content (not a challenge/login/consent page).

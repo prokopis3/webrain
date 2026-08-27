@@ -4,8 +4,8 @@
 // ponytail: single connection, one page, synchronous CDP command/response per call.
 
 use crate::browser::{
-    BrowserBackend, InteractiveElement, PageState, detect_antibot, detect_chrome_error,
-    detect_crippled,
+    BrowserBackend, ELEMENTS_JS, InteractiveElement, LINKS_JS, PageState, detect_antibot,
+    detect_chrome_error, detect_crippled,
 };
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -261,73 +261,9 @@ pub struct NavOpts {
     pub wait_timeout_secs: Option<u64>,
 }
 
-/// JS that indexes interactive elements for click/type tools (shared by
-/// navigate and snapshot so both produce identical element lists).
-/// Interaction is index-based only (querySelectorAll order); precise
-/// selectors for extraction come from webrain_a11y (css_path/xpath).
-pub const ELEMENTS_JS: &str = r#"
-        (() => {
-            const elems = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
-            return Array.from(elems).slice(0, 60).map((el, i) => ({
-                index: i,
-                tag: el.tagName.toLowerCase(),
-                text: (el.type === 'password' ? '' : (el.textContent || el.value || '')).trim().substring(0, 80),
-                selector: el.id ? '#' + el.id : el.className ? '.' + el.className.split(' ')[0] : el.tagName.toLowerCase(),
-                visible: el.offsetParent !== null
-            }));
-        })()
-        "#;
-
 /// Compact page-state caps: keep MCP responses small (a11y-style), not full-page dumps.
 /// ponytail: 60 elements + 3k text is enough for an agent step; a11y gives full structure.
 const PAGE_TEXT_CAP: usize = 3000;
-
-/// JS that collects deduped same-origin links (capped) for the PageState `links`
-/// field. Scrapling LinkExtractor-level quality: canonicalize, filter non-http
-/// schemes, strip fragments, drop content-obvious extensions (images, fonts,
-/// pdf, archives, ico, css/js), dedupe in insertion order. Turns "crawl +
-/// internal links" into a single navigate call.
-/// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
-/// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
-pub const LINKS_JS: &str = r#"
-    (() => {
-        try {
-            const origin = location.origin;
-            const skipExt = new Set(['pdf','zip','rar','7z','tar','gz','xz','bz2',
-                'jpg','jpeg','png','gif','webp','avif','svg','ico','bmp','tif','tiff',
-                'woff','woff2','ttf','otf','eot',
-                'mp4','webm','mp3','ogg','wav','mov','avi','m4a',
-                'css','js','json','xml','rss',
-                'exe','dmg','iso','apk','msi']);
-            const seen = new Set();
-            const out = [];
-            for (const el of document.querySelectorAll('a[href], area[href]')) {
-                const raw = el.href || '';
-                if (!raw) continue;
-                // strip fragment + trailing slash; drop non-http
-                let u = raw;
-                const hash = u.indexOf('#');
-                if (hash > -1) u = u.slice(0, hash);
-                // drop non-http(s) schemes (mailto, javascript, tel, file, etc.)
-                if (!u.startsWith('http://') && !u.startsWith('https://')) continue;
-                // same-origin only
-                if (!u.startsWith(origin)) continue;
-                // trailing-slash normalise
-                const qp = u.indexOf('?');
-                let path = qp > -1 ? u.slice(0, qp) : u;
-                if (path.endsWith('/')) u = u.slice(0, path.length - 1) + (qp > -1 ? u.slice(qp) : '');
-                // drop known non-content extensions
-                const seg = u.split('/').pop() || '';
-                const dot = seg.lastIndexOf('.');
-                if (dot > -1 && skipExt.has(seg.slice(dot + 1).toLowerCase())) continue;
-                if (seen.has(u)) continue;
-                seen.add(u);
-                if (out.push(u) >= 200) break;
-            }
-            return out;
-        } catch (e) { return []; }
-    })()
-    "#;
 
 /// Resolve a CDP HTTP endpoint (or pass through a ws:// URL) to its browser WebSocket URL.
 fn resolve_ws(http_url: &str) -> anyhow::Result<String> {
@@ -390,6 +326,15 @@ pub struct CdpBackend {
     /// replayed via Page.addScriptToEvaluateOnNewDocument in attach_and_init so
     /// they run before every new document on every tab.
     init_scripts: Arc<Mutex<Vec<String>>>,
+    /// Stealth-off for THIS backend (serp google flow: a human's Chrome runs no
+    /// injected anti-bot script). Per-backend, not a process-global env —
+    /// setting WEBRAIN_NO_STEALTH via set_var from a concurrent MCP handler is
+    /// a data race (edition-2024 unsafe) and leaked to every session in-process.
+    no_stealth: Arc<std::sync::atomic::AtomicBool>,
+    /// Serializes the first-attach path in ensure_page_attached: two concurrent
+    /// callers could both see an empty `tabs` map and each attach a separate
+    /// page target (silently creating a second tab and repointing `active`).
+    attach: Arc<Mutex<()>>,
 }
 
 /// A single attached page target (one browser tab).
@@ -439,7 +384,7 @@ impl CdpBackend {
         tokio::spawn(async move {
             let mut sink = write;
             while let Some(text) = out_rx.recv().await {
-                if sink.send(Message::Text(text.into())).await.is_err() {
+                if sink.send(Message::Text(text)).await.is_err() {
                     break;
                 }
             }
@@ -476,6 +421,8 @@ impl CdpBackend {
             net_capture: Arc::new(Mutex::new(false)),
             net_urls: Arc::new(Mutex::new(Vec::new())),
             init_scripts: Arc::new(Mutex::new(Vec::new())),
+            no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            attach: Arc::new(Mutex::new(())),
         })
     }
 
@@ -496,6 +443,13 @@ impl CdpBackend {
     /// ponytail: same as connect_default but takes url instead of env var.
     pub async fn connect_with_url(cdp_url: &str) -> anyhow::Result<Self> {
         Self::connect(&resolve_ws(cdp_url)?).await
+    }
+
+    /// Disable stealth_js injection for THIS backend (serp google flow: a
+    /// human's Chrome runs no anti-bot script; trusted-commands only).
+    pub fn set_no_stealth(&self, v: bool) {
+        self.no_stealth
+            .store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Connect to a Chrome launched with `--remote-debugging-pipe` — CDP over
@@ -572,6 +526,8 @@ impl CdpBackend {
             net_capture: Arc::new(Mutex::new(false)),
             net_urls: Arc::new(Mutex::new(Vec::new())),
             init_scripts: Arc::new(Mutex::new(Vec::new())),
+            no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            attach: Arc::new(Mutex::new(())),
         })
     }
 
@@ -644,24 +600,29 @@ impl CdpBackend {
         let text = serde_json::to_string(&msg)?;
         conn.write.send(text).await?;
 
-        loop {
-            let Some(text) = conn.read.recv().await else {
-                anyhow::bail!("CDP connection closed");
-            };
-            let v: Value = serde_json::from_str(&text)?;
-            if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
-                if let Some(err) = v.get("error") {
-                    anyhow::bail!("CDP error [{}]: {}", method, err);
+        // 30s response cap: an unanswered command (renderer paused on a dialog,
+        // tab crash, half-open socket) must fail fast instead of holding the
+        // single connection Mutex forever and stalling every other command.
+        let wait = async {
+            loop {
+                let Some(text) = conn.read.recv().await else {
+                    anyhow::bail!("CDP connection closed");
+                };
+                let v: Value = serde_json::from_str(&text)?;
+                if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+                    if let Some(err) = v.get("error") {
+                        anyhow::bail!("CDP error [{}]: {}", method, err);
+                    }
+                    return Ok::<Value, anyhow::Error>(
+                        v.get("result").cloned().unwrap_or(json!({})),
+                    );
                 }
-                return Ok(v.get("result").cloned().unwrap_or(json!({})));
-            }
-            // Event (no id). Network capture: while net_capture is set,
-            // requestWillBeSent URLs are buffered (browsemind pattern).
-            let ev_session = v.get("sessionId").and_then(|s| s.as_str());
-            if ev_session == session {
-                if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                    if m == "Network.requestWillBeSent" {
-                        if *self.net_capture.lock().await {
+                // Event (no id). Network capture: while net_capture is set,
+                // requestWillBeSent URLs are buffered (browsemind pattern).
+                let ev_session = v.get("sessionId").and_then(|s| s.as_str());
+                if ev_session == session {
+                    if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
+                        if m == "Network.requestWillBeSent" && *self.net_capture.lock().await {
                             if let Some(u) = v
                                 .get("params")
                                 .and_then(|p| p.get("request"))
@@ -674,6 +635,17 @@ impl CdpBackend {
                     }
                 }
             }
+        };
+        // Flat 30s is too short for the slow-but-legit operations (full-page
+        // PDF/screenshot, awaitPromise evaluate) — give them a longer budget.
+        let cap = match method {
+            "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
+            _ => std::time::Duration::from_secs(30),
+        };
+        match tokio::time::timeout(cap, wait).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(e),
+            Err(_) => anyhow::bail!("CDP command {method} timed out after {cap:?}"),
         }
     }
 
@@ -692,9 +664,12 @@ impl CdpBackend {
     }
 
     /// Register an attached tab as the active tab and reset the D1 caches.
+    /// Lock order: `active` BEFORE `tabs` — the same order as
+    /// active_session/list_tabs/close_tab, so no path can deadlock on the
+    /// opposite ordering (tabs→active was the inversion).
     async fn register_tab(&self, id: String, tab: Tab) {
-        self.tabs.lock().await.insert(id.clone(), tab);
-        *self.active.lock().await = id;
+        *self.active.lock().await = id.clone();
+        self.tabs.lock().await.insert(id, tab);
         *self.fp.lock().await = None;
         *self.snap.lock().await = None;
     }
@@ -719,6 +694,14 @@ impl CdpBackend {
     }
 
     async fn ensure_page_attached(&self) -> anyhow::Result<()> {
+        if !self.tabs.lock().await.is_empty() {
+            return Ok(());
+        }
+        // Serialize the first attach: two concurrent callers (supported via
+        // tab_session) could both pass the fast-path above, each attach a
+        // separate page target and register it — re-check under the lock so
+        // only one wins and the loser sees the winner's tab.
+        let _g = self.attach.lock().await;
         if !self.tabs.lock().await.is_empty() {
             return Ok(());
         }
@@ -807,16 +790,18 @@ impl CdpBackend {
         // domain untouched — that's what patchright does.
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
-        self.set_blocked_urls(Some(&sid), &BLOCKED_URLS).await?;
+        self.set_blocked_urls(Some(&sid), BLOCKED_URLS).await?;
         // Stealth: mask automation markers before any page script runs.
-        // WEBRAIN_NO_STEALTH=1 (the serp google flow) skips the injected
-        // stealth — a human's Chrome runs no anti-bot script; the flow then
-        // keeps only trusted commands (no Runtime.evaluate, no injected JS).
-        if std::env::var("WEBRAIN_NO_STEALTH")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            tracing::debug!("WEBRAIN_NO_STEALTH=1 — skipping stealth_js injection");
+        // The serp google flow sets no_stealth on the backend (a human's Chrome
+        // runs no anti-bot script; the flow then keeps only trusted commands —
+        // no Runtime.evaluate, no injected JS). WEBRAIN_NO_STEALTH=1 remains a
+        // CLI-side fallback (set before the runtime starts, so it's race-free).
+        let no_stealth = self.no_stealth.load(std::sync::atomic::Ordering::Relaxed)
+            || std::env::var("WEBRAIN_NO_STEALTH")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        if no_stealth {
+            tracing::debug!("stealth_js injection skipped (no_stealth)");
         } else {
             self.send_cmd_with(
                 Some(&sid),
@@ -1027,19 +1012,20 @@ impl CdpBackend {
     /// (Re)apply the network block list; adds resource-type patterns when
     /// `disable_resources` is on and the 3500-domain tracker list when `block_trackers`
     /// is on. Blocks before navigate so requests never start.
-    /// ponytail: the base BLOCKED_URLS is already set once at attach_and_init, so
-    /// with default opts this is a no-op — saves a redundant CDP round-trip per page.
+    /// ponytail: always re-applies the exact list for these opts. Network.
+    /// setBlockedURLs REPLACES the session list, so a previous navigation with
+    /// disable_resources/block_trackers would otherwise leave the extended
+    /// patterns sticky for every later default navigation — re-applying the
+    /// base list when opts are default resets it (one extra round-trip per page).
     async fn apply_blocking(&self, sid: Option<&str>, opts: &NavOpts) -> anyhow::Result<()> {
-        if opts.disable_resources || opts.block_trackers {
-            let mut urls: Vec<&str> = BLOCKED_URLS.to_vec();
-            if opts.disable_resources {
-                urls.extend_from_slice(RESOURCE_PATTERNS);
-            }
-            if opts.block_trackers {
-                urls.extend_from_slice(tracker_domains());
-            }
-            self.set_blocked_urls(sid, &urls).await?;
+        let mut urls: Vec<&str> = BLOCKED_URLS.to_vec();
+        if opts.disable_resources {
+            urls.extend_from_slice(RESOURCE_PATTERNS);
         }
+        if opts.block_trackers {
+            urls.extend_from_slice(tracker_domains());
+        }
+        self.set_blocked_urls(sid, &urls).await?;
         Ok(())
     }
 
@@ -1158,6 +1144,7 @@ impl CdpBackend {
     ///   2. CDP-click its center via Input.dispatchMouseEvent — crosses the
     ///      cross-origin iframe barrier real reCAPTCHA/Turnstile checkboxes
     ///      live behind (a JS el.click() alone can't reach them)
+    ///
     /// Then poll until a captcha token populates (`*-response`), or the block
     /// page redirects away (Google /sorry auto-continues on pass). Returns
     /// true when cleared.
@@ -1200,9 +1187,9 @@ impl CdpBackend {
     var isRecaptchaAnchor = src.indexOf('google.com/recaptcha') >= 0 && br.height >= 70 && br.height <= 90;
     var ox = isRecaptchaAnchor ? 27 : br.width / 2;
     var oy = isRecaptchaAnchor ? 37 : br.height / 2;
-    return JSON.stringify({claimed: true, cx: Math.round(br.left + ox), cy: Math.round(br.top + oy)});
+    return {claimed: true, cx: Math.round(br.left + ox), cy: Math.round(br.top + oy)};
   }
-  return JSON.stringify({claimed: false});
+  return {claimed: false};
 })()"#;
         let start = std::time::Instant::now();
         let mut claimed = false;
@@ -1309,18 +1296,17 @@ impl CdpBackend {
                 .send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid}))
                 .await;
         }
-        self.tabs.lock().await.remove(id);
-        let active = self.active.lock().await.clone();
-        if active == id {
-            let next = self
-                .tabs
-                .lock()
-                .await
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_default();
-            *self.active.lock().await = next;
+        // Lock active → tabs (same order as register_tab/active_session) and
+        // hold BOTH for the remove + next-active reassignment in one scope — a
+        // concurrent close_tab/register_tab must not interleave and leave
+        // `active` pointing at a closed tab.
+        {
+            let mut active = self.active.lock().await;
+            let mut tabs = self.tabs.lock().await;
+            tabs.remove(id);
+            if *active == id {
+                *active = tabs.keys().next().cloned().unwrap_or_default();
+            }
         }
         *self.fp.lock().await = None;
         *self.snap.lock().await = None;
@@ -1491,13 +1477,16 @@ impl CdpBackend {
 
         // Get interactive elements
         let elements_val = self.eval_js(ELEMENTS_JS).await?;
+        // An empty `elements` from a failed eval (Null / wrong shape) must not
+        // mislabel a healthy page as a bot-limited "crippled" shell.
+        let elements_ok = elements_val.is_array();
         let elements: Vec<InteractiveElement> =
             serde_json::from_value(elements_val).unwrap_or_default();
 
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
-        let crippled = detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
         let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url: url.to_string(),
@@ -1532,7 +1521,7 @@ async fn element_center(b: &CdpBackend, index: usize) -> anyhow::Result<Option<(
     );
     let v = b.eval_js(&js).await?;
     Ok(v.as_array()
-        .and_then(|a| Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))))
+        .and_then(|a| Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))))
 }
 
 /// True when `elementFromPoint(x,y)` resolves to the element at `index` (or a
@@ -1812,7 +1801,13 @@ impl CdpBackend {
                 return 'hovered';
             }})()"#
         );
-        self.eval_js(&js).await?;
+        // A stale element list must surface as an error, not a silent no-op.
+        let marker = self.eval_js(&js).await?.as_str().unwrap_or("").to_string();
+        if marker != "hovered" {
+            anyhow::bail!(
+                "hover: element {index} {marker} — stale element list? re-navigate/snapshot"
+            );
+        }
         Ok(())
     }
 
@@ -2052,7 +2047,14 @@ impl BrowserBackend for CdpBackend {
                 return 'not found';
             }})()"#
         );
-        self.eval_js(&js).await?;
+        // A stale element list must surface as an error, not a silent no-op —
+        // otherwise the LLM can't self-correct a re-navigate/snapshot.
+        let marker = self.eval_js(&js).await?.as_str().unwrap_or("").to_string();
+        if marker != "clicked" {
+            anyhow::bail!(
+                "click: element {index} {marker} — stale element list? re-navigate/snapshot"
+            );
+        }
         Ok(())
     }
 
@@ -2061,14 +2063,13 @@ impl BrowserBackend for CdpBackend {
         // Trusted CDP path (browsemind cdp_session_type): focus+clear then
         // Input.insertText — React/Vue detect isTrusted=true (JS .value= +
         // synthetic Event is ignored by controlled inputs).
-        if focus_clear(self, index).await.is_ok() {
-            if self
+        if focus_clear(self, index).await.is_ok()
+            && self
                 .send_cmd("Input.insertText", json!({"text": text}))
                 .await
                 .is_ok()
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
         // JS fallback
         let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
@@ -2085,7 +2086,13 @@ impl BrowserBackend for CdpBackend {
                 return 'typed';
             }})()"#
         );
-        self.eval_js(&js).await?;
+        // A stale element list must surface as an error, not a silent no-op.
+        let marker = self.eval_js(&js).await?.as_str().unwrap_or("").to_string();
+        if marker != "typed" {
+            anyhow::bail!(
+                "type_text: element {index} {marker} — stale element list? re-navigate/snapshot"
+            );
+        }
         Ok(())
     }
 
@@ -2170,7 +2177,15 @@ impl BrowserBackend for CdpBackend {
                 const opts = {{ key, code: key, bubbles: true, cancelable: true }};
                 el.dispatchEvent(new KeyboardEvent('keydown', opts));
                 el.dispatchEvent(new KeyboardEvent('keyup', opts));
-                if (el.form && k === 'Enter') {{ el.form.dispatchEvent(new Event('submit', {{ bubbles: true, cancelable: true }})); return 'form-submitted'; }}
+                if (el.form && k === 'Enter') {{
+                    const ev = new Event('submit', {{ bubbles: true, cancelable: true }});
+                    // Dispatch first so React/Vue onSubmit (validation, XHR,
+                    // preventDefault) runs; only native-submit if not canceled.
+                    // el.form.submit() alone skips the submit event entirely.
+                    const proceed = el.form.dispatchEvent(ev);
+                    if (proceed) {{ el.form.submit(); }}
+                    return 'form-submitted';
+                }}
                 return 'pressed ' + k;
             }})()"#
         );
@@ -2372,12 +2387,16 @@ impl BrowserBackend for CdpBackend {
             .as_str()
             .unwrap_or("")
             .to_string();
+        let elements_val = self.eval_js(ELEMENTS_JS).await?;
+        // An empty `elements` from a failed eval (Null / wrong shape) must not
+        // mislabel a healthy page as a bot-limited "crippled" shell.
+        let elements_ok = elements_val.is_array();
         let elements: Vec<InteractiveElement> =
-            serde_json::from_value(self.eval_js(ELEMENTS_JS).await?).unwrap_or_default();
+            serde_json::from_value(elements_val).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
-        let crippled = detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
         let chrome_error = detect_chrome_error(&title, &text);
         let state = PageState {
             url,
@@ -2559,7 +2578,13 @@ impl BrowserBackend for CdpBackend {
             .await
             .ok()?;
         let root = doc["root"]["nodeId"].as_i64()?;
-        let gate = "div[role='dialog'], #yDmH0d, form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
+        // NOTE: `#yDmH0d` (Google's app shell) is deliberately NOT in the gate —
+        // it exists on EVERY google page, so it used to authorize the blind
+        // last-button fallback on a plain results page and CLICK A RESULT LINK
+        // ("consent=clicked:Tokyo provides an asynch" — the tab navigated to
+        // YouTube mid-search, parse → 0, fresh=0). A real consent overlay is a
+        // dialog/banner container; only that may authorize a click.
+        let gate = "div[role='dialog'], form[action*='consent'], [aria-modal='true'], #cnsw, .consent-bump, [id*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
         let hit = self
             .send_cmd(
                 "DOM.querySelector",
@@ -2570,6 +2595,21 @@ impl BrowserBackend for CdpBackend {
         if hit["nodeId"].as_i64().unwrap_or(0) == 0 {
             return None;
         }
+        // A REAL overlay (dialog/banner/form) is required before the Phase-2
+        // blind last-button fallback may click anything; a loose consent-ish
+        // container alone ([id*='consent'], #cnsw, .consent-bump) only
+        // authorizes pattern-matched buttons. Without this, a page with a
+        // stray `consent`-named element but no dialog could still get an
+        // arbitrary last-link click.
+        let strict = "div[role='dialog'], [aria-modal='true'], form[action*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
+        let strict_hit = self
+            .send_cmd(
+                "DOM.querySelector",
+                json!({"nodeId": root, "selector": strict}),
+            )
+            .await
+            .ok()?;
+        let overlay = strict_hit["nodeId"].as_i64().unwrap_or(0) != 0;
         let tree = self
             .send_cmd("Accessibility.getFullAXTree", json!({}))
             .await
@@ -2598,10 +2638,18 @@ impl BrowserBackend for CdpBackend {
             let Some(bid) = n.get("backendDOMNodeId").and_then(|v| v.as_i64()) else {
                 continue;
             };
-            let quads = self
-                .send_cmd("DOM.getContentQuads", json!({"nodeId": bid}))
+            // bid is a browser-global backendDOMNodeId — pass it via
+            // backendNodeId (nodeId expects a document-scoped DOM id, so the
+            // old call always failed and consent buttons were never clicked).
+            let Ok(quads) = self
+                .send_cmd("DOM.getContentQuads", json!({"backendNodeId": bid}))
                 .await
-                .ok()?;
+            else {
+                // A stale AX node (detached since the snapshot, or bid==0) must
+                // NOT abort the whole hunt — skip it and keep scanning so a
+                // valid consent button later in the list still gets clicked.
+                continue;
+            };
             let Some((x, y)) = quad_center(&quads) else {
                 continue;
             };
@@ -2611,7 +2659,7 @@ impl BrowserBackend for CdpBackend {
             }
             last_btn = Some((x, y, name));
         }
-        last_btn
+        if overlay { last_btn } else { None }
     }
 
     /// TRUSTED (no page JS): Page.getFrameTree → main-frame URL.

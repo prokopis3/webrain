@@ -14,10 +14,14 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / `~/.config/webrain/profiles` |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys; `GROQ`/`OPENAI` also power the vision chain | — |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` / `OPENROUTER_API_KEY` | Cloud STT (transcript) keys; all four also power the vision `ask` chain (OpenRouter → OpenAI → Fireworks → Groq → bundled local Qwen3-VL-2B) | — |
+| `SERPAPI_API_KEY` | serpapi.com paid Google SERP provider — used by `webrain_serp` when `limit > 10` | — |
+| `WEBRAIN_2CAPTCHA_KEY` | 2captcha API key for Google /sorry-wall reCAPTCHA solving (`webrain_serp` google/brave flows) | — |
+| `WEBRAIN_NO_STEALTH` | Set `1` to skip the injected stealth JS + UA override (e.g. the `webrain serp` google flow) | off |
+| `WEBRAIN_STEALTH_NOISE` | Set `0` to disable the canvas/audio fingerprint-noise injection (sites that distrust the spoofed profile) | on |
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
 | `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
-| `EMBED_URL` | `/embeddings` endpoint for `webrain_vision_index` | — |
+| `EMBED_URL` / `EMBED_MODEL` / `EMBED_API_KEY` | OpenAI-compatible `/v1/embeddings` endpoint + model + Bearer token for `webrain_vision` `op=index` / `retrieve` (any compatible server: OpenAI, Ollama, TEI, local vLLM) | `api.openai.com/v1/embeddings` + `text-embedding-3-small` |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
 
 ## Local AI (watch & vision)

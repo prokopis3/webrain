@@ -85,21 +85,54 @@ fn now() -> u64 {
 }
 
 /// Load the key, or create one on first enrollment.
+/// Only `NotFound` means "no key yet" — any other read error (EACCES, I/O) is
+/// propagated so an unreadable key is never silently regenerated (which would
+/// lock out every entry encrypted with the existing key).
 fn ensure_key() -> anyhow::Result<[u8; 32]> {
-    if let Ok(raw) = std::fs::read(key_path()) {
-        return raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("vault.key must be 32 bytes"));
+    match std::fs::read(key_path()) {
+        Ok(raw) => {
+            return raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("vault.key must be 32 bytes"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     let mut key = [0u8; 32];
     getrandom::fill(&mut key)?;
     std::fs::create_dir_all(vault_dir())?;
-    std::fs::write(key_path(), key)?;
+    // Exclusive create: two concurrent first runs must not each write a
+    // different key and clobber the other (locking out the other's entries).
+    // 0600 at creation — no world-readable window before a chmod would run.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(key_path(), std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts.open(key_path()) {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(&key)?;
+            f.sync_all()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lost the race — another process created the key; trust theirs.
+            // It may still be mid-write (0-byte/partial), so retry the read a
+            // few times instead of failing on a transient partial file.
+            for _ in 0..5 {
+                if let Ok(raw) = std::fs::read(key_path()) {
+                    if let Ok(k) = raw.as_slice().try_into() {
+                        return Ok(k);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            anyhow::bail!("vault.key must be 32 bytes");
+        }
+        Err(e) => return Err(e.into()),
     }
     Ok(key)
 }
@@ -139,16 +172,32 @@ fn decrypt(key: &[u8; 32], enc: &Enc) -> anyhow::Result<Cred> {
     Ok(serde_json::from_slice(&pt)?)
 }
 
+/// Serializes read-modify-write cycles (set/set_username/remove) so two
+/// concurrent mutations can't both read the same snapshot and have the last
+/// save_entries silently drop the other's entry. In-process only — the vault is
+/// CLI/one-server driven; cross-process installs are out of scope.
+static VAULT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn load_entries() -> anyhow::Result<Vec<Entry>> {
     match std::fs::read_to_string(index_path()) {
         Ok(s) if !s.trim().is_empty() => Ok(serde_json::from_str(&s)?),
-        _ => Ok(Vec::new()),
+        Ok(_) => Ok(Vec::new()),
+        // Only a missing index means "empty vault"; an unreadable/truncated
+        // index must NOT look empty, or a later set/remove would rewrite the
+        // file and permanently discard previously stored entries.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
     }
 }
 
 fn save_entries(entries: &[Entry]) -> anyhow::Result<()> {
     std::fs::create_dir_all(vault_dir())?;
-    std::fs::write(index_path(), serde_json::to_string_pretty(entries)?)?;
+    // Atomic replace: write a temp file then rename over vault.json so a crash
+    // mid-write can't truncate/corrupt the live index (which would look empty
+    // on the next load and trigger a data-losing rewrite).
+    let tmp = index_path().with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(entries)?)?;
+    std::fs::rename(&tmp, index_path())?;
     Ok(())
 }
 
@@ -160,6 +209,7 @@ pub fn set(
     password: &str,
     totp: Option<String>,
 ) -> anyhow::Result<()> {
+    let _g = VAULT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = ensure_key()?;
     let cred = Cred {
         username: username.to_string(),
@@ -182,6 +232,7 @@ pub fn set(
 /// Update only the username of an existing profile. No secret re-entry needed:
 /// decryption uses the vault key, not the account password.
 pub fn set_username(service: &str, profile: &str, username: &str) -> anyhow::Result<()> {
+    let _g = VAULT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = load_key()?;
     let mut entries = load_entries()?;
     let entry = entries
@@ -220,6 +271,7 @@ pub fn get(service: &str, profile: &str) -> anyhow::Result<Cred> {
 }
 
 pub fn remove(service: &str, profile: &str) -> anyhow::Result<()> {
+    let _g = VAULT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_entries()?;
     let before = entries.len();
     entries.retain(|e| !(e.service == service && e.profile == profile));
@@ -273,6 +325,11 @@ fn base32_decode(s: &str) -> anyhow::Result<Vec<u8>> {
             out.push((bits >> nbits) as u8);
         }
     }
+    // Leftover bits must be zero — a malformed seed with non-zero trailing bits
+    // used to be silently accepted as a (wrong) TOTP key.
+    if nbits > 0 && (bits & ((1u32 << nbits) - 1)) != 0 {
+        anyhow::bail!("base32 seed has non-zero trailing bits");
+    }
     Ok(out)
 }
 
@@ -304,9 +361,14 @@ const OTP_JS: &str = r#"(() => {
 })()"#;
 
 pub fn fill_js(sel: &str, val: &str) -> String {
+    // Two-phase sentinel replacement: the selector value could contain the
+    // literal "VAL" (or the value contain "SEL"), corrupting the other's JSON
+    // if replaced sequentially. Swap in control-char sentinels first.
     FILL_JS
-        .replace("SEL", &jstr(sel))
-        .replace("VAL", &jstr(val))
+        .replace("SEL", "\u{1}")
+        .replace("VAL", "\u{2}")
+        .replace("\u{1}", &jstr(sel))
+        .replace("\u{2}", &jstr(val))
 }
 
 pub fn click_js(sel: &str) -> String {
@@ -339,6 +401,15 @@ mod tests {
             base32_decode("JBSWY3DPEHPK3PXP").unwrap(),
             b"Hello!\xde\xad\xbe\xef"
         );
+    }
+
+    #[test]
+    fn base32_rejects_non_zero_trailing_bits() {
+        // 13 chars = 65 bits = 8 bytes + 1 leftover bit. Leftover bit 0 → ok;
+        // leftover bit 1 (a malformed seed) must be rejected, not silently
+        // accepted as a wrong TOTP key.
+        assert!(base32_decode("AAAAAAAAAAAAA").is_ok());
+        assert!(base32_decode("AAAAAAAAAAAAB").is_err());
     }
 
     #[test]

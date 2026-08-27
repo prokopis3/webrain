@@ -84,6 +84,19 @@ fn bin_name(base: &str) -> String {
     }
 }
 
+/// First numeric component of a `chrome-<ver>` / `lightpanda-v<tag>` /
+/// `obscura-v<tag>` / `chrome-<version>` cache-dir name — for NUMERIC version
+/// ordering (newest build first), not lexicographic: `chrome-99` must sort
+/// below `chrome-100`, and `lightpanda-0.9.0` below `lightpanda-0.10.0`.
+/// Returns the full dotted component list so multi-part tags compare by their
+/// major/minor/patch rather than collapsing to the first numeric run.
+fn dir_version(name: &std::ffi::OsStr) -> Vec<u64> {
+    name.to_string_lossy()
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|tok| tok.parse::<u64>().ok())
+        .collect()
+}
+
 /// Depth-limited recursive search for a file by exact name (CfT zip layout is
 /// shallow: `chrome-win64/chrome.exe`, `.../Google Chrome for Testing.app/...`).
 fn find_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
@@ -108,11 +121,18 @@ fn find_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 /// Chrome downloaded by `webrain install`, newest `chrome-<version>` first.
 pub fn find_cft_chrome() -> Option<PathBuf> {
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("chrome-") {
-            if let Some(b) = find_named(&p, &bin_name("chrome"), 4) {
+            // macOS ships the executable as "Google Chrome for Testing" inside the
+            // .app bundle (not a bare `chrome`), so look for the platform name.
+            let exe = if cfg!(target_os = "macos") {
+                "Google Chrome for Testing".to_string()
+            } else {
+                bin_name("chrome")
+            };
+            if let Some(b) = find_named(&p, &exe, 6) {
                 return Some(b);
             }
         }
@@ -145,7 +165,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
         }
     }
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("lightpanda-") {
@@ -181,7 +201,7 @@ pub fn find_obscura() -> Option<PathBuf> {
         }
     }
     let mut entries: Vec<_> = std::fs::read_dir(browsers_dir()).ok()?.flatten().collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
     for e in entries {
         let p = e.path();
         if p.is_dir() && e.file_name().to_string_lossy().starts_with("obscura-") {
@@ -417,12 +437,22 @@ pub fn install_whisper_model(model: &str, force: bool) -> Result<PathBuf> {
 /// animated progress bar + honest per-chunk completion as the vision model).
 /// Streams to a temp file in the cache dir, reads it back, removes it.
 fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!("webrain-dl-{}", std::process::id()));
+    // Unique per-call temp name (pid + monotonic nonce): concurrent installs in
+    // one process no longer collide, a stale sidecar from a *different* URL can't
+    // be resumed, and a predictable PID-only path can't be symlink-attacked.
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "webrain-dl-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_file(&tmp);
     download_to_file(url, &tmp)?;
     let bytes = std::fs::read(&tmp)?;
+    // download_to_file leaves .part/.part.done/.ok sidecars — clean them all.
     let _ = std::fs::remove_file(&tmp);
-    // download_to_file leaves a .ok marker next to the file — clean both.
+    let _ = std::fs::remove_file(tmp.with_extension("part"));
+    let _ = std::fs::remove_file(tmp.with_extension("part.done"));
     let _ = std::fs::remove_file(tmp.with_extension("ok"));
     Ok(bytes)
 }
@@ -431,9 +461,15 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let name = f.name().to_string();
-        let out = dest.join(&name);
-        if f.is_dir() || name.ends_with('/') {
+        let raw = f.name().replace('\\', "/");
+        // Zip-slip guard: reject host-absolute paths (incl. Windows `C:/`
+        // drive prefixes, which `Path::join` treats as absolute on Windows),
+        // `..` traversal components, and any drive-prefixed component.
+        if Path::new(&raw).is_absolute() || raw.split('/').any(|c| c == ".." || c.contains(':')) {
+            anyhow::bail!("unsafe zip entry name: {raw:?}");
+        }
+        let out = dest.join(&raw);
+        if f.is_dir() || raw.ends_with('/') {
             std::fs::create_dir_all(&out)?;
             continue;
         }
@@ -442,6 +478,14 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
         }
         let mut w = std::fs::File::create(&out)?;
         std::io::copy(&mut f, &mut w)?;
+        #[cfg(unix)]
+        if let Some(mode) = f.unix_mode() {
+            // Preserve the archive's mode — CfT/whisper archives ship
+            // `chrome`/`whisper-cli` as 0755; File::create alone (0644 & ~umask)
+            // would leave them non-executable on Linux/macOS.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode));
+        }
     }
     Ok(())
 }
@@ -505,7 +549,14 @@ pub fn install_chrome(force: bool) -> Result<PathBuf> {
     let bytes = download_bytes(url)?;
     let dest = dir.join(format!("chrome-{version}"));
     extract_zip(&bytes, &dest)?;
-    find_named(&dest, &bin_name("chrome"), 4).with_context(|| {
+    // macOS ships "Google Chrome for Testing.app/Contents/MacOS/Google Chrome
+    // for Testing" (not a bare `chrome`), so search for the platform exe name.
+    let exe = if cfg!(target_os = "macos") {
+        "Google Chrome for Testing".to_string()
+    } else {
+        bin_name("chrome")
+    };
+    find_named(&dest, &exe, 4).with_context(|| {
         format!(
             "chrome binary not found after extract in {}",
             dest.display()
@@ -645,7 +696,9 @@ fn install_ffmpeg(force: bool) -> Result<(PathBuf, PathBuf)> {
         let e = e?;
         let p = e.path();
         if p.is_file() {
-            let _ = std::fs::copy(&p, dir.join(p.file_name().unwrap()));
+            // Propagate: a failed DLL copy (Windows avcodec-*.dll) must not
+            // silently produce a broken install reported as "ok".
+            std::fs::copy(&p, dir.join(p.file_name().unwrap()))?;
         }
     }
     let _ = std::fs::remove_dir_all(&work);
@@ -698,7 +751,8 @@ fn install_whisper_bin(force: bool) -> Result<PathBuf> {
         let e = e?;
         let p = e.path();
         if p.is_file() {
-            let _ = std::fs::copy(&p, dir.join(p.file_name().unwrap()));
+            // Propagate: whisper.dll/ggml-cpu-*.dll must land or the install fails.
+            std::fs::copy(&p, dir.join(p.file_name().unwrap()))?;
         }
     }
     let _ = std::fs::remove_dir_all(&work);
@@ -813,8 +867,9 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         return download_plain(url, dest);
     };
 
-    // Genuinely complete (has the .ok marker from a prior successful rename)?
-    if ok.exists() {
+    // Genuinely complete (has the .ok marker AND the destination file — a stale
+    // marker left behind after the dest was deleted must not fake success).
+    if ok.exists() && dest.exists() {
         println!("  ✓ {name}: {} (already complete)", human_bytes(total));
         return Ok(());
     }
@@ -823,6 +878,10 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     let chunk = total.div_ceil(workers as u64);
     let done = Arc::new(AtomicU64::new(0));
     let completed = Arc::new(Mutex::new(std::collections::HashSet::<u64>::new()));
+    // Counts workers that have RETURNED (success or failure) so the progress
+    // loop can terminate even when done never reaches total (a failed chunk
+    // would otherwise spin the loop forever at 120 ms).
+    let finished = Arc::new(AtomicU64::new(0));
 
     // Recover completed chunks from a prior run's sidecar (true resume).
     if let Ok(s) = std::fs::read_to_string(&sidecar) {
@@ -843,6 +902,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         let f = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false) // pre-allocated .part: never truncate parallel chunks
             .open(&part)?;
         f.set_len(total)?;
     }
@@ -858,6 +918,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
             let sidecar = sidecar.to_path_buf();
             let done = Arc::clone(&done);
             let completed = Arc::clone(&completed);
+            let finished = Arc::clone(&finished);
             std::thread::spawn(move || -> Result<()> {
                 let mut last_err = None;
                 for attempt in 0..3 {
@@ -873,12 +934,14 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
                                     .collect::<Vec<_>>()
                                     .join("\n"),
                             );
+                            finished.fetch_add(1, Ordering::Relaxed);
                             return Ok(());
                         }
                         Err(e) => last_err = Some(e), // transient drop -> retry
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500 * (attempt + 1)));
                 }
+                finished.fetch_add(1, Ordering::Relaxed);
                 Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chunk {start}-{end} failed")))
             })
         })
@@ -888,8 +951,9 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     // in place (no 100s of scrolled "0 B / …" lines); a "Connecting…" state
     // hides the first-seconds 0-byte stall while the 8 chunk sockets open.
     let w = 30usize;
-    let last_pct: i64 = -1;
+    let mut last_pct: i64 = -1;
     let mut last_done = 0u64;
+    let spawned = handles.len() as u64;
     let mut last_t = std::time::Instant::now();
     let mut connecting = true;
     loop {
@@ -919,7 +983,10 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         let _ = std::io::stdout().flush();
         last_done = d;
         last_t = std::time::Instant::now();
-        if d >= total {
+        last_pct = pct;
+        // Bail when all bytes arrived OR every worker has returned — a chunk
+        // that permanently failed (3 retries) would otherwise spin forever.
+        if d >= total || finished.load(Ordering::Relaxed) >= spawned {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -960,7 +1027,16 @@ fn fetch_chunk(
 ) -> Result<()> {
     use std::io::{Read, Seek, Write};
     use std::sync::atomic::Ordering;
-    let resp = ureq::get(url)
+    // Per-attempt timeout: ureq's default is no timeout, so a stalled server
+    // would block the worker thread forever (combined with the byte-count-only
+    // progress loop, the whole install would hang).
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .build(),
+    );
+    let resp = agent
+        .get(url)
         .header("User-Agent", "webrain")
         .header("Range", &format!("bytes={start}-{end}"))
         .call()
