@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **deps**: bump `base64` 0.22 → 0.23 (workspace dependency).
+
 ### Fixed
 
 - **cli**: `webrain vault user` no longer echoes the username back to the
