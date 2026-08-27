@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+_No unreleased changes yet._
+
+## [0.8.0] - 2026-08-27
+
+### Added
+
 - **core/mcp**: `webrain_batch` gains `op=markdown` — full page HTML →
   Markdown via pure-Rust `htmd` (turndown.js-equivalent, skips script/style/
   noscript), surpassing `fetch`'s 3000-char `innerText` cap. Optional `query` +
