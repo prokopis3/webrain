@@ -3491,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-cli"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-core"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-mcp"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
