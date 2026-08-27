@@ -1,6 +1,6 @@
 ---
 title: "webrain: MCP browser automation & web scraping server"
-description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 16 intent-based tools, any MCP client.
+description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 17 intent-based tools, any MCP client.
 sidebarTitle: Home
 mode: custom
 ---
@@ -84,7 +84,7 @@ mode: custom
               <div className="term-body wf-body">
                 <div className="wf-group" style={{ '--i': 0 }}>
                   <div className="term-line wf-line"><span className="term-prompt">❯</span><code>webrain mcp</code></div>
-                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>MCP server ready · 16 tools</span></div>
+                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>MCP server ready · 17 tools</span></div>
                 </div>
                 <div className="wf-group" style={{ '--i': 1 }}>
                   <div className="term-line wf-line wf-ask"><span className="term-prompt">❯</span><span>“scrape product prices from shop.example.com”</span></div>
@@ -172,7 +172,7 @@ mode: custom
               <div className="term-body wf-body">
                 <div className="wf-group" style={{ '--i': 0 }}>
                   <div className="term-line wf-line"><span className="term-prompt">❯</span><code>webrain mcp</code></div>
-                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>MCP server ready · 16 tools</span></div>
+                  <div className="term-line wf-line"><span className="term-ok">✓</span><span>MCP server ready · 17 tools</span></div>
                 </div>
                 <div className="wf-group" style={{ '--i': 1 }}>
                   <div className="term-line wf-line wf-ask"><span className="term-prompt">❯</span><span>“scrape product prices from shop.example.com”</span></div>
@@ -208,7 +208,7 @@ mode: custom
         </div>
         <div className="session-body term-body">
           <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain mcp">webrain mcp</code></div>
-          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out">✓ MCP server ready · <b>16 tools</b></span></div>
+          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out">✓ MCP server ready · <b>17 tools</b></span></div>
           <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain_navigate shop.example.com">webrain_navigate shop.example.com</code></div>
           <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out"><b>0 challenges</b> · 24 product cards detected</span></div>
           <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain_extract mode=autoschema">webrain_extract mode=autoschema</code></div>
@@ -238,7 +238,7 @@ mode: custom
     <div className="section" id="try-agent">
       <div className="section-head">
         <h2>Give the scraper LLM a try.</h2>
-        <p>This is the agent loop webrain runs: a plain-language prompt, sixteen intent-based tools, and structured JSON back. Presets show illustrative output, except the drone one: a real 1m43s run. Pick a demo or type your own prompt.</p>
+        <p>This is the agent loop webrain runs: a plain-language prompt, seventeen intent-based tools, and structured JSON back. Presets show illustrative output, except the drone one: a real 1m43s run. Pick a demo or type your own prompt.</p>
       </div>
       <div className="try">
         <div className="try-bar">
@@ -350,13 +350,13 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Everything an agent needs to read the web.</h2>
-        <p>Sixteen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
+        <p>Seventeen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
         <div className="shell card-2">
           <div className="core core-grad">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>16 intent-based tools</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>17 intent-based tools</h3>
             <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector, and every legacy one-action alias still dispatches.</p>
             <div className="agent-mini" aria-hidden="true"><span className="am-seg">agent</span><span className="am-arrow">→</span><span className="am-seg">navigate</span><span className="am-arrow">→</span><span className="am-seg">observe</span><span className="am-arrow">→</span><span className="am-seg">extract</span><span className="am-arrow">→</span><span className="am-seg am-json">JSON</span><span className="am-cursor" /></div>
             <div className="tool-chips">

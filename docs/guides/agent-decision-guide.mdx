@@ -5,12 +5,12 @@ description: Which webrain MCP tool should your AI agent use? Decision table map
 
 # Agent Decision Guide
 
-webrain exposes **16 intent-based MCP tools**. This page is a decision table:
+webrain exposes **17 intent-based MCP tools**. This page is a decision table:
 given a task, which tool (and which `what` / `action` / `mode` / `op`
 selector) should your agent call? The same rules are served to the LLM at
 runtime by `webrain_guide`.
 
-## The 16 tools at a glance
+## The 17 tools at a glance
 
 | Need | Tool | Selector |
 |---|---|---|
@@ -29,6 +29,7 @@ runtime by `webrain_guide`.
 | Sessions, cookies, profiles, login (vault + TOTP) | `webrain_session` | `op=…` |
 | Vision: index / retrieve / ask (screenshot → vision answer; captcha OCR) | `webrain_vision` | `op=…` |
 | Run arbitrary JavaScript in the page (or in a cross-origin iframe via `webrain_eval_in_frame`) | `webrain_eval` | — |
+| Run JS inside a specific cross-origin iframe (isolated world, reCAPTCHA/Turnstile frames) | `webrain_eval_in_frame` | `url_contains` + `js` |
 | Get this guide from the LLM at runtime | `webrain_guide` | — |
 
 ## Decision tree

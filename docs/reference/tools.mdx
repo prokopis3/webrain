@@ -1,11 +1,11 @@
 ---
 title: Tools Reference
-description: The 16-tool consolidated MCP surface (63 legacy capabilities folded via map_surface), grouped and verbatim.
+description: The 17-tool consolidated MCP surface (63 legacy capabilities folded via map_surface), grouped and verbatim.
 ---
 
 # Tools Reference
 
-All 16 tools are discovered dynamically — `webrain_guide` lists them for the
+All 17 tools are discovered dynamically — `webrain_guide` lists them for the
 LLM. The surface is **intent-based** (firecrawl-style): each tool has a `what`
 / `action` / `op` / `mode` selector that routes to the legacy capability via
 `map_surface()`. This page is the authoritative reference; descriptions match
@@ -43,6 +43,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_session` (`op=…`) | open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
 | `webrain_vision` (`op=…`) | index · retrieve · ask | ✅ CDP (screenshot) |
 | `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
+| `webrain_eval_in_frame` | Run JS inside a specific cross-origin iframe (isolated world, matched by `url_contains` src substring) — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile challenge frames | ✅ CDP |
 | `webrain_guide` | agent decision guide | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,

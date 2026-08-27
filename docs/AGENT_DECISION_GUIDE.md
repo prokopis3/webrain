@@ -4,7 +4,7 @@ How to choose the optimal path for every scraping task: **which browser**, **how
 to handle a challenge**, and **which extraction tool**. Built from the
 browsemind extraction guides + verified live on scrapingcourse.com.
 
-> **Tool naming.** This guide predates the 16-tool consolidation and mostly
+> **Tool naming.** This guide predates the 17-tool consolidation and mostly
 > uses the legacy one-action names (`webrain_fetch_http`,
 > `webrain_extract_json`, `webrain_spider`, `webrain_click`, …). Those still
 > dispatch, but the consolidated surface is the primary dialect:

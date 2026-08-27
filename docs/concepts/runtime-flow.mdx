@@ -69,7 +69,7 @@ Every message funnels into **`handle_rpc()`** (lib.rs:51-608). It routes
 handful of tools **before** the CDP backend is touched because they need no
 browser: `webrain_guide`, `webrain_scrape` (fetch_http), `webrain_search`,
 `webrain_download`, `webrain_pdf` (render / images ops). The consolidated
-16-tool surface (`observe`/`interact`/`extract`/`crawl`/`session`/…) is folded
+17-tool surface (`observe`/`interact`/`extract`/`crawl`/`session`/…) is folded
 to these executors up front by `tools::map_surface()`.
 
 ### 3. Tool registration — `webrain-mcp/src/tools.rs`
