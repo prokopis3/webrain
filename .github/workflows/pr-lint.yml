@@ -10,12 +10,13 @@
 
 name: PR Lint
 
-# pull_request_target: under `pull_request`, fork PRs get a READ-ONLY
-# GITHUB_TOKEN, so the commit-status write and the sticky comment fail with 403
-# for external contributors. Safe here — this job never checks out or executes
-# PR head code; both actions only read PR metadata via the API.
+# NOTE: keep `pull_request` (NOT `pull_request_target`). Branch protection on
+# main requires the "Lint PR Title" status check, and `pull_request_target`
+# workflows load their file from the BASE branch — until main's copy also uses
+# `pull_request_target`, switching here would leave the required check dead and
+# block every merge. Migrate both copies together in a separate change.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, synchronize, reopened]
     branches: [main]
 
