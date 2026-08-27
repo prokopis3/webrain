@@ -209,8 +209,12 @@ fn spawn_and_wait(
             );
         }
         // Verify the CDP signature, not just an open TCP port — a foreign
-        // listener on the port must not be mistaken for our engine.
-        if cdp_ready(port) {
+        // listener on the port must not be mistaken for our engine. But only
+        // Chrome exposes the HTTP /json/version probe; obscura/lightpanda
+        // expose raw CDP over WS (no /json/version), so fall back to a
+        // port-open check for them (the connect/handshake catches a foreign
+        // listener downstream).
+        if cdp_ready(port) || (name != "chrome" && port_open(port)) {
             return Ok(launched);
         }
         std::thread::sleep(Duration::from_millis(250));

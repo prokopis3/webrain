@@ -21,12 +21,25 @@ fn main() -> anyhow::Result<()> {
     // google serp runs with no injected stealth JS. edition-2024 set_var is
     // unsafe because concurrent env reads (in tokio's worker pool) are a data
     // race — set it HERE, before Runtime::new() spawns any threads.
-    if args.get(1).map(|s| s.as_str()) == Some("serp")
-        && args
-            .windows(2)
-            .any(|w| w[0] == "--engine" && (w[1] == "google" || w[1] == "auto"))
-    {
-        // auto can join google via the browser path when one is attached.
+    //
+    // Resolve the engine the same way the serp arm does (default = auto), so
+    // the DEFAULT `webrain serp "q"` invocation — which can join google via the
+    // browser path when one is attached — also gets no-stealth, and so do
+    // case-variant / `--engine=google` spellings.
+    let is_serp = args.get(1).map(|s| s.as_str()) == Some("serp");
+    let engine_flag = args
+        .windows(2)
+        .find(|w| w[0] == "--engine")
+        .map(|w| w[1].to_ascii_lowercase());
+    let engine_eq = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--engine="))
+        .map(|v| v.to_ascii_lowercase());
+    let no_stealth_engine = engine_flag
+        .or(engine_eq)
+        .map(|e| e == "google" || e == "auto")
+        .unwrap_or(true); // no --engine → defaults to auto
+    if is_serp && no_stealth_engine {
         unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
     }
     let rt = tokio::runtime::Runtime::new()?;
@@ -373,11 +386,13 @@ fn main() -> anyhow::Result<()> {
                                 proxy.as_deref(),
                             ) {
                                 Ok(launched) => {
-                                    println!(
-                                        "launched chrome (guest): {} (CDP_URL={})",
-                                        launched.profile_dir.display(),
-                                        launched.cdp_url
-                                    );
+                                    if !json_out {
+                                        println!(
+                                            "launched chrome (guest): {} (CDP_URL={})",
+                                            launched.profile_dir.display(),
+                                            launched.cdp_url
+                                        );
+                                    }
                                     // WARM SESSION — the guest Chrome stays alive on 9222
                                     // between runs (its in-memory session persists).
                                     // Forget the handle so Drop::kill() never runs.

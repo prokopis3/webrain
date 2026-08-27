@@ -274,6 +274,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // fall through to the backend connect + call_tool dispatch below.
             // `auto` is HTTP-only by default, but joins google/brave when a
             // backend is already attached (passed through below).
+            let mut serp_no_stealth = false;
             if tool_name == "webrain_serp" {
                 let engine = arguments
                     .get("engine")
@@ -298,6 +299,12 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         b.set_no_stealth(true);
                     }
                     let result = crate::tools::serp_from_args(&arguments, backend_ref).await;
+                    // Scoped no-stealth: clear the flag after the serp call so a
+                    // later navigate/batch/scrape in this session isn't silently
+                    // run without stealth_js (the google/auto serp arms set it).
+                    if let Some(b) = backend_ref {
+                        b.set_no_stealth(false);
+                    }
                     let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
                     return json!({
                         "jsonrpc": "2.0", "id": id,
@@ -364,12 +371,26 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                     }
                                 }
                                 // bing has a working pure-HTTP path — no Chrome →
-                                // leave the backend None so serp falls back to HTTP
-                                // (google/brave NEED a browser, so they error out).
+                                // run serp_from_args(None) HERE: the shared dispatch
+                                // below re-attempts the browser connect and would
+                                // hard-error (serp_from_args with None is never
+                                // reached from the needs_browser branch otherwise).
+                                // google/brave NEED a browser, so they error out.
                                 Err(e) if engine == "bing" => {
                                     tracing::debug!(
-                                        "no Chrome for bing browser path ({e}); falling back to pure HTTP"
+                                        "no Chrome for bing browser path ({e}); running pure HTTP"
                                     );
+                                    let result =
+                                        crate::tools::serp_from_args(&arguments, None).await;
+                                    let is_err = result.get("status").and_then(|v| v.as_str())
+                                        == Some("error");
+                                    return json!({
+                                        "jsonrpc": "2.0", "id": id,
+                                        "result": {
+                                            "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                                            "isError": is_err
+                                        }
+                                    });
                                 }
                                 Err(e) => {
                                     return tool_error(
@@ -388,6 +409,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 if engine == "google" {
                     if let Some(b) = backend.as_ref() {
                         b.set_no_stealth(true);
+                        serp_no_stealth = true;
                     }
                 }
                 // google|brave → continue to the shared backend connect + call_tool
@@ -783,6 +805,14 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 }
             }
             let result = tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
+            // Scoped no-stealth: the google serp arm armed set_no_stealth on the
+            // shared session backend — clear it now so later browse/batch/scrape
+            // calls in this session don't inherit the google-only no-stealth mode.
+            if serp_no_stealth {
+                if let Some(b) = backend.as_ref() {
+                    b.set_no_stealth(false);
+                }
+            }
             // Reconnect: a browser kill/restart wedges the cached backend forever
             // (dead socket → "os error 10054" on every write). Drop it on
             // connection-level errors so the next call connects fresh. The rest

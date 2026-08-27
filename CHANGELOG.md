@@ -181,6 +181,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transient wall (the HTTP fallback retries those), so a no-result bing query
   now falls back to the chain in ~6s instead of burning ~30s in the
   google/brave wall-clearing loop.
+- **core/mcp/cli**: OCR-review findings — (1) MCP `webrain_serp` bing now runs
+  the pure-HTTP path directly when no Chrome can be attached/launched (the
+  shared dispatch previously re-attempted the browser and hard-errored);
+  (2) the google/auto no-stealth flag is scoped to the serp call and cleared
+  after, so it no longer silently disables stealth_js for later browse/batch/
+  scrape calls in the same MCP session; (3) CLI sets `WEBRAIN_NO_STEALTH` for
+  the default `serp` invocation and case-variant/`--engine=` spellings, not
+  just literal `--engine google|auto`; (4) the guest-Chrome launch message is
+  `json_out`-gated (pure-JSON contract); (5) zip extraction rejects Windows
+  drive-prefixed absolute paths (`C:/…`) that `Path::join` treats as absolute;
+  (6) launch readiness falls back to a port-open probe for non-Chrome engines
+  (obscura/lightpanda have no HTTP `/json/version`).
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
