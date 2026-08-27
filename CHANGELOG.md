@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **deps**: bump `zip` 2.4.2 → 7.2.0 (engine archive extraction only).
+
 ### Fixed
 
 - **cli**: `webrain vault user` no longer echoes the username back to the
