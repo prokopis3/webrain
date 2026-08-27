@@ -27,15 +27,19 @@ COPY webrain-core webrain-core
 COPY webrain-mcp webrain-mcp
 COPY webrain-cli webrain-cli
 # Reuse the cargo registry + target caches across builds (BuildKit) so a source
-# change doesn't recompile the whole dependency tree.
+# change doesn't recompile the whole dependency tree. The target cache is keyed
+# by TARGETARCH so amd64/arm64 artifacts never mix, and the built binary is
+# copied OUT of the ephemeral cache mount within the same RUN (a cache mount's
+# contents are discarded when the RUN ends and never reach the image layer).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release --bin webrain
+    --mount=type=cache,target=/app/target,id=webrain-target-$TARGETARCH \
+    cargo build --release --bin webrain \
+    && cp /app/target/release/webrain /app/webrain
 
 # ── Runtime stage ───────────────────────────────────────────────
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates chromium
-COPY --from=builder /app/target/release/webrain /usr/local/bin/webrain
+COPY --from=builder /app/webrain /usr/local/bin/webrain
 # ponytail: intentionally runs as root for now — Alpine Chromium refuses to
 # start as a non-root user without --no-sandbox, and launch.rs doesn't pass it
 # yet. Adding a `USER webrain` here would silently break browser launches.

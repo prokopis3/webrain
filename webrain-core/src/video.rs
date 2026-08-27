@@ -1236,15 +1236,17 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
             let whisper_thread = s.spawn(|| {
                 if segments.is_empty() && !opts.no_whisper && probe.has_audio {
                     if let Ok(audio) = extract_audio(&video, wd) {
-                        if let Ok(segs) = whisper_local(&audio, wd)
-                            && !segs.is_empty()
-                        {
-                            return (segs, "local".to_string());
-                        } else if opts.stt_backend == SttBackend::Whisper
-                            && let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                            && !segs.is_empty()
-                        {
-                            return (segs, "whisper".to_string());
+                        if let Ok(segs) = whisper_local(&audio, wd) {
+                            if !segs.is_empty() {
+                                return (segs, "local".to_string());
+                            }
+                        }
+                        if opts.stt_backend == SttBackend::Whisper {
+                            if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend) {
+                                if !segs.is_empty() {
+                                    return (segs, "whisper".to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -1272,17 +1274,19 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
         if let Ok(audio) = extract_audio(&video, wd) {
             // Local first — offline/private/free, GPU when present. A missing
             // binary/model falls through to the cloud API (if a key is set).
-            if let Ok(segs) = whisper_local(&audio, wd)
-                && !segs.is_empty()
-            {
-                whisper_segments = segs;
-                whisper_source = "local";
-            } else if opts.stt_backend == SttBackend::Whisper
-                && let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                && !segs.is_empty()
-            {
-                whisper_segments = segs;
-                whisper_source = "whisper";
+            if let Ok(segs) = whisper_local(&audio, wd) {
+                if !segs.is_empty() {
+                    whisper_segments = segs;
+                    whisper_source = "local";
+                }
+            }
+            if opts.stt_backend == SttBackend::Whisper {
+                if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend) {
+                    if !segs.is_empty() {
+                        whisper_segments = segs;
+                        whisper_source = "whisper";
+                    }
+                }
             }
         }
     }

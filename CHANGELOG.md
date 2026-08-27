@@ -193,6 +193,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drive-prefixed absolute paths (`C:/…`) that `Path::join` treats as absolute;
   (6) launch readiness falls back to a port-open probe for non-Chrome engines
   (obscura/lightpanda have no HTTP `/json/version`).
+- **docker**: the release build no longer loses the binary — the cargo `target`
+  cache mount is ephemeral (its contents never reach the image layer), so the
+  binary is now copied out within the same `RUN`, and the target cache is keyed
+  by `$TARGETARCH` so multi-arch builds don't mix amd64/arm64 artifacts.
+- **core/cli**: the three `if let … && let …` chains (introduced by the clippy
+  auto-fix) are rewritten as nested `if let` — let-chains need Rust 1.88 but
+  the workspace MSRV is 1.85; the collapsible-if lint is allowed at the one
+  retained site with an explanatory comment.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username
