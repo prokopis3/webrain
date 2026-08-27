@@ -14,6 +14,8 @@ _No unreleased changes yet._
 ### Changed
 
 - **deps**: bump `base64` 0.22 → 0.23 (workspace dependency).
+- **deps**: bump `lopdf` 0.41.0 → 0.42.0 — unifies with `pdf-inspector`'s
+  transitive lopdf (drops the duplicate 0.41/0.42 PDF stack).
 - **deps**: bump `zip` 2.4.2 → 7.2.0 (engine archive extraction only).
 - **deps**: bump `futures-util` 0.3.33 → 0.3.34.
 - **deps**: bump `async-trait` 0.1.91 → 0.1.92.
