@@ -14,6 +14,7 @@ _No unreleased changes yet._
 ### Changed
 
 - **deps**: bump `zip` 2.4.2 → 7.2.0 (engine archive extraction only).
+- **deps**: bump `async-trait` 0.1.91 → 0.1.92.
 
 ### Fixed
 
