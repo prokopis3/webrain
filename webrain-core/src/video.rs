@@ -425,7 +425,10 @@ fn frames(path: &str, dir: &Path, probe: &Probe, opts: &WatchOpts) -> Result<Vec
             fallback.arg("-ss").arg(format!("{s:.3}"));
         }
         if let Some(e) = opts.end {
-            fallback.arg("-to").arg(format!("{e:.3}"));
+            // -to is output-only and ignored before -i; bound the input
+            // window with -t (duration) so the end is actually honored.
+            let dur = e - opts.start.unwrap_or(0.0);
+            fallback.arg("-t").arg(format!("{dur:.3}"));
         }
         fallback
             .arg("-i")
@@ -1365,10 +1368,12 @@ pub fn watch_batch(sources: &[String], opts: &WatchOpts) -> Vec<Value> {
     // per-worker opts so the scope closures only borrow (no per-iteration move).
     let per_worker_opts: Vec<WatchOpts> = (0..workers)
         .map(|w| WatchOpts {
-            out_dir: opts
-                .out_dir
-                .clone()
-                .or_else(|| Some(format!("watch_{}_{}", std::process::id(), w))),
+            // Per-worker subdir ALWAYS (also under an explicit base out_dir, so
+            // concurrent workers never write the same download/ + frames/ dirs).
+            out_dir: Some(match &opts.out_dir {
+                Some(base) => format!("{base}/worker_{w}"),
+                None => format!("watch_{}_{}", std::process::id(), w),
+            }),
             ..opts.clone()
         })
         .collect();

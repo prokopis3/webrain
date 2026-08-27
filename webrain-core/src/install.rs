@@ -85,13 +85,16 @@ fn bin_name(base: &str) -> String {
 }
 
 /// First numeric component of a `chrome-<ver>` / `lightpanda-v<tag>` /
-/// `obscura-v<tag>` cache dir name — for NUMERIC version ordering (newest
-/// build first), not lexicographic: `chrome-99` must sort below `chrome-100`.
-fn dir_version(name: &std::ffi::OsStr) -> u64 {
+/// `obscura-v<tag>` / `chrome-<version>` cache-dir name — for NUMERIC version
+/// ordering (newest build first), not lexicographic: `chrome-99` must sort
+/// below `chrome-100`, and `lightpanda-0.9.0` below `lightpanda-0.10.0`.
+/// Returns the full dotted component list so multi-part tags compare by their
+/// major/minor/patch rather than collapsing to the first numeric run.
+fn dir_version(name: &std::ffi::OsStr) -> Vec<u64> {
     name.to_string_lossy()
         .split(|c: char| !c.is_ascii_digit())
-        .find_map(|tok| tok.parse::<u64>().ok())
-        .unwrap_or(0)
+        .filter_map(|tok| tok.parse::<u64>().ok())
+        .collect()
 }
 
 /// Depth-limited recursive search for a file by exact name (CfT zip layout is
@@ -129,7 +132,7 @@ pub fn find_cft_chrome() -> Option<PathBuf> {
             } else {
                 bin_name("chrome")
             };
-            if let Some(b) = find_named(&p, &exe, 4) {
+            if let Some(b) = find_named(&p, &exe, 6) {
                 return Some(b);
             }
         }

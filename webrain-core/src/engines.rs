@@ -659,12 +659,20 @@ impl SpiderEngine {
             if disallowed.is_empty() {
                 return true;
             }
-            // Match against the URL PATH only — splitn(3,'/').nth(2) kept the
-            // host ("https://x/product/1" → "x/product/1"), so a Disallow
-            // prefix like "/product" never matched an absolute link and
-            // respect_robots silently blocked nothing.
+            // Match against the URL PATH + QUERY (RFC 9309 matches both) —
+            // splitn(3,'/').nth(2) kept the host, and path-only matching
+            // dropped rules like `Disallow: /search?q=` on links like
+            // `/search?q=foo&x=1`. Relative links already fell back to the
+            // full lowercased string (query included); now absolute ones do too.
             let path = url::Url::parse(link)
-                .map(|u| u.path().to_lowercase())
+                .map(|u| {
+                    let mut p = u.path().to_lowercase();
+                    if let Some(q) = u.query() {
+                        p.push('?');
+                        p.push_str(&q.to_lowercase());
+                    }
+                    p
+                })
                 .unwrap_or_else(|_| link.to_lowercase());
             !disallowed.iter().any(|p| path.starts_with(p))
         };

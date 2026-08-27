@@ -201,6 +201,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-fix) are rewritten as nested `if let` — let-chains need Rust 1.88 but
   the workspace MSRV is 1.85; the collapsible-if lint is allowed at the one
   retained site with an explanatory comment.
+- **core/scripts/ci/docs**: second OCR-review batch — (1) `vault` retries the
+  loser-side key read (transient 0-byte/partial file on create-race no longer
+  hard-errors); (2) robots.txt `Disallow` matches path+query (RFC 9309); (3)
+  2captcha poll is POSTed (key never in a query string); (4) `cdp` close_tab
+  holds both locks for the active reassignment (no race), Enter on a form
+  dispatches a submit event first (SPA `onSubmit` runs, native submit only if
+  not canceled), and print/screenshot get a 120s budget instead of the flat
+  30s; (5) `watch` workers get per-worker `out_dir` subdirs even under an
+  explicit base, and the ffmpeg fallback uses `-t` (duration) instead of
+  `-to` before `-i`; (6) engine-cache version ordering parses the full dotted
+  version (`0.9.0` < `0.10.0`) and mac CfT search depth is 6; (7) CLI serp
+  error returns `Err` (drops the `--fresh` Chrome) instead of `exit(1)`;
+  (8) `check_docs_orphans.py` actually validates `.mdx` files; (9) `release.yml`
+  keeps the changelog H1 at the top and tolerates a rejected changelog push;
+  (10) `build-skill.sh` pipefail-safe grep, correct pathspec, SKILL.md presence
+  check, dist exclusion, and repo-guard ordering; (11) `install.sh`/`install.ps1`
+  reject non-executable (HTML-200) downloads (ELF/Mach-O + MZ magic) and clean
+  up temp files on any exit; (12) docs landing JS honors keyboard tab selection,
+  stops the parallax rAF/listeners when the view is gone, and bails stale
+  streamLines runs via the generation token.
 - **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
   budget 5 → 10 pages; serpapi already honored 100).
 - **core**: `login` — placeholder substitution is single-pass (a username

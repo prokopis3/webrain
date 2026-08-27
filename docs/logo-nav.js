@@ -43,6 +43,12 @@
   };
   document.addEventListener("click", onTab, true);
   document.addEventListener("keydown", onTab, true);
+  // Drop the capture listeners once the poll exits (settled / user interaction
+  // / n >= 50) — they'd otherwise keep running for the whole page lifetime.
+  const stopListening = () => {
+    document.removeEventListener("click", onTab, true);
+    document.removeEventListener("keydown", onTab, true);
+  };
   // Settled = the block exists and data-cmd is populated — early-exit the
   // poll then, instead of ~7.5s of DOM churn (re-writing textContent every
   // 150ms can disrupt a user mid-copy).
@@ -54,7 +60,7 @@
   let n = 0;
   (function loop() {
     if (!userClicked) apply(os);
-    if (settled() || userClicked || ++n >= 50) return;
+    if (settled() || userClicked || ++n >= 50) { stopListening(); return; }
     setTimeout(loop, 150);
   })();
   window.addEventListener("load", function onload() {

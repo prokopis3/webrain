@@ -11,8 +11,12 @@
 $ErrorActionPreference = 'Stop'
 $Repo = 'prokopis3/webrain'
 # LOCALAPPDATA can be unset in SYSTEM/service contexts — fall back to the user
-# profile so the binary still lands in an absolute location.
+# profile, then to SystemDrive if BOTH are unset (Join-Path of $null yields a
+# RELATIVE path that would land in the process CWD).
 $local = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+if (-not $local -or -not [System.IO.Path]::IsPathRooted($local)) {
+    $local = Join-Path $env:SystemDrive 'webrain'
+}
 $InstallDir = Join-Path $local 'Programs\webrain'
 $exe = Join-Path $InstallDir 'webrain.exe'
 
@@ -23,10 +27,18 @@ Write-Host "webrain: downloading $url"
 # an interrupted download (or a running webrain.exe lock) can't leave a
 # truncated/corrupt binary at the final path.
 $tmp = Join-Path $InstallDir (".webrain.tmp." + [System.Guid]::NewGuid().ToString('N'))
-Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing
+Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing -TimeoutSec 60
 if ((Get-Item $tmp).Length -eq 0) {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
     throw "webrain: downloaded file is empty — possible truncated/HTML error page."
+}
+# Size alone doesn't catch a non-empty HTML error body returned with HTTP 200 —
+# verify the file is a real Windows PE executable ("MZ" header) so a skipped
+# checksum can't move a non-binary over the working webrain.exe.
+$head = Get-Content $tmp -Encoding Byte -TotalCount 2
+if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
+    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    throw "webrain: downloaded file is not a Windows PE executable — possible HTML error page."
 }
 # Verify against the release's published checksums.txt (the release workflow
 # publishes it): a tampered release/mirror/MITM fails the check instead of
@@ -48,7 +60,13 @@ try {
 } catch {
     Write-Host "webrain: could not fetch checksums.txt — skipping verification." -ForegroundColor Yellow
 }
-Move-Item -Force $tmp $exe
+try {
+    Move-Item -Force $tmp $exe
+} finally {
+    # A running webrain.exe (sharing violation) or any failure leaves $tmp —
+    # clean it up so the install dir doesn't accumulate .webrain.tmp.* files.
+    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+}
 
 # Exact PATH segment matching (no substring wildcard that matches a sibling
 # dir) and no empty leading segment (which some shells read as the CWD).

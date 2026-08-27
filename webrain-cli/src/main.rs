@@ -474,8 +474,10 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     // stderr + non-zero exit: scripts must be able to detect a
                     // failed search, and --json stdout must stay pure JSON.
+                    // return Err (not exit(1)) so _launched drops cleanly and
+                    // a --fresh Chrome isn't orphaned with an open debug port.
                     eprintln!("serp failed: {e}");
-                    std::process::exit(1);
+                    return Err(anyhow::anyhow!("serp failed: {e}"));
                 }
             }
             // --hold: keep the fresh browser up so you can inspect it; close on
@@ -927,8 +929,25 @@ fn upgrade() -> anyhow::Result<()> {
         println!("webrain: installed via Scoop \u{2014} running `scoop update webrain`");
         // Windows locks a running exe, so Scoop refuses to replace webrain
         // while ANY instance of this binary is up. Stop only same-path
-        // siblings; this process then exits, so it's never in the way.
-        stop_same_exe_webrain();
+        // siblings and WAIT for them to exit (the lock must be gone before
+        // scoop touches the file); child engines (Chrome/lightpanda/obscura)
+        // are never touched — they stay warm for the new binary to re-attach.
+        let killed = stop_same_exe_webrain();
+        if !killed.is_empty() {
+            println!(
+                "webrain: stopped {} running instance(s) (PID {}) \u{2014} they held the old exe",
+                killed.len(),
+                killed
+                    .iter()
+                    .take(3)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // A cached scoop bucket silently reports the old version as "latest":
+        // pull the hosting bucket so `scoop update webrain` sees the newest.
+        refresh_scoop_bucket();
         std::process::Command::new("cmd")
             .args(["/c", "scoop", "update", "webrain"])
             .spawn()?;
@@ -946,12 +965,15 @@ fn scoop_installed() -> bool {
         .exists()
 }
 
-/// Stop sibling webrain processes that point at THIS exact binary. Scoop
-/// can't replace an exe any instance holds open; same-path-only means a
-/// different webrain install or an unrelated process named `webrain*` is
-/// left alone. This process exits right after (it's never a sibling to kill).
+/// Stop sibling webrain processes that point at THIS exact binary, wait for
+/// them to fully exit (the exe lock must be released before scoop replaces
+/// it), and return the PIDs stopped. Same-path-only means a different webrain
+/// install or an unrelated process named `webrain*` is left alone; child
+/// engines (Chrome/lightpanda/obscura) are never touched — they stay warm for
+/// the new binary to re-attach. This process exits right after (it's never a
+/// sibling to kill).
 #[cfg(target_os = "windows")]
-fn stop_same_exe_webrain() {
+fn stop_same_exe_webrain() -> Vec<u32> {
     let self_pid = std::process::id();
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -959,12 +981,48 @@ fn stop_same_exe_webrain() {
     // Escape single quotes in the exe path so a path containing `'` can't
     // terminate the PowerShell string and inject arbitrary commands.
     let exe_esc = exe.replace('\'', "''");
+    // Kill then Wait-Process — Stop-Process can return before full teardown,
+    // and the single synchronous PowerShell call means .output() returns only
+    // after the wait completes.
     let ps = format!(
-        "Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {self_pid} -and $_.Path -eq '{exe_esc}' }} | Stop-Process -Force"
+        "$p = Get-Process 'webrain*' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {self_pid} -and $_.Path -eq '{exe_esc}' }}; $p | ForEach-Object {{ $_.Id }}; $p | Stop-Process -Force -ErrorAction SilentlyContinue; $p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue"
     );
-    let _ = std::process::Command::new("powershell")
+    let mut killed = Vec::new();
+    if let Ok(o) = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output();
+        .output()
+    {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                killed.push(pid);
+            }
+        }
+    }
+    killed
+}
+
+/// Find the scoop bucket that hosts webrain (`USERPROFILE/scoop/buckets/*/
+/// bucket/webrain.json`) and `git pull` it, so `scoop update webrain` sees the
+/// newest manifest instead of a cached one that reports the old version as
+/// "latest". Best-effort — any failure is ignored (scoop update still runs).
+#[cfg(target_os = "windows")]
+fn refresh_scoop_bucket() {
+    let buckets = std::env::var("USERPROFILE")
+        .map(|u| std::path::PathBuf::from(u).join("scoop/buckets"))
+        .unwrap_or_default();
+    let Ok(rd) = std::fs::read_dir(&buckets) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        if entry.path().join("bucket/webrain.json").exists() {
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(entry.path())
+                .arg("pull")
+                .output();
+            return;
+        }
+    }
 }
 
 /// Best-effort list of OTHER running webrain processes (self excluded).

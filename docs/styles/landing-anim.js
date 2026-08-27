@@ -133,6 +133,7 @@
   var tabsEl = document.querySelector('.landing .install-tabs');
   if (tabsEl) {
     tabsEl.addEventListener('click', function () { userPicked = true; }, true);
+    tabsEl.addEventListener('keydown', function () { userPicked = true; }, true);
   }
   ensureInstallDefault();
   var installer = setInterval(function () {
@@ -441,19 +442,24 @@
     if (REDUCE) return;
     if (!window.matchMedia || !window.matchMedia('(pointer: fine)').matches) return;
     var target = { x: 0, y: 0 }, cur = { x: 0, y: 0 }, has = false;
-    window.addEventListener('mousemove', function (e) {
+    var move = function (e) {
       target.x = (e.clientX / window.innerWidth - 0.5) * 2;
       target.y = (e.clientY / window.innerHeight - 0.5) * 2;
       has = true;
-    }, { passive: true });
+    };
+    window.addEventListener('mousemove', move, { passive: true });
     (function frame() {
+      var g = document.querySelector('.landing .mesh-glow');
+      if (!g) {
+        // Landing view is gone (SPA navigation) — stop the rAF loop AND the
+        // listener so we don't burn frames/listeners for the whole session.
+        window.removeEventListener('mousemove', move);
+        return;
+      }
       if (has) {
         cur.x += (target.x - cur.x) * 0.08;
         cur.y += (target.y - cur.y) * 0.08;
-        var g = document.querySelector('.landing .mesh-glow');
-        if (g) {
-          g.style.transform = 'translate3d(' + (cur.x * 18).toFixed(1) + 'px,' + (cur.y * 18).toFixed(1) + 'px,0)';
-        }
+        g.style.transform = 'translate3d(' + (cur.x * 18).toFixed(1) + 'px,' + (cur.y * 18).toFixed(1) + 'px,0)';
       }
       requestAnimationFrame(frame);
     })();
@@ -877,14 +883,15 @@
     return el;
   }
 
-  function streamLines(linesEl, lines, i) {
+  function streamLines(linesEl, lines, i, gen) {
+    if (gen !== playgroundGen) return; // a newer run started — drop this stale chain
     if (i >= lines.length) return;
     var ln = lines[i];
     var el = buildLine(linesEl, ln.k, ln.t, ln.out || '');
     anime({
       targets: el, opacity: [0, 1], translateX: [-10, 0], duration: 420, easing: 'easeOutCubic',
       complete: function () {
-        setTimeout(function () { streamLines(linesEl, lines, i + 1); }, ln.gap || 210);
+        setTimeout(function () { streamLines(linesEl, lines, i + 1, gen); }, ln.gap || 210);
       }
     });
   }
@@ -934,7 +941,7 @@
       update: function () { if (gen === playgroundGen) typeEl.textContent = prompt.slice(0, Math.round(st.len)); }
     }).finished.then(function () {
       if (gen !== playgroundGen) return;
-      streamLines(linesEl, demo.lines, 0);
+      streamLines(linesEl, demo.lines, 0, gen);
       setTimeout(function () { if (gen === playgroundGen) showCard(cardEl, demo.card); }, demo.lines.length * 480 + 320);
     });
   }

@@ -118,8 +118,15 @@ pub fn solve_recaptcha2(
     let mut transport_fails = 0usize;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(5));
-        let poll = format!("{RES_URL}?key={api_key}&action=get&id={id}");
-        let (status, body) = match crate::engines::serp_http_get(&poll, None) {
+        // POST the poll too — the key must never appear in a query string
+        // (2captcha accepts POSTed form params; a proxied poll would otherwise
+        // put the key in the proxy's access logs).
+        let poll_params = vec![
+            ("key".to_string(), api_key.to_string()),
+            ("action".to_string(), "get".to_string()),
+            ("id".to_string(), id.clone()),
+        ];
+        let (status, body) = match crate::engines::serp_http_post(RES_URL, &poll_params, None) {
             Ok(v) => v,
             // Transient transport blip — the (possibly charged) task is still
             // pending server-side; keep polling instead of aborting the solve.

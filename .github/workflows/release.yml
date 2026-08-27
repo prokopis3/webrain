@@ -109,7 +109,7 @@ jobs:
             released = f'## [{ver}] - {date}' + m.group(1)
             # Keep EVERYTHING after the old [Unreleased] block (all previously
             # released entries). Omitting t[m.end():] destroyed release history.
-            out = '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + t[:m.start()] + released + t[m.end():]
+            out = t[:m.start()] + '## [Unreleased]\n\n### Added\n\n_No unreleased changes yet._\n\n' + released + t[m.end():]
             p.write_text(out, encoding='utf-8')
             " "$VER" "$(date +%F)"
             git config user.name "github-actions[bot]"
@@ -118,7 +118,10 @@ jobs:
             git commit -m "chore(release): changelog for ${VER}" || true
             # A tag push leaves the workspace on detached HEAD (no local main) —
             # push the current commit explicitly instead of a nonexistent ref.
-            git push origin HEAD:main
+            # The changelog back-commit is ancillary to publishing: tolerate a
+            # rejected push (non-fast-forward on a protected branch) so the
+            # release still proceeds.
+            git push origin HEAD:main || echo "::warning::changelog push skipped; release continues"
           fi
 
       - name: Extract release body from changelog

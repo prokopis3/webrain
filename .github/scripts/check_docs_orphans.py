@@ -44,8 +44,8 @@ def main() -> int:
     blob = nav_blob()
     pats = ignore_patterns()
     orphans = []
-    for f in sorted(DOCS.rglob("*.md")):
-        if f.suffix == ".md" or f.suffix == ".mdx":
+    for f in sorted(DOCS.rglob("*")):
+        if f.is_file() and f.suffix in (".md", ".mdx"):
             rel = f.relative_to(DOCS).as_posix()
             if is_ignored(rel, pats):
                 continue

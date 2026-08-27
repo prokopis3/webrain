@@ -120,11 +120,17 @@ fn ensure_key() -> anyhow::Result<[u8; 32]> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Lost the race — another process created the key; trust theirs.
-            let raw = std::fs::read(key_path())?;
-            return raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("vault.key must be 32 bytes"));
+            // It may still be mid-write (0-byte/partial), so retry the read a
+            // few times instead of failing on a transient partial file.
+            for _ in 0..5 {
+                if let Ok(raw) = std::fs::read(key_path()) {
+                    if let Ok(k) = raw.as_slice().try_into() {
+                        return Ok(k);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            anyhow::bail!("vault.key must be 32 bytes");
         }
         Err(e) => return Err(e.into()),
     }

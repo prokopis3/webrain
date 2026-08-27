@@ -636,10 +636,16 @@ impl CdpBackend {
                 }
             }
         };
-        match tokio::time::timeout(std::time::Duration::from_secs(30), wait).await {
+        // Flat 30s is too short for the slow-but-legit operations (full-page
+        // PDF/screenshot, awaitPromise evaluate) — give them a longer budget.
+        let cap = match method {
+            "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
+            _ => std::time::Duration::from_secs(30),
+        };
+        match tokio::time::timeout(cap, wait).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(e),
-            Err(_) => anyhow::bail!("CDP command {method} timed out after 30s"),
+            Err(_) => anyhow::bail!("CDP command {method} timed out after {cap:?}"),
         }
     }
 
@@ -1291,20 +1297,16 @@ impl CdpBackend {
                 .await;
         }
         // Lock active → tabs (same order as register_tab/active_session) and
-        // hold both for the remove + next-active selection in one scope.
-        let (was_active, next_active) = {
-            let active = self.active.lock().await.clone();
+        // hold BOTH for the remove + next-active reassignment in one scope — a
+        // concurrent close_tab/register_tab must not interleave and leave
+        // `active` pointing at a closed tab.
+        {
+            let mut active = self.active.lock().await;
             let mut tabs = self.tabs.lock().await;
             tabs.remove(id);
-            let next = if active == id {
-                tabs.keys().next().cloned().unwrap_or_default()
-            } else {
-                active.clone()
-            };
-            (active, next)
-        };
-        if was_active == id {
-            *self.active.lock().await = next_active;
+            if *active == id {
+                *active = tabs.keys().next().cloned().unwrap_or_default();
+            }
         }
         *self.fp.lock().await = None;
         *self.snap.lock().await = None;
@@ -2175,7 +2177,15 @@ impl BrowserBackend for CdpBackend {
                 const opts = {{ key, code: key, bubbles: true, cancelable: true }};
                 el.dispatchEvent(new KeyboardEvent('keydown', opts));
                 el.dispatchEvent(new KeyboardEvent('keyup', opts));
-                if (el.form && k === 'Enter') {{ el.form.submit(); return 'form-submitted'; }}
+                if (el.form && k === 'Enter') {{
+                    const ev = new Event('submit', {{ bubbles: true, cancelable: true }});
+                    // Dispatch first so React/Vue onSubmit (validation, XHR,
+                    // preventDefault) runs; only native-submit if not canceled.
+                    // el.form.submit() alone skips the submit event entirely.
+                    const proceed = el.form.dispatchEvent(ev);
+                    if (proceed) {{ el.form.submit(); }}
+                    return 'form-submitted';
+                }}
                 return 'pressed ' + k;
             }})()"#
         );
