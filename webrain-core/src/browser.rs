@@ -37,22 +37,45 @@ pub struct PageState {
 /// ponytail: tiny marker list; add structural HTML markers if sites evade it.
 pub fn detect_antibot(title: &str, text: &str) -> Option<String> {
     let hay = format!("{title}\n{text}").to_ascii_lowercase();
-    const MARKERS: &[(&str, &str)] = &[
-        ("cloudflare_challenge", "checking your browser"),
-        ("cloudflare_challenge", "just a moment"),
-        ("cloudflare_challenge", "verify you are human"),
+    // Strong technical markers — near-certain challenge signals (a legit page
+    // doesn't contain "__cf_chl" / "challenge-platform" / a captcha id in its
+    // visible text). Single match is enough.
+    const STRONG: &[(&str, &str)] = &[
         ("cloudflare_challenge", "__cf_chl"),
         ("cloudflare_challenge", "challenge-platform"),
-        ("blocked", "access denied"),
-        ("blocked", "forbidden"),
         ("blocked", "cf-error-code"),
         ("captcha", "h-captcha"),
         ("captcha", "g-recaptcha"),
     ];
-    MARKERS
+    for (kind, m) in STRONG {
+        if hay.contains(m) {
+            return Some(kind.to_string());
+        }
+    }
+    // Generic phrases that can appear in legitimate prose ("forbidden",
+    // "access denied", "just a moment") — require TWO corroborating markers
+    // before declaring a challenge, so a support article that merely mentions
+    // one isn't misread as a blocked page (challenge gates whether the LLM
+    // keeps scraping).
+    const WEAK: &[(&str, &str)] = &[
+        ("cloudflare_challenge", "checking your browser"),
+        ("cloudflare_challenge", "just a moment"),
+        ("cloudflare_challenge", "verify you are human"),
+        ("blocked", "access denied"),
+        ("blocked", "forbidden"),
+    ];
+    let hits: Vec<&str> = WEAK
         .iter()
-        .find(|(_, m)| hay.contains(m))
-        .map(|(kind, _)| kind.to_string())
+        .filter(|(_, m)| hay.contains(m))
+        .map(|(kind, _)| *kind)
+        .collect();
+    if hits.len() >= 2 {
+        if hits.contains(&"cloudflare_challenge") {
+            return Some("cloudflare_challenge".to_string());
+        }
+        return Some(hits[0].to_string());
+    }
+    None
 }
 
 /// A page Chrome rendered for a dead/cert/5xx URL (spider-rs
@@ -64,16 +87,23 @@ pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
     let hay = format!("{title}\n{text}");
     // Chrome error pages carry a code — ERR_NAME_NOT_RESOLVED, DNS_PROBE_STARTED,
     // NET::ERR_CERT_* … grab the first one.
-    for marker in ["ERR_", "DNS_"] {
-        if let Some(i) = hay.find(marker) {
-            let code: String = hay[i..]
-                .chars()
-                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
-                .collect();
-            if !code.is_empty() {
-                return Some(code);
+    let extract = |region: &str| -> Option<String> {
+        for marker in ["ERR_", "DNS_"] {
+            if let Some(i) = region.find(marker) {
+                let code: String = region[i..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                if !code.is_empty() {
+                    return Some(code);
+                }
             }
         }
+        None
+    };
+    // A code in the <title> is authoritative — real interstitials put it there.
+    if let Some(code) = extract(title) {
+        return Some(code);
     }
     // Interstitials without a bare code (apostrophe may be curly — match both).
     let l = hay.to_ascii_lowercase();
@@ -85,10 +115,15 @@ pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
         "your connection is not private",
         "no internet",
     ];
-    PHRASES
-        .iter()
-        .find(|p| l.contains(*p))
-        .map(|_| "CHROME_ERROR".to_string())
+    // A body-only code needs a corroborating interstitial phrase — an ordinary
+    // support article that merely mentions "ERR_*" must not be flagged as dead.
+    if PHRASES.iter().any(|p| l.contains(*p)) {
+        if let Some(code) = extract(&hay) {
+            return Some(code);
+        }
+        return Some("CHROME_ERROR".to_string());
+    }
+    None
 }
 
 /// A loaded page with almost no interactive elements and no challenge is likely
@@ -108,6 +143,90 @@ pub struct InteractiveElement {
     pub selector: String,
     pub visible: bool,
 }
+
+/// JS that indexes interactive elements for click/type tools (shared by
+/// navigate and snapshot so both produce identical element lists).
+/// Interaction is index-based only (querySelectorAll order); precise
+/// selectors for extraction come from webrain_a11y (css_path/xpath).
+/// Housed here (not in a backend module) so the backend-agnostic
+/// `BrowserBackend::snapshot` default doesn't depend on a concrete backend.
+pub const ELEMENTS_JS: &str = r#"
+        (() => {
+            const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/([^a-zA-Z0-9_-])/g, '\\$1');
+            // Index-stable unique selector: id → class → nth-of-type chain from
+            // body. A bare tag name ("input") is NOT used — DOM.querySelector
+            // would resolve it to the FIRST match, not the element at `index`
+            // (broke DOM.setFileInputFiles for id/class-less <input type=file>).
+            const uniqSel = (el) => {
+                if (el.id) return '#' + esc(el.id);
+                if (el.className && typeof el.className === 'string' && el.className.trim()) return '.' + esc(el.className.trim().split(/\s+/)[0]);
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+                    let nth = 1, sib = cur.previousElementSibling;
+                    while (sib) { if (sib.tagName === cur.tagName) nth++; sib = sib.previousElementSibling; }
+                    parts.unshift(cur.tagName.toLowerCase() + ':nth-of-type(' + nth + ')');
+                    cur = cur.parentNode;
+                }
+                return parts.join(' > ') || el.tagName.toLowerCase();
+            };
+            const elems = document.querySelectorAll('a, button, input, select, textarea, [role="button"]');
+            return Array.from(elems).slice(0, 60).map((el, i) => ({
+                index: i,
+                tag: el.tagName.toLowerCase(),
+                text: (el.type === 'password' ? '' : (el.textContent || el.value || '')).trim().substring(0, 80),
+                selector: uniqSel(el),
+                visible: el.offsetParent !== null
+            }));
+        })()
+        "#;
+
+/// JS that collects deduped same-origin links (capped) for the PageState `links`
+/// field. Scrapling LinkExtractor-level quality: canonicalize, filter non-http
+/// schemes, strip fragments, drop content-obvious extensions (images, fonts,
+/// pdf, archives, ico, css/js), dedupe in insertion order. Turns "crawl +
+/// internal links" into a single navigate call.
+/// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
+/// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
+pub const LINKS_JS: &str = r#"
+    (() => {
+        try {
+            const origin = location.origin;
+            const skipExt = new Set(['pdf','zip','rar','7z','tar','gz','xz','bz2',
+                'jpg','jpeg','png','gif','webp','avif','svg','ico','bmp','tif','tiff',
+                'woff','woff2','ttf','otf','eot',
+                'mp4','webm','mp3','ogg','wav','mov','avi','m4a',
+                'css','js','json','xml','rss',
+                'exe','dmg','iso','apk','msi']);
+            const seen = new Set();
+            const out = [];
+            for (const el of document.querySelectorAll('a[href], area[href]')) {
+                const raw = el.href || '';
+                if (!raw) continue;
+                // strip fragment + trailing slash; drop non-http
+                let u = raw;
+                const hash = u.indexOf('#');
+                if (hash > -1) u = u.slice(0, hash);
+                // drop non-http(s) schemes (mailto, javascript, tel, file, etc.)
+                if (!u.startsWith('http://') && !u.startsWith('https://')) continue;
+                // same-origin only
+                if (!u.startsWith(origin)) continue;
+                // trailing-slash normalise
+                const qp = u.indexOf('?');
+                let path = qp > -1 ? u.slice(0, qp) : u;
+                if (path.endsWith('/')) u = u.slice(0, path.length - 1) + (qp > -1 ? u.slice(qp) : '');
+                // drop known non-content extensions
+                const seg = u.split('/').pop() || '';
+                const dot = seg.lastIndexOf('.');
+                if (dot > -1 && skipExt.has(seg.slice(dot + 1).toLowerCase())) continue;
+                if (seen.has(u)) continue;
+                seen.add(u);
+                if (out.push(u) >= 200) break;
+            }
+            return out;
+        } catch (e) { return []; }
+    })()
+    "#;
 
 /// Abstraction over a browser backend.
 /// ponytail: trait with async_trait when needed; dyn dispatch for now.
@@ -144,11 +263,10 @@ pub trait BrowserBackend: Send + Sync {
     /// Hard-reload the current page bypassing cache (Ctrl+Shift+R) — drops the
     /// anti-bot state Google set on a flagged request; the manual recipe that
     /// beats the /sorry wall. Default falls back to location.reload() (best-
-    /// effort; CDP backends override with Page.reload ignoreCache:true).
+    /// effort; CDP backends override with Page.reload ignoreCache:true — the
+    /// boolean is non-standard and ignored by browsers).
     async fn reload_hard(&self) -> anyhow::Result<()> {
-        self.evaluate("location.reload(true); true")
-            .await
-            .map(|_| ())
+        self.evaluate("location.reload(); true").await.map(|_| ())
     }
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at
@@ -282,14 +400,16 @@ pub trait BrowserBackend: Send + Sync {
             .as_str()
             .unwrap_or("")
             .to_string();
+        let elements_val = self.evaluate(ELEMENTS_JS).await?;
+        // An empty `elements` from a failed eval (Null / wrong shape) must not
+        // mislabel a healthy page as a bot-limited "crippled" shell.
+        let elements_ok = elements_val.is_array();
         let elements: Vec<InteractiveElement> =
-            serde_json::from_value(self.evaluate(crate::backends::cdp::ELEMENTS_JS).await?)
-                .unwrap_or_default();
+            serde_json::from_value(elements_val).unwrap_or_default();
         let links: Vec<String> =
-            serde_json::from_value(self.evaluate(crate::backends::cdp::LINKS_JS).await?)
-                .unwrap_or_default();
+            serde_json::from_value(self.evaluate(LINKS_JS).await?).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
-        let crippled = detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
         let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url,

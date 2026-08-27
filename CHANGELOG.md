@@ -7,6 +7,423 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **core/mcp**: `webrain_batch` gains `op=markdown` — full page HTML →
+  Markdown via pure-Rust `htmd` (turndown.js-equivalent, skips script/style/
+  noscript), surpassing `fetch`'s 3000-char `innerText` cap. Optional `query` +
+  `top_k` bm25-prune the markdown to query-relevant chunks (crawl4ai
+  fit_markdown style, reuses existing `bm25_filter`, zero LLM).
+- **core/mcp/cli**: `webrain_serp` / `webrain serp` reply includes a
+  `per_engine` breakdown — `[{engine, status: ok|empty|skipped, count}]` —
+  showing which engines contributed results and which were skipped (CLI prints
+  `engines: duckduckgo=ok(5), bing=empty(0), ...`).
+
+### Security
+
+- **core**: engine archives are extracted with a zip-slip guard — absolute
+  paths and `..` traversal entries are rejected, and Unix exec bits from the
+  archive are preserved (`chrome`/`whisper-cli` stay executable on Linux).
+- **core**: `lightpanda`/`obscura` CDP servers now bind to `127.0.0.1`
+  (previously `0.0.0.0` exposed unauthenticated browser control on the LAN);
+  Chrome already bound loopback.
+- **core**: the 2captcha submit is now a form POST — the API key and proxy
+  credentials no longer travel in the URL query string (access-log exposure).
+- **core**: vault hardening — `vault.key` is created exclusively with `0600`
+  (no world-readable window, no concurrent-run clobber), unreadable keys/index
+  errors are propagated instead of treated as "empty" (no silent data loss),
+  and `vault.json` writes are atomic (temp + rename).
+- **cli**: `webrain upgrade`/`self-update` now verify the downloaded binary's
+  SHA-256 against the release's `checksums.txt` and fail closed on mismatch.
+- **mcp**: HTTP transport caps the request body (16 MiB) — a huge client
+  `Content-Length` can no longer exhaust memory — and `port` args are validated
+  with `u16::try_from` instead of silently truncating.
+- **installers**: `install.sh`/`install.ps1` download to a temp file, reject
+  empty downloads, and atomically move into place (an interrupted download
+  can no longer destroy a working install).
+- **mcp**: search queries are percent-encoded (space→`+` let `&`/`#`/`%`
+  inject parameters or truncate the query), and the `webrain_download`
+  `isError` flag reflects the result instead of being hardcoded `false`.
+- **cli**: `webrain serp` errors go to stderr with a non-zero exit (scripts
+  can detect failures; `--json` stdout stays pure JSON), launch diagnostics
+  are suppressed under `--json`, the screenshot filename gets sub-second
+  precision, and the PowerShell stop-command escapes `'` in the exe path.
+- **installer/port script**: `port_blocklist.ps1` validates hostnames per RFC
+  1123, guards against clobbering the blocklist on a truncated response
+  (<1000 domains → abort), writes BOM-less UTF-8 (PowerShell 5.1's BOM broke
+  `include_str!` exact matches), and retries with TLS 1.2.
+- **core**: the TOTP base32 decoder rejects seeds with non-zero trailing bits
+  (a malformed key is an error instead of a silently wrong code), and the
+  template filler uses two-phase sentinel replacement so a literal `SEL`/`VAL`
+  in real values can't corrupt the fill.
+- **ci**: third-party GitHub Actions are pinned to full commit SHAs (the
+  mutable `stable`/`v2`/`v3`/`v6` refs could be force-moved); Dependabot keeps
+  the SHAs updated. `dependabot.yml` no longer references the nonexistent
+  `dependencies` label (Dependabot won't create it — the PRs were silently
+  skipped or unlabeled).
+- **installers**: `install.sh`/`install.ps1` verify the downloaded binary
+  against the release's published `checksums.txt` before installing — a
+  tampered release/mirror/MITM fails the check instead of silently installing
+  arbitrary code (release.yml already publishes the checksums).
+
+### Docs
+
+- **docs/landing**: coverflow cards render in the correct order (`--card`
+  indices were inverted), hovering the coverflow pauses the transcript groups
+  too (not just the cards), the no-JS fallback shows the benchmark comparison
+  via a `--fill` custom property, and `bar-fill` reads `var(--fill, 0)`.
+- **docs/landing**: `runPlayground`'s async continuations are generation-
+  guarded (a stale run can no longer reveal a card after reset), the
+  IntersectionObserver callback is idempotent (no double-reveal flash), the
+  no-IO fallback no longer flashes content hidden→shown, and the install-tab
+  demo stops auto-cycling once the user clicks.
+- **docs/landing**: `h1 .w` `will-change` is scoped to `prefers-reduced-
+  motion: no-preference`, and `.try-input` gets a `:focus-visible` ring.
+- **docs/logo-nav**: the injected script appends to `document.head` (with a
+  `documentElement` fallback), the nav bindings react to keyboard (`Tab`
+  counts as a user click so the poll doesn't steal focus), and the loader
+  bails out early once the block is settled.
+- **docs/config**: commitlint's type/scope overlap is documented as deliberate
+  (the `.md`-scope templates and the `docs` type intentionally overlap) so a
+  future reader doesn't "fix" it (#7).
+- **docs/script**: `port_blocklist.ps1` documents its alphabetical crop to the
+  3500-slot blocklist cap (#27).
+
+### Fixed
+
+- **core**: `bm25_filter` document-frequency now counts distinct documents per
+  term, not raw occurrences — a term repeated inside one doc could inflate
+  `df` past `n/2` and flip IDF negative, penalizing the very chunks that
+  matched the query (hurt `op=markdown` pruning and `extract` bm25 mode).
+- **core**: `build_clean_js` selector list uses a leading comma — the default
+  (`exclude_social=false`) previously emitted a trailing comma that made
+  `querySelectorAll` throw a SyntaxError, breaking the clean-text path.
+- **core**: `batch_map`/`pdf_extract_batch` return early on empty input instead
+  of panicking (`urls[0]` index-out-of-bounds / `chunks(0)`).
+- **core**: CDP backend — consistent `active → tabs` lock order (removes a
+  deadlock inversion between `register_tab` and `active_session`/`close_tab`),
+  and a 30s response timeout so one unanswered command can't hold the
+  connection mutex forever.
+- **core**: `launch` reaps the killed child (`wait()` in `Drop`) so long-lived
+  parents no longer accumulate zombies, and `install_chrome` finds the macOS
+  "Google Chrome for Testing" executable name.
+- **core**: `install` `.ok` markers are only trusted when the destination file
+  still exists, the download progress loop terminates when all workers finish
+  (a permanently-failing chunk no longer spins forever), and `last_pct` is
+  actually updated.
+- **mcp**: the guest Chrome launch guard is only `mem::forget`-ed after a
+  successful CDP attach — a failed attach now kills the guest instead of
+  leaking an orphan.
+- **cli**: `webrain fetch` truncates text on a UTF-8 char boundary
+  (`floor_char_boundary`) instead of panicking on non-ASCII pages.
+- **core**: `video` — `Detail::Transcript`/`max_frames:0` now produce zero
+  frames (the `.clamp(1, …)` made them impossible), the uniform-fps fallback
+  honors `start`/`end` (`-ss`/`-to`), ffmpeg exit status is checked, the WAV
+  payload is labeled `audio/wav` (not `audio/mpeg`), and `watch_batch` gives
+  each worker a distinct work dir (concurrent runs clobbered the same
+  `watch_<pid>` dir) and recovers from a poisoned mutex.
+- **core**: `serp` — `brave` removed from `HTTP_ENGINES` (it's a browser-only
+  SPA that plain-HTTP always parsed to zero), `serpapi_google` sends the
+  `start` offset for pagination, protocol-relative `//host` links resolve
+  correctly (not `google.com//host`), and the post-browser serpapi fallback
+  honors `opts.fallback`.
+- **core**: `serp` — **auto is relevance-filtered**: results sharing no
+  significant query token with the query are dropped at the source (per-page in
+  `http_search`/`browser_search` and at the merge), so a junk page from a
+  flagged/GeoIP'd IP (bing's unrelated "results" for "tokio rust") can no
+  longer fill `limit` ahead of duckduckgo's real results; `auto` merges
+  `duckduckgo → bing` (ddg first) and HTTP-fetches only those two — google/
+  brave join the merge via the browser **only when a CDP engine is attached**
+  (sequential — one browser, one active tab, and Google walls simultaneous
+  /search requests; 20s-capped each; never HTTP-polled pointlessly) and are
+  reported `skipped` otherwise; a failed/empty single engine now reports the
+  fallback winner as its source.
+- **core**: `serp` — **google's URL is now a real-browser URL**: `num` and `lr`
+  (language-restrict) are gone — google answers those with an empty "did not
+  match any documents. Reset search tools" page on automated/flagged sessions —
+  and `start` is omitted on page 0 (canonical). That soft-block is now detected
+  as a wall so the retry loop fails fast instead of burning 4 attempts on an
+  empty page. Results are honest about provider: a fallback reply carries
+  `source` (actual provider, e.g. `engine: google, source: duckduckgo`) in the
+  JSON, CLI, and MCP envelope, so substituted results can never be mislabeled.
+- **core**: **consent dismissal can no longer click a search result** — Google's
+  app shell `#yDmH0d` (present on every google page) was in the consent-gate
+  selector, and the AX last-button fallback then clicked an arbitrary result
+  link on dialog-less pages ("consent=clicked:Tokyo provides an asynch" — the
+  tab navigated to YouTube mid-search → parse 0). The gate now requires a real
+  dialog/banner container, and the blind last-button fallback fires only when a
+  strict overlay (role=dialog / aria-modal / consent form / onetrust) matched.
+- **core**: `serp` HTTP engines retry a 2xx page that parses to zero results —
+  engines under rate-limit pressure (bing intermittently) serve an empty /
+  JS-shell page with HTTP 200, which used to short-circuit straight to
+  "0 results → provider fallback" on the first try. The shared
+  `http_search_page` now retries within the existing budget before giving up,
+  so a transient empty page doesn't immediately mislabel the engine as broken.
+- **core**: `serp` google pagination budgets pages on ~7 results/page instead
+  of 10 — google serves ~6-7 organic results per page once video carousels /
+  AI overviews / featured snippets crowd the SERP, so `--limit 20` used to
+  stall at ~13 (2 pages × 6.5). Ceiling division now fetches enough pages to
+  reach the limit (20 → ~19, 50 → ~50).
+- **core/mcp/cli**: `serp` bing is now browser-backed like google/brave —
+  bing's plain-HTTP endpoint caps at ~10 results/page and ignores `first` on
+  rate-limited/GeoIP'd IPs (anomaly page or same-page repeat), so bing now
+  routes through the real-browser backend (`first=1,11,21…` pagination) and
+  auto-launches/attaches Chrome like the other browser engines. On an
+  unblocked IP bing paginates; on a locked IP it still returns the real page-1
+  results and falls back cleanly.
+- **core/mcp/cli**: `serp` bing falls back to pure HTTP when no Chrome can be
+  launched (verified on WSL Linux — `failed to spawn Chrome` no longer a hard
+  error for bing; google/brave still require a browser). The Linux-only
+  dead-code warning on `cmd_exists` is gone (cfg-gated to its macOS/Windows
+  callers).
+- **core**: `serp` bing's browser path makes ONE attempt (not 4) — an empty
+  bing page usually means "no results for this query/IP" rather than a
+  transient wall (the HTTP fallback retries those), so a no-result bing query
+  now falls back to the chain in ~6s instead of burning ~30s in the
+  google/brave wall-clearing loop.
+- **core/mcp/cli**: OCR-review findings — (1) MCP `webrain_serp` bing now runs
+  the pure-HTTP path directly when no Chrome can be attached/launched (the
+  shared dispatch previously re-attempted the browser and hard-errored);
+  (2) the google/auto no-stealth flag is scoped to the serp call and cleared
+  after, so it no longer silently disables stealth_js for later browse/batch/
+  scrape calls in the same MCP session; (3) CLI sets `WEBRAIN_NO_STEALTH` for
+  the default `serp` invocation and case-variant/`--engine=` spellings, not
+  just literal `--engine google|auto`; (4) the guest-Chrome launch message is
+  `json_out`-gated (pure-JSON contract); (5) zip extraction rejects Windows
+  drive-prefixed absolute paths (`C:/…`) that `Path::join` treats as absolute;
+  (6) launch readiness falls back to a port-open probe for non-Chrome engines
+  (obscura/lightpanda have no HTTP `/json/version`).
+- **docker**: the release build no longer loses the binary — the cargo `target`
+  cache mount is ephemeral (its contents never reach the image layer), so the
+  binary is now copied out within the same `RUN`, and the target cache is keyed
+  by `$TARGETARCH` so multi-arch builds don't mix amd64/arm64 artifacts.
+- **core/cli**: the three `if let … && let …` chains (introduced by the clippy
+  auto-fix) are rewritten as nested `if let` — let-chains need Rust 1.88 but
+  the workspace MSRV is 1.85; the collapsible-if lint is allowed at the one
+  retained site with an explanatory comment.
+- **core/scripts/ci/docs**: second OCR-review batch — (1) `vault` retries the
+  loser-side key read (transient 0-byte/partial file on create-race no longer
+  hard-errors); (2) robots.txt `Disallow` matches path+query (RFC 9309); (3)
+  2captcha poll is POSTed (key never in a query string); (4) `cdp` close_tab
+  holds both locks for the active reassignment (no race), Enter on a form
+  dispatches a submit event first (SPA `onSubmit` runs, native submit only if
+  not canceled), and print/screenshot get a 120s budget instead of the flat
+  30s; (5) `watch` workers get per-worker `out_dir` subdirs even under an
+  explicit base, and the ffmpeg fallback uses `-t` (duration) instead of
+  `-to` before `-i`; (6) engine-cache version ordering parses the full dotted
+  version (`0.9.0` < `0.10.0`) and mac CfT search depth is 6; (7) CLI serp
+  error returns `Err` (drops the `--fresh` Chrome) instead of `exit(1)`;
+  (8) `check_docs_orphans.py` actually validates `.mdx` files; (9) `release.yml`
+  keeps the changelog H1 at the top and tolerates a rejected changelog push;
+  (10) `build-skill.sh` pipefail-safe grep, correct pathspec, SKILL.md presence
+  check, dist exclusion, and repo-guard ordering; (11) `install.sh`/`install.ps1`
+  reject non-executable (HTML-200) downloads (ELF/Mach-O + MZ magic) and clean
+  up temp files on any exit; (12) docs landing JS honors keyboard tab selection,
+  stops the parallax rAF/listeners when the view is gone, and bails stale
+  streamLines runs via the generation token.
+- **core/mcp/cli**: `serp` `limit` raised **1..=50 → 1..=100** (pagination
+  budget 5 → 10 pages; serpapi already honored 100).
+- **core**: `login` — placeholder substitution is single-pass (a username
+  containing "PASS" no longer gets corrupted), a missing captcha token bails
+  with `waiting_for_human` instead of submitting a guaranteed-403 empty token,
+  and the 2FA response reports `totp_filled`.
+- **core**: `launch` — the CDP wait loop surfaces an early child exit via
+  `try_wait()` (no more misleading 20s timeout), and `service`/`profile` names
+  are validated so `/` or `..` can't escape the profiles root.
+- **core**: `install` — DLL/backend copy errors propagate (silent broken
+  installs are gone), cached engines sort by numeric version (`chrome-99` <
+  `chrome-100`), and each download chunk has a 60s timeout.
+- **core**: `vision` — embedding responses validate count/values (no more
+  panic on `vecs[i]` or silent `0.0` garbage), an empty embed result errors,
+  and the vector/caption store is mutually exclusive per id with atomic saves.
+- **core**: `crawl` robots.txt now matches the URL path (absolute links were
+  silently exempt from `Disallow`), and `reload_hard` drops the non-standard
+  `location.reload(true)` boolean.
+- **cdp**: the JS Enter fallback submits the form natively (`el.form.submit()`),
+  and consent-button quads use `backendNodeId` (the old `nodeId` call always
+  failed, so consent dialogs were never clicked).
+- **mcp**: `webrain_eval_in_frame`, the batch `op=eval` `js` param, and the
+  `drag` x1/y1/x2/y2 params are now in `list_tools` (previously
+  undiscoverable to schema-driven clients).
+- **core**: `throttle_tick` computes the plain average (the min/max/floor
+  clamp chain could produce non-monotonic delays).
+- **core**: `visible_text_len` skips `<script>/<style>/<noscript>` bodies
+  (their raw JS/CSS no longer inflate the visible-text budget).
+- **core**: engine downloads use a per-call unique temp name (concurrent
+  installs can't clobber each other's `.part` files) and clean up sidecars.
+- **core**: `detect_chrome_error` requires a corroborating interstitial phrase
+  for body-only error codes (a title that merely contains e.g. `ERR` is no
+  longer misread as a Chrome error page).
+- **mcp**: `webrain_watch` runs off the executor thread (`spawn_blocking`) — a
+  long watch no longer stalls other MCP requests, and the in-flight session
+  table is capped at 64 sessions (evicts the oldest instead of leaking).
+- **cli**: `webrain setcookies` accepts both the bare cookie array and the
+  wrapped `{"count": N, "cookies": [...]}` shape.
+- **core/cdp**: the captcha widget-claim JS returns the result object directly
+  — it ended with `JSON.stringify(...)`, so `eval_js` (returnByValue) yielded a
+  String and the cross-origin CDP click on the claimed captcha iframe was dead
+  code (only the in-page `#cf-turnstile` fallback ran). The trusted iframe
+  checkbox click now actually fires.
+- **core/cdp**: `ELEMENTS_JS` emits a unique selector per element — id/class
+  are CSS-escaped, and id/class-less elements get a body-relative
+  `nth-of-type` chain instead of a bare tag name (a bare `input` resolved via
+  `DOM.querySelector` to the FIRST match, so `set_file_inputs` could set files
+  on the wrong node).
+- **core/cdp**: the network block list is re-applied on every navigation —
+  `Network.setBlockedURLs` replaces the session list, so a page navigated with
+  `disable_resources`/`block_trackers` previously left those patterns sticky
+  for every later default navigation.
+- **core**: `detect_antibot` now requires TWO corroborating markers for generic
+  phrases (`forbidden`, `access denied`, `just a moment`) — a support article
+  that merely mentions one is no longer misread as a blocked/challenge page;
+  and `crippled` is gated on element-extraction success (an empty `elements`
+  from a failed eval can't mislabel a healthy page as a bot-limited shell).
+- **core**: the 2captcha proxy is validated up-front (an unparseable URL, a
+  missing port, or an unknown scheme fails loudly instead of silently dropping
+  the proxy and wasting a paid solve), credentials are percent-decoded, and
+  `socks4`/`socks4a` map to SOCKS4 (were mislabeled SOCKS5).
+- **core**: `vault::set`/`set_username`/`remove` serialize the read-modify-write
+  cycle with an in-process mutex — two concurrent mutations can no longer read
+  the same snapshot and have the last `save_entries` drop the other's entry.
+- **core**: `launch` waits for the CDP signature (`GET /json/version` →
+  `webSocketDebuggerUrl`), not just an open TCP port — a foreign listener that
+  grabs the port between check and bind can no longer be mistaken for the
+  spawned engine.
+- **core/cdp**: the first-attach path is serialized (two concurrent
+  `ensure_page_attached` calls could each attach a separate page target,
+  creating a duplicate tab and repointing `active`), and `click`/`type_text`/
+  `hover` surface a stale-element error instead of a silent no-op.
+- **core**: `crawl` fetches robots.txt off the executor with the 30s-timed
+  pooled agent — a hung robots server can no longer stall the async worker
+  indefinitely (a bare `ureq::get` had no timeout).
+- **mcp**: `http_fetch` (fetch/search), `pdf_images`, and `vault::list` run off
+  the executor (`spawn_blocking`); serp's `http_search`/`serpapi` and vision's
+  `ask_viewport` provider chain are likewise off-executor (up-to-120s blocking
+  HTTP no longer ties up a tokio worker).
+- **mcp**: serp google's stealth-off is now a per-backend `no_stealth` flag on
+  `CdpBackend` — the old `std::env::set_var("WEBRAIN_NO_STEALTH")` from a
+  concurrent handler was an edition-2024 data race and permanently disabled
+  stealth for every session in the process.
+- **core/cdp**: `ELEMENTS_JS`/`LINKS_JS` now live on the `BrowserBackend`
+  trait (`browser.rs`) instead of inside the CDP backend — the shared
+  `snapshot` path no longer reaches into `backends::cdp`, so any backend can
+  supply its own extraction script and the crippled gate sees the trait's
+  contract (#38).
+- **core**: `login` gate/captcha probe failures are observable — the evaluate
+  result is matched and the error is logged (`tracing::debug!(error=…)`)
+  instead of being silently dropped behind an `unwrap_or(false)` (#46).
+- **core**: `vision::index_current_page` runs the blocking embed/store off the
+  executor (`spawn_blocking`) — a large page no longer stalls other MCP
+  requests on the tokio worker (#99).
+
+### Changed
+
+- **core/mcp/cli**: clippy `--workspace --all-targets` is clean (zero warnings)
+  — doc-comment list/continuation fixes, `sort_by_key` for engine discovery,
+  explicit `.truncate(false)` on the pre-allocated `.part`, `VectorStore::is_empty`,
+  `#[allow(clippy::too_many_arguments)]` on the two 8-arg public APIs, and the
+  `surface_tests` module moved to the end of `tools.rs` (items-after-test-module).
+- **docker**: base images pinned to concrete minors (`rust:1.85-alpine`,
+  `alpine:3.21`), the build copies only the workspace manifests + crate
+  sources instead of the whole repo, and BuildKit cache mounts reuse the
+  cargo registry + target dirs across builds. (Running as non-root is
+  deferred — Alpine Chromium needs `--no-sandbox`, which `launch.rs` doesn't
+  pass yet.)
+- **cargo**: workspace tokio narrowed from `features = ["full"]` to the
+  feature set the crates actually use (rt, net, time, io-util, sync, macros,
+  process, signal, fs), and the direct `lopdf` pinned `0.44` → `0.41` to match
+  `pdf-inspector`'s transitive version — one PDF stack instead of two (the
+  extraction code already targeted 0.41's API).
+- **ci**: PR-lint runs on `pull_request_target` (fork PRs get a read-only
+  `GITHUB_TOKEN` under `pull_request`, so the commit-status + sticky-comment
+  steps failed with 403 — safe here, no PR head code is executed); the release
+  workflow gains a concurrency group + job timeouts; `ci.yml` gains a docs
+  orphan check (`.github/scripts/check_docs_orphans.py`) that enforces the
+  `.mintignore` promise — every `docs/` `.md`/`.mdx` must be in `docs.json`
+  navigation or listed in `.mintignore`.
+- **cli**: `webrain upgrade` is one careful cross-platform flow — Homebrew /
+  Scoop delegate to the package manager detached (this process exits so it
+  never holds the binary); raw installs self-update in place. Running
+  instances handled per-OS: Windows stops only same-exe siblings (never an
+  unrelated `webrain*` process or a second install), Unix swaps atomically
+  and warns that a still-running server keeps the old version until restart.
+
+### Docs (landing + README + guides)
+
+- **docs**: landing gains a cosmic starfield background (galaxy, re-tuned from
+  a stars.js concept to the electric-cyan/OLED palette) — twinkling white +
+  cyan stars, three slow orbit "node" dots, a rare shooting star, masked to
+  fade below the fold. Pure CSS motion (opacity/rotate) gated behind
+  `prefers-reduced-motion: no-preference`; built from DOM spans so the
+  Mintlify custom-page sanitizer keeps it (a `<canvas>` gets stripped); never
+  runs on phones; self-healing like the rest of the motion layer.
+- **docs**: the SERP showcase is now capability-honest (per the SERP claims
+  review): the demo runs `engine=duckduckgo` (which genuinely reproduces the
+  shown results over plain HTTP) instead of claiming `auto` fetches google in
+  parallel; the "3 engines, no browser at all" stat is now "2 browserless by
+  default (duckduckgo · bing)"; the copy notes `auto` is duckduckgo + bing in
+  practice.
+- **docs**: `AGENT_DECISION_GUIDE` SERP row fixed — `engine=auto` fires the
+  HTTP engines (ddg · bing · google · brave) concurrently; google/brave only
+  use the browser path when requested explicitly (`engine=google`/
+  `engine=brave`), matching the code (was: "google joins via the browser
+  path" for auto, which is not implemented).
+- **docs**: README tool table now lists all **16** tools (added `webrain_serp`),
+  plus a structured-search feature bullet, `webrain serp` CLI entry, and a
+  duplicate Docker-prereq line removed; landing "fifteen" → "sixteen".
+- **mcp**: the embedded `AGENT_GUIDE` (served by `webrain_guide`) now says
+  **16 TOOLS** and drops `webrain_eval_in_frame` from the numbered list —
+  it's a legacy dispatch-only executor that was never registered in
+  `list_tools()`, so the guide now matches the actual `tools/list` surface.
+- **docs**: landing gains a "skills & recipes" section (the in-repo
+  `skills/webrain/` playbook: router skill, workflows, prompts, references)
+  and a 6th real-run playground preset ("Real run · drone build" — a 1m43s
+  DeepSeek session: `webrain_serp` discovery → `webrain_batch` 6-source fetch
+  → synthesized build guide); the capabilities-bento stat "15 MCP tools" is
+  now "16" (the last stale count).
+- **docs**: P0 marketing-honesty pass — the "16 intent-based tools" cell now
+  shows all 16 chips (added the missing `serp`); the "63 legacy one-action
+  aliases" claim (the code has 53 dispatch arms / 16 registered) is now
+  number-free and truthful; hero lede "beat captchas" → "clear bot gates"
+  (native path clears non-interactive gates; interactive ones need a human);
+  playground demos labeled illustrative (drone = the real 1m43s run).
+  Art-directed design references for Hero / Proven on real jobs / the
+  capabilities grid saved under `design/landing/` (not yet wired into the
+  page — they match the live tokens).
+- **docs**: the "Proven on real jobs" section gains a "Real operations, end
+  to end" block — two full agent jobs as bento cards: the live skroutz.gr
+  hardware-buy (16 tool calls · 0 challenges · 100% price match · ~$0.04,
+  verdict Acer Helios 16 AI @ 3.699 €) and the multi-source drone-build
+  research (2× serp · 6 sources · 1m43s · 12-part plan). Reuses the existing
+  `.shell` scroll-reveal, so they animate with the same anime.js motion as
+  the rest of the page.
+- **docs**: landing "massive powerful" pass (v4.3) — hero gains a living
+  neural-web spider network behind the terminal coverflow (sanitizer-safe
+  `<path>`/`<rect>` rings + spokes + glowing nodes, two packets travel the
+  rings via `anime.path`, reduced-motion keeps a static hairline
+  constellation); each hero workflow terminal now carries the brand-identity
+  TOOLS rail (`navigate`…`vision`, lit per transcript, JS-injected,
+  self-healing); the skills section moves from a fourth bento to an
+  asymmetric "router hub" layout (prompt → decide → browser/extractor
+  route-map with traveling packets, three cells stacked beside it); the CTA
+  band gains a converging particle stream (pure CSS, reduced-motion-safe).
+  Copy pre-flight: zero visible em/en dashes (Mintlify smartypants turns
+  `--op` into `—op` — the CLI command is now rendered as a JSX string), and
+  metadata lines rationed to ≤1 middle-dot.
+- **docs**: docs-accuracy audit against the 16-tool surface — `quickstart`,
+  `mcp/cursor`, `guides/agent-decision-guide`, and `concepts/runtime-flow`
+  stale "15"/"63-tool" counts → 16 (added the missing `webrain_serp` row to
+  the agent-guide table); `reference/cli` drops the non-existent
+  `webrain snapshot` example and the false click-with-`selector` claim
+  (click is index-based; selectors live on `observe what=html` / `extract
+  mode=schema` / `interact action=wait`); `reference/environment` adds
+  `SERPAPI_API_KEY`, `WEBRAIN_2CAPTCHA_KEY`, `OPENROUTER_API_KEY`,
+  `WEBRAIN_NO_STEALTH`, `WEBRAIN_STEALTH_NOISE`, and `EMBED_MODEL` /
+  `EMBED_API_KEY`; `AGENT_DECISION_GUIDE` tool dialect modernized to the
+  consolidated names (legacy one-action names still dispatch); unreferenced
+  `benchmark-art.png` + `mcp-browser-demo.gif` removed; `.mintignore`
+  completed with `IMPROVE_PLAN.md` + `SERP_CLAIMS_REVIEW.md`.
+
 ## [0.7.3] - 2026-08-15
 
 ### Fixed

@@ -2,17 +2,16 @@
 # Security alerts/updates are enabled separately in the repo Security tab.
 version: 2
 updates:
+  # ponytail: no `labels` — the `dependencies` label doesn't exist on this repo,
+  # and Dependabot won't create it; a nonexistent label breaks PR creation (or
+  # silently skips labeling). The PR title/body already carry the ecosystem.
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels:
-      - dependencies

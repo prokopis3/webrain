@@ -6,15 +6,16 @@ mode: custom
 ---
 
 <div className="landing">
-  <div className="mesh" />
+  <div className="mesh"><span className="mesh-grid" /><span className="mesh-glow" /></div>
+  <div className="galaxy" aria-hidden="true"></div>
 
   {/* Hero — typography-led split, anti-center */}
   <div className="wrap">
     <div className="hero">
       <div>
         <span className="eyebrow"><span className="dot" />Rust · open source</span>
-        <h1>Browser automation <em>for AI agents.</em></h1>
-        <p className="lede">One Rust binary that gives any LLM a real browser. Scrape, beat captchas, and transcribe videos, all on your machine.</p>
+        <h1>Browser automation <em className="grad">for AI agents.</em></h1>
+        <p className="lede">One Rust binary that gives any LLM a real browser. Scrape, clear bot gates, and transcribe videos, all on your machine.</p>
         <div className="cta-row">
           <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
@@ -42,9 +43,38 @@ mode: custom
         </div>
       </div>
       <div className="hero-visual">
+        {/* neural web — living spider network (sanitizer-safe: path/rect only) */}
+        <div className="hero-web" aria-hidden="true">
+          <svg viewBox="0 0 600 460" fill="none">
+            <path className="hw-ring" d="M300 40 a260 190 0 1 1 0 380 a260 190 0 1 1 0 -380" />
+            <path className="hw-ring" d="M300 90 a210 140 0 1 1 0 280 a210 140 0 1 1 0 -280" />
+            <path className="hw-ring" d="M300 135 a160 95 0 1 1 0 190 a160 95 0 1 1 0 -190" />
+            <path className="hw-spoke" d="M300 230 L560 230" />
+            <path className="hw-spoke" d="M300 230 L483.8 95.6" />
+            <path className="hw-spoke" d="M300 230 L300 40" />
+            <path className="hw-spoke" d="M300 230 L116.2 95.6" />
+            <path className="hw-spoke" d="M300 230 L40 230" />
+            <path className="hw-spoke" d="M300 230 L116.2 364.4" />
+            <path className="hw-spoke" d="M300 230 L300 420" />
+            <path className="hw-spoke" d="M300 230 L483.8 364.4" />
+            <rect className="hw-node hw-node-hub" x="296" y="226" width="8" height="8" rx="4" />
+            <rect className="hw-node" x="557" y="224" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="480" y="90" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="297" y="34" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="110" y="90" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="34" y="224" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="110" y="358" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="297" y="414" width="6" height="6" rx="3" />
+            <rect className="hw-node" x="480" y="358" width="6" height="6" rx="3" />
+            <path className="hw-track" d="M300 90 a210 140 0 1 1 0 280 a210 140 0 1 1 0 -280" />
+            <path className="hw-track hw-track-2" d="M300 40 a260 190 0 1 1 0 380 a260 190 0 1 1 0 -380" />
+            <path className="hw-packet" d="M0 -4 a4 4 0 1 1 0 8 a4 4 0 1 1 0 -8" />
+            <path className="hw-packet hw-packet-2" d="M0 -2.6 a2.6 2.6 0 1 1 0 5.2 a2.6 2.6 0 1 1 0 -5.2" />
+          </svg>
+        </div>
         <div className="wf-stage">
           {/* card 0 — public scrape */}
-          <div className="wf-card3d" style={{ '--card': 0 }}>
+          <div className="wf-card3d" style={{ '--card': 0 }} data-tools="navigate observe extract">
             <div className="term workflow-term">
               <div className="term-bar">
                 <span className="term-dots"><i /><i /><i /></span>
@@ -75,7 +105,7 @@ mode: custom
             </div>
           </div>
           {/* card 1 — vault → launch → navigate → session login → batch from session */}
-          <div className="wf-card3d" style={{ '--card': 1 }}>
+          <div className="wf-card3d" style={{ '--card': 3 }} data-tools="vault session navigate batch">
             <div className="term workflow-term">
               <div className="term-bar">
                 <span className="term-dots"><i /><i /><i /></span>
@@ -109,7 +139,7 @@ mode: custom
             </div>
           </div>
           {/* card 2 — batch interact on public pages */}
-          <div className="wf-card3d" style={{ '--card': 2 }}>
+          <div className="wf-card3d" style={{ '--card': 2 }} data-tools="batch interact">
             <div className="term workflow-term">
               <div className="term-bar">
                 <span className="term-dots"><i /><i /><i /></span>
@@ -132,7 +162,7 @@ mode: custom
             </div>
           </div>
           {/* card 3 — dup of card 0 (seamless 3D loop) */}
-          <div className="wf-card3d wf-dup" style={{ '--card': 3 }}>
+          <div className="wf-card3d wf-dup" style={{ '--card': 1 }} data-tools="navigate observe extract">
             <div className="term workflow-term">
               <div className="term-bar">
                 <span className="term-dots"><i /><i /><i /></span>
@@ -167,6 +197,29 @@ mode: custom
     </div>
   </div>
 
+  {/* Live CLI session — typewriter replay (marketing-page port) */}
+  <div className="wrap">
+    <div className="session-term" id="session-term">
+      <div className="term">
+        <div className="term-bar">
+          <span className="term-dots"><i /><i /><i /></span>
+          <span className="term-title">webrain · live CLI session</span>
+          <span className="term-live"><i />live</span>
+        </div>
+        <div className="session-body term-body">
+          <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain mcp">webrain mcp</code></div>
+          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out">✓ MCP server ready · <b>16 tools</b></span></div>
+          <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain_navigate shop.example.com">webrain_navigate shop.example.com</code></div>
+          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out"><b>0 challenges</b> · 24 product cards detected</span></div>
+          <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain_extract mode=autoschema">webrain_extract mode=autoschema</code></div>
+          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out">schema: {'{title, price, url}'} · <b>42 rows</b></span></div>
+          <div className="term-line" data-kind="cmd"><span className="term-prompt">❯</span><code data-cmd="webrain_batch --op fetch · 12 urls">{'webrain_batch --op fetch · 12 urls'}</code></div>
+          <div className="term-line" data-kind="out"><span className="term-prompt" style={{ color: 'var(--faint)' }}>→</span><span className="term-out">12 pages · 2.1s · <b>189 items</b></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   {/* Trust strip — real logos, the one marquee */}
   <div className="wrap">
     <div className="logos">
@@ -185,7 +238,7 @@ mode: custom
     <div className="section" id="try-agent">
       <div className="section-head">
         <h2>Give the scraper LLM a try.</h2>
-        <p>This is the agent loop webrain runs: a plain-language prompt, fifteen intent-based tools, and structured JSON back. Pick a demo or type your own prompt.</p>
+        <p>This is the agent loop webrain runs: a plain-language prompt, sixteen intent-based tools, and structured JSON back. Presets show illustrative output, except the drone one: a real 1m43s run. Pick a demo or type your own prompt.</p>
       </div>
       <div className="try">
         <div className="try-bar">
@@ -199,6 +252,7 @@ mode: custom
           <button className="try-preset" data-demo="batch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Batch interact</button>
           <button className="try-preset" data-demo="watch" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Watch video</button>
           <button className="try-preset" data-demo="serp" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>SERP search</button>
+          <button className="try-preset" data-demo="drone" role="tab" aria-selected="false" onClick={(e)=>{const k=e.currentTarget.getAttribute('data-demo');const shell=e.currentTarget.closest('.try');shell.querySelectorAll('.try-preset').forEach(b=>{const on=b===e.currentTarget;b.classList.toggle('active',on);b.setAttribute('aria-selected',on);});window.__webrain&&window.__webrain.run&&window.__webrain.run(k,null);}}>Real run · drone build</button>
         </div>
         <div className="try-prompt">
           <span className="term-prompt">❯</span>
@@ -296,17 +350,17 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Everything an agent needs to read the web.</h2>
-        <p>Fifteen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
+        <p>Sixteen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
         <div className="shell card-2">
           <div className="core core-grad">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>16 intent-based tools</h3>
-            <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector. Sixty-three legacy one-action aliases still dispatch.</p>
+            <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector, and every legacy one-action alias still dispatches.</p>
             <div className="agent-mini" aria-hidden="true"><span className="am-seg">agent</span><span className="am-arrow">→</span><span className="am-seg">navigate</span><span className="am-arrow">→</span><span className="am-seg">observe</span><span className="am-arrow">→</span><span className="am-seg">extract</span><span className="am-arrow">→</span><span className="am-seg am-json">JSON</span><span className="am-cursor" /></div>
             <div className="tool-chips">
-              <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">guide</a>
+              <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">serp</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">guide</a>
             </div>
           </div>
         </div>
@@ -372,8 +426,57 @@ mode: custom
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
               <div className="stat"><b>3</b><span>browser engines</span></div>
-              <div className="stat"><b>15</b><span>MCP tools</span></div>
+              <div className="stat"><b>16</b><span>MCP tools</span></div>
               <div className="stat"><b>0</b><span>Node runtime</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* Skills & recipes — the playbook that ships with the binary */}
+  <div className="wrap">
+    <div className="section">
+      <div className="section-head">
+        <h2>Skills, recipes, and agent prompts, in the repo.</h2>
+        <p>webrain ships a working agent playbook, not just tools: a routing skill, verified block-bypass workflows, and a ready-to-copy news-research prompt. Clone the repo and load them into any client.</p>
+      </div>
+      <div className="playbook">
+        <div className="shell playbook-hub">
+          <div className="core core-grad">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" /></svg></span>webrain skill</h3>
+            <p className="hub-lede">The router. Load it and it picks the browser, the challenge path, and the extractor for each task, <code>mcp_webrain-*</code> without guesswork.</p>
+            <div className="route-map" aria-hidden="true">
+              <div className="route-node"><b>prompt</b><span>any plain-language ask</span></div>
+              <svg className="route-path" viewBox="0 0 200 60" fill="none"><path className="route-line" d="M10 30 H150" /><path className="route-packet" d="M0 -3 a3 3 0 1 1 0 6 a3 3 0 1 1 0 -6" /></svg>
+              <div className="route-node"><b>decide</b><span>LLM + rule fallback</span></div>
+              <svg className="route-path" viewBox="0 0 200 60" fill="none"><path className="route-line" d="M10 30 H150" /><path className="route-packet" d="M0 -3 a3 3 0 1 1 0 6 a3 3 0 1 1 0 -6" /></svg>
+              <div className="route-node"><b>browser · extractor</b><span>three engines, one CDP</span></div>
+            </div>
+            <div className="cap-tags"><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain">SKILL.md</a></div>
+          </div>
+        </div>
+        <div className="playbook-side">
+          <div className="shell">
+            <div className="core">
+              <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg></span>Workflows</h3>
+              <p>Verified block-bypass recipes: CAPTCHA geometry, feed &amp; news aggregation past WAFs, protected-site end-to-end.</p>
+              <div className="cap-tags"><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/workflows">captcha-solve</a><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/workflows">feed-and-news</a><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/workflows">protected-site</a></div>
+            </div>
+          </div>
+          <div className="shell">
+            <div className="core">
+              <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></svg></span>Agent prompts</h3>
+              <p>A ready news-research agent: copy the prompt into any chat for the optimal tool order and a precise bypass playbook.</p>
+              <div className="cap-tags"><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/prompts">news-research-agent</a></div>
+            </div>
+          </div>
+          <div className="shell">
+            <div className="core">
+              <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="m12 2 10 6.5L12 15 2 8.5 12 2Z" /><path d="m2 12.5 10 6.5 10-6.5" /></svg></span>References</h3>
+              <p>Depth for every decision: browser selection, challenge handling, persistent profiles, extraction matrix, anti-patterns.</p>
+              <div className="cap-tags"><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/references">browser-selection</a><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/references">challenges</a><a className="tool-chip" href="https://github.com/prokopis3/webrain/tree/main/skills/webrain/references">extraction</a></div>
             </div>
           </div>
         </div>
@@ -383,7 +486,7 @@ mode: custom
 
   {/* Proven on real jobs — verified results */}
   <div className="wrap">
-    <div className="section">
+    <div className="section section-proof">
       <div className="section-head">
         <h2>Proven on real jobs.</h2>
         <p>Measured on live sites and documented in the repo. No invented numbers, no benchmark theater.</p>
@@ -394,7 +497,40 @@ mode: custom
         <div className="bench-stat"><b data-count="3"><em className="num">3</em></b><span>browser engines behind one CDP backend, plus a no-browser HTTP path</span></div>
         <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies. One ~22 MB Rust binary on macOS, Linux, and Windows</span></div>
       </div>
-      <p className="proven-note">Every figure is in the repo: the <a href="/guides/agent-decision-guide">agent guide</a> and the <a href="https://github.com/prokopis3/webrain">changelog</a>.</p>
+      <div className="bench-bars">
+        <div className="bar-row">
+          <div className="bar-name">Agent loop · 407 products</div>
+          <div className="bar-track"><div className="bar-fill" data-w="100" style={{ '--fill': '100%', background: 'linear-gradient(90deg,#0e5f78,#38f0ff)' }} /></div>
+          <div className="bar-val"><b data-tv="46000">46,000</b><span>tokens</span></div>
+        </div>
+        <div className="bar-row">
+          <div className="bar-name">Structured extract · zero LLM</div>
+          <div className="bar-track"><div className="bar-fill" data-w="1" style={{ '--fill': '1%', background: 'linear-gradient(90deg,#6b4bd8,#ff5da8)' }} /></div>
+          <div className="bar-val"><b>0</b><span>tokens</span></div>
+        </div>
+        <p className="proven-note">Same store, same 407 products. The extraction engine does the work with no LLM in the loop: zero tokens, zero cost per row.</p>
+      </div>
+      <p className="proven-note">Reproduce the zero-LLM claim on any site: <code>webrain_extract · mode=autoschema</code> → <code>mode=schema</code>. No LLM, no tokens.</p>
+      <p className="proven-note"><b>Real operations, end to end.</b> Two full agent jobs. Every number from the run, not a demo.</p>
+      <div className="bento">
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" /></svg></span>Buy a machine for Qwen3.8</h3>
+            <p>Live skroutz.gr op: navigate 4 targets, batch 2 search pages, eval the benchmark tables, rank by €/tok/s.</p>
+            <div className="cap-tags"><span className="tool-chip">16 tool calls</span><span className="tool-chip">0 challenges</span><span className="tool-chip">100% price match</span><span className="tool-chip">~$0.04</span></div>
+            <p>Verdict → <b>Acer Predator Helios 16 AI</b> · 3.699 €, <b>~100 t/s</b> on Qwen3.8-27B Q4 (interpolated)</p>
+          </div>
+        </div>
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="5" r="1.4" /><circle cx="19" cy="5" r="1.4" /><circle cx="5" cy="19" r="1.4" /><circle cx="19" cy="19" r="1.4" /><path d="M6.4 5h11.2M5 6.4v11.2M19 6.4v11.2M6.4 19h11.2" /></svg></span>Plan a drone build</h3>
+            <p>Multi-source research: serp discovery → one batch over 6 build guides + firmware repos → a synthesized parts-and-code plan.</p>
+            <div className="cap-tags"><span className="tool-chip">2× webrain_serp</span><span className="tool-chip">6 sources · one batch</span><span className="tool-chip">1m43s</span><span className="tool-chip">DeepSeek V4 Flash</span></div>
+            <p>Output → <b>12-part list</b> · $500-650, <b>Betaflight / INAV / ArduPilot</b> + STM32 KiCad repo</p>
+          </div>
+        </div>
+      </div>
+      <p className="proven-note">Every figure is in the repo: the <a href="/guides/agent-decision-guide">agent guide</a>, the <a href="https://github.com/prokopis3/webrain">changelog</a></p>
     </div>
   </div>
 
@@ -403,7 +539,7 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Structured search. Five engines, one tool.</h2>
-        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches the HTTP engines in parallel and merges them.</p>
+        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches duckduckgo + bing in parallel over plain HTTP and merges them — relevance-filtered and deduped (google and brave join the merge when a CDP engine is attached).</p>
       </div>
       <div className="serp">
         <div className="serp-copy">
@@ -425,10 +561,10 @@ mode: custom
           </div>
           <div className="serp-term-body term-body">
             <div className="serp-lines">
-              <div className="term-line serp-ask"><span className="term-prompt">❯</span><span>“tokio rust” · engine=auto · limit=5</span></div>
-              <div className="term-line"><span className="term-prompt">❯</span><code>webrain_serp · engine=auto</code></div>
-              <div className="term-line"><span className="term-ok">✓</span><span>duckduckgo, bing, google fetched in parallel</span></div>
-              <div className="term-line"><span className="term-ok">✓</span><span>merged + deduped · 5 unique results · 2.1s</span><span className="serp-cursor" /></div>
+              <div className="term-line serp-ask"><span className="term-prompt">❯</span><span>“tokio rust” · engine=duckduckgo · limit=5</span></div>
+              <div className="term-line"><span className="term-prompt">❯</span><code>webrain_serp · engine=duckduckgo</code></div>
+              <div className="term-line"><span className="term-ok">✓</span><span>duckduckgo · plain HTTP · no browser</span></div>
+              <div className="term-line"><span className="term-ok">✓</span><span>deduped · 5 unique results · 0.9s</span><span className="serp-cursor" /></div>
             </div>
             <div className="serp-results">
               <div className="serp-row">
@@ -450,7 +586,7 @@ mode: custom
             </div>
             <div className="serp-stats">
               <div className="serp-stat"><b data-count="5"><em className="num">5</em></b><span>engines behind one tool</span></div>
-              <div className="serp-stat"><b data-count="3"><em className="num">3</em></b><span>engines, no browser at all</span></div>
+              <div className="serp-stat"><b data-count="2"><em className="num">2</em></b><span>browserless by default (duckduckgo · bing)</span></div>
               <div className="serp-stat"><b data-count="50"><em className="num">50</em></b><span>max results per call</span></div>
             </div>
           </div>
@@ -593,6 +729,7 @@ mode: custom
   <div className="wrap">
     <div className="section" style={{ paddingTop: '1rem' }}>
       <div className="cta-band">
+        <div className="cta-stream" aria-hidden="true" />
         <h2>Give your agent a browser in five minutes.</h2>
         <p>Install webrain, start the MCP server, and ask your LLM to scrape. No selectors, no wrappers.</p>
         <div className="cta-row">
@@ -613,7 +750,7 @@ mode: custom
         <a href="/comparisons/playwright">vs Playwright</a>
         <a href="https://github.com/prokopis3/webrain">GitHub</a>
       </div>
-      <div className="legal">© 2026 webrain · Open source (MIT) · MCP server for browser automation and web scraping</div>
+      <div className="legal">© 2026 webrain · Open source (MIT). MCP server for browser automation and web scraping</div>
     </div>
   </div>
 

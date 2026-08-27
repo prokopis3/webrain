@@ -4,6 +4,15 @@ How to choose the optimal path for every scraping task: **which browser**, **how
 to handle a challenge**, and **which extraction tool**. Built from the
 browsemind extraction guides + verified live on scrapingcourse.com.
 
+> **Tool naming.** This guide predates the 16-tool consolidation and mostly
+> uses the legacy one-action names (`webrain_fetch_http`,
+> `webrain_extract_json`, `webrain_spider`, `webrain_click`, …). Those still
+> dispatch, but the consolidated surface is the primary dialect:
+> `webrain_scrape`, `webrain_extract(mode=schema)`, `webrain_crawl(mode=spider)`,
+> `webrain_interact(action=click)`, `webrain_observe(what=…)`, … The runtime
+> `webrain_guide` tool and the [Tools Reference](/reference/tools) carry the
+> exact legacy → consolidated map.
+
 ---
 
 ## 1. Browser selection (set `CDP_URL` / pick the backend)
@@ -14,7 +23,7 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 | **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
 | JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material (not full layout parity). |
 | Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target CDP** — `webrain_batch` falls back to sequential single-tab reuse (probe detects it). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
-| Pure static HTML, no JS/auth | **no browser** → `webrain_fetch_http` | 10-100× faster than a browser, zero memory. |
+| Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10-100× faster than a browser, zero memory. |
 
 > **lightpanda vs obscura batch note:** obscura opens N parallel tabs
 > (concurrency = real overlap). lightpanda `serve` holds ONE browser context —
@@ -24,7 +33,7 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 > crawls, lightpanda for footprint/velocity per page (verified: ~2-4s/page on
 > mymarket.gr vs ~12s/page on obscura).
 
-### a11y (webrain_a11y)
+### a11y (observe what=a11y)
 Google/Material widgets are often NOT `button`: dropdowns are `combobox`, menu
 items `option`, segmented controls `radio`/`tab`. `filter` matches name OR value
 OR css_path (case-insensitive); `role` is a substring match, so `role=button`
@@ -45,6 +54,15 @@ nothing). Known upstream gap: obscura's AX role map has no `option` arm
 After `webrain_navigate(url)`, check `challenge` in the response:
 
 - **`challenge: null`** → page loaded normally → go straight to extraction (§3).
+- **`crippled: true`** (title "Attention Required!" / "you have been blocked") →
+  a HARD block, NOT a challenge — a WAF rule (usually IP/ASN) refused outright.
+  Headless Chrome is detectable and triggers it. Fix: real HEADED Chrome +
+  persistent profile + `--disable-blink-features=AutomationControlled`; if the
+  same IP still blocks, route a clean-IP proxy (`proxy` param) or report — do
+  NOT loop. Scope matters: a `/rss/` endpoint can be blocked while the homepage
+  loads; the real feed may be off-domain (FeedBurner) — `eval` the
+  `link[rel="alternate"]` tags or spider `(?i)rss|feed|atom` to find it, then
+  fetch it plain-HTTP (not blocked).
 - **`challenge: cloudflare_challenge`** (title "Just a moment…", `_cf_chl*`,
   `cf-turnstile`) or **`blocked`** (403/forbidden) → the page is gated:
   - **obscura CANNOT pass it** (no layout engine → iframe never renders;
@@ -74,39 +92,39 @@ After `webrain_navigate(url)`, check `challenge` in the response:
 
 | Task says / page is | Tool | Notes |
 |---|---|---|
-| Structured list (products, results) on current page | `webrain_extract_json(base_selector, fields)` | Schema known → use it directly. |
-| **Schema unknown** (from scratch) | `webrain_autoschema` → repeated container, then `webrain_eval` → probe descendant tags/classes, then `webrain_extract_json` | Zero-LLM discovery, no `get_html`. |
+| Structured list (products, results) on current page | `webrain_extract(mode=schema, base_selector, fields)` | Schema known → use it directly. |
+| **Schema unknown** (from scratch) | `webrain_extract(mode=autoschema)` → repeated container, then `webrain_eval` → probe descendant tags/classes, then `webrain_extract(mode=schema)` | Zero-LLM discovery, no `observe(what=html)`. |
 | Specific pages / page numbers | `webrain_navigate` per page, or `webrain_batch` for a range | `?page=N` / `/page/N` / `/pagination/N` |
 | Many URLs / pages 1..N / catalog | `webrain_batch(op=extract, urls=[...], concurrency=8)` | Fastest for pagination; one call, parallel tabs. |
 | **URLs unknown** (discover first) | `webrain_eval` → read pagination `href`s structurally (same-prefix numeric links + next/prev; **no class assumptions**), derive range, then `webrain_batch` | Proven 5-step flow, see §4. |
-| Entire site / follow links | `webrain_spider` | BFS/DFS crawl. Args: `allow`/`deny` URL regex (prune /cart, /login, images at crawl time), `retry`, `delay_ms`, `autothrottle` (adaptive per-domain delay, backs off when blocked), `crawldir` (checkpoint/resume for long crawls), `crawl_timeout_secs`. |
-| **Site has a sitemap** (discover ALL urls first) | `webrain_sitemap(url)` → `{urls, count}` | Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Feed the urls into `webrain_batch` for a full crawl. |
+| Entire site / follow links | `webrain_crawl(mode=spider)` | BFS/DFS crawl. Args: `allow`/`deny` URL regex (prune /cart, /login, images at crawl time), `retry`, `delay_ms`, `autothrottle` (adaptive per-domain delay, backs off when blocked), `crawldir` (checkpoint/resume for long crawls), `crawl_timeout_secs`. |
+| **Site has a sitemap** (discover ALL urls first) | `webrain_crawl(mode=sitemap, url)` → `{urls, count}` | Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Feed the urls into `webrain_batch` for a full crawl. |
 | **N interactive sites at once** (load-more / infinite-scroll / form fill) | `webrain_batch(op=interact, urls=[...], interaction=<async JS>, base_selector?, fields?, concurrency=N)` | One call replaces N serial agent loops: the interaction JS runs in PARALLEL tabs, each doing its own waits, then optionally extracts. See `interaction` examples in §4b. |
 | **Per-proxy isolation / spread across browsers** | `webrain_batch(op=extract|fetch|interact, urls=[...], cdp_urls=["http://127.0.0.1:9222","http://127.0.0.1:9224",...])` | Round-robins URLs across N CDP backends — each browser = own proxy/cookies/fingerprint = N exit IPs in one call, no subagents. |
 | **N independent sites / more throughput / different engines** | **delegate** — spawn one subagent per browser/site-group, each with its own `CDP_URL` (see §4c) | One browser already parallelizes inside via `webrain_batch concurrency=N`; delegate *across* browsers for scale. |
-| **Huge site-wide crawl** | **delegate** — shard by subdomain/section, one `webrain_spider` per subagent (each its own `crawldir` for checkpoint/resume) | See §4c. |
+| **Huge site-wide crawl** | **delegate** — shard by subdomain/section, one `webrain_crawl(mode=spider)` per subagent (each its own `crawldir` for checkpoint/resume) | See §4c. |
 | **Persist a batch to disk** | `webrain_batch(..., output="output/my_crawl.json")` | Writes the full payload before returning (`written_to` in response) — survives temp-file GC / dropped responses between turns. |
 | Faster/smaller reads on any browser call | `webrain_navigate`/`webrain_batch` args: `network_idle` (wait for no new network), `wait_selector` + `wait_selector_state` (attached/visible/hidden/detached), `disable_resources` (block fonts/images/media), `css_selector` (narrow returned text to one element) | Token + time savers; all default off. |
-| Emails, phones, prices, dates, IDs | `webrain_extract_regex` | Built-in patterns. |
-| JSON-LD / microdata | `webrain_get_jsonld` | Zero cost. |
-| HTML tables | `webrain_table` | |
-| Infinite scroll / feed | `webrain_batch(op=interact, urls=[...], interaction=<scroll/click loop>, base_selector, fields)`; or single-page: `webrain_scan` (auto-scroll) then `webrain_extract_json`; or `webrain_click` "Load More" + re-extract | Dynamic pages: wait for JS to hydrate before extracting. `op=interact` is the parallel multi-page path. |
-| Search engines | `webrain_serp` (structured JSON: position/title/url/snippet — duckduckgo/bing need no browser; google and brave use the connected CDP engine) · `webrain_search` (navigate to the results page) | `webrain_serp` dedupes, paginates (`page`), pins an **en-US market when no `region`** is set (a GeoIP'd IP otherwise serves localized garbage), and falls back across providers; `engine=auto` merges duckduckgo+bing concurrently (google joins via the browser path: auto-launched persistent-profile Chrome, hard-refresh + humanized flow, optional 2captcha solve via `WEBRAIN_2CAPTCHA_KEY`, optional **serpapi.com fallback via `SERPAPI_API_KEY`**). Pass `proxy` to route HTTP engines and the google launch through an HTTP(S)/SOCKS proxy — a clean-IP proxy is the reliable way to beat GeoIP-locked bing/google (they ignore market params on flagged/rotating IPs). |
-| Static page, no browser | `webrain_fetch_http(url)` | |
-| Relevance filter on extracted items | `webrain_bm25(query, items)` | Keep top-k. |
+| Emails, phones, prices, dates, IDs | `webrain_extract(mode=regex)` | Built-in patterns. |
+| JSON-LD / microdata | `webrain_extract(mode=jsonld)` | Zero cost. |
+| HTML tables | `webrain_extract(mode=table)` | |
+| Infinite scroll / feed | `webrain_batch(op=interact, urls=[...], interaction=<scroll/click loop>, base_selector, fields)`; or single-page: `webrain_crawl(mode=scan)` (auto-scroll) then `webrain_extract(mode=schema)`; or `webrain_interact(action=click)` "Load More" + re-extract | Dynamic pages: wait for JS to hydrate before extracting. `op=interact` is the parallel multi-page path. |
+| Search engines | `webrain_serp` (structured JSON: position/title/url/snippet — duckduckgo/bing need no browser; google and brave use the connected CDP engine) · `webrain_search` (navigate to the results page) | `webrain_serp` dedupes, paginates (`page`), pins an **en-US market when no `region`** is set (a GeoIP'd IP otherwise serves localized garbage), and falls back across providers; `engine=auto` fetches **duckduckgo + bing concurrently over plain HTTP** (no browser) and — when a CDP engine is attached — also renders google + brave and merges everything; results are **relevance-filtered** (unrelated junk pages from flagged/GeoIP'd IPs are dropped) and deduped, with a `per_engine` breakdown in the reply. Over plain HTTP only duckduckgo and bing answer reliably (google is JS-gated, brave is an SPA shell), so ask for `engine=google` / `engine=brave` explicitly when you need them — those render in the connected CDP engine (auto-launched persistent-profile Chrome for google, hard-refresh + humanized flow, optional 2captcha solve via `WEBRAIN_2CAPTCHA_KEY`, optional **serpapi.com fallback via `SERPAPI_API_KEY`**). Pass `proxy` to route the HTTP engines and the google launch through an HTTP(S)/SOCKS proxy — a clean-IP proxy is the reliable way to beat GeoIP-locked bing/google (they ignore market params on flagged/rotating IPs). |
+| Static page, no browser | `webrain_scrape(url)` | |
+| Relevance filter on extracted items | `webrain_extract(mode=bm25, query, items)` | Keep top-k. |
 
 **Extraction cascade (cost-ascending, like crawl4ai):** CSS schema → XPath →
-Regex → JSON-LD → (LLM last). If `webrain_extract_json` returns 0 items:
+Regex → JSON-LD → (LLM last). If `webrain_extract(mode=schema)` returns 0 items:
 1. Check the page really loaded (`challenge`/title not a block page).
-2. Re-run `webrain_autoschema` + field probe (selectors may not match DOM).
+2. Re-run `webrain_extract(mode=autoschema)` + field probe (selectors may not match DOM).
 3. If page is a JS SPA that renders late → scroll/wait, then retry.
 
-## Checkpoints on `webrain_spider` — when and how
+## Checkpoints on `webrain_crawl` (mode=spider) — when and how
 
-`webrain_spider(crawldir="<dir>", checkpoint_every=N)` persists `{queue, seen}`
-to `<dir>/checkpoint.json` every N pages, and a later call with the SAME
-`crawldir` resumes from where it stopped. The checkpoint is deleted only on a
-clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
+`webrain_crawl(mode=spider, crawldir="<dir>", checkpoint_every=N)` persists
+`{queue, seen}` to `<dir>/checkpoint.json` every N pages, and a later call with
+the SAME `crawldir` resumes from where it stopped. The checkpoint is deleted
+only on a clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
 
 **Use a checkpoint when:**
 - The crawl is big enough that it might not finish in one call — roughly
@@ -119,8 +137,8 @@ clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
   `max_pages` to continue — the second run resumes, it doesn't restart.
 
 **How (typical flow for a long crawl):**
-1. First call: `webrain_spider(seed_url, crawldir="output/site_crawl", max_pages=50, checkpoint_every=10, crawl_timeout_secs=<your call budget>, ...)`. Run it; if it returns all 50, done. If it stops early (timeout/cap), the checkpoint is left on disk.
-2. Continue: call `webrain_spider(seed_url, crawldir="output/site_crawl", max_pages=200, ...)` — same `crawldir` → resumes the queue, skips already-visited URLs. Repeat raising `max_pages` until the crawl reports a clean finish (checkpoint auto-deleted).
+1. First call: `webrain_crawl(mode=spider, seed_url, crawldir="output/site_crawl", max_pages=50, checkpoint_every=10, crawl_timeout_secs=<your call budget>, ...)`. Run it; if it returns all 50, done. If it stops early (timeout/cap), the checkpoint is left on disk.
+2. Continue: call `webrain_crawl(mode=spider, seed_url, crawldir="output/site_crawl", max_pages=200, ...)` — same `crawldir` → resumes the queue, skips already-visited URLs. Repeat raising `max_pages` until the crawl reports a clean finish (checkpoint auto-deleted).
 3. Each response returns `stats: {elapsed_ms, pages_ok, pages_err, page_ms_total}` — use it to judge whether to continue (pages_ok growing, queue not drained) or stop.
 
 **Gotchas:**
@@ -129,13 +147,14 @@ clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
 - The checkpoint does NOT store extracted items, only crawl state (queue + seen) — persist products separately via `output="..."` on a batch, or read each page as you go.
 - Autothrottle's learned delays are per-crawl (not checkpointed) — a resumed crawl starts throttling fresh.
 
-**HTML is the LAST resort — never default to it.** `webrain_snapshot`
-(text+elements), `webrain_clean` (stripped text), `webrain_eval` (sync JS),
-and `webrain_extract_json`/`table`/`regex` (structure) all return page content
-far cheaper than `webrain_get_html` (raw markup, token-heavy, unreadable to an
-LLM). Call `webrain_get_html` ONLY when the task explicitly asks for HTML
-markup (a scraper spec, a tag/attribute audit) — and if you do, tell the user
-you're pulling HTML and why. Otherwise: snapshot first, always.
+**HTML is the LAST resort — never default to it.** `webrain_observe(what=state)`
+(text+elements), `webrain_observe(what=clean)` (stripped text), `webrain_eval`
+(sync JS), and `webrain_extract(mode=schema|table|regex)` (structure) all return
+page content far cheaper than `webrain_observe(what=html)` (raw markup,
+token-heavy, unreadable to an LLM). Call `webrain_observe(what=html)` ONLY when
+the task explicitly asks for HTML markup (a scraper spec, a tag/attribute
+audit) — and if you do, tell the user you're pulling HTML and why. Otherwise:
+observe state first, always.
 
 ---
 
@@ -149,7 +168,7 @@ STEP 2: webrain_eval → collect pagination hrefs:
         links whose path = current_path + '/' + <numeric>, plus next/prev labels
         (NO hardcoded .px-2/.next-page — derive structurally)
         → max page → build URLs [seed, .../2, .../N]
-STEP 3: webrain_autoschema → repeated container selector (e.g. div.product-item)
+STEP 3: webrain_extract(mode=autoschema) → repeated container selector (e.g. div.product-item)
 STEP 4: webrain_eval → probe first container: descendant tag/class + sample text
         → build fields [{name, selector, type: text|attr}]
 STEP 5: webrain_batch(op=extract, urls=<discovered>, base_selector, fields,
@@ -164,13 +183,13 @@ autoschema/eval unless the schema is already known/verified.
 
 ```
 Page loaded → observe the pagination area:
-  A) Numbered links (1,2,3…)?       → discover links → webrain_validate_urls
+  A) Numbered links (1,2,3…)?       → discover links → webrain_crawl(mode=validate)
                                     → webrain_batch (State I/O pattern)
   B) "Next" button only, no numbers?→ session click loop: click(Next) → extract → repeat
   C) "Load More" / "Show More"?     → click loop (webrain_batch op=interact for many)
-  D) Infinite scroll / feed?        → webrain_scan (or op=interact scroll loop)
+  D) Infinite scroll / feed?        → webrain_crawl(mode=scan) (or op=interact scroll loop)
   E) Direct URL pattern (/page/N)?  → construct URLs → webrain_batch
-  F) Unknown / complex?             → webrain_spider (auto-discovers)
+  F) Unknown / complex?             → webrain_crawl(mode=spider) (auto-discovers)
 ```
 
 ---
@@ -204,7 +223,7 @@ webrain_batch(
   each browser = own proxy/cookies/fingerprint). Use when a site rate-limits by
   IP or you need separate cookie jars — one call, N exit IPs, no subagents.
   When you also need full isolation of *independent interactive sites*, combine
-  with `webrain_open_session` per target + `Mcp-Session-Id` header routing.
+  with `webrain_session(op=open)` per target + `Mcp-Session-Id` header routing.
 - Verified live on scrapingcourse.com: button-click → 132 products,
   infinite-scrolling → products, in a single parallel call.
 
@@ -223,11 +242,11 @@ single browser's `webrain_batch concurrency=N`.
    already parallelizes in-process; delegate *across browsers* when you need
    more throughput or different engines.
 2. **Different engines/roles** — challenge-heavy pages → Chrome subagent
-   (9222), bulk pages → obscura subagent (9224), static → `webrain_fetch_http`
+   (9222), bulk pages → obscura subagent (9224), static → `webrain_scrape`
    subagent (no CDP). Matches the browser matrix (§1).
 3. **Per-proxy / per-IP isolation** — one `CDP_URL` per subagent = each
    browser carries its own proxy/cookies/fingerprint = N exit IPs at once.
-4. **Huge site-wide crawl** — shard by subdomain/section; one `webrain_spider`
+4. **Huge site-wide crawl** — shard by subdomain/section; one `webrain_crawl(mode=spider)`
    per subagent (each with its own `crawldir` for checkpoint/resume).
 5. **Discovery overlapping extraction** — one subagent discovers schema/URLs on
    a new site while others extract from already-known sites.
@@ -247,14 +266,14 @@ reduce browser launches).
 | catalog / "find all" / many urls | links → validate → `webrain_batch` | >~100 urls or mixed engines | URLs across subagents |
 | specific pages (3, 4, 7) | navigate one-by-one | — (never) | — |
 | infinite scroll / load more | `webrain_batch(op=interact)` per site | many interactive sites | one subagent per site-group |
-| whole site | `webrain_spider` | huge / multi-subdomain | one spider subagent per subdomain (own `crawldir`) |
+| whole site | `webrain_crawl(mode=spider)` | huge / multi-subdomain | one spider subagent per subdomain (own `crawldir`) |
 | discovery + extraction overlap | sequential | new site needs schema while others extract | scout subagent + extract subagents |
 
 **Subagent self-heal (give each a fallback chain so it returns data, not
 failure):**
-- extraction: `webrain_fit`/`webrain_flatten` → `webrain_extract_json` →
-  `webrain_eval` → `webrain_annotate`
-- pagination: construct `/page/N` → click Next → scroll → `webrain_scan`
+- extraction: `webrain_observe(what=fit|flatten)` → `webrain_extract(mode=schema)`
+  → `webrain_eval` → `webrain_observe(what=annotate)`
+- pagination: construct `/page/N` → interact click Next → scroll → `webrain_crawl(mode=scan)`
 - anti-bot: on `challenge`, **stop and report** — you re-route to the Chrome
   subagent (the subagent must not burn calls fighting a block).
 
@@ -267,7 +286,7 @@ failure):**
   re-routes that URL to the Chrome subagent.
 
 **Aggregate yourself:** dedupe by url/name (batch endpoints return sliding
-windows), `webrain_bm25` to keep only relevant items, then emit one answer with
+windows), `webrain_extract(mode=bm25)` to keep only relevant items, then emit one answer with
 a count. Subagents may nest (a subagent is just another LLM with webrain MCP)
 and may use `webrain_batch concurrency` inside their own shard.
 
@@ -278,9 +297,10 @@ and may use `webrain_batch concurrency` inside their own shard.
 ```
 STEP 1: webrain_navigate(login_url)
 STEP 2: if challenge field set → chrome way (§2), else continue
-STEP 3: webrain_type(email_index, email); webrain_type(password_index, pwd)
-        (find field indices from navigate/snapshot elements, or webrain_a11y)
-STEP 4: webrain_click(submit_index)
+STEP 3: webrain_interact(action=type, index=<email_index>, text=email); repeat
+        for the password (find field indices from navigate/observe elements, or
+        webrain_observe(what=a11y))
+STEP 4: webrain_interact(action=click, index=<submit_index>)
 STEP 5: webrain_navigate(protected_url) → verify challenge:null + auth marker
         (e.g. "Logout", "Welcome, <user>")
 STEP 6: extract (§3) → done
@@ -308,7 +328,7 @@ webrain auto-selects the best asset for your platform + stealth preference
 These come from running a real 6-source crawl (653 products) and shaving the
 latency that cost an agent the most.
 
-**Internal-link discovery is now free.** `webrain_navigate`/`snapshot` return a
+**Internal-link discovery is now free.** `webrain_navigate`/`webrain_observe(what=state)` return a
 `links` field — deduped same-origin hrefs (≤200). **Scrapling LinkExtractor-quality
 cleaning:** URLs are canonicalized (trailing-slash normalized), fragments
 stripped, non-http(s) schemes dropped (mailto:, javascript:, tel:), 50+
@@ -322,7 +342,7 @@ patterns etc.), capped at your URL budget.
 
 **Read `data`, not `text`, from batch.** `webrain_batch(op=extract|interact)`
 now returns each result's products as a parsed `data` array (same shape as
-single-page `webrain_extract_json`). Parse nothing; `text` is kept only for
+single-page `webrain_extract(mode=schema)`). Parse nothing; `text` is kept only for
 backward compat. Previously the products were a JSON *string* inside `text`,
 which cost repeated `data`/`text` confusion.
 
@@ -338,7 +358,7 @@ beat the interaction loop by ~3× and avoided observer/scroll races entirely.
 content renders — extracting too early yields 0 items. Before extracting, wait
 for DOM growth: poll element count / text length rising with `webrain_wait`
 (a JS growth expression) or `wait_selector` on the data container.
-`webrain_fit`/`flatten`/`extract_json` on an unhydrated shell is the same as
+`webrain_observe(what=fit|flatten)`/`webrain_extract(mode=schema)` on an unhydrated shell is the same as
 0 items (browsemind `_wait_for_js_hydration` borrow).
 
 **`webrain_eval` + async on obscura.** Browser-level `Runtime.evaluate` does not
@@ -356,10 +376,10 @@ the Turnstile recipe above covers it. Summary: stealth → always on, wait-until
 interaction runs in a session where `await` resolves. Sync JS on `webrain_eval`
 is fine.
 
-**`webrain_type` index = the SAME list as `navigate`/`snapshot` elements.**
+**`webrain_interact(action=type)` index = the SAME list as `navigate`/`observe` elements.**
 `type_text` now uses the identical selector as `ELEMENTS_JS`/`click`
 (`a, button, input, select, textarea, [role="button"]`), so the index you read
-from a snapshot maps 1:1 to `webrain_type`. Before the fix it enumerated only
+from a snapshot maps 1:1 to `webrain_interact(action=type)`. Before the fix it enumerated only
 `input/textarea/select` — on a page whose first interactive element is a link
 (like scrapingcourse's CSRF login: `#logo-link` first), the index pointed at
 the wrong field. If a type lands in the wrong box, re-check the page's FIRST

@@ -41,10 +41,6 @@ pub fn chrome_path() -> PathBuf {
             }
         }
     }
-    // CfT fallback only when no real Chrome/Edge is installed.
-    if let Some(p) = crate::install::find_cft_chrome() {
-        return p;
-    }
     #[cfg(target_os = "macos")]
     {
         for cand in [
@@ -71,6 +67,13 @@ pub fn chrome_path() -> PathBuf {
         if let Ok(p) = which(name) {
             return p;
         }
+    }
+    // CfT fallback only when no real Chrome/Edge is installed (must run AFTER
+    // the install-path + PATH checks so CfT/Chromium never wins over a real
+    // browser — CfT is more fingerprintable and Cloudflare withholds Turnstile
+    // tokens from it).
+    if let Some(p) = crate::install::find_cft_chrome() {
+        return p;
     }
     // Last resort — spawn fails with a clear "failed to spawn Chrome" error.
     PathBuf::from("google-chrome")
@@ -129,11 +132,47 @@ pub struct Launched {
 impl Drop for Launched {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        // Reap the child: std Child does NOT wait() in its own Drop, so without
+        // this a long-lived parent would accumulate a zombie per killed Chrome.
+        let _ = self.child.wait();
     }
 }
 
 fn port_open(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// True when `port` actually serves CDP. A plain TCP connect succeeds against
+/// ANY listener, so the wait loop would otherwise declare readiness against a
+/// foreign process that grabbed the port between the check and our engine's
+/// bind. Requiring the CDP signature (GET /json/version → webSocketDebuggerUrl)
+/// means readiness only ever matches the spawned engine.
+fn cdp_ready(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/json/version");
+    // Short 3s budget — this runs inside the 250ms readiness poll; a hung
+    // endpoint must not stall the whole wait loop.
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(3)))
+            .build(),
+    );
+    match agent.get(&url).call() {
+        Ok(resp) => resp
+            .into_body()
+            .read_to_string()
+            .unwrap_or_default()
+            .contains("webSocketDebuggerUrl"),
+        Err(_) => false,
+    }
+}
+
+/// A service/profile name is a single path component — anything containing a
+/// path separator or `..` would escape the profiles root via --user-data-dir.
+fn validate_profile_component(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        anyhow::bail!("invalid profile/service name {name:?} — must be a single path component");
+    }
+    Ok(())
 }
 
 /// Shared engine spawn: spawn `bin`, wait up to 20s for the CDP port, kill on
@@ -150,7 +189,7 @@ fn spawn_and_wait(
         .args(args)
         .spawn()
         .with_context(|| format!("failed to spawn {name} at {}", bin.display()))?;
-    let launched = Launched {
+    let mut launched = Launched {
         port,
         cdp_url,
         profile_dir,
@@ -158,7 +197,24 @@ fn spawn_and_wait(
     };
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        if port_open(port) {
+        // Child died during startup (bad binary, incompatible flags, crash) —
+        // surface the real exit status instead of a misleading 20s timeout.
+        if let Some(status) = launched
+            .child
+            .try_wait()
+            .with_context(|| format!("wait {name}"))?
+        {
+            anyhow::bail!(
+                "{name} exited during startup with {status} (did not open CDP on port {port})"
+            );
+        }
+        // Verify the CDP signature, not just an open TCP port — a foreign
+        // listener on the port must not be mistaken for our engine. But only
+        // Chrome exposes the HTTP /json/version probe; obscura/lightpanda
+        // expose raw CDP over WS (no /json/version), so fall back to a
+        // port-open check for them (the connect/handshake catches a foreign
+        // listener downstream).
+        if cdp_ready(port) || (name != "chrome" && port_open(port)) {
             return Ok(launched);
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -184,6 +240,10 @@ fn launch_chrome_opt(
     if port_open(port) {
         anyhow::bail!("port {port} already has a CDP endpoint — another Chrome is running there");
     }
+    // service/profile are user-supplied and joined into --user-data-dir: a
+    // name containing `/` or `..` would escape the profiles root.
+    validate_profile_component(service)?;
+    validate_profile_component(profile)?;
     let profile_dir = profiles_dir().join(service).join(profile);
     std::fs::create_dir_all(&profile_dir)?;
 
@@ -269,6 +329,8 @@ pub async fn launch_chrome_pipe(
     profile: &str,
     headed: bool,
 ) -> anyhow::Result<tokio::process::Child> {
+    validate_profile_component(service)?;
+    validate_profile_component(profile)?;
     let profile_dir = profiles_dir().join(service).join(profile);
     std::fs::create_dir_all(&profile_dir)?;
     let mut cmd = tokio::process::Command::new(chrome_path());
@@ -301,10 +363,12 @@ pub fn launch_lightpanda(port: u16) -> anyhow::Result<Launched> {
             "lightpanda not found — install the binary (see docs/AGENT_DECISION_GUIDE.md) or set WEBRAIN_LIGHTPANDA"
         )
     })?;
+    // Bind to loopback: an unauthenticated CDP server on 0.0.0.0 would give any
+    // network peer full browser control. CdpBackend connects via 127.0.0.1.
     let args = vec![
         "serve".to_string(),
         "--host".to_string(),
-        "0.0.0.0".to_string(),
+        "127.0.0.1".to_string(),
         "--port".to_string(),
         port.to_string(),
         "--advertise-host".to_string(),
@@ -333,10 +397,12 @@ pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
             "obscura not found — run `webrain install --engine obscura` or set WEBRAIN_OBSCURA"
         )
     })?;
+    // Bind to loopback: an unauthenticated CDP server on 0.0.0.0 would give any
+    // network peer full browser control. CdpBackend connects via 127.0.0.1.
     let args = vec![
         "serve".to_string(),
         "--host".to_string(),
-        "0.0.0.0".to_string(),
+        "127.0.0.1".to_string(),
         "--port".to_string(),
         port.to_string(),
         "--stealth".to_string(),

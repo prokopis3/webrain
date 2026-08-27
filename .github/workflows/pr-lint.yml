@@ -10,10 +10,19 @@
 
 name: PR Lint
 
+# NOTE: keep `pull_request` (NOT `pull_request_target`). Branch protection on
+# main requires the "Lint PR Title" status check, and `pull_request_target`
+# workflows load their file from the BASE branch — until main's copy also uses
+# `pull_request_target`, switching here would leave the required check dead and
+# block every merge. Migrate both copies together in a separate change.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches: [main]
+
+concurrency:
+  group: pr-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -24,9 +33,10 @@ jobs:
   lint-title:
     name: Lint PR Title
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Lint PR title
-        uses: amannn/action-semantic-pull-request@v6
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
         id: lint_pr_title
         with:
           types: |
@@ -82,7 +92,7 @@ jobs:
 
       - name: Post lint result
         if: failure()
-        uses: marocchino/sticky-pull-request-comment@v3
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3
         with:
           header: pr-lint
           message: |

@@ -7,10 +7,13 @@
 // results, reachable from the webrain_serp MCP tool, the `webrain serp` CLI, and
 // any LLM over webrain's MCP transport (stdio or --http).
 //
-// "For all browser engines": duckduckgo/bing/google serve plain HTML → fetched
-// over the pooled no-browser HTTP agent (no browser at all). `brave` is a JS SPA
-// → rendered in whatever CDP engine is attached (Chrome/obscura/lightpanda) via
-// navigate + get_html. `auto` fetches all HTTP engines concurrently and merges.
+// duckduckgo/bing serve plain HTML → fetched over the pooled no-browser HTTP
+// agent (no browser at all). `google`/`brave` are JS-gated → rendered in
+// whatever CDP engine is attached (Chrome/obscura/lightpanda) via navigate +
+// get_html. `auto` fetches duckduckgo+bing concurrently (no browser) and merges;
+// google/brave join the merge when a browser is attached. Every result is
+// relevance-filtered against the query (unrelated junk pages never enter the
+// reply — engines on flagged/GeoIP'd IPs sometimes serve garbage).
 //
 // Recommended features (from the reference app's list) that make sense for a
 // local portable tool: provider fallback, URL dedupe, pagination, safe search +
@@ -51,6 +54,28 @@ pub struct SerpResponse {
     /// Engines that returned zero/errored and were skipped (auto + fallback).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Actual provider that supplied the results — differs from `engine` only
+    /// after a provider fallback (e.g. engine=google, source=duckduckgo).
+    /// Empty for `auto` (the reply is a merged aggregate).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    /// Per-engine outcome breakdown — which engines contributed how many
+    /// results, and which were skipped/empty. Populated for `auto` always;
+    /// single-engine calls report the winner plus any skipped fallbacks.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub per_engine: Vec<SerpEngineReport>,
+}
+
+/// One engine's outcome inside a SERP reply (mainly for `engine=auto`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SerpEngineReport {
+    pub engine: String,
+    /// "ok" (contributed ≥1 relevant result) | "empty" (answered but 0 relevant)
+    /// | "skipped" (errored, timed out, or not attempted — e.g. google/brave
+    /// with no browser attached).
+    pub status: String,
+    /// Results this engine contributed to the reply (after relevance filtering).
+    pub count: usize,
 }
 
 /// Search parameters for serp_search.
@@ -59,7 +84,7 @@ pub struct SerpOpts {
     pub query: String,
     /// duckduckgo | bing | google | brave | auto (all HTTP engines, merged).
     pub engine: String,
-    /// Max results to return, 1..=50.
+    /// Max results to return, 1..=100.
     pub limit: usize,
     /// 0-based results page (per-engine offset).
     pub page: usize,
@@ -95,7 +120,24 @@ impl Default for SerpOpts {
 }
 
 /// HTTP-renderable engines, in fallback/auto preference order.
-const HTTP_ENGINES: [&str; 4] = ["bing", "duckduckgo", "brave", "google"];
+/// NOTE: `brave` is deliberately absent — it's a JS SPA that only renders in a
+/// browser, so http_search("brave") always parses to zero results (it would
+/// silently claim a browser engine contributed nothing). Brave runs via
+/// browser_search when a backend is attached.
+const HTTP_ENGINES: [&str; 3] = ["bing", "duckduckgo", "google"];
+
+/// `auto`'s no-browser engines, in merge-preference order. duckduckgo is the
+/// most reliable plain-HTML SERP; bing is GeoIP-fragile and can serve unrelated
+/// junk on flagged IPs, so it merges second (after relevance filtering).
+const AUTO_HTTP_ENGINES: [&str; 2] = ["duckduckgo", "bing"];
+
+/// `auto`'s JS-gated engines — joined only when a CDP backend is attached.
+const AUTO_BROWSER_ENGINES: [&str; 2] = ["google", "brave"];
+
+/// Cap on one browser engine inside `auto`: a walled google/brave (Brave's PoW
+/// captcha can take ~10-20s to auto-resolve) must never stall the whole merged
+/// reply, so the browser join is best-effort and timed out.
+const SERP_BROWSER_CAP: Duration = Duration::from_secs(20);
 
 /// Build the provider URL for one engine + params.
 fn engine_url(
@@ -152,12 +194,18 @@ fn engine_url(
             let mut u = Url::parse("https://www.google.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            p.append_pair("start", &(page * 10).to_string());
-            p.append_pair("num", &limit.to_string());
+            // Real-browser google URL: NO `num` (10/page default; `num>10` is a
+            // bot signal and often ignored) and NO `lr` (the language-restrict
+            // filter makes google serve "did not match any documents" on
+            // flagged/automated sessions — verified live). `start` only past
+            // page 0 (google's canonical page 0 omits it). `hl`/`gl` pin the
+            // locale without the aggressive `lr` restriction.
+            if page > 0 {
+                p.append_pair("start", &(page * 10).to_string());
+            }
             p.append_pair("safe", if safe { "active" } else { "off" });
             p.append_pair("hl", lang);
             p.append_pair("gl", cc);
-            p.append_pair("lr", &format!("lang_{lang}"));
             drop(p);
             Ok(u.to_string())
         }
@@ -400,6 +448,12 @@ fn google_href(href: &str) -> String {
             return decoded;
         }
     }
+    // Protocol-relative links (//host/path) must resolve BEFORE the single-slash
+    // case — strip_prefix('/') also matches them and produced a bogus
+    // google.com//host/path that got filtered as an internal link.
+    if let Some(rest) = href.strip_prefix("//") {
+        return format!("https://{rest}");
+    }
     if let Some(rest) = href.strip_prefix('/') {
         return format!("https://www.google.com/{rest}");
     }
@@ -574,6 +628,61 @@ fn dedupe_cap(results: Vec<SerpResult>, limit: usize) -> Vec<SerpResult> {
     out
 }
 
+/// Stopwords never count as query tokens for the relevance gate.
+const STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "for", "in", "on", "at", "to", "by", "with", "is", "are",
+    "was", "were", "be", "been", "being", "this", "that", "these", "those", "it", "its", "as",
+    "from", "into", "over", "under", "about", "vs", "via", "no", "not", "do", "does", "did",
+    "what", "who", "when", "where", "why", "how",
+];
+
+/// Significant (non-stopword, len >= 3) lowercase query tokens.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in query.split(|c: char| !c.is_alphanumeric()) {
+        if t.is_empty() {
+            continue;
+        }
+        let t = t.to_lowercase();
+        if t.len() >= 3 && !STOPWORDS.contains(&t.as_str()) && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Does `text` contain any significant query token as a whole word?
+fn contains_query_token(text: &str, tokens: &[String]) -> bool {
+    tokens.iter().any(|t| {
+        text.split(|c: char| !c.is_alphanumeric())
+            .any(|w| !w.is_empty() && w.to_lowercase() == *t)
+    })
+}
+
+/// Junk-page guard: engines on flagged/GeoIP'd IPs sometimes serve unrelated
+/// "results" (bing's identity-theft page for "tokio rust", speedtest pages for
+/// "webrain rust", ...). A result survives only when its title, domain, or URL
+/// shares at least one significant query token with the query. Positions are
+/// renumbered 1-based after filtering. Queries with no significant tokens
+/// (e.g. "ai") pass through unfiltered — there is nothing to judge against.
+fn filter_relevant(results: Vec<SerpResult>, query: &str) -> Vec<SerpResult> {
+    let tokens = query_tokens(query);
+    if tokens.is_empty() {
+        return results;
+    }
+    let mut out: Vec<SerpResult> = Vec::new();
+    for r in results {
+        let hay = format!("{} {} {}", r.title, r.domain, r.url);
+        if contains_query_token(&hay, &tokens) {
+            out.push(r);
+        }
+    }
+    for (i, r) in out.iter_mut().enumerate() {
+        r.position = i + 1;
+    }
+    out
+}
+
 /// Monotonic-ish request id: unix millis + per-process sequence.
 fn request_id() -> String {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -593,10 +702,33 @@ async fn http_search_page(
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
     let mut attempt = 0u32;
+    let url_owned = url.to_string();
+    let proxy = opts.proxy.clone();
     loop {
-        match crate::engines::serp_http_get(url, opts.proxy.as_deref()) {
+        // ureq is blocking — run it off the async executor so the `auto`
+        // join_all fan-out hits the blocking pool instead of tying up (and
+        // serializing on) async worker threads.
+        let u = url_owned.clone();
+        let p = proxy.clone();
+        let res =
+            tokio::task::spawn_blocking(move || crate::engines::serp_http_get(&u, p.as_deref()))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("serp task failed: {e}")));
+        match res {
             Ok((status, body)) if (200..300).contains(&status) => {
-                return Ok(parse_results(engine, &body, opts.limit));
+                let parsed = parse_results(engine, &body, opts.limit);
+                // A 2xx body that parses to ZERO is usually a flaky empty /
+                // JS-shell page an engine serves under rate-limit pressure
+                // (bing intermittently returns one for an otherwise-fine
+                // query), not a genuinely-empty result set. Retry within the
+                // existing budget before giving up; the caller's relevance +
+                // dedupe still handle real empties.
+                if parsed.is_empty() && attempt < opts.retries {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(200 * (1 << attempt))).await;
+                    continue;
+                }
+                return Ok(parsed);
             }
             Ok((status, _)) if attempt >= opts.retries => {
                 return Err(anyhow::anyhow!("{engine} returned HTTP {status}"));
@@ -620,8 +752,8 @@ async fn http_search_page(
 async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     let mut all: Vec<SerpResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // 50 max / ~10 per page; bounded so a hostile engine can't loop forever.
-    let max_pages = (opts.limit / 10).clamp(1, 5);
+    // 100 max / ~10 per page; bounded so a hostile engine can't loop forever.
+    let max_pages = (opts.limit / 10).clamp(1, 10);
     for page in opts.page..opts.page + max_pages {
         let url = engine_url(
             engine,
@@ -632,6 +764,10 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
             opts.limit,
         )?;
         let rs = http_search_page(engine, &url, opts).await?;
+        // Junk-page guard: drop results that share no significant query token
+        // BEFORE counting "fresh" — a page of unrelated results stops the
+        // pagination early instead of filling `limit` with garbage.
+        let rs = filter_relevant(rs, &opts.query);
         let mut fresh = 0usize;
         for r in rs {
             if seen.insert(dedupe_key(&r.url)) {
@@ -663,30 +799,9 @@ fn jitter(a: u64, b: u64) -> u64 {
     a + x % (b - a + 1)
 }
 
-/// Dismiss a Google consent wall / regional dialog is done as a TRUSTED CDP
-/// click on a structurally-picked button (see browser_search) — never JS
-/// `.click()` / DOM removal, and never text matching (localized in every
-/// language).
-
-/// Register the Google human-like init script once per backend process (it is
-/// Render an engine's results page in an attached browser and parse the DOM —
-/// works on every CDP engine (Chrome/obscura/lightpanda); needed for `brave`
-/// and the only path that beats Google's consent/JS wall.
-///
-/// Google goes through the HOMEPAGE → search-box flow (browsemind recipe):
-/// loading the homepage, human-like events (after navigation, before consent),
-/// dismissing consent, TYPING the
-/// query with trusted CDP Input.insertText (Google's controlled input ignores
-/// JS `.value=` + synthetic Event — trusted keys are required to reveal the
-/// search button) and TRUSTED-clicking "Google Search" (never JS Enter, which
-/// Google penalizes). Hitting `/search?q=` directly is a strong bot signal that
-/// reliably trips Google's "unusual traffic" page, so we never use the direct
-/// Dismiss a Google consent wall/regional dialog with a TRUSTED CDP click —
-/// browsemind's ConsentManager recipe: Phase 1 multilingual accept/reject text
-/// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
-/// discovery goes through the accessibility tree + DOM quads
-/// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
-/// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
+/// Multilingual accept/reject strings for Google's consent dialog
+/// (browsemind ConsentManager Phase 1 — never "Sign in"). Scanned by
+/// `consent_button`; see `dismiss_google_consent`.
 const CONSENT_PATTERNS: &[&str] = &[
     "accept",
     "agree",
@@ -721,6 +836,12 @@ const CONSENT_PATTERNS: &[&str] = &[
     "отклонить",
     "απόρριψη",
 ];
+/// Dismiss a Google consent wall/regional dialog with a TRUSTED CDP click —
+/// browsemind's ConsentManager recipe: Phase 1 multilingual accept/reject text
+/// (never "Sign in"), Phase 2 last-button fallback. No page JS runs: button
+/// discovery goes through the accessibility tree + DOM quads
+/// (Accessibility.getFullAXTree → backendDOMNodeId → DOM.getContentQuads), the
+/// click itself is Input.dispatchMouseEvent. Single-shot now (see body).
 async fn dismiss_google_consent<B: BrowserBackend>(backend: &B) -> String {
     // ponytail ultra: fire the TRUSTED click the instant the overlay renders.
     // consent_button is DOM-gated (~1ms when no overlay), so poll fast (150ms)
@@ -745,7 +866,7 @@ async fn browser_search<B: BrowserBackend>(
     engine: &str,
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
-    if engine == "google" || engine == "brave" {
+    if engine == "google" || engine == "brave" || engine == "bing" {
         // Direct search-URL + pagination (the guest-browser flow): navigate
         // straight to engine_url's search URL (google /search?q=..&start=..,
         // brave /search?q=..&offset=..) instead of homepage→type→submit, and
@@ -762,8 +883,18 @@ async fn browser_search<B: BrowserBackend>(
         // → fresh==0 → stop early → the retry/fallback chain takes over.
         let mut all: Vec<SerpResult> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // 50 max / ~10 per page; bounded so a hostile wall can't loop forever.
-        let max_pages = (opts.limit / 10).clamp(1, 5);
+        // google serves ~6-7 organic results per page (video carousels, AI
+        // overviews, featured snippets crowd the rest), so budget pages on ~7
+        // not 10 or --limit 20 stalls at ~13 (2 pages × 6.5). Ceiling division
+        // so --limit 20 gets 3 pages (20→~19-20), --limit 50 gets 8. fresh==0 /
+        // the limit check bound the loop; this is just the ceiling.
+        // bing paginates 10/page via `first` (1, 11, 21…), so budget /10
+        // (google ~6.5-7/page stays /7).
+        let max_pages = if engine == "bing" {
+            (opts.limit / 10).clamp(1, 10)
+        } else {
+            opts.limit.div_ceil(7).clamp(1, 15)
+        };
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
             let url = engine_url(
@@ -800,7 +931,10 @@ async fn browser_search<B: BrowserBackend>(
             // Wait for the results DOM to render (fixed beat — no eval).
             wait_for_results(backend, engine).await?;
             let html = backend.get_html().await?;
-            let rs = dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit);
+            let rs = filter_relevant(
+                dedupe_cap(parse_results(engine, &html, opts.limit), opts.limit),
+                &opts.query,
+            );
             let mut fresh = 0usize;
             for r in rs {
                 if seen.insert(dedupe_key(&r.url)) {
@@ -906,12 +1040,24 @@ async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
         p.append_pair("engine", "google");
         p.append_pair("q", &opts.query);
         p.append_pair("num", &opts.limit.clamp(1, 100).to_string());
+        // serpapi honors `start` up to `num` — page the results like the other
+        // engines (was silently ignored, returning page-0 dupes on --page N).
+        p.append_pair("start", &(opts.page * opts.limit.clamp(1, 100)).to_string());
         p.append_pair("hl", lang);
         p.append_pair("gl", cc);
         p.append_pair("safe", if opts.safe { "active" } else { "off" });
         p.append_pair("api_key", &key);
     }
-    let (status, body) = crate::engines::serp_http_get(u.as_str(), opts.proxy.as_deref())?;
+    // ureq is blocking — off the executor (this fn is called from the async
+    // serp path, incl. the post-browser fallback).
+    let url_s = u.as_str().to_string();
+    let proxy = opts.proxy.clone();
+    let fetched = tokio::task::spawn_blocking(move || {
+        crate::engines::serp_http_get(&url_s, proxy.as_deref())
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("serpapi task failed: {e}")))?;
+    let (status, body) = fetched;
     if !(200..300).contains(&status) {
         return Ok(Vec::new());
     }
@@ -967,11 +1113,13 @@ fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
 /// over plain HTTP (consent/JS shell → zero results), so when a browser is
 /// attached it goes straight to the browser path — the only one that returns
 /// real Google results. Everything else uses HTTP with provider fallback.
+/// Returns (results, skipped, source) — `source` names the engine that actually
+/// supplied the results (differs from `engine` only after a provider fallback).
 async fn specific_engine<B: BrowserBackend>(
     engine: &str,
     opts: &SerpOpts,
     backend: Option<&B>,
-) -> anyhow::Result<(Vec<SerpResult>, Vec<String>)> {
+) -> anyhow::Result<(Vec<SerpResult>, Vec<String>, String)> {
     // serpapi.com paid Google provider (SERPAPI_API_KEY): the reliable way to
     // get MORE than the free engines' ~10-per-page cap — serpapi honors `num`
     // up to 100, so a high limit is best served by serpapi FIRST. For small
@@ -986,7 +1134,7 @@ async fn specific_engine<B: BrowserBackend>(
     if serpapi_first {
         if let Ok(rs) = serpapi_google(opts).await {
             if !rs.is_empty() {
-                return Ok((rs, Vec::new()));
+                return Ok((rs, Vec::new(), "google".to_string()));
             }
         }
     }
@@ -994,7 +1142,8 @@ async fn specific_engine<B: BrowserBackend>(
     // when a browser is attached it goes straight to the browser path — the only
     // one that returns real Google results (browsemind recipe: real Chrome +
     // human-like init + wait-for-results + consent dismiss + data-hveid parse).
-    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave") {
+    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave" || engine == "bing")
+    {
         // Google/Brave intermittently serve a "unusual traffic / not a robot"
         // CAPTCHA page (rate-limited IP — Google /sorry, Brave's PoW "Verify
         // you're not a bot"). A persistent-profile wall usually clears in ~10s
@@ -1002,9 +1151,18 @@ async fn specific_engine<B: BrowserBackend>(
         // walled for minutes — retrying that 4× burns ~60s for nothing. So: two
         // consecutive walled attempts = IP blocked for this session → fall back
         // to the other engines instead of wasting more navigations.
-        let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha|not a bot/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
+        // Google's soft-block for automation is an EMPTY results page
+        // ("did not match any documents. Reset search tools") — not a /sorry
+        // CAPTCHA — so it must count as a wall too, or the retry loop burns 4
+        // attempts (minutes) re-fetching the same empty page.
+        let wall_js = "location.href.indexOf('/sorry') >= 0 || /unusual traffic|not a robot|captcha|not a bot|did not match any documents|reset search tools/i.test(location.href + ' ' + (document.body ? document.body.innerText : ''))";
         let mut walls = 0u32;
-        for attempt in 0..4 {
+        // bing: ONE browser attempt. An empty bing page usually means "no
+        // results for this query/IP", not a transient wall (the HTTP fallback
+        // retries those) — so don't burn the 4×~25s google/brave wall-clearing
+        // loop on a query bing simply has nothing for.
+        let attempts = if engine == "bing" { 1 } else { 4 };
+        for attempt in 0..attempts {
             // Retry in a FRESH TAB — a failed first attempt can poison the
             // tab's session state (per-tab JS/history/risk flags). A human
             // opens a new window/tab after a failed search instead of
@@ -1016,7 +1174,7 @@ async fn specific_engine<B: BrowserBackend>(
             }
             let rs = browser_search(b, engine, opts).await.unwrap_or_default();
             if !rs.is_empty() {
-                return Ok((rs, Vec::new()));
+                return Ok((rs, Vec::new(), engine.to_string()));
             }
             let walled = b
                 .evaluate(wall_js)
@@ -1029,21 +1187,25 @@ async fn specific_engine<B: BrowserBackend>(
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+            if attempt + 1 < attempts {
+                tokio::time::sleep(Duration::from_secs(if attempt == 0 { 10 } else { 3 })).await;
+            }
         }
     }
-    // serpapi as a post-browser fallback (only when it wasn't tried first).
-    if serpapi_ready && !serpapi_first {
+    // serpapi as a post-browser fallback (only when it wasn't tried first AND
+    // fallback is enabled — an explicit --no-fallback must not silently get
+    // serpapi.com results).
+    if opts.fallback && serpapi_ready && !serpapi_first {
         if let Ok(rs) = serpapi_google(opts).await {
             if !rs.is_empty() {
-                return Ok((rs, Vec::new()));
+                return Ok((rs, Vec::new(), "google".to_string()));
             }
         }
     }
     match http_search(engine, opts).await {
-        Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new())),
+        Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new(), engine.to_string())),
         Ok(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
-        Ok(rs) => Ok((rs, Vec::new())),
+        Ok(rs) => Ok((rs, Vec::new(), String::new())),
         Err(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
         Err(err) => Err(err),
     }
@@ -1051,18 +1213,20 @@ async fn specific_engine<B: BrowserBackend>(
 
 /// Fallback chain for a failed/empty specific engine: try the other HTTP
 /// engines, then render the requested engine in a browser if one is attached.
+/// Returns (results, skipped, winner) — `winner` names the engine that supplied
+/// the results (empty when every fallback failed too).
 async fn fallback_chain<B: BrowserBackend>(
     exclude: &str,
     opts: &SerpOpts,
     backend: Option<&B>,
-) -> (Vec<SerpResult>, Vec<String>) {
+) -> (Vec<SerpResult>, Vec<String>, String) {
     let mut skipped = vec![exclude.to_string()];
     for e in HTTP_ENGINES {
         if e == exclude {
             continue;
         }
         match http_search(e, opts).await {
-            Ok(rs) if !rs.is_empty() => return (rs, skipped),
+            Ok(rs) if !rs.is_empty() => return (rs, skipped, e.to_string()),
             Ok(_) => skipped.push(e.to_string()),
             Err(_) => skipped.push(e.to_string()),
         }
@@ -1073,7 +1237,7 @@ async fn fallback_chain<B: BrowserBackend>(
         if let Ok(rs) = serpapi_google(opts).await {
             if !rs.is_empty() {
                 skipped.retain(|s| s != exclude);
-                return (rs, skipped);
+                return (rs, skipped, "google".to_string());
             }
         }
     }
@@ -1084,13 +1248,13 @@ async fn fallback_chain<B: BrowserBackend>(
                 // it was never really skipped; drop it from the skip list so a
                 // successful google run doesn't report `skipped: google`.
                 skipped.retain(|s| s != exclude);
-                return (rs, skipped);
+                return (rs, skipped, exclude.to_string());
             }
             _ => {}
         }
         skipped.push(format!("{exclude} (browser)"));
     }
-    (Vec::new(), skipped)
+    (Vec::new(), skipped, String::new())
 }
 
 /// Run a SERP search. `backend` is optional — only `brave` (and the browser
@@ -1104,20 +1268,86 @@ pub async fn serp_search<B: BrowserBackend>(
     let request_id = request_id();
     let engine = opts.engine.to_lowercase();
 
-    let (results, skipped) = match engine.as_str() {
-        // auto: fire all HTTP engines concurrently, merge, dedupe, cap.
+    let (results, skipped, per_engine, source) = match engine.as_str() {
+        // auto: fire the no-browser engines (duckduckgo, bing) concurrently over
+        // HTTP, then merge + relevance-filter + dedupe + cap. When a CDP backend
+        // is attached, google/brave ALSO render in the browser (sequentially —
+        // one active tab, and Google walls simultaneous /search requests) and
+        // join the merge; without one they're reported skipped, never
+        // HTTP-polled pointlessly.
         "auto" => {
-            let futures: Vec<_> = HTTP_ENGINES.iter().map(|e| http_search(e, opts)).collect();
-            let outcomes = futures_util::future::join_all(futures).await;
+            let mut per_engine: Vec<SerpEngineReport> = Vec::new();
+            let mut skipped: Vec<String> = Vec::new();
+            let http_outcomes = futures_util::future::join_all(
+                AUTO_HTTP_ENGINES.iter().map(|e| http_search(e, opts)),
+            )
+            .await;
             let mut merged: Vec<SerpResult> = Vec::new();
-            let mut skipped = Vec::new();
-            for (e, o) in HTTP_ENGINES.iter().zip(outcomes) {
+            for (e, o) in AUTO_HTTP_ENGINES.iter().zip(http_outcomes) {
                 match o {
-                    Ok(mut rs) => merged.append(&mut rs),
-                    Err(_) => skipped.push((*e).to_string()),
+                    Ok(rs) => {
+                        let count = rs.len();
+                        merged.extend(rs);
+                        per_engine.push(SerpEngineReport {
+                            engine: (*e).to_string(),
+                            status: if count > 0 { "ok" } else { "empty" }.to_string(),
+                            count,
+                        });
+                    }
+                    Err(_) => {
+                        skipped.push((*e).to_string());
+                        per_engine.push(SerpEngineReport {
+                            engine: (*e).to_string(),
+                            status: "skipped".to_string(),
+                            count: 0,
+                        });
+                    }
                 }
             }
-            (dedupe_cap(merged, opts.limit), skipped)
+            if let Some(b) = backend {
+                // SEQUENTIAL, not concurrent: browser_search drives the ONE
+                // active tab/session of the shared CDP backend, and Google walls
+                // simultaneous /search requests from one browser (the codebase
+                // measured fewer results with parallel tabs). Two interleaved
+                // browser flows would race the same tab. The HTTP engines above
+                // stay in parallel — only the browser join is serialized.
+                for e in AUTO_BROWSER_ENGINES {
+                    match tokio::time::timeout(SERP_BROWSER_CAP, browser_search(b, e, opts)).await {
+                        Ok(Ok(rs)) => {
+                            let count = rs.len();
+                            merged.extend(rs);
+                            per_engine.push(SerpEngineReport {
+                                engine: e.to_string(),
+                                status: if count > 0 { "ok" } else { "empty" }.to_string(),
+                                count,
+                            });
+                        }
+                        _ => {
+                            skipped.push(format!("{e} (browser)"));
+                            per_engine.push(SerpEngineReport {
+                                engine: e.to_string(),
+                                status: "skipped".to_string(),
+                                count: 0,
+                            });
+                        }
+                    }
+                }
+            } else {
+                for e in AUTO_BROWSER_ENGINES {
+                    skipped.push(format!("{e} (no browser attached)"));
+                    per_engine.push(SerpEngineReport {
+                        engine: e.to_string(),
+                        status: "skipped".to_string(),
+                        count: 0,
+                    });
+                }
+            }
+            (
+                dedupe_cap(filter_relevant(merged, &opts.query), opts.limit),
+                skipped,
+                per_engine,
+                String::new(), // auto = merged aggregate, no single source
+            )
         }
         "brave" => {
             let b = backend.ok_or_else(|| {
@@ -1126,9 +1356,56 @@ pub async fn serp_search<B: BrowserBackend>(
                      with --remote-debugging-port=9222); duckduckgo|bing|google|auto work without one"
                 )
             })?;
-            (browser_search(b, "brave", opts).await?, Vec::new())
+            let rs = browser_search(b, "brave", opts).await?;
+            let count = rs.len();
+            (
+                rs,
+                Vec::new(),
+                vec![SerpEngineReport {
+                    engine: "brave".to_string(),
+                    status: if count > 0 { "ok" } else { "empty" }.to_string(),
+                    count,
+                }],
+                "brave".to_string(),
+            )
         }
-        e if HTTP_ENGINES.contains(&e) => specific_engine(e, opts, backend).await?,
+        e if HTTP_ENGINES.contains(&e) => {
+            let (results, skipped, source) = specific_engine(e, opts, backend).await?;
+            let mut per_engine: Vec<SerpEngineReport> = Vec::new();
+            if results.is_empty() {
+                if skipped.is_empty() {
+                    per_engine.push(SerpEngineReport {
+                        engine: e.to_string(),
+                        status: "empty".to_string(),
+                        count: 0,
+                    });
+                } else {
+                    for s in &skipped {
+                        per_engine.push(SerpEngineReport {
+                            engine: s.clone(),
+                            status: "skipped".to_string(),
+                            count: 0,
+                        });
+                    }
+                }
+            } else {
+                per_engine.push(SerpEngineReport {
+                    engine: source.clone(),
+                    status: "ok".to_string(),
+                    count: results.len(),
+                });
+                for s in &skipped {
+                    if s != &source {
+                        per_engine.push(SerpEngineReport {
+                            engine: s.clone(),
+                            status: "skipped".to_string(),
+                            count: 0,
+                        });
+                    }
+                }
+            }
+            (results, skipped, per_engine, source)
+        }
         other => {
             return Err(anyhow::anyhow!(
                 "unknown engine '{other}' (duckduckgo|bing|google|brave|auto)"
@@ -1143,6 +1420,8 @@ pub async fn serp_search<B: BrowserBackend>(
         request_id,
         ms: start.elapsed().as_millis() as u64,
         skipped,
+        per_engine,
+        source,
     })
 }
 
@@ -1304,6 +1583,11 @@ mod tests {
             google_href("https://example.com/x"),
             "https://example.com/x"
         );
+        // protocol-relative //host — must NOT resolve to google.com//host
+        assert_eq!(
+            google_href("//example.com/path"),
+            "https://example.com/path"
+        );
         assert_eq!(google_href(""), "");
     }
 
@@ -1387,6 +1671,18 @@ mod tests {
         assert!(g.contains("safe=active"));
         assert!(g.contains("hl=en"), "google en-US lang: {g}");
 
+        // Real-browser google URL (the "did not match any documents" fix):
+        // page 0 must omit `start`, and NO `num`/`lr` ever — both are bot
+        // signals that google answers with an empty-results page.
+        let g0 = engine_url("google", "rust", 0, false, None, 100).unwrap();
+        assert!(!g0.contains("start="), "page 0 omits start: {g0}");
+        assert!(!g0.contains("num="), "no num param: {g0}");
+        assert!(!g0.contains("lr="), "no lr language-restrict: {g0}");
+        assert!(g0.contains("q=rust"), "query kept: {g0}");
+        let g1 = engine_url("google", "rust", 1, false, None, 100).unwrap();
+        assert!(g1.contains("start=10"), "page 1 start offset: {g1}");
+        assert!(!g1.contains("num="), "no num on later pages either: {g1}");
+
         let br = engine_url("brave", "rust", 2, false, None, 10).unwrap();
         assert!(br.contains("offset=2"), "brave page-indexed offset: {br}");
         assert!(
@@ -1434,5 +1730,89 @@ mod tests {
         assert_eq!(parse_serpapi_json(body, 1).len(), 1, "limit respected");
         assert!(parse_serpapi_json(r#"{"error":"bad"}"#, 10).is_empty());
         assert!(parse_serpapi_json("not json", 10).is_empty());
+    }
+
+    fn mk_result(title: &str, url: &str) -> SerpResult {
+        SerpResult {
+            position: 1,
+            title: title.to_string(),
+            url: url.to_string(),
+            domain: domain(url),
+            snippet: String::new(),
+        }
+    }
+
+    #[test]
+    fn relevance_gate_drops_unrelated_junk() {
+        // The exact regression from the demo review: bing served identity-theft /
+        // fireplace junk for "tokio rust" and it drowned duckduckgo's real results.
+        let rs = vec![
+            mk_result("Tokio - An asynchronous Rust runtime", "https://tokio.rs/"),
+            mk_result("The Fire Factory", "https://www.thefirefactory.com/"),
+            mk_result(
+                "Identity Theft Protection",
+                "https://cybernews.com/identity-theft-protection/",
+            ),
+            mk_result(
+                "GitHub - tokio-rs/tokio",
+                "https://github.com/tokio-rs/tokio",
+            ),
+        ];
+        let kept = filter_relevant(rs, "tokio rust");
+        assert_eq!(kept.len(), 2, "junk dropped, real results kept");
+        assert_eq!(kept[0].title, "Tokio - An asynchronous Rust runtime");
+        assert_eq!(kept[0].position, 1, "positions renumbered");
+        assert_eq!(kept[1].url, "https://github.com/tokio-rs/tokio");
+        assert_eq!(kept[1].position, 2);
+    }
+
+    #[test]
+    fn relevance_gate_matches_domains_and_url_tokens() {
+        // "rust" must match rust-lang.org (hyphenated domain) and a URL path.
+        let rs = vec![
+            mk_result("Rust Programming Language", "https://rust-lang.org/"),
+            mk_result("docs", "https://docs.rs/tokio/latest/tokio/"),
+            mk_result("unrelated", "https://example.com/"),
+        ];
+        let kept = filter_relevant(rs, "rust");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].url, "https://rust-lang.org/");
+        let kept2 = filter_relevant(
+            vec![mk_result("docs", "https://docs.rs/tokio/latest/tokio/")],
+            "tokio rust",
+        );
+        assert_eq!(kept2.len(), 1, "URL path token matches");
+    }
+
+    #[test]
+    fn relevance_gate_passes_when_query_has_no_significant_tokens() {
+        // "ai" is too short to judge against; stopwords-only queries pass all.
+        let rs = vec![
+            mk_result("anything at all", "https://example.com/a"),
+            mk_result("more stuff", "https://example.com/b"),
+        ];
+        assert_eq!(filter_relevant(rs.clone(), "ai").len(), 2);
+        assert_eq!(filter_relevant(rs.clone(), "the of").len(), 2);
+        assert_eq!(filter_relevant(rs, "c++").len(), 2);
+    }
+
+    #[test]
+    fn query_tokens_are_significant_only() {
+        assert_eq!(
+            query_tokens("tokio rust"),
+            vec!["tokio".to_string(), "rust".to_string()]
+        );
+        assert_eq!(
+            query_tokens("the rust programming language"),
+            vec![
+                "rust".to_string(),
+                "programming".to_string(),
+                "language".to_string()
+            ]
+        );
+        assert!(query_tokens("ai").is_empty());
+        assert!(query_tokens("c++").is_empty());
+        // deduped + case-insensitive
+        assert_eq!(query_tokens("Rust rust"), vec!["rust".to_string()]);
     }
 }

@@ -2,11 +2,11 @@
 
 <img src="assets/webrain-logo-rounded.png" alt="webrain" width="180" height="180">
 
-# webrain
+# WebRain
 
 **A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.**
 
-Webrain exposes 16 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
+WebRain exposes 16 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
 
 [![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -37,8 +37,9 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **Scrape at scale** — batch pagination + spider with auto-throttle and checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
 - **Structured data without hand-written selectors** — `webrain_autoschema` probes the DOM, then JSON / regex / table extractors read container-level structure.
 - **Stealth login** — real-Chrome profiles with an encrypted local credential vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
-- **Get past challenges** — reads the `challenge` field on every navigate; protected sites use real Chrome + a persistent profile + session (native login).
+- **Get past challenges** — reads the `challenge` field on every navigate; protected sites use real Chrome + a persistent profile + session (native login). Native CAPTCHA/vision v2 (drag, eval_in_frame, vision ask) — no Python sidecar.
 - **See the page** — a11y / semantic tree, snapshots, and vision tiles (screenshot → vector store) for tables and charts.
+- **Structured search** — `webrain_serp` returns typed JSON (`position`/`title`/`url`/`domain`/`snippet`) across duckduckgo · bing · google · brave, deduped, paginated, region-pinned, with proxy + 2captcha + serpapi fallbacks.
 - **Read anything** — PDFs (extract + render), JSON-LD, media, plus `fetch_http` for static pages 10–100× faster than a browser.
 
 ---
@@ -59,7 +60,6 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **OS**: Windows, macOS, or Linux (x86_64 / arm64).
 - **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
 - **Linux**: system libraries for Chrome (list below) before first run.
-- **Docker** — only to run the obscura / lightpanda engines in containers.
 - **Docker** — only to run the obscura / lightpanda engines in containers.
 - **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
 
@@ -279,6 +279,7 @@ webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
 webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
 webrain install watch|whisper|vision [--model]     # local AI stack (whisper + Qwen3-VL-2B)
+webrain serp "<query>" [--engine …] [--limit N]   # structured JSON search (5 engines + auto)
 ```
 
 The 16-tool MCP surface is discovered dynamically — `webrain_guide` lists
@@ -313,6 +314,7 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
 | `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
 | `webrain_search` | Web search (duckduckgo · google · bing · brave) |
+| `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · google · brave · auto (dedupe · paginate · region-pin · proxy · 2captcha) |
 | `webrain_pdf` | PDF work: `op` = page · extract (→ markdown) · render (→ vision tiles) · images |
 | `webrain_download` | Files/media: `engine` = http (stream) · ytdlp (HLS/playlists) |
 | `webrain_watch` | Video → timestamped transcript + frames (no browser; `vision:true` → text captions) |

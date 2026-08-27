@@ -1,6 +1,6 @@
 ---
 title: Agent Decision Guide
-description: Which webrain MCP tool should your AI agent use? Decision table mapping every task — navigate, observe, interact, extract, crawl, batch, PDF, video, sessions — to the 15 webrain tools.
+description: Which webrain MCP tool should your AI agent use? Decision table mapping every task — navigate, observe, interact, extract, crawl, batch, PDF, video, sessions — to the 16 webrain tools.
 ---
 
 # Agent Decision Guide
@@ -22,6 +22,7 @@ runtime by `webrain_guide`.
 | Run many URLs (fetch/extract/interact/eval/screenshot) | `webrain_batch` | `op=…` |
 | Crawl a site (spider, sitemap, scan, validate) | `webrain_crawl` | `mode=…` |
 | Search the web (DDG/Google/Bing/Brave) | `webrain_search` | — |
+| Typed SERP JSON (position/title/url/domain/snippet) | `webrain_serp` | `engine=…` |
 | PDF page / extract / render / images | `webrain_pdf` | `op=…` |
 | Download files (HTTP / yt-dlp), media | `webrain_download` | `engine=…` |
 | Transcribe + describe a video (no browser) | `webrain_watch` | — |
@@ -65,6 +66,9 @@ Turnstile sites see [Protected Websites](/agent/protected-sites) and
 
 **A PDF, a video, a file** → `webrain_pdf` / `webrain_watch` / `webrain_download`.
 
+**Search the web / structured results** → `webrain_search` (navigate to the
+results page) or `webrain_serp` (typed JSON: position/title/url/domain/snippet).
+
 **Screenshots or visual QA at scale** → `webrain_vision` (`op=index` /
 `retrieve`).
 
@@ -80,6 +84,7 @@ Turnstile sites see [Protected Websites](/agent/protected-sites) and
 | "Scrape these 50 URLs" | `webrain_batch` | `op=extract` |
 | "Read the PDF" | `webrain_pdf` | `op=extract` |
 | "Get a transcript + frames of this video" | `webrain_watch` | no browser |
+| "Get the top search results as JSON" | `webrain_serp` | `engine=duckduckgo` |
 | "Log in and keep the session" | `webrain_session` | vault + TOTP |
 
 ## Related
