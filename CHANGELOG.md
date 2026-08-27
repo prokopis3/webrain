@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **deps**: bump `async-trait` 0.1.91 → 0.1.92.
+
 ### Fixed
 
 - **cli**: `webrain vault user` no longer echoes the username back to the
