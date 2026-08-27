@@ -13,6 +13,10 @@ _No unreleased changes yet._
 
 ### Changed
 
+- **docs**: MCP surface count corrected 16 → **17** across landing, README,
+  tools reference, decision guide, and the embedded `AGENT_GUIDE` —
+  `webrain_eval_in_frame` is a separately-registered tool in `list_tools()`
+  (was mislabeled "hidden executor — not in tools/list").
 - **deps**: bump `base64` 0.22 → 0.23 (workspace dependency).
 - **deps**: bump `lopdf` 0.41.0 → 0.42.0 — unifies with `pdf-inspector`'s
   transitive lopdf (drops the duplicate 0.41/0.42 PDF stack).

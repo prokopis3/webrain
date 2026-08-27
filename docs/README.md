@@ -6,7 +6,7 @@ Preview locally with `npx mintlify@latest dev`.
 ## Editing rules
 
 - **One fact, one home.** Canonical numbers stay in sync everywhere — grep
-  before you change one: **16 MCP tools**, **2 browserless engines**
+  before you change one: **17 MCP tools**, **2 browserless engines**
   (duckduckgo · bing; google/brave need the connected CDP engine), **50 max
   results** per `webrain_serp` call (`limit` clamps `1..=50`).
 - **Capability-truthful only.** Never claim behavior the runtime doesn't
