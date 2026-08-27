@@ -1646,6 +1646,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "lopdf"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c"
+dependencies = [
+ "aes 0.8.4",
+ "bitflags 2.13.1",
+ "cbc",
+ "chrono",
+ "ecb",
+ "encoding_rs",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap",
+ "itoa",
+ "jiff",
+ "log",
+ "md-5",
+ "nom",
+ "rand 0.10.2",
+ "rangemap",
+ "rayon",
+ "sha2 0.10.9",
+ "stringprep",
+ "thiserror 2.0.19",
+ "time",
+ "ttf-parser",
+ "weezl",
+]
+
+[[package]]
 name = "lzma-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1953,14 +1984,14 @@ dependencies = [
 
 [[package]]
 name = "pdf-inspector"
-version = "0.1.7"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7475018de0880b394b7cc50f871fac0c010aa411dcd14c64074a3e640a4c05c"
+checksum = "f323996b5c71c5f48860be70c265965135c9bedb39a33271dfc95d5f53dbdb34"
 dependencies = [
  "env_logger",
  "include_dir",
  "log",
- "lopdf",
+ "lopdf 0.42.0",
  "once_cell",
  "rayon",
  "regex",
@@ -3487,7 +3518,7 @@ dependencies = [
  "hmac 0.13.0",
  "htmd",
  "image",
- "lopdf",
+ "lopdf 0.41.0",
  "pdf-inspector",
  "pdfium-render",
  "regex",
