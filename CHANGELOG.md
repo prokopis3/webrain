@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Fixed
+
+- **cli**: `webrain vault user` no longer echoes the username back to the
+  terminal (CodeQL cleartext-log — a username is half a credential).
+
 ## [0.8.0] - 2026-08-27
 
 ### Added

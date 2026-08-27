@@ -876,7 +876,8 @@ fn main() -> anyhow::Result<()> {
                         return Ok(());
                     }
                     webrain_core::vault::set_username(&service, &profile, &username)?;
-                    println!("vault: {service}/{profile} username set to {username}");
+                    // ponytail: don't echo the username back — it's half a credential.
+                    println!("vault: {service}/{profile} username set");
                 }
                 other => println!("unknown vault subcommand: {other} (use: set|list|user|rm)"),
             }
