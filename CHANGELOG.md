@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+### Changed
+
+- **deps**: bump `futures-util` 0.3.33 → 0.3.34.
+
 ### Fixed
 
 - **cli**: `webrain vault user` no longer echoes the username back to the
