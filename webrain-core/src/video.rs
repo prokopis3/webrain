@@ -365,7 +365,10 @@ fn frames(path: &str, dir: &Path, probe: &Probe, opts: &WatchOpts) -> Result<Vec
     let cap = opts
         .max_frames
         .unwrap_or_else(|| frame_budget(probe.duration, opts.detail))
-        .clamp(1, opts.detail.hard_cap().max(1));
+        .clamp(0, opts.detail.hard_cap());
+    if cap == 0 {
+        return Ok(Vec::new()); // Transcript etc.: no frames by contract
+    }
     let outdir = dir.join("frames");
     let _ = std::fs::create_dir_all(&outdir);
     clear_jpgs(&outdir);
@@ -399,6 +402,12 @@ fn frames(path: &str, dir: &Path, probe: &Probe, opts: &WatchOpts) -> Result<Vec
     cmd.arg("-q:v").arg("4");
     cmd.arg(&pattern);
     let out = run(&mut cmd)?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "ffmpeg frame extraction failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
 
     let mut extracted = parse_frame_paths(&outdir, &out.stderr);
     // Uniform-fps fallback when scene detection yields too few frames (reels
@@ -406,10 +415,22 @@ fn frames(path: &str, dir: &Path, probe: &Probe, opts: &WatchOpts) -> Result<Vec
     // would give a single frame). Needs a usable duration to budget the fps.
     if extracted.len() < 4 && opts.detail != Detail::Efficient && probe.duration > 0.0 {
         // Uniform-fps fallback (e.g. no scene cuts, or a weird filter pass).
+        // Reuse the same -ss/-to input bounds as the primary command so the
+        // caller's start/end window is honored (not t=0..end of file).
         clear_jpgs(&outdir);
         let fps = (cap as f64 / probe.duration.max(1.0)).min(2.0);
-        let out = run(std::process::Command::new(tool_path("ffmpeg"))
-            .args(["-hide_banner", "-loglevel", "info", "-y"])
+        let mut fallback = std::process::Command::new(tool_path("ffmpeg"));
+        fallback.args(["-hide_banner", "-loglevel", "info", "-y"]);
+        if let Some(s) = opts.start {
+            fallback.arg("-ss").arg(format!("{s:.3}"));
+        }
+        if let Some(e) = opts.end {
+            // -to is output-only and ignored before -i; bound the input
+            // window with -t (duration) so the end is actually honored.
+            let dur = e - opts.start.unwrap_or(0.0);
+            fallback.arg("-t").arg(format!("{dur:.3}"));
+        }
+        fallback
             .arg("-i")
             .arg(path)
             .arg("-vf")
@@ -418,7 +439,14 @@ fn frames(path: &str, dir: &Path, probe: &Probe, opts: &WatchOpts) -> Result<Vec
             .arg(cap.to_string())
             .arg("-q:v")
             .arg("4")
-            .arg(&pattern))?;
+            .arg(&pattern);
+        let out = run(&mut fallback)?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "ffmpeg uniform-fps fallback failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
         extracted = parse_frame_paths(&outdir, &out.stderr);
     }
     if extracted.len() > cap {
@@ -611,7 +639,7 @@ fn whisper_transcribe(audio: &str, backend: SttBackend) -> Result<Vec<Segment>> 
             );
         }
         body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n")
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
                 .as_bytes(),
         );
         body.extend_from_slice(&bytes);
@@ -1061,10 +1089,10 @@ fn spawn_llama_server_impl(
 }
 
 /// Send evenly-sampled frames to a vision LLM and return per-frame captions
-/// + an overall visual summary as text.
-/// ponytail: cloud targets (Groq qwen3.6-27b) cap at 3 frames (hard limit).
-/// Local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage;
-/// ~256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
+/// plus an overall visual summary as text.
+/// ponytail: cloud targets (Groq qwen3.6-27b) cap at 3 frames (hard limit);
+/// local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage,
+/// about 256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
 fn describe_frames(frames: &[Frame]) -> Result<String> {
     let openrouter = std::env::var("OPENROUTER_API_KEY").ok();
     let openai = std::env::var("OPENAI_API_KEY").ok();
@@ -1211,15 +1239,16 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
             let whisper_thread = s.spawn(|| {
                 if segments.is_empty() && !opts.no_whisper && probe.has_audio {
                     if let Ok(audio) = extract_audio(&video, wd) {
-                        if let Ok(segs) = whisper_local(&audio, wd)
-                            && !segs.is_empty()
-                        {
-                            return (segs, "local".to_string());
-                        } else if opts.stt_backend == SttBackend::Whisper {
-                            if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                                && !segs.is_empty()
-                            {
-                                return (segs, "whisper".to_string());
+                        if let Ok(segs) = whisper_local(&audio, wd) {
+                            if !segs.is_empty() {
+                                return (segs, "local".to_string());
+                            }
+                        }
+                        if opts.stt_backend == SttBackend::Whisper {
+                            if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend) {
+                                if !segs.is_empty() {
+                                    return (segs, "whisper".to_string());
+                                }
                             }
                         }
                     }
@@ -1248,17 +1277,18 @@ pub fn watch(source: &str, opts: &WatchOpts) -> Result<Value> {
         if let Ok(audio) = extract_audio(&video, wd) {
             // Local first — offline/private/free, GPU when present. A missing
             // binary/model falls through to the cloud API (if a key is set).
-            if let Ok(segs) = whisper_local(&audio, wd)
-                && !segs.is_empty()
-            {
-                whisper_segments = segs;
-                whisper_source = "local";
-            } else if opts.stt_backend == SttBackend::Whisper {
-                if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend)
-                    && !segs.is_empty()
-                {
+            if let Ok(segs) = whisper_local(&audio, wd) {
+                if !segs.is_empty() {
                     whisper_segments = segs;
-                    whisper_source = "whisper";
+                    whisper_source = "local";
+                }
+            }
+            if opts.stt_backend == SttBackend::Whisper {
+                if let Ok(segs) = whisper_transcribe(&audio, opts.stt_backend) {
+                    if !segs.is_empty() {
+                        whisper_segments = segs;
+                        whisper_source = "whisper";
+                    }
                 }
             }
         }
@@ -1296,6 +1326,7 @@ fn probe_placeholder() -> Probe {
     Probe::default()
 }
 
+#[allow(clippy::too_many_arguments)] // watch summary: 8 distinct report fields
 fn finish_json(
     source: &str,
     dl: &Path,
@@ -1331,15 +1362,30 @@ pub fn watch_batch(sources: &[String], opts: &WatchOpts) -> Vec<Value> {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, 8);
+    // Distinct work dir per worker: with out_dir=None, watch() derives
+    // `watch_<pid>` from process::id() — identical across workers, so
+    // concurrent downloads/frames would clobber each other. Pre-build the
+    // per-worker opts so the scope closures only borrow (no per-iteration move).
+    let per_worker_opts: Vec<WatchOpts> = (0..workers)
+        .map(|w| WatchOpts {
+            // Per-worker subdir ALWAYS (also under an explicit base out_dir, so
+            // concurrent workers never write the same download/ + frames/ dirs).
+            out_dir: Some(match &opts.out_dir {
+                Some(base) => format!("{base}/worker_{w}"),
+                None => format!("watch_{}_{}", std::process::id(), w),
+            }),
+            ..opts.clone()
+        })
+        .collect();
     let results: std::sync::Mutex<Vec<Option<Value>>> =
         (0..sources.len()).map(|_| None).collect::<Vec<_>>().into();
     let next = std::sync::Mutex::new(0usize);
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        for wopts in &per_worker_opts {
             scope.spawn(|| {
                 loop {
                     let i = {
-                        let mut g = next.lock().unwrap();
+                        let mut g = next.lock().unwrap_or_else(|e| e.into_inner());
                         if *g >= sources.len() {
                             return;
                         }
@@ -1348,19 +1394,20 @@ pub fn watch_batch(sources: &[String], opts: &WatchOpts) -> Vec<Value> {
                         i
                     };
                     let t0 = std::time::Instant::now();
-                    let mut v = match watch(&sources[i], opts) {
+                    let mut v = match watch(&sources[i], wopts) {
                         Ok(v) => v,
                         Err(e) => json!({"source": sources[i], "error": e.to_string()}),
                     };
                     v["ms"] = json!(t0.elapsed().as_millis());
-                    results.lock().unwrap()[i] = Some(v);
+                    // Poison recovery: one worker panicking must not abort the batch.
+                    results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(v);
                 }
             });
         }
     });
     results
         .into_inner()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .into_iter()
         .map(|r| r.unwrap_or_else(|| json!({"error": "watch worker failed"})))
         .collect()

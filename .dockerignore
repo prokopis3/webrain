@@ -10,3 +10,11 @@ scripts
 skills
 *.md
 .github
+# Secrets: keep keys/credentials out of the build context (COPY . . ships it
+# to the builder image layers / cache).
+.env*
+*.pem
+*.key
+*.p12
+id_rsa*
+credentials*

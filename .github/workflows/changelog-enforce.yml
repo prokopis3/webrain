@@ -14,6 +14,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: changelog-enforce-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -22,6 +26,7 @@ jobs:
   enforce-changelog:
     name: Enforce Changelog
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -30,32 +35,35 @@ jobs:
 
       - name: Check for CHANGELOG changes
         id: changelog_check
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           # PR: diff against the base branch; push: the exact pushed range
-          # (github.event.before), falling back to the last commit.
-          if [ "${{ github.base_ref }}" != "" ]; then
-            RANGE="origin/${{ github.base_ref }}...HEAD"
-          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && [ "${{ github.event.before }}" != "" ]; then
-            RANGE="${{ github.event.before }}...HEAD"
+          # (github.event.before), falling back to the last commit. Refs come
+          # via env so shell metacharacters can't inject commands.
+          if [ "$BASE_REF" != "" ]; then
+            RANGE="origin/$BASE_REF...HEAD"
+          elif [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && [ "$BEFORE_SHA" != "" ]; then
+            RANGE="$BEFORE_SHA...HEAD"
           else
             RANGE="HEAD~1...HEAD"
           fi
-          CHANGED=$(git diff --name-only $RANGE | grep -c "CHANGELOG.md" || true)
+          # Compute the diff ONCE and fail explicitly on a git error — the old
+          # `... | grep ... || true` masked a broken RANGE as 'no changes'.
+          DIFF_FILES=$(git diff --name-only $RANGE) || { echo "::error::git diff failed for range $RANGE"; exit 1; }
+          CHANGED=$(printf '%s\n' "$DIFF_FILES" | grep -c "CHANGELOG.md" || true)
           echo "changelog_changed=$CHANGED" >> $GITHUB_OUTPUT
 
           # Check if Rust source files were changed (exclude docs, config)
-          SOURCE_CHANGED=$(git diff --name-only $RANGE | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
+          SOURCE_CHANGED=$(printf '%s\n' "$DIFF_FILES" | grep -cE "^(webrain-core/|webrain-mcp/|webrain-cli/|Cargo\.(toml|lock))" || true)
           echo "source_changed=$SOURCE_CHANGED" >> $GITHUB_OUTPUT
 
-      - name: Fail if changelog missing
-        if: github.actor != 'dependabot[bot]' && steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
-        run: |
-          echo "::error::Rust source changed but CHANGELOG.md was not updated. Add an entry under [Unreleased]. See https://keepachangelog.com for format."
-          exit 1
-
+      # Comment BEFORE the fail step: the fail step exits 1 under the same
+      # condition, so an implicit success() comment step after it never runs.
       - name: Comment if changelog missing
         if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
-        uses: marocchino/sticky-pull-request-comment@v3
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3
         with:
           header: changelog
           message: |
@@ -66,3 +74,12 @@ jobs:
 
             Please add an entry under `[Unreleased]` describing your changes.
             See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format guidelines.
+
+      # PR-only enforcement: on push-to-main the actor is the merger (not
+      # dependabot), so a merged dependabot bump would otherwise fail the
+      # branch — the PR gate already caught it.
+      - name: Fail if changelog missing
+        if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && steps.changelog_check.outputs.changelog_changed == '0' && steps.changelog_check.outputs.source_changed > '0'
+        run: |
+          echo "::error::Rust source changed but CHANGELOG.md was not updated. Add an entry under [Unreleased]. See https://keepachangelog.com for format."
+          exit 1

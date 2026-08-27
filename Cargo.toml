@@ -3,15 +3,25 @@ resolver = "3"
 members = ["webrain-core", "webrain-mcp", "webrain-cli"]
 
 [workspace.package]
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
+description = "WebRain: portable MCP browser-automation & scraping server (CDP engines, vault, vision, video watch)"
+repository = "https://github.com/prokopis3/webrain"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+# Narrowed from `full`: only the features the workspace actually uses (net,
+# time, sync, io-util, rt for the servers, process/signal/fs for the CLI).
+# `full` pulled the entire tokio feature set into every member (and, for the
+# webrain-core library, into any downstream consumer via feature unification).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "sync", "macros", "process", "signal", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+tiktoken-rs = "0.12.0"
+rpassword = "7"
+url = "2"

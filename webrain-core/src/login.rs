@@ -52,8 +52,13 @@ pub fn login_js(user: &str, pass: &str) -> String {
   passEl.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
   return {ok:true, clicked:false};
 })()"#;
-    TPL.replace("USER", &jstr(user))
-        .replace("PASS", &jstr(pass))
+    // Two-phase replacement via control-char sentinels: each substitution runs
+    // over the OTHER placeholder's token, so a username containing "PASS" (or a
+    // password containing "USER") can't corrupt the other field's JSON.
+    TPL.replace("USER", "\u{1}")
+        .replace("PASS", "\u{2}")
+        .replace("\u{1}", &jstr(user))
+        .replace("\u{2}", &jstr(pass))
 }
 
 /// True when a 2FA / approval / device-verification gate needs the human.
@@ -86,27 +91,40 @@ async fn has_session(b: &CdpBackend) -> anyhow::Result<bool> {
 }
 
 async fn gate_up(b: &CdpBackend) -> bool {
-    b.evaluate(twofa_js())
-        .await
-        .map(|v| v.as_bool().unwrap_or(false))
-        .unwrap_or(false)
+    // ponytail: a transient "Execution context was destroyed" right after submit
+    // navigation is expected — treat it as "no gate yet" and keep polling (the
+    // loop re-probes every 3s). But surface the failure in the log so a
+    // PERSISTENT probe error isn't indistinguishable from "no gate".
+    match b.evaluate(twofa_js()).await {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(e) => {
+            tracing::debug!(error = %e, "login gate probe failed — treating as no gate");
+            false
+        }
+    }
 }
 
 /// reCAPTCHA / anti-bot challenge — creds were accepted, a human must solve.
 /// Distinct from the 2FA gate: URL/iframe markers only, not the 2FA vocabulary.
 async fn captcha_up(b: &CdpBackend) -> bool {
-    b.evaluate(
-        r#"(() => {
+    let r = b
+        .evaluate(
+            r#"(() => {
   const u = location.href.toLowerCase();
   if (/recaptcha|captcha|auth_platform/.test(u)) return true;
   if (document.getElementById('captcha-recaptcha')) return true;
   const t = (document.body ? document.body.innerText : '').toLowerCase();
   return /unusual traffic|verify you are human|complete the security check/.test(t);
 })()"#,
-    )
-    .await
-    .map(|v| v.as_bool().unwrap_or(false))
-    .unwrap_or(false)
+        )
+        .await;
+    match r {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(e) => {
+            tracing::debug!(error = %e, "captcha probe failed — treating as no challenge");
+            false
+        }
+    }
 }
 
 /// One login attempt: fill+submit, poll briefly for a session cookie, and if a
@@ -143,7 +161,17 @@ pub async fn run_login(
         .map(|v| v.as_bool().unwrap_or(false))
         .unwrap_or(false)
     {
-        let _tok = backend.wait_turnstile_token(30).await;
+        // Submitting with an EMPTY token is a guaranteed 403 that gets misread
+        // as a credentials problem — bail for the human if the widget never
+        // populated.
+        if !backend.wait_turnstile_token(30).await {
+            return Ok(json!({
+                "logged_in": false,
+                "waiting_for_human": true,
+                "challenge": "captcha",
+                "message": "captcha token did not populate — solve the widget in the headed browser, then call login again",
+            }));
+        }
     }
     let submitted = backend.evaluate(&login_js(user, pass)).await?;
     // no form found => page is a tablet/app interstitial or not the login form;
@@ -172,11 +200,17 @@ pub async fn run_login(
         }
         if gate_up(backend).await {
             // TOTP auto-fill if a seed is stored; the human still confirms submit.
+            // Report whether the code actually landed (vs. a missing OTP field
+            // or a failed injection) so the caller can distinguish "entered"
+            // from "injection failed".
+            let mut totp_filled = false;
             if let Some(seed) = totp {
                 if let Ok(code) = vault::totp_code(seed) {
-                    let _ = backend
+                    totp_filled = backend
                         .evaluate(&vault::fill_js(otp_selector(), &code))
-                        .await;
+                        .await
+                        .map(|v| v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false))
+                        .unwrap_or(false);
                 }
             }
             return Ok(json!({
@@ -184,6 +218,7 @@ pub async fn run_login(
                 "waiting_for_human": true,
                 "message": "2FA/approval gate — approve or enter the code in the browser, then call login again",
                 "submitted": submitted,
+                "totp_filled": totp_filled,
             }));
         }
         if t0.elapsed().as_secs() > 15 {

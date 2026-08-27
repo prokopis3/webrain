@@ -5,8 +5,7 @@
 .codebase-memory/
 __pycache__/
 *.pyc
-vision/
-/build_err.txt
+/vision/
 .vscode/
 /dist_*
 /profiles

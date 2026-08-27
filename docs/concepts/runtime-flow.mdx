@@ -36,7 +36,7 @@ flowchart TD
   the binary and the non-MCP CLI (fetch, screenshot, spider, doctor, launch,
   login, vault, cookies, engine spawning).
 - **`webrain-mcp`** — the MCP server: stdio + HTTP transports, the JSON-RPC
-  dispatcher, and the 63-tool schemas + dispatch table.
+  dispatcher, and the 16 consolidated tool schemas + dispatch table.
 - **`webrain-core`** — the runtime: CDP client, engines, install, launch,
   vault, login, vision. Both `webrain-cli` and `webrain-mcp` call into it.
 
@@ -74,7 +74,7 @@ to these executors up front by `tools::map_surface()`.
 
 ### 3. Tool registration — `webrain-mcp/src/tools.rs`
 
-- **`list_tools()`** — the **15 consolidated `webrain_*` schemas** the LLM
+- **`list_tools()`** — the **16 consolidated `webrain_*` schemas** the LLM
   sees, with canonical descriptions (63 legacy one-action names still dispatch
   via `map_surface()`; their executor arms live in `call_tool()`).
 - **`call_tool()`** — the dispatch: `map_surface(name, args)` folds a

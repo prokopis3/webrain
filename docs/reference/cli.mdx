@@ -28,21 +28,25 @@ Drive webrain by hand — every engine and tool has a CLI twin.
 | `webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` | Drive the `CDP_URL` backend |
 | `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend` |
 
-## Snapshot-driven interaction
+## Index-driven interaction
 
-The CLI works on **snapshot refs** — the same elements `webrain snapshot`
-reports, 1-indexed:
+`webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` attach to
+the `CDP_URL` backend and operate on **element indices** — the same
+`elements[]` array that `webrain_observe` / `webrain_navigate` return over MCP:
 
 ```bash
-webrain launch https://example.com
-webrain snapshot          # prints interactive elements, 1-indexed
-webrain click 3           # click element #3
-webrain type 5 "text"     # type into element #5
+webrain launch <service> <profile> <url>   # real Chrome on a persistent profile
+webrain click 3                            # click element #3
+webrain type 5 "text"                      # type into element #5
 webrain eval 'document.querySelector("#email").value'
 ```
 
-The MCP tools also accept plain CSS selectors directly (e.g.
-`webrain_interact` action=click with `selector: "#submit"`).
+Get the element list from the MCP side (`webrain_observe` `what=state` or
+`what=a11y` returns `elements[]` with these indices), or run
+`webrain fetch <url>` to load a page and see its element count. For CSS
+selectors use the MCP tools instead: `webrain_observe what=html` accepts a
+`selector`, `webrain_extract mode=schema` is driven entirely by selectors, and
+`webrain_interact action=wait` accepts a `selector`.
 
 ## `webrain doctor`
 
