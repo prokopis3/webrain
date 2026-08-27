@@ -44,7 +44,7 @@ flate2 = "1"
 zip = "2"
 # Firecrawl pdf-inspector: pure Rust on lopdf — proper ToUnicode CMap decoding,
 # Markdown output, table detection, layout classification.
-pdf-inspector = "0.1.7"
+pdf-inspector = "1.14.1"
 # Zero-code alternative (the implemented path): `obscura serve --host 0.0.0.0
 # --stealth` in Docker maps :9222 — CdpBackend drives it via
 # CDP_URL=ws://127.0.0.1:9222/devtools/browser (raw ws:// passthrough in resolve_ws).
