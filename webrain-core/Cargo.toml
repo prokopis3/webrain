@@ -32,7 +32,7 @@ hmac = "0.13"
 sha1 = "0.11"
 regex = "1"
 # Structured SERP parsing (webrain_serp): pure-Rust CSS selector extraction.
-scraper = "0.24"
+scraper = "0.27"
 # HTML → Markdown (turndown.js-equivalent, pure Rust) for webrain_batch op=markdown.
 htmd = "0.5"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
