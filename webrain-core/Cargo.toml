@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
-tokio-tungstenite = { version = "0.24", features = ["connect"] }
+tokio-tungstenite = { version = "0.30", features = ["connect"] }
 futures-util = "0.3"
 url = "2"
 base64 = "0.23"
