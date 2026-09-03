@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-_No unreleased changes yet._
+- **core/mcp**: `webrain_crawl` (mode=spider) now crawls with **concurrent
+  tabs** in real mode — new `concurrency` param (default 4) fans N workers
+  across N tabs on multi-target backends (real Chrome/obscura, batch's
+  per-session routing); single-target backends (lightpanda) and
+  `concurrency: 1` keep the exact sequential path. New
+  `SpiderEngine::with_concurrency(n)`.
+- **core**: spider **checkpoint/resume is now crash-serious** — `crawldir`
+  persists `{queue, seen, results}` atomically (tmp+rename) every
+  `checkpoint_every` new pages, so a resumed crawl (same `crawldir`) returns
+  prior + new results, never re-fetches a seen URL, and honors the combined
+  `max_pages` budget (raise `max_pages` on resume to fetch more). Works for
+  both the serial and the new parallel path.
+
+### Changed
 
 ### Changed
 

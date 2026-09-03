@@ -381,8 +381,9 @@ pub fn list_tools() -> Vec<Value> {
                 "crawl_timeout_secs": {"type": "integer", "default": 0, "description": "0 = no cap"},
                 "autothrottle": {"type": "boolean", "default": false},
                 "autothrottle_max_ms": {"type": "integer", "default": 30000},
-                "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir"},
+                "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir. Persists {queue, seen, results} atomically; a resume (same crawldir) returns prior + new results and never re-fetches. max_pages counts the whole crawldir — raise it on resume to fetch more"},
                 "checkpoint_every": {"type": "integer", "default": 10},
+                "concurrency": {"type": "integer", "default": 4, "description": "spider: concurrent page fetches across tabs (real Chrome/obscura multi-target); single-target/lightpanda auto-serializes"},
                 "disable_resources": {"type": "boolean", "default": false, "description": "spider: block fonts/images/media on every page fetch"},
                 "block_trackers": {"type": "boolean", "default": false, "description": "spider: also block the 3500-domain tracker list"},
                 "network_idle": {"type": "boolean", "default": false, "description": "spider: wait for network idle on every page"},
@@ -1194,6 +1195,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_i64())
                 .unwrap_or(10)
                 .max(1) as usize;
+            let concurrency = args
+                .get("concurrency")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(4)
+                .max(1) as usize;
             let spider = SpiderEngine::new(depth, pages)
                 .with_strategy(strategy)
                 .with_same_domain(same_domain)
@@ -1207,6 +1213,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .with_crawl_timeout(crawl_timeout)
                 .with_autothrottle(autothrottle, 200, autothrottle_max)
                 .with_checkpoint(crawldir, checkpoint_every)
+                .with_concurrency(concurrency)
                 .with_nav_opts(nav_opts(args));
             let t0 = std::time::Instant::now();
             let results = spider.crawl(backend, seed).await;
