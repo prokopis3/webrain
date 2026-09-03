@@ -64,9 +64,12 @@ Highlights:
   time
 - `autothrottle` — adaptive per-domain delay: speeds up on fast servers,
   doubles on a blocked/error page, capped by `autothrottle_max_ms`
-- `crawldir` — checkpoint/resume: persists `{queue, seen}` every
-  `checkpoint_every` pages; re-run with the same `crawldir` to continue.
-  Deleted on clean finish.
+- `crawldir` — checkpoint/resume: persists `{queue, seen, results}` atomically
+  every `checkpoint_every` pages; re-run with the same `crawldir` to continue
+  (returns prior + new results, never re-fetches). Deleted on clean finish.
+  `max_pages` counts the whole crawldir — raise it on resume to fetch more.
+- `concurrency` — parallel tabs on real Chrome/obscura (default 4);
+  single-target/lightpanda auto-serializes
 - `crawl_timeout_secs` — hard wall-clock cap
 - `respect_robots`, `keywords` (BestFirst scoring), `no_content` (link-only
   fast path)

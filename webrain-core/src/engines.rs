@@ -348,11 +348,17 @@ pub struct SpiderEngine {
     autothrottle: bool,
     autothrottle_start_delay_ms: u64,
     autothrottle_max_delay_ms: u64,
-    /// Checkpoint/resume (Scrapling crawldir): persist {queue, seen} every N pages
-    /// to this dir so a long crawl survives interruption and resumes from where it
-    /// stopped. Deleted on a clean finish.
+    /// Checkpoint/resume (Scrapling crawldir): persist {queue, seen, results}
+    /// atomically every N NEW pages so a long crawl survives interruption; a
+    /// resumed run returns prior + new results without re-fetching. Deleted on
+    /// a clean finish.
     crawldir: Option<std::path::PathBuf>,
     checkpoint_every: usize,
+    /// Concurrent page fetches: N workers each drive their OWN tab (batch's
+    /// session-routed pattern) so page loads overlap on real Chrome/obscura.
+    /// 1 = sequential (legacy behavior); single-target backends (lightpanda)
+    /// always fall back to 1 regardless of this.
+    concurrency: usize,
     /// NavOpts applied to every page fetch (stealth is always injected by the
     /// backend; these control blocking, waiting, and timeout).
     nav_opts: NavOpts,
@@ -379,6 +385,7 @@ impl Default for SpiderEngine {
             autothrottle_max_delay_ms: 30_000,
             crawldir: None,
             checkpoint_every: 10,
+            concurrency: 1,
             nav_opts: NavOpts::default(),
         }
     }
@@ -389,6 +396,25 @@ pub struct SpiderResult {
     pub page: PageResult,
     pub depth: usize,
     pub links: Vec<String>,
+}
+
+/// Shared frontier/result state for the concurrent (multi-tab) crawl path. All
+/// mutations — claim, enqueue, result-push, checkpoint — happen under ONE mutex
+/// so workers can't double-crawl a URL or lose a result. Contention is nil vs
+/// the ~100ms+ page loads each worker performs outside the lock.
+struct SpiderShared {
+    queue: std::collections::VecDeque<(String, usize)>,
+    visited: std::collections::HashSet<String>,
+    results: Vec<SpiderResult>,
+    /// Pages claimed but not yet completed (budget accounting).
+    inflight: usize,
+    /// results.len() at which the next checkpoint save fires.
+    next_checkpoint: usize,
+    /// Constant per-crawl context (never checkpointed): seed host for the domain
+    /// filter, robots Disallow prefixes, and the wall-clock deadline.
+    seed_host: String,
+    disallowed: Vec<String>,
+    deadline: Option<std::time::Instant>,
 }
 
 impl SpiderEngine {
@@ -474,6 +500,11 @@ impl SpiderEngine {
         self.checkpoint_every = every.max(1);
         self
     }
+    /// Concurrent multi-tab crawl width (real Chrome/obscura). 1 = sequential.
+    pub fn with_concurrency(mut self, n: usize) -> Self {
+        self.concurrency = n.max(1);
+        self
+    }
     pub fn with_nav_opts(mut self, opts: NavOpts) -> Self {
         self.nav_opts = opts;
         self
@@ -526,52 +557,67 @@ impl SpiderEngine {
         !self.deny.iter().any(|r| r.is_match(url))
     }
 
-    /// Checkpoint file: {queue: [[url, depth]...], seen: [...]}. One JSON file,
-    /// atomic-ish rewrite. ponytail: no serde for the queue — (String, usize)
-    /// pairs serialize fine as arrays.
+    /// Checkpoint file: {queue: [[url, depth]...], seen: [...], results: [...]}.
+    /// One JSON file, atomically rewritten (tmp + rename) so a crash never leaves
+    /// a torn file that would read back as a fresh crawl. ponytail: no serde for
+    /// the queue — (String, usize) pairs serialize fine as arrays.
     fn checkpoint_path(&self) -> Option<std::path::PathBuf> {
         self.crawldir.as_ref().map(|d| d.join("checkpoint.json"))
     }
 
+    /// Persist crawl state: pending frontier + seen URLs + results collected so
+    /// far. Crash-serious: a resumed crawl returns prior + new results, never
+    /// re-fetches a seen URL, and respects the combined max_pages budget.
     fn save_checkpoint(
         &self,
         queue: &std::collections::VecDeque<(String, usize)>,
         visited: &std::collections::HashSet<String>,
+        results: &[SpiderResult],
     ) {
         let Some(path) = self.checkpoint_path() else {
             return;
         };
         let q: Vec<Value> = queue.iter().map(|(u, d)| json!([u, d])).collect();
         let seen: Vec<String> = visited.iter().cloned().collect();
+        let res: Vec<Value> = results
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+            .collect();
         let saved_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let data = json!({"queue": q, "seen": seen, "saved_at": saved_at});
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        let data = json!({"queue": q, "seen": seen, "results": res, "saved_at": saved_at});
         if let Ok(s) = serde_json::to_string(&data) {
-            let _ = std::fs::write(&path, s);
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, s).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 
-    /// Restore {queue, seen} from checkpoint. Returns (queue, seen) or (empty,
-    /// empty) when no checkpoint exists. ponytail: missing/corrupt = start fresh.
+    /// Restore {queue, seen, results}. Missing/corrupt checkpoint = fresh crawl.
+    /// ponytail: read/parse failures and absent fields degrade to empty, never
+    /// error — a resume is best-effort.
     fn load_checkpoint(
         &self,
     ) -> (
         std::collections::VecDeque<(String, usize)>,
         std::collections::HashSet<String>,
+        Vec<SpiderResult>,
     ) {
         let mut queue = std::collections::VecDeque::new();
         let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
         let Some(path) = self.checkpoint_path() else {
-            return (queue, seen);
+            return (queue, seen, results);
         };
         let Ok(raw) = std::fs::read_to_string(path) else {
-            return (queue, seen);
+            return (queue, seen, results);
         };
         let Ok(data) = serde_json::from_str::<Value>(&raw) else {
-            return (queue, seen);
+            return (queue, seen, results);
         };
         if let Some(q) = data.get("queue").and_then(|v| v.as_array()) {
             for item in q {
@@ -585,7 +631,14 @@ impl SpiderEngine {
                 seen.insert(u.to_string());
             }
         }
-        (queue, seen)
+        if let Some(r) = data.get("results").and_then(|v| v.as_array()) {
+            for x in r {
+                if let Ok(row) = serde_json::from_value::<SpiderResult>(x.clone()) {
+                    results.push(row);
+                }
+            }
+        }
+        (queue, seen, results)
     }
 
     fn delete_checkpoint(&self) {
@@ -615,6 +668,26 @@ impl SpiderEngine {
     }
 
     pub async fn crawl(&self, browser: &CdpBackend, seed_url: &str) -> Vec<SpiderResult> {
+        // Multi-tab concurrent crawl (real Chrome/obscura) when concurrency > 1
+        // on a multi-target backend. Single-target (lightpanda) and concurrency
+        // = 1 fall through to the exact sequential path below. The capability
+        // probe costs two scratch createTargets, so it only runs when
+        // parallelism is actually requested.
+        if self.concurrency > 1 && matches!(browser.single_target_probe().await, Ok(false)) {
+            let seed_host = url::Url::parse(seed_url)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_default();
+            let seed_origin = seed_url.split('/').take(3).collect::<Vec<_>>().join("/");
+            let disallowed = if self.respect_robots {
+                self.fetch_robots(&seed_origin).await
+            } else {
+                Vec::new()
+            };
+            return self
+                .crawl_parallel(browser, seed_url, seed_host, disallowed)
+                .await;
+        }
         use std::collections::{HashSet, VecDeque};
 
         let seed_host = url::Url::parse(seed_url)
@@ -686,22 +759,32 @@ impl SpiderEngine {
         // AutoThrottle per-domain delays (learned during this crawl, not persisted).
         let mut throttle: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-        // Checkpoint/resume: restore {queue, seen} from a previous interrupted run.
+        // Checkpoint/resume: restore {queue, seen, results} from an interrupted
+        // run so a resume returns prior + new results without re-fetching.
         if self.crawldir.is_some() {
-            let (q, s) = self.load_checkpoint();
+            let (q, s, r) = self.load_checkpoint();
             queue = q;
             visited = s;
+            results = r;
         }
-        if queue.is_empty() {
+        // Seed only a genuinely fresh crawl (empty frontier AND nothing seen). A
+        // kept checkpoint must never re-seed — the old `queue.is_empty()` guard
+        // re-crawled the whole site after a drained-but-kept checkpoint.
+        if visited.is_empty() && queue.is_empty() {
             queue.push_back((seed_url.to_string(), 0));
             visited.insert(seed_url.to_string());
         }
         let mut since_checkpoint = 0usize;
 
-        while let Some((url, depth)) = self.pop(&mut queue) {
+        loop {
+            // Budget/deadline checked BEFORE popping so an early stop never drops
+            // the frontier item — a resume continues exactly where it left off.
             if results.len() >= self.max_pages {
                 break;
             }
+            let Some((url, depth)) = self.pop(&mut queue) else {
+                break;
+            };
             if let Some(deadline) = crawl_deadline {
                 if std::time::Instant::now() >= deadline {
                     break; // wall-clock cap (spider-rs crawl_timeout) — stop the crawl.
@@ -854,24 +937,425 @@ impl SpiderEngine {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
 
-            // Checkpoint: persist {queue, seen} every N pages so a long crawl
-            // survives interruption and resumes from here (Scrapling crawldir).
+            // Checkpoint: persist {queue, seen, results} every N NEW pages so a
+            // long crawl survives interruption and resumes (Scrapling crawldir).
             since_checkpoint += 1;
             if self.crawldir.is_some() && since_checkpoint >= self.checkpoint_every {
                 since_checkpoint = 0;
-                self.save_checkpoint(&queue, &visited);
+                self.save_checkpoint(&queue, &visited, &results);
             }
         }
 
-        // Clean finish: only drop the checkpoint when the crawl genuinely
-        // completed (queue drained, no error page we can't recover). A break on
-        // max_pages/timeout/errors must KEEP the checkpoint so a resume continues.
-        let queue_drained = queue.is_empty() && results.iter().all(|r| r.page.error.is_none());
-        if self.crawldir.is_some() && queue_drained {
-            self.delete_checkpoint();
+        // Checkpoint lifecycle: a fully drained frontier = finished crawl →
+        // delete the checkpoint. Any early stop (max_pages budget, wall-clock
+        // timeout, error left in the frontier) keeps it AND writes a final
+        // snapshot, so the returned-but-unpersisted tail survives a crash
+        // before the next resume.
+        let queue_drained = queue.is_empty();
+        if self.crawldir.is_some() {
+            if queue_drained {
+                self.delete_checkpoint();
+            } else {
+                self.save_checkpoint(&queue, &visited, &results);
+            }
         }
 
         results
+    }
+
+    /// Fetch the seed origin's robots.txt `Disallow` prefixes once (blocking
+    /// ureq off the executor, timed agent). Shared by the parallel path; the
+    /// serial path inlines the same fetch. ponytail: single fetch, prefix match
+    /// only; per-origin fetch for multi-domain crawls when same_domain is off.
+    async fn fetch_robots(&self, seed_origin: &str) -> Vec<String> {
+        let robots_url = format!("{seed_origin}/robots.txt");
+        let robots = tokio::task::spawn_blocking(move || {
+            browser_req(browser_agent().get(&robots_url))
+                .call()
+                .ok()
+                .and_then(|r| r.into_body().read_to_string().ok())
+        })
+        .await
+        .unwrap_or(None);
+        robots
+            .map(|s| {
+                s.lines()
+                    .filter_map(|l| {
+                        l.trim()
+                            .to_lowercase()
+                            .strip_prefix("disallow:")
+                            .map(|p| p.trim().to_string())
+                    })
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// RFC 9309 robots match against PATH + QUERY for a link. Shared helper for
+    /// the parallel path (the serial path inlines an identical closure — kept
+    /// verbatim for zero regression). ponytail: duplicate predicate, ~12 lines.
+    fn robots_ok(&self, disallowed: &[String], link: &str) -> bool {
+        if disallowed.is_empty() {
+            return true;
+        }
+        let path = url::Url::parse(link)
+            .map(|u| {
+                let mut p = u.path().to_lowercase();
+                if let Some(q) = u.query() {
+                    p.push('?');
+                    p.push_str(&q.to_lowercase());
+                }
+                p
+            })
+            .unwrap_or_else(|_| link.to_lowercase());
+        !disallowed.iter().any(|p| path.starts_with(p))
+    }
+
+    /// Parallel multi-tab crawl: N workers, each owning its own tab (opened via
+    /// the backend, driven through a per-session CDP session — batch's proven
+    /// pattern), pull URLs from the shared frontier and load them concurrently.
+    /// State (queue/visited/results) is shared behind ONE mutex so no URL is
+    /// double-crawled and checkpointing stays consistent with the serial path.
+    async fn crawl_parallel(
+        &self,
+        browser: &CdpBackend,
+        seed_url: &str,
+        seed_host: String,
+        disallowed: Vec<String>,
+    ) -> Vec<SpiderResult> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // Restore prior crawl state (frontier + collected results) like the
+        // serial path — a resume returns prior + new results.
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut results: Vec<SpiderResult> = Vec::new();
+        if self.crawldir.is_some() {
+            let (q, s, r) = self.load_checkpoint();
+            queue = q;
+            visited = s;
+            results = r;
+        }
+        if visited.is_empty() && queue.is_empty() {
+            queue.push_back((seed_url.to_string(), 0));
+            visited.insert(seed_url.to_string());
+        }
+        // Combined budget across resumes: prior results count toward max_pages.
+        let next_checkpoint = results.len() + self.checkpoint_every;
+        let deadline = self
+            .crawl_timeout_secs
+            .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(SpiderShared {
+            queue,
+            visited,
+            results,
+            inflight: 0,
+            next_checkpoint,
+            seed_host,
+            disallowed,
+            deadline,
+        }));
+        // Per-domain learned delay (autothrottle) + polite start-spacing gate.
+        let throttle = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<String, u64>::new()));
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
+
+        let engine = std::sync::Arc::new(self.clone());
+        let workers = self.concurrency.max(1);
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let e = engine.clone();
+            let b = browser.clone();
+            let sh = shared.clone();
+            let th = throttle.clone();
+            let ga = gate.clone();
+            handles.push(tokio::spawn(async move {
+                Self::spider_worker(e, b, sh, th, ga).await;
+            }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // Fully drained = finished crawl → drop the checkpoint. Any early stop
+        // (budget/timeout) keeps it plus a final snapshot so the returned-but-
+        // unpersisted tail survives a crash before the next resume.
+        {
+            let sh = shared.lock().await;
+            if self.crawldir.is_some() {
+                if sh.queue.is_empty() && sh.inflight == 0 {
+                    self.delete_checkpoint();
+                } else {
+                    self.save_checkpoint(&sh.queue, &sh.visited, &sh.results);
+                }
+            }
+        }
+        shared.lock().await.results.clone()
+    }
+
+    /// Fetch one page on a given tab session (concurrent path). Mirrors
+    /// navigate_opts's text semantics — interactive wait, sparse (<500 chars)
+    /// full-load fallback, 3000-char cap, SPA settle before link extraction —
+    /// but drives the worker's OWN session instead of the shared active tab, so
+    /// N workers load N pages in parallel.
+    async fn fetch_page_session(
+        &self,
+        browser: &CdpBackend,
+        sid: &str,
+        url: &str,
+        start: std::time::Instant,
+    ) -> (PageResult, Vec<String>) {
+        let links_expr = "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)";
+
+        // Discover-only fast path (crawl4ai prefetch): short-cap nav + links only.
+        if self.discover_only {
+            let mut opts = self.nav_opts.clone();
+            opts.wait_timeout_secs = Some(opts.wait_timeout_secs.unwrap_or(4).min(4));
+            let mut links = Vec::new();
+            let mut err = None;
+            match browser.navigate_session_opts(sid, url, &opts).await {
+                Ok(_) => match browser.eval_session(sid, links_expr).await {
+                    Ok(v) => {
+                        if let Some(arr) = v.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    links.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => err = Some(e.to_string()),
+                },
+                Err(e) => err = Some(e.to_string()),
+            }
+            return (
+                PageResult {
+                    url: url.to_string(),
+                    title: None,
+                    content: None,
+                    error: err,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                },
+                links,
+            );
+        }
+
+        let mut page = PageResult {
+            url: url.to_string(),
+            title: None,
+            content: None,
+            error: Some("unreached".into()),
+            duration_ms: 0,
+        };
+        let mut attempts = 0u32;
+        loop {
+            let fetched: Result<(String, String), anyhow::Error> = async {
+                browser
+                    .navigate_session_opts(sid, url, &self.nav_opts)
+                    .await?;
+                let title = browser
+                    .eval_session(sid, "document.title")
+                    .await?
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let mut text = browser
+                    .eval_session(sid, "document.body ? document.body.innerText || '' : ''")
+                    .await?
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                // Sparse (<500 chars) → wait for full load, re-read (navigate_opts
+                // parity — a slow SPA shouldn't yield a half-empty page).
+                if text.chars().count() < 500 {
+                    let cap2 = self.nav_opts.wait_timeout_secs.unwrap_or(6);
+                    let s2 = std::time::Instant::now();
+                    loop {
+                        let rs = browser
+                            .eval_session(sid, "document.readyState")
+                            .await?
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        if rs == "complete" || s2.elapsed().as_secs() > cap2 {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    text = browser
+                        .eval_session(sid, "document.body ? document.body.innerText || '' : ''")
+                        .await?
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                }
+                Ok((title, text))
+            }
+            .await;
+            match fetched {
+                Ok((title, text)) => {
+                    page = PageResult {
+                        url: url.to_string(),
+                        title: Some(title),
+                        content: Some(text.chars().take(3000).collect()),
+                        error: None,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    };
+                    break;
+                }
+                Err(e) => {
+                    attempts += 1;
+                    if attempts > self.retry {
+                        page.error = Some(e.to_string());
+                        page.duration_ms = start.elapsed().as_millis() as u64;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        if page.error.is_some() {
+            return (page, Vec::new());
+        }
+        // SPA/VitePress render links after initial DOM — short settle.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let links = match browser.eval_session(sid, links_expr).await {
+            Ok(v) => {
+                let mut hrefs = vec![];
+                if let Some(arr) = v.as_array() {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            hrefs.push(s.to_string());
+                        }
+                    }
+                }
+                hrefs
+            }
+            Err(_) => vec![],
+        };
+        (page, links)
+    }
+
+    /// One crawl worker: opens its own tab, then loops claiming frontier URLs
+    /// and loading them on that tab until the queue drains, max_pages is hit, or
+    /// the wall-clock deadline passes. All state is under `shared`'s one mutex,
+    /// so budget/deadline/done decisions are race-free.
+    async fn spider_worker(
+        engine: std::sync::Arc<Self>,
+        browser: CdpBackend,
+        shared: std::sync::Arc<tokio::sync::Mutex<SpiderShared>>,
+        throttle: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
+        gate: std::sync::Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    ) {
+        // Own tab (multi-target parallel path); closed when this worker exits.
+        let (sid, tab_id) = match browser.open_tab("about:blank").await {
+            Ok(id) => match browser.tab_session(&id).await {
+                Ok(s) => (s, Some(id)),
+                Err(_) => {
+                    let _ = browser.close_tab(&id).await;
+                    return;
+                }
+            },
+            Err(_) => return,
+        };
+
+        loop {
+            // Claim one frontier URL — budget/deadline/done checked under the
+            // lock so concurrent workers can't over-run max_pages or double-crawl.
+            let claimed: Option<(String, usize)> = {
+                let mut sh = shared.lock().await;
+                if let Some(dl) = sh.deadline {
+                    if std::time::Instant::now() >= dl {
+                        break;
+                    }
+                }
+                if sh.results.len() + sh.inflight >= engine.max_pages {
+                    break;
+                }
+                if sh.queue.is_empty() {
+                    if sh.inflight == 0 {
+                        break; // nothing left AND nobody mid-fetch → done
+                    }
+                    None
+                } else {
+                    let item = engine.pop(&mut sh.queue);
+                    sh.inflight += 1;
+                    item
+                }
+            };
+            let Some((url, depth)) = claimed else {
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                continue;
+            };
+
+            let domain = url.split('/').nth(2).unwrap_or("").to_string();
+            // Polite spacing (parallel): workers coordinate request START times
+            // so the site sees ~one request per `delay` (delay_ms floor, or the
+            // learned autothrottle delay) instead of N simultaneous requests.
+            let delay = if engine.autothrottle {
+                let m = throttle.lock().await;
+                m.get(&domain)
+                    .copied()
+                    .unwrap_or(engine.autothrottle_start_delay_ms)
+                    .max(engine.delay_ms)
+            } else {
+                engine.delay_ms
+            };
+            if delay > 0 {
+                let wake = {
+                    let mut g = gate.lock().await;
+                    let now = tokio::time::Instant::now();
+                    let w = g.map_or(now, |prev| if prev > now { prev } else { now });
+                    *g = Some(w + std::time::Duration::from_millis(delay));
+                    w
+                };
+                tokio::time::sleep_until(wake).await;
+            }
+
+            let start = std::time::Instant::now();
+            let (page, links) = engine.fetch_page_session(&browser, &sid, &url, start).await;
+            if engine.autothrottle {
+                let blocked = page.error.is_some();
+                let mut m = throttle.lock().await;
+                engine.throttle_tick(
+                    &mut m,
+                    &domain,
+                    start.elapsed().as_millis() as u64,
+                    !blocked,
+                );
+            }
+
+            {
+                let mut sh = shared.lock().await;
+                sh.results.push(SpiderResult {
+                    page,
+                    depth,
+                    links: links.clone(),
+                });
+                sh.inflight -= 1;
+                if depth < engine.max_depth {
+                    for link in &links {
+                        if !sh.visited.contains(link)
+                            && engine.domain_ok(link, &sh.seed_host)
+                            && engine.url_ok(link)
+                            && engine.robots_ok(&sh.disallowed, link)
+                        {
+                            sh.visited.insert(link.clone());
+                            engine.push_link(&mut sh.queue, link.clone(), depth + 1);
+                        }
+                    }
+                }
+                if engine.crawldir.is_some() && sh.results.len() >= sh.next_checkpoint {
+                    sh.next_checkpoint = sh.results.len() + engine.checkpoint_every;
+                    engine.save_checkpoint(&sh.queue, &sh.visited, &sh.results);
+                }
+            }
+        }
+
+        if let Some(id) = tab_id {
+            let _ = browser.close_tab(&id).await;
+        }
     }
 
     /// BestFirst relevance score: count keyword hits (case-insensitive) in the URL.
@@ -914,6 +1398,45 @@ impl SpiderEngine {
             CrawlStrategy::Bfs | CrawlStrategy::BestFirst => q.pop_front(),
             CrawlStrategy::Dfs => q.pop_back(),
         }
+    }
+}
+
+#[cfg(test)]
+mod spider_checkpoint_tests {
+    // ponytail: one check that checkpoint save/load round-trips queue + seen +
+    // results (crash-resume is the whole point of crawldir — a resume must get
+    // the already-fetched pages back and never re-fetch them).
+    #[test]
+    fn checkpoint_round_trip_preserves_results() {
+        let dir = std::env::temp_dir().join(format!("webrain_cp_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s =
+            super::SpiderEngine::new(2, 10).with_checkpoint(dir.to_string_lossy().into_owned(), 2);
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(("https://a.com/2".to_string(), 1));
+        let mut seen = std::collections::HashSet::new();
+        seen.insert("https://a.com/1".to_string());
+        let res = vec![super::SpiderResult {
+            page: crate::browser::PageResult {
+                url: "https://a.com/1".to_string(),
+                title: Some("t".to_string()),
+                content: Some("body".to_string()),
+                error: None,
+                duration_ms: 1,
+            },
+            depth: 0,
+            links: vec!["https://a.com/2".to_string()],
+        }];
+        s.save_checkpoint(&q, &seen, &res);
+        let (q2, seen2, res2) = s.load_checkpoint();
+        assert_eq!(q2.len(), 1);
+        assert_eq!(q2[0].0, "https://a.com/2");
+        assert_eq!(q2[0].1, 1);
+        assert!(seen2.contains("https://a.com/1"));
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].page.url, "https://a.com/1");
+        assert_eq!(res2[0].links[0], "https://a.com/2");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -273,7 +273,7 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `extract
 </Accordion>
 
 <Accordion title="webrain_spider">
-Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume, `crawl_timeout_secs`.
+Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume (persists `{queue, seen, results}` atomically; resume returns prior + new, never re-fetches; `max_pages` counts the whole crawldir), `concurrency` (parallel tabs on Chrome/obscura, default 4), `crawl_timeout_secs`.
 </Accordion>
 
 <Accordion title="webrain_sitemap">

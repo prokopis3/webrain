@@ -122,9 +122,14 @@ Regex → JSON-LD → (LLM last). If `webrain_extract(mode=schema)` returns 0 it
 ## Checkpoints on `webrain_crawl` (mode=spider) — when and how
 
 `webrain_crawl(mode=spider, crawldir="<dir>", checkpoint_every=N)` persists
-`{queue, seen}` to `<dir>/checkpoint.json` every N pages, and a later call with
-the SAME `crawldir` resumes from where it stopped. The checkpoint is deleted
-only on a clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
+`{queue, seen, results}` atomically (tmp+rename) to `<dir>/checkpoint.json`
+every N NEW pages. A later call with the SAME `crawldir` resumes from where it
+stopped — it returns prior + new results and never re-fetches a seen URL. The
+checkpoint is deleted only on a clean (queue-drained) finish; a
+capped/timeout/error crawl KEEPS it (plus a final snapshot). `max_pages` counts
+the WHOLE crawldir across resumes (prior pages included) — raise it to fetch
+more. On multi-target backends (real Chrome/obscura) the spider loads pages in
+`concurrency` (default 4) parallel tabs; lightpanda / `concurrency: 1` = serial.
 
 **Use a checkpoint when:**
 - The crawl is big enough that it might not finish in one call — roughly
@@ -143,7 +148,11 @@ only on a clean (queue-drained) finish; a capped/timeout/error crawl KEEPS it.
 
 **Gotchas:**
 - Use the SAME `crawldir` string to resume; a different dir = a fresh crawl.
-- `max_pages` still caps each *call*, not the whole resume chain — raise it per call to go further.
+- `max_pages` caps the whole crawldir (prior resumed pages count) — a resume
+  with the same `max_pages` fetches nothing new; raise it to go further.
+- A resume replays the already-collected `results` in its response (crash
+  safety costs a little re-sending) — dedupe by URL if you only want the new
+  pages.
 - The checkpoint does NOT store extracted items, only crawl state (queue + seen) — persist products separately via `output="..."` on a batch, or read each page as you go.
 - Autothrottle's learned delays are per-crawl (not checkpointed) — a resumed crawl starts throttling fresh.
 
