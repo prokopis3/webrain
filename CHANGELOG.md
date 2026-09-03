@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prior + new results, never re-fetches a seen URL, and honors the combined
   `max_pages` budget (raise `max_pages` on resume to fetch more). Works for
   both the serial and the new parallel path.
-
-### Changed
+- **cli**: `webrain spider` gains `--concurrency N` — parallel multi-tab crawl
+  on real Chrome/obscura, matching `webrain_crawl` (1 / single-target lightpanda
+  = sequential, unchanged default).
 
 ### Changed
 

@@ -109,9 +109,19 @@ fn main() -> anyhow::Result<()> {
         }
         Some("spider") => {
             let seed = args.get(2).map(|s| s.as_str()).unwrap_or("about:blank");
-            // lazy CLI flags: --dfs, --depth N, --pages N, --no-same-domain, --json-urls
+            // lazy CLI flags: --dfs, --depth N, --pages N, --concurrency N,
+            // --no-same-domain, --json-urls
             let json_urls = args.contains(&"--json-urls".to_string());
             let dfs = args.contains(&"--dfs".to_string());
+            // Parallel multi-tab crawl (matches webrain_crawl's concurrency): N
+            // workers on multi-target backends (Chrome/obscura); 1/single-target
+            // (lightpanda) = sequential, the legacy default.
+            let concurrency: usize = args
+                .iter()
+                .position(|a| a == "--concurrency")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
             let depth: usize = args
                 .iter()
                 .position(|a| a == "--depth")
@@ -146,7 +156,8 @@ fn main() -> anyhow::Result<()> {
                 .with_same_domain(same_domain)
                 .with_discover_only(discover_only)
                 .with_respect_robots(respect_robots)
-                .with_keywords(keywords);
+                .with_keywords(keywords)
+                .with_concurrency(concurrency);
             let results = rt.block_on(spider.crawl(&backend, seed));
             if json_urls {
                 let all_urls: Vec<&String> = results.iter().flat_map(|r| r.links.iter()).collect();
