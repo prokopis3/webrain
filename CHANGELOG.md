@@ -9,6 +9,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **mcp**: `webrain_cookies` / `webrain_setcookies` also take an optional
+  `cdp_url`, resolved per call instead of from the session's backend. This is not
+  symmetry with the ops below -- it is what makes the argument MEAN something. The
+  deepscrape gateway treats "this caller brought their own browser" as verified
+  before clearing its own-worker guard, and while these arms ignored the argument
+  that guard would have been cleared on a value the worker never read, then
+  answered from whatever Chrome the session happened to hold -- a cross-tenant
+  cookie read. `caller_cdp` decides what counts as an endpoint for both the vault
+  ops and this pair, and a blank string is NOT one, so "present" cannot be
+  satisfied by whitespace.
+- **mcp**: `webrain_save_state`, `webrain_restore_state` and the vault `login` path
+  now take an optional `cdp_url` and use it INSTEAD of the loopback `port`. All
+  three built `http://127.0.0.1:{port}` unconditionally, so a caller who brought
+  their own browser -- a hosted CDP provider, or their own machine -- got
+  "cannot connect to http://127.0.0.1:9222" and had no way to address the
+  endpoint they were handed. `vault_cdp_target` prefers a non-blank `cdp_url`
+  (trimmed) and otherwise keeps the historical `http://127.0.0.1:{port}`, which
+  remains the only correct target when this worker launched its own Chrome.
+  Still NOT tenant-safe on a shared instance: the `state.json` FILE is written
+  under `profiles_dir()`, which is PROCESS-GLOBAL, so a deployment serving BYO
+  callers must point `WEBRAIN_PROFILES_DIR` at a per-tenant path, or keep these
+  ops refused through the gateway. The cookie pair (`cookies` / `setcookies`) is
+  unaffected by that caveat because it is payload-only: it acts on the session
+  backend and stores nothing.
+- **core**: `webrain_scrape` can now PROPOSE a schema: `autoschema: true` returns
+  candidate CSS base selectors with occurrence counts, browserlessly. It is
+  `webrain_autoschema`'s job done on fetched HTML with `scraper` instead of in a
+  browser, and that matters because autoschema is the step that spares a caller
+  from inventing a selector -- requiring a browser put it out of reach of the
+  shared pool, i.e. of the callers who need it most. Same answer shape
+  (`{selector, count}`), except ties are ordered by selector so one page cannot
+  propose two different schemas on two runs.
+- **core**: the browserless autoschema reply now carries `sample`: the inner HTML
+  of ONE matched container, truncated to 6000 chars. It is the missing half of
+  "compile a schema from a sentence" -- a model cannot write FIELD selectors from
+  a whole page (wasteful prompt) or from visible text (no tags), and one record
+  is exactly the context a selector needs. Absent when no container is found,
+  never an empty string.
+- **core**: `webrain_scrape` (the `webrain_fetch_http` tool) takes an optional
+  `base_selector` + `fields` CSS schema. With it the FULL page is fetched and
+  parsed browserlessly with `scraper`, using the same field vocabulary as
+  `webrain_extract mode=schema` (`text` / `attr` / `html` / `list` /
+  `nested_list`), so one schema means the same thing on both paths. This is what
+  lets the SHARED pool serve structured extraction at all: no browser and no
+  "current page", so there is nothing to attribute to another tenant. The
+  full-body path is a separate function rather than a flag on `http_fetch`,
+  because that one caps HTML at 3000 chars by design and a schema parsed from a
+  3000-char prefix would return zero rows on nearly every real page -- silently,
+  since an empty result is a valid answer.
+- **core**: `serp` with `engine: auto` now reaches the deep provider. `auto`
+  merged `duckduckgo + bing` only, and `serpapi_google` was gated on
+  `engine == "google"`, so the one deep-capable provider in the file was
+  unreachable from the default engine — `limit: 50` on `auto` could never return
+  50. When the merged free results fall short of `limit` and
+  `SERPAPI_API_KEY` is set, `auto` tops up from serpapi (`num` returns up to 100
+  in a single browserless call). Gated on `limit > 10` to match the existing
+  `serpapi_first` policy, so a default small search is unaffected and an unkeyed
+  install is unchanged.
+- **core**: `http_search` paging is now driven by results obtained rather than
+  an assumed 10-per-page density. These engines serve far fewer than ten
+  (measured 2026-10-10: 11 for duckduckgo, 10 for bing at `limit=50`), so the old
+  `limit / 10` page budget could never fill a deep request. The page budget now
+  assumes as few as 5 results per page (20-page ceiling), and pagination stops
+  after **two** consecutive dry pages instead of the first — bing intermittently
+  returns a single result, and a GeoIP-locked IP can repeat page 0 once before
+  serving page 1.
+- **mcp**: `webrain_serp` takes a new `browser` flag (default **false**). A browser
+  is no longer launched for `bing` unless the caller asks for one — only
+  `google`/`brave` require it, since they are JS-gated and parse to zero without
+  one. Measured 2026-10-10: `limit=50` returned 11 results for `duckduckgo` and 10
+  for `bing` with no browser, so the cheap path is now the default and depth is
+  opt-in with `browser: true`. A failed guest launch still falls back to the
+  pure-HTTP path for `bing` rather than erroring.
+- **mcp**: HTTP transport is now deployable behind a gateway. `GET /health`
+  liveness route (unauthenticated, handled before the MCP parser); optional bearer
+  auth via `WEBRAIN_HTTP_TOKEN` (constant-time compare, unset = unchanged);
+  graceful shutdown on SIGTERM/Ctrl-C with a bounded 20s drain so scale-in no
+  longer severs a batch mid-scrape; and `WEBRAIN_NO_STATE` for shared instances.
+- **mcp**: `WEBRAIN_NO_STATE=1` refuses the tools that touch **process-global**
+  state (vault, profiles, launch, login) with one guard placed after
+  `map_surface`, so `webrain_session(op=login)` is covered by the same check as a
+  direct `webrain_login`. The vault and browser profiles are per-process, not
+  per-session, so without this one tenant's login hands the next tenant a working
+  profile. See `docs/PLATFORM_EXPOSURE_PLAN.md`.
+- **mcp**: `clamp_concurrency` caps tab fan-out at 6 for `webrain_batch` and
+  `webrain_crawl` when `WEBRAIN_NO_STATE` is set — otherwise one tenant can
+  request a thousand tabs and starve every other tenant on the box.
+- **docs**: `docs/PLATFORM_EXPOSURE_PLAN.md` — how webrain is served as a shared
+  MCP tool for free users and a leased tool for entitled users, across webrain,
+  deepscrape and arachnefly. Plus three diagrams in `docs/diagrams/`.
+- **docs**: `docs/DEEPSCRAPE_FRONTEND_HANDOFF.md` — audit of the deepscrape crawl path
+  (it reaches crawl4ai, not webrain) with cited findings: the caller's bearer token is
+  handed to crawl4ai, the SSRF guard covers one of two doors and is pre-redirect only,
+  the BFF buffers instead of streaming (the fix is written and commented out), JSON
+  travels as `application/octet-stream`, and there is no `challenge` concept so a
+  blocked crawl is indistinguishable from an empty one. Companion
+  `docs/prompts/deepscrape-frontend-improve.prompt.md` is the handoff prompt.
+- **core**: **proxy rotation pool** — `WEBRAIN_PROXIES` (comma/newline-separated)
+  enables round-robin rotation for the no-browser HTTP path. A walled exit
+  (403/429/503, or a transport reset) is marked dead for a 120s cooldown and the
+  retry leaves through a different IP. An explicit per-call `proxy` always wins
+  and never rotates, so single-proxy setups behave exactly as before. New
+  `webrain_core::proxy`.
+- **core**: **revalidation-only HTTP cache** (`webrain_core::httpcache`) — stores
+  ETag/Last-Modified per (proxy, url) and revalidates with `If-None-Match` /
+  `If-Modified-Since`; a 304 is answered from the stored body as a synthetic 200,
+  so unvalidated content is never served. Bounded (256 entries), in-memory, and
+  disabled with `WEBRAIN_HTTP_CACHE=0`.
+- **core**: the HTTP cache now **survives a process restart**, which is what scheduled
+  recurring monitoring needed: after a restart every check used to re-download the whole
+  page because the validator was gone. A disk layer stores **metadata only** — the
+  validator pair, a sha256 of the body (so a change is detectable even from an origin that
+  sends no validator), and the check time — keyed by a hash of `(proxy, url)` so a signed
+  URL's token is not written to disk and two exits still keep separate validators. Page
+  bodies are **never** persisted: an authenticated page would otherwise land on a shared
+  worker's disk, and a body is orders of magnitude larger than what a monitor needs. Bounded
+  at 1024 entries / 7 days, one atomic whole-file rewrite per 200 (tmp + rename), refreshed
+  at most once a minute per 304. Location `WEBRAIN_HTTP_CACHE_DIR`, else the platform cache
+  dir. Every I/O and parse failure degrades to a cache miss — never a failed fetch. New
+  `webrain_core::httpcache::fingerprint`. `WEBRAIN_HTTP_CACHE=0` disables both layers.
 - **core/mcp**: `webrain_crawl` (mode=spider) now crawls with **concurrent
   tabs** in real mode — new `concurrency` param (default 4) fans N workers
   across N tabs on multi-target backends (real Chrome/obscura, batch's
@@ -24,6 +144,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli**: `webrain spider` gains `--concurrency N` — parallel multi-tab crawl
   on real Chrome/obscura, matching `webrain_crawl` (1 / single-target lightpanda
   = sequential, unchanged default).
+
+### Fixed
+
+- **mcp**: **`WEBRAIN_NO_STATE` did not cover the session family — a real cross-tenant
+  leak on a shared worker.** The guard matched three executor names
+  (`profiles`/`launch`/`login`), but `webrain_session` folds into *eight* executors and
+  the other six were served. Worse, three of them (`open`/`close`/`list`) are answered by
+  the outer HTTP layer and never reached `handle_rpc` at all, so no guard placed there
+  could have covered them: `webrain_session(op=list)` returned every tenant's sessions,
+  and `op=cookies` / `op=save_state` handed over cookies and auth state. The guard now
+  matches the **umbrella** name — so a ninth op fails closed the day it ships — and is
+  applied in both dispatch layers. Found and independently reproduced by the deepscrape
+  integration, which had to rebuild the boundary in front of webrain because this one
+  did not hold (`functions/src/domain/webrain-tools.domain.ts`). Verified in both
+  directions by `scripts/probe_http_transport.ps1` (10 probes): guards on → every
+  session op refused while `webrain_eval` still reaches CDP; guards off → `op=list`
+  works again, so the change is additive.
+- **mcp**: `webrain_batch` accepted a negative `concurrency`. `as usize` on a
+  negative `i64` wraps to a colossal value, handing the tab semaphore an
+  effectively unbounded permit count — a client could ask for `concurrency: -1`
+  and get unrestricted fan-out. Now clamped with `.max(1)` before the cast.
+- **core**: proxied HTTP requests no longer build a fresh `ureq::Agent` per call.
+  Each one was paying a new TCP+TLS handshake — the exact cost the shared pooled
+  agent exists to avoid — and rotation would have multiplied it by the number of
+  exits. Agents are now cached per proxy URL.
+- **skill**: `build-skill.sh` could never produce a bundle. `git archive
+  HEAD:skills/webrain` was invoked with the cwd already inside `skills/webrain`,
+  which silently yields an archive holding only the `webrain/` directory entry
+  and no files at all — surfaced as a misleading "SKILL.md missing from bundle".
+  The identical command from the repo root packages all 21 entries. The script
+  now resolves the repo root and archives from there. It also drops a layout
+  allowlist that had drifted (it permitted only `SKILL.md` + `scripts/` while
+  the skill also ships `references/`, `workflows/`, `prompts/`, `evals/` and
+  `credentials/`) and checks for `unzip` up front instead of failing obscurely.
+- **docs**: `.github/copilot-instructions.md` described a different project.
+  It named Pixelbrain and crawl4ai project keys, referenced three files that do
+  not exist (`ARCHITECTURE_DEEP_DIVE.md`, `ROADMAP.md`, `docs/architecture.mmd`),
+  claimed no ADRs exist, documented a `manage_adr` mode that does not exist, and
+  carried Playwright/crawl4ai session warnings for a repo with no Playwright.
+  It now documents webrain, including the codebase-memory-mcp 0.11.x path-guard
+  workaround this repo requires to be indexed at all.
 
 ### Changed
 
