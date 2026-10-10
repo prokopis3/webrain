@@ -18,9 +18,10 @@
 // Recommended features (from the reference app's list) that make sense for a
 // local portable tool: provider fallback, URL dedupe, pagination, safe search +
 // region, request ids, retry with backoff, parallel multi-provider, per-request
-// proxy. SaaS-only concerns are deferred — Redis cache, API keys, rate limits,
-// billing, metrics, OTel, circuit breaker, proxy rotation pool (ponytail: name
-// the ceiling, add when this is hosted as a multi-tenant service).
+// proxy, proxy rotation pool (`WEBRAIN_PROXIES`, see crate::proxy), and
+// revalidation-only HTTP caching (see crate::httpcache). SaaS-only concerns are
+// still deferred — Redis, API keys, quota billing, metrics, OTel, circuit
+// breaker (ponytail: name the ceiling, add when this is hosted).
 
 use crate::browser::BrowserBackend;
 use serde::Serialize;
@@ -694,8 +695,12 @@ fn request_id() -> String {
     format!("serp-{millis}-{seq}")
 }
 
-/// Fetch + parse one HTTP engine with retry + exponential backoff.
 /// Fetch + parse ONE engine results page with retry + exponential backoff.
+///
+/// Proxy: an explicit `opts.proxy` wins and never rotates, so single-proxy
+/// deployments behave exactly as before. With no explicit proxy the
+/// `WEBRAIN_PROXIES` pool supplies one, and a walled exit is marked dead and
+/// replaced on the next attempt — see `crate::proxy`.
 async fn http_search_page(
     engine: &str,
     url: &str,
@@ -703,7 +708,8 @@ async fn http_search_page(
 ) -> anyhow::Result<Vec<SerpResult>> {
     let mut attempt = 0u32;
     let url_owned = url.to_string();
-    let proxy = opts.proxy.clone();
+    let explicit = opts.proxy.is_some();
+    let mut proxy = opts.proxy.clone().or_else(crate::proxy::next_proxy);
     loop {
         // ureq is blocking — run it off the async executor so the `auto`
         // join_all fan-out hits the blocking pool instead of tying up (and
@@ -714,6 +720,13 @@ async fn http_search_page(
             tokio::task::spawn_blocking(move || crate::engines::serp_http_get(&u, p.as_deref()))
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("serp task failed: {e}")));
+        // Wall signal: a 403/429/503 is an explicit refusal, and a transport
+        // error (reset/timeout) is usually the same story told by a dropped
+        // socket. A 2xx never rotates — that exit is working.
+        let walled = match &res {
+            Ok((status, _)) => matches!(*status, 403 | 429 | 503),
+            Err(_) => true,
+        };
         match res {
             Ok((status, body)) if (200..300).contains(&status) => {
                 let parsed = parse_results(engine, &body, opts.limit);
@@ -722,7 +735,8 @@ async fn http_search_page(
                 // (bing intermittently returns one for an otherwise-fine
                 // query), not a genuinely-empty result set. Retry within the
                 // existing budget before giving up; the caller's relevance +
-                // dedupe still handle real empties.
+                // dedupe still handle real empties. No rotation here: the
+                // exit answered, so a different IP would not help.
                 if parsed.is_empty() && attempt < opts.retries {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(200 * (1 << attempt))).await;
@@ -738,6 +752,14 @@ async fn http_search_page(
             }
             _ => {
                 attempt += 1;
+                // A walled exit is burned for this run, so the retry is only
+                // worth anything from a different IP.
+                if walled && !explicit {
+                    if let Some(p) = proxy.as_deref() {
+                        crate::proxy::mark_dead(p);
+                    }
+                    proxy = crate::proxy::next_proxy();
+                }
                 tokio::time::sleep(Duration::from_millis(200 * (1 << attempt))).await;
             }
         }
@@ -752,8 +774,15 @@ async fn http_search_page(
 async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     let mut all: Vec<SerpResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // 100 max / ~10 per page; bounded so a hostile engine can't loop forever.
-    let max_pages = (opts.limit / 10).clamp(1, 10);
+    // Paging is driven by results OBTAINED, not by an assumed 10-per-page
+    // density: these engines serve far fewer than ten here. Measured
+    // 2026-10-10 with no browser attached — `limit=50` returned 10 results for
+    // bing and 11 for duckduckgo — so a `limit / 10` page budget could never
+    // reach the requested count and a deep request looked "capped" rather than
+    // truncated. Assume as few as 5 fresh results per page; the 20-page ceiling
+    // is what still stops a hostile or GeoIP-locked engine looping forever.
+    let max_pages = (opts.limit / 5).clamp(1, 20);
+    let mut dry_pages = 0usize;
     for page in opts.page..opts.page + max_pages {
         let url = engine_url(
             engine,
@@ -775,7 +804,16 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
                 fresh += 1;
             }
         }
-        if all.len() >= opts.limit || fresh == 0 {
+        if all.len() >= opts.limit {
+            break;
+        }
+        // One empty page is not proof of exhaustion: bing intermittently
+        // returns a single result, and an IP GeoIP-locked to one SERP can
+        // repeat page 0 once before serving page 1. Two consecutive dry pages
+        // is the real stop signal — breaking on the FIRST one is the other half
+        // of why a deep request stopped at ~10.
+        dry_pages = if fresh == 0 { dry_pages + 1 } else { 0 };
+        if dry_pages >= 2 {
             break;
         }
     }
@@ -1340,6 +1378,32 @@ pub async fn serp_search<B: BrowserBackend>(
                         status: "skipped".to_string(),
                         count: 0,
                     });
+                }
+            }
+            // Deep fill from the paid provider. The HTTP engines cap at ~10
+            // each (measured 2026-10-10: 11 results for duckduckgo, 10 for bing
+            // at limit=50), so `auto` could not satisfy a deep request however
+            // the pager was written — the only deep-capable provider in this
+            // file was reachable from `engine == "google"` alone, and `auto` is
+            // the default. serpapi needs NO browser (`num` returns up to 100 in
+            // one call), so this top-up is what makes `auto` + a high limit mean
+            // what it says. Mirrors the `serpapi_first` policy of only engaging
+            // for `limit > 10`, so a default small search never touches it; and
+            // `serpapi_google` returns empty with no SERPAPI_API_KEY, so this is
+            // inert on an unkeyed install. Reported as `google` because that is
+            // the Google result set serpapi serves (same label `serpapi_google`
+            // already returns through `specific_engine`).
+            if opts.limit > 10 && merged.len() < opts.limit {
+                if let Ok(rs) = serpapi_google(opts).await {
+                    if !rs.is_empty() {
+                        let count = rs.len();
+                        merged.extend(rs);
+                        per_engine.push(SerpEngineReport {
+                            engine: "google".to_string(),
+                            status: "ok".to_string(),
+                            count,
+                        });
+                    }
                 }
             }
             (
