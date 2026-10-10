@@ -20,6 +20,12 @@ services:
       - "127.0.0.1:9223:9223" # HTTP MCP transport (webrain mcp --http 9223)
     environment:
       - WEBRAIN_HTTP_ADDR=0.0.0.0:9223
+      # Binding 0.0.0.0 is required for a published port to reach the container, but it
+      # is non-loopback, so webrain now REFUSES to start unauthenticated unless this is
+      # declared explicitly. That is safe here ONLY because `ports` above publishes to
+      # 127.0.0.1 on the host. Anything not confined to this machine should set
+      # WEBRAIN_HTTP_TOKEN instead of this flag.
+      - WEBRAIN_ALLOW_UNAUTHENTICATED=1
     volumes:
       - webrain-config:/root/.config/webrain # encrypted vault + browser profiles
       - webrain-cache:/root/.cache/webrain   # engine cache (Chrome for Testing / Obscura)

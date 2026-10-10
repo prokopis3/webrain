@@ -1,4 +1,4 @@
-# Pixelbrain — Copilot Instructions
+# webrain — Copilot Instructions
 
 ## MANDATORY: Use Codebase Memory MCP Before Every Task
 
@@ -32,59 +32,101 @@ Use this **cascade** — start with the cheapest, escalate only when needed:
 5. read_file() [LAST RESORT]                          unbounded
 ```
 
-### Which Projects to Query
+### Which Project to Query
 
-- **For pixelbrain changes**: Query BOTH pixelbrain AND crawl4ai (pixelbrain depends on crawl4ai internals)
-- **For crawl4ai understanding**: Query crawl4ai project directly
-- **For general questions**: Query pixelbrain first
+- Project key: `D-Windows-Documents-Programming-Projects-Rust-webrain`
+- webrain is self-contained — one Rust workspace, three crates, no second project to
+  cross-reference. Query this one.
+- For the MCP surface, start at `list_tools` / `call_tool` in `webrain-mcp/src/tools.rs`.
+- For the browser engine, start at `CdpBackend` in `webrain-core/src/backends/cdp.rs`.
 
 ### Cross-Project Tracing
 
-When a function call crosses from pixelbrain into crawl4ai (or vice versa):
+`modes`: `calls` (default), `data_flow`, `cross_service`. webrain has no second
+service to cross into, so `calls` covers it:
+
 ```
-mcp_codebase-memo_trace_path(function_name="...", project="D-Windows-Documents-Programming-Projects-Python-pixelbrain", mode="cross_service")
+mcp_codebase-memo_trace_path(function_name="call_tool", project="D-Windows-Documents-Programming-Projects-Rust-webrain", mode="calls")
 ```
 
 ### Change Detection Protocol
 
 **Before** any modification:
 ```
-mcp_codebase-memo_detect_changes(project="D-Windows-Documents-Programming-Projects-Python-pixelbrain")
+mcp_codebase-memo_detect_changes(project="D-Windows-Documents-Programming-Projects-Rust-webrain")
 ```
 **After** any fix/improvement/feature:
 ```
-mcp_codebase-memo_index_repository(repo_path="d:\...\pixelbrain", mode="fast")
+mcp_codebase-memo_index_repository(repo_path="D:/Windows/Documents/Programming/Projects/Rust/webrain", mode="fast")
+```
+
+**Indexing this repo needs one-time setup.** codebase-memory-mcp 0.11.x classifies
+this path as a *system* directory — its first component on `D:` is literally
+`Windows` — and `allow-root --approve-sensitive` does **not** clear it, because it
+stores backslashes while the indexer canonicalizes to forward slashes, so the
+exact-match lift never fires. Append the slash form manually to
+`~/.cache/codebase-memory-mcp/allowed_roots`:
+
+```
+!D:/Windows/Documents/Programming/Projects/Rust/webrain
 ```
 
 ---
 
-## Architecture Overview — LLM Browser Automation Agent
+## Architecture Overview — Native MCP Scraping Server
 
-Pixelbrain is a **generic LLM browser automation & web scraping agent**. The LLM decides everything — search (any engine), crawl (single/batch), scrape (crawl4ai strategies), browser-navigate, browser-interact — all from the user's prompt with no hardcoded intent detection.
+webrain is a **portable, LLM-agnostic browser-automation and scraping MCP server** in
+Rust. The LLM decides everything — search, crawl, scrape, navigate, interact — from the
+user's prompt. There is **no hardcoded intent detection**, and **no LLM in the
+extraction path**: extraction is JSON / regex / JSON-LD / table / autoschema / BM25, all
+zero-LLM.
 
-### Core Loop
+### Layering
 
 ```
-loop(max_steps):
-    1. OBSERVE:  PageState.capture(agent) — JS DOM snapshot + URL + visible text
-    2. THINK:    AgentBrain.assess_progress() — phase/stuck detection
-    4  REMEMBER-KNOW: AgentBrain.remember() — LLM prompt + memory update
-    3. DECIDE:   AgentBrain.decide() — LLM first, RuleActionSuggester fallback
-    4. ACT:      ActionDispatcher.dispatch() → handler → BrowserAgent
-    5. VERIFY:   AgentBrain.verify() — task completion detection
-    6. LEARN:    AgentBrain.learn() — update LLM prompt + memory
+CLI (webrain-cli)  ->  MCP (webrain-mcp)  ->  core engine (webrain-core)  ->  CDP
 ```
+
+- **webrain-core** (lib, no binary): `BrowserBackend` trait, `CdpBackend` (one shared
+  WebSocket, `Clone`, per-tab ops), `SessionPool`, `vault` (+TOTP), `video`,
+  `SpiderEngine`, `TileEngine`, `VectorStore`, `proxy` (rotation pool), `httpcache`
+  (revalidation-only).
+- **webrain-mcp** (lib): stdio JSON-RPC + HTTP transport; `tools.rs` owns the CDP
+  connection and exposes the **17 intent-based tools** through one `call_tool`
+  dispatcher, with `map_surface()` folding consolidated calls onto legacy executor arms.
+- **webrain-cli** (bin): `match`-based subcommands, deliberately **no clap**.
+
+### Core loop (per tool call)
+
+```
+1. RESOLVE   args -> intent (map_surface) -> handler
+2. CONNECT   CdpBackend: attach to real Chrome / obscura / lightpanda (all speak CDP)
+3. ACT       navigate | eval | interact | extract | batch ...
+4. REPORT    typed JSON back over MCP — never raw HTML
+```
+
+The agent-facing contract is intent, not the 66-method `CdpBackend` surface — see
+`docs/adr/0002-intent-tool-surface-and-central-dispatch.md`.
 
 ---
 
 
 ## Architecture Decision Records
 
-No ADRs have been created yet. To persist architectural insights:
+`docs/adr/` holds the records (the files are the source of truth):
+
+| ADR | Decision |
+|---|---|
+| `0001-webrain-architecture.md` | Layered Cargo workspace, CDP backend, MCP transport |
+| `0002-intent-tool-surface-and-central-dispatch.md` | 17 intent tools + central dispatch |
+
+To read the copy stored in the codebase-memory graph:
 ```
-mcp_codebase-memo_get_architecture(project="D-Windows-Documents-Programming-Projects-Python-pixelbrain")
-mcp_codebase-memo_manage_adr(mode="store", title="...", context="...", decision="...")
+mcp_codebase-memo_manage_adr(mode="get", project="D-Windows-Documents-Programming-Projects-Rust-webrain")
 ```
+`mode="update"` replaces the whole document and expects exactly six sections —
+**PURPOSE, STACK, ARCHITECTURE, PATTERNS, TRADEOFFS, PHILOSOPHY**; `mode="set_sections"`
+splices named sections only. There is no `mode="store"` with `title`/`context`/`decision`.
 
 ---
 
@@ -103,10 +145,13 @@ memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 
 | File | Purpose |
 |------|---------|
-| `ARCHITECTURE_DEEP_DIVE.md` | 15-section comprehensive architecture analysis |
-| `ROADMAP.md` | Future priorities, milestones, and research areas |
-| `docs/architecture.mmd` | Mermaid architecture diagram |
+| `AGENTS.md` | Agent rules — browser/engine selection, challenge handling |
 | `docs/AGENT_DECISION_GUIDE.md` | **LLM tool/browser/challenge decision guide** |
+| `docs/ARCHITECTURE.md` | Architecture overview |
+| `docs/FEATURE_GAPS.md` | Ranked steal-list and gap plan with build order |
+| `docs/adr/` | Architecture Decision Records |
+| `docs/reference/tools.mdx` | The 17-tool MCP surface |
+| `skills/webrain/SKILL.md` | The agent-facing skill |
 | `/memories/repo/project-structure.md` | Repo memory with live codebase stats |
 
 ---
@@ -177,9 +222,22 @@ Code first. Then at most three short lines: what was skipped, when to add it. No
 **Ponytail is ACTIVE now in this chat (full mode).** To deactivate: say "stop ponytail" or "normal mode".
 
 CRUCIAL WARNINGS:
-The issue is that Playwright's page.evaluate(), page.click(), and page.context.new_cdp_session() all use Playwright's OWN session context, NOT crawl4ai's session context. Every command must go through crawl4ai's arun() with js_code to stay in crawl4ai's session
 
-NEVER RETURN FULL HTML TO FEEDBAKCK LLMAGENT DO NOT ADD CUSTOM WAYS TO SURPASS ONLY THIS PROMPT AND PLANNER EXAMPLE THE LLMAGENT MUST BE GENERIC FIR ANY DOMAIN ANY TASK PROMPT
+**webrain stays generic.** Never add per-site recipes, hardcoded selectors, or intent
+sniffing to make one domain work. The LLM's prompt is the only source of intent and the
+tool must serve any domain — if a site needs special handling, that belongs in the
+agent's prompt, not in the Rust.
+
+**Never return raw HTML to the agent.** Replies carry typed JSON, extracted fields,
+visible text, or vision tiles. Keeping raw markup out of the context window is the whole
+point of a zero-LLM extraction layer.
+
+**A challenge page is not successful navigation.** Read the `challenge` field on every
+`webrain_navigate`; never extract a challenge / login / consent page as target content.
+
+**Browser identity is state.** Profile, session, and challenge are runtime state. The fix
+for a protected site is real Chrome + persistent profile + session — never "discard the
+browser and retry anonymously".
 
 
 # ! success doesnt come from  what you do occasionally it comes from what you do consistenly 

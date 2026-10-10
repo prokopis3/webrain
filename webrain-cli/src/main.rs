@@ -83,9 +83,17 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("Fetching: {url}");
             let state = rt.block_on(backend.navigate(url))?;
             println!("Title: {}", state.title);
-            // floor_char_boundary: slicing at an arbitrary byte offset panics if
-            // the cut lands mid multi-byte UTF-8 (any non-ASCII page > 2000 B).
-            let end = state.text.floor_char_boundary(state.text.len().min(2000));
+            // Slicing at an arbitrary byte offset panics if the cut lands mid
+            // multi-byte UTF-8 (any non-ASCII page > 2000 B), so walk back to the
+            // nearest char boundary. `str::floor_char_boundary` is the direct
+            // call, but it is still unstable — rustc 1.88 rejects it with E0658,
+            // and a `--release` build treats that as a hard error — so this is
+            // the stable equivalent. 0 is always a boundary, hence unwrap_or(0).
+            let cap = state.text.len().min(2000);
+            let end = (0..=cap)
+                .rev()
+                .find(|&i| state.text.is_char_boundary(i))
+                .unwrap_or(0);
             println!("Text:  {}", &state.text[..end]);
             println!("Elements: {} interactive", state.elements.len());
         }

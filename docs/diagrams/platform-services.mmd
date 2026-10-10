@@ -1,0 +1,33 @@
+flowchart TB
+  subgraph clients["Clients"]
+    Web["Angular deepscrape<br/>browser app"]
+    Agents["MCP clients<br/>Copilot · Claude · Codex · Cursor"]
+  end
+
+  subgraph edge["Fly.io edge"]
+    Front["deepscrape frontend<br/>Angular SPA + BFF"]
+    Fn["Firebase functions<br/>session · webhooks"]
+  end
+
+  subgraph auth["arachnefly · Go · Fly.io"]
+    Gate["Entitlement gate<br/>auth · paywall · quota"]
+    Router["Tenant router<br/>session to worker"]
+    Scale["fly-autoscaler<br/>queue depth driven"]
+  end
+
+  subgraph workers["Scrape workers — Fly private 6PN only, no public ingress"]
+    W1["webrain instance A<br/>obscura CDP backend"]
+    W2["webrain instance B<br/>lightpanda CDP backend"]
+    C4["deploycrawl4ai"]
+  end
+
+  Web --> Front
+  Front --> Fn
+  Front -->|"HTTPS + bearer"| Gate
+  Agents -->|"HTTPS + bearer"| Gate
+  Gate --> Router
+  Scale -.->|"scale to queue"| workers
+  Router -->|"private 6PN"| W1
+  Router -->|"private 6PN"| W2
+  W1 --> C4
+  W2 --> C4
