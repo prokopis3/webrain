@@ -1486,7 +1486,7 @@ impl CdpBackend {
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
-        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, &elements);
         let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url: url.to_string(),
@@ -2396,7 +2396,7 @@ impl BrowserBackend for CdpBackend {
         let challenge = detect_antibot(&title, &text);
         let links: Vec<String> =
             serde_json::from_value(self.eval_js(LINKS_JS).await?).unwrap_or_default();
-        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, &elements);
         let chrome_error = detect_chrome_error(&title, &text);
         let state = PageState {
             url,

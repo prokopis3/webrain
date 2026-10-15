@@ -147,6 +147,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core**: `detect_crippled` counted ALL indexed elements, so a stripped anti-bot
+  shell was reported as a healthy page. YouTube's results page exposes 15 anchors --
+  every one `visible: false` (About / Press / Copyright / ... footer links) -- and
+  `elements.len() == 15` cleared the `< 5` threshold, so `crippled` stayed `false` on
+  exactly the page the heuristic exists to catch. It now counts **visible** elements
+  only, which turns that page into `crippled: true`. The flag is still a soft hint
+  (nothing branches on it), and the documented false positive -- a real page with
+  fewer than five visible controls, e.g. a login form -- is unchanged. Covered by four
+  unit tests in `webrain-core/src/browser.rs`.
 - **mcp**: **`WEBRAIN_NO_STATE` did not cover the session family — a real cross-tenant
   leak on a shared worker.** The guard matched three executor names
   (`profiles`/`launch`/`login`), but `webrain_session` folds into *eight* executors and
