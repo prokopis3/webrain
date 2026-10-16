@@ -896,7 +896,16 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                 .and_then(|c| c.as_array())
                                 .cloned()
                                 .unwrap_or_default();
-                            let _ = b.set_cookies(&cookies).await;
+                            // Discarding this error reported `cookies_restored: N`
+                            // for a restore that wrote nothing, so a caller relying
+                            // on the count would skip a re-login over a dead session.
+                            // Fail loudly instead; `save_state` already propagates.
+                            if let Err(e) = b.set_cookies(&cookies).await {
+                                return tool_error(
+                                    id,
+                                    &format!("cannot restore {} cookies: {e}", cookies.len()),
+                                );
+                            }
                             let ls = payload.get("localStorage").cloned().unwrap_or_default();
                             let keys = b.evaluate(&restore_ls_js(&ls)).await.unwrap_or_default();
                             json!({
