@@ -3038,6 +3038,30 @@ pub fn download_ytdlp(
     }
 }
 
+/// The ceiling on bytes `download_files` writes for ONE url.
+///
+/// It exists because the copy used to be unbounded: `std::io::copy` has no cap,
+/// so a single URL could fill the disk of whichever process served the call --
+/// and on a shared worker that process is every other caller's too. 512 MiB is
+/// generous for the files this path is for (documents, images, archives) and
+/// still bounded, so a runaway URL costs a bounded amount and a named error
+/// rather than the whole filesystem.
+///
+/// Deliberately NOT applied to `download_ytdlp`: that path exists for video and
+/// audio, where large is the expected size rather than a runaway, and yt-dlp
+/// already has its own `--max-filesize` for a caller who wants one.
+///
+/// `WEBRAIN_DOWNLOAD_MAX_BYTES` overrides it, in the same shape as
+/// `WEBRAIN_FETCH_TIMEOUT_SECS`: a positive number, with a sane default rather
+/// than a value that happens to suit one artefact.
+fn download_max_bytes() -> u64 {
+    std::env::var("WEBRAIN_DOWNLOAD_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512 * 1024 * 1024)
+}
+
 pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
     std::fs::create_dir_all(dir).ok();
     let agent = browser_agent();
@@ -3055,12 +3079,23 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
                 .unwrap_or("download");
             let path = format!("{dir}/{i}_{name}");
             let mut f = std::fs::File::create(&path)?;
-            let mut reader = resp.into_body().into_reader();
-            let n = std::io::copy(&mut reader, &mut f)?;
+            let reader = resp.into_body().into_reader();
+            // ponytail: bound the write. `Read::take` stops the READ, so the
+            // excess is never written -- the file on disk is short, not
+            // truncated after the fact. `n == cap` is reported as "capped"
+            // rather than "truncated" because a source of EXACTLY `cap` bytes
+            // takes the same branch and calling that truncated would be a lie.
+            let cap = download_max_bytes();
+            let mut limited = std::io::Read::take(reader, cap);
+            let n = std::io::copy(&mut limited, &mut f)?;
             Ok(BatchResult {
                 url: url.clone(),
                 title: path,
-                text: format!("{n} bytes"),
+                text: if n == cap {
+                    format!("{n} bytes (capped at WEBRAIN_DOWNLOAD_MAX_BYTES)")
+                } else {
+                    format!("{n} bytes")
+                },
                 data: None,
                 error: None,
                 ms: 0,
