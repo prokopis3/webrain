@@ -821,6 +821,42 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
         "webrain_crawl" => {
             let mode = s("mode")?;
             dropk(&mut a, "mode");
+            // ONE normalisation, at the only place crawl picks a mode.
+            //
+            // The schema advertises three seed spellings flat (`url`, `urls`,
+            // `seed_url`) while each mode reads exactly one of them, so a caller
+            // -- a model reading the schema, or the platform gateway in front of
+            // it -- picks the wrong spelling and is answered "<x> required" for a
+            // request that named a perfectly good URL. Measured against this
+            // binary: spider wants `seed_url`, validate wants `urls`,
+            // sitemap/scan want `url`.
+            //
+            // Filling in all three from whichever was supplied makes the mode
+            // irrelevant to the caller, and doing it HERE rather than in each arm
+            // means the next mode inherits it instead of re-learning it.
+            let scalar = a
+                .get("seed_url")
+                .or_else(|| a.get("url"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    a.get("urls")
+                        .and_then(|v| v.as_array())
+                        .and_then(|list| list.first())
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+            if let (Some(one), Some(obj)) = (scalar, a.as_object_mut()) {
+                if !obj.contains_key("url") {
+                    obj.insert("url".into(), json!(one.clone()));
+                }
+                if !obj.contains_key("seed_url") {
+                    obj.insert("seed_url".into(), json!(one.clone()));
+                }
+                if !obj.contains_key("urls") {
+                    obj.insert("urls".into(), json!([one]));
+                }
+            }
             Some((
                 match mode {
                     "spider" => "webrain_spider",
@@ -2490,6 +2526,47 @@ mod surface_tests {
             fold("webrain_crawl", json!({"mode": "validate"})).0,
             "webrain_validate_urls"
         );
+    }
+
+    /// The three seed spellings are advertised flat while each mode reads one of
+    /// them, so the fold has to hand every mode the field it wants. Measured
+    /// against the shipped binary: `{"mode":"spider","url":...}` was answered
+    /// `seed_url required`, and `{"mode":"validate","url":...}` `urls required`.
+    #[test]
+    fn crawl_seed_spelling_does_not_depend_on_the_mode() {
+        let (tool, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "spider", "url": "https://e.com"}),
+        );
+        assert_eq!(tool, "webrain_spider");
+        assert_eq!(args["seed_url"], json!("https://e.com"));
+
+        let (tool, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "validate", "url": "https://e.com"}),
+        );
+        assert_eq!(tool, "webrain_validate_urls");
+        assert_eq!(args["urls"], json!(["https://e.com"]));
+
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "sitemap", "seed_url": "https://e.com"}),
+        );
+        assert_eq!(args["url"], json!("https://e.com"));
+
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "scan", "urls": ["https://e.com", "https://f.com"]}),
+        );
+        assert_eq!(args["url"], json!("https://e.com"));
+
+        // A caller that already names the field correctly is left alone.
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "spider", "seed_url": "https://given.com", "urls": ["https://kept.com"]}),
+        );
+        assert_eq!(args["seed_url"], json!("https://given.com"));
+        assert_eq!(args["urls"], json!(["https://kept.com"]));
     }
 
     #[test]
