@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **core**: optional **Brave Search API** provider — `BRAVE_API_KEY` routes
+  `brave` through `api.search.brave.com` (typed JSON, `count` ≤ 20, page-indexed
+  `offset`, no browser needed) via a new header-capable
+  `engines::serp_http_get_auth` (Brave authenticates with
+  `X-Subscription-Token`, not a query param, so the existing
+  `serp_http_get` could not carry it). `--engine brave` now works headless with
+  a key instead of demanding a CDP browser, and the MCP/CLI layers share
+  `serp::brave_api_ready()` so they stop short-circuiting brave into the browser
+  path as well (both previously answered "requires a connected browser"). `auto`
+  engages it for `limit > 20` while still short, BEFORE any browser render. `<strong>` highlights in
+  `description` are stripped, so tool output stays markup-free. Inert without
+  the key (`serpapi_google`-style policy), so unkeyed installs are unchanged.
+- **docs**: `reference/cli.mdx` gained the missing `webrain serp` command row
+  and `reference/environment.mdx` gained the six env vars that existed in code
+  but nowhere in the reference: `WEBRAIN_PROXIES` (proxy rotation pool,
+  120 s cooldown on a walled exit), `WEBRAIN_HTTP_CACHE`,
+  `WEBRAIN_HTTP_CACHE_DIR`, `WEBRAIN_DOWNLOAD_MAX_BYTES`,
+  `WEBRAIN_FETCH_TIMEOUT_SECS`, and `EMBED_FALLBACK_*`.
 - **mcp**: `webrain_cookies` / `webrain_setcookies` also take an optional
   `cdp_url`, resolved per call instead of from the session's backend. This is not
   symmetry with the ops below -- it is what makes the argument MEAN something. The
@@ -145,8 +163,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on real Chrome/obscura, matching `webrain_crawl` (1 / single-target lightpanda
   = sequential, unchanged default).
 
+### Performance
+
+- **core**: the CDP connection is no longer a per-browser bottleneck.
+  `send_cmd_with` held the shared-connection lock for the entire reply wait
+  (30 s, 120 s for screenshot/PDF), so `webrain_batch(concurrency: 8)` issued its
+  eight tabs' commands strictly one at a time and a single slow
+  `Page.captureScreenshot` stalled every other tab. Replies are now routed by one
+  reader task through `HashMap<u64, oneshot::Sender<Value>>`; the lock is held
+  only long enough to allocate an id and write. No API change — `CdpBackend`
+  still clones.
+- **core**: `capture_media` no longer fakes traffic with a 200 ms `eval_js("1")`
+  pump. The shared reader drains events whether or not a command is in flight, so
+  the dwell is a plain sleep, and capture is armed per page session
+  (`net_capture` is now `Option<String>`, not `bool`) so browser-level events can
+  no longer land in a page's buffer.
+- **core**: the network-capture buffer is capped at 2048 URLs and consumed with
+  `std::mem::take`. A video page emits thousands of segment requests; the old
+  uncapped push plus a full clone doubled peak memory for a list that is trimmed
+  to 100 entries when reported.
+- **core**: `VectorStore` normalizes on `add`/`load` instead of on every
+  candidate of every `search` — one `sqrt` per query instead of one per indexed
+  tile. `load` also normalizes, so indexes written before this change stay
+  correct.
+- **core**: `vision index_current_page` copies each tile's base64 PNG once per
+  call instead of once for the embedder and again for
+  `describe_tiles`/`caption_tiles` — the largest transient allocation in the
+  vision path.
+- **mcp**: `tokens.est_tokens` reports the `chars/4` estimate above a 32 KiB
+  reply instead of running exact BPE over it. Screenshot, vision and PDF replies
+  carry megabytes of base64, and cl100k emits roughly one `u32` per four
+  characters — about 1M tokens, hundreds of ms of CPU and a multi-megabyte
+  transient, for a cosmetic number.
+- **mcp**: session eviction at the 64-session cap is now **LRU**
+  (`SessionMeta.used` + `min_by_key`) instead of `map.keys().next()`. HashMap
+  order is hash order, so the old code could drop the caller's own live session
+  while idle ones survived.
+- **core**: one `serp::renumber` helper replaces five hand-written position
+  loops, and the `auto` merge no longer re-runs `filter_relevant` on results every
+  provider had already relevance-filtered (each URL was parsed twice for an
+  identical list).
+
 ### Fixed
 
+- **core**: SERP pagination advanced by a **guessed** page size, so deep requests
+  truncated silently. duckduckgo stepped `s` by 30 while the HTML endpoint serves
+  ~10 per page — offsets 30/60 landed past the results, returned nothing, and the
+  two-dry-page guard stopped the loop, which is exactly why `--limit 50` measured
+  **11** results. bing had the same class of bug (`first = page*10+1` while page 0
+  sends `count=limit`, so a successful `count` was rewound into on page 1).
+  `engine_url` now takes a **result offset** (`ddg s=offset`, `bing first=offset+1`,
+  `google start=offset`) and `http_search` advances it by what each page actually
+  delivered — self-correcting for the 10-30/page spread; `--page N` maps to
+  `N * 10`. Brave keeps its page-indexed `offset` (the browser path passes it).
 - **core**: `detect_crippled` counted ALL indexed elements, so a stripped anti-bot
   shell was reported as a healthy page. YouTube's results page exposes 15 anchors --
   every one `visible: false` (About / Press / Copyright / ... footer links) -- and
@@ -197,6 +266,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **core**: `auto` no longer renders google/brave unconditionally — the browser
+  tier is skipped once the merge already reached `limit`. The join ran
+  regardless, so a default `limit=10` search that duckduckgo had already filled
+  still paid up to `SERP_BROWSER_CAP` × 2 (~40 s) rendering google and brave for
+  results it was about to discard. Browser engines are also skipped when the
+  Brave API already supplied `brave` for the same reply.
 - **docs**: MCP surface count corrected 16 → **17** across landing, README,
   tools reference, decision guide, and the embedded `AGENT_GUIDE` —
   `webrain_eval_in_frame` is a separately-registered tool in `list_tools()`

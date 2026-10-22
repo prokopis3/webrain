@@ -36,7 +36,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_batch` (`op=…`) | fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
-| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto; optional proxy + 2captcha) | 🔶 mixed (HTTP engines no browser; google/brave use CDP) |
+| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto; optional proxy + 2captcha) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP) |
 | `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
@@ -307,13 +307,15 @@ Search the web and navigate to the results page. `duckduckgo` is HTML-lite and s
 </Accordion>
 
 <Accordion title="webrain_serp">
-Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML over the pooled no-browser HTTP agent; `google` is JS-gated over HTTP so it uses the browser path — `webrain serp --engine google` auto-launches a persistent-profile Chrome (headed by default, `--headless` for headless) and drives homepage → consent (trusted two-phase click) → humanized typing → trusted click; `brave` renders in the connected CDP engine; `auto` fetches HTTP engines concurrently and merges + dedupes.
+Structured search results as **typed JSON** (`position`/`title`/`url`/`domain`/`snippet`) — a SERP API any LLM can call. `duckduckgo` (default) / `bing` are plain HTML over the pooled no-browser HTTP agent; `google` is JS-gated over HTTP so it uses the browser path — `webrain serp --engine google` auto-launches a persistent-profile Chrome (headed by default, `--headless` for headless) and drives homepage → consent (trusted two-phase click) → humanized typing → trusted click; `brave` uses its keyed API when `BRAVE_API_KEY` is set (no browser needed — 20/page, page-indexed `offset`), otherwise it renders in the connected CDP engine; `auto` fetches HTTP engines concurrently and merges + dedupes.
 
 Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe (`safe`) + region (`region` — an **en-US market is pinned when unset**, because a GeoIP'd IP otherwise serves localized garbage), `request_id` + `ms`, retry with backoff (`retries`), and a **multi-page merge** so `limit` > ~10 is honored wherever engines paginate.
 
 **Proxy:** `proxy` routes the HTTP engines through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`) and bakes `--proxy-server` into the google auto-launch. Bing/Google GeoIP-lock flagged/rotating IPs and ignore market params, so a clean-IP proxy is the reliable way to get correct, larger result sets. An attached CDP engine keeps whatever proxy it started with.
 
 **CAPTCHA solving:** set `WEBRAIN_2CAPTCHA_KEY` (a 2captcha API key) and the google browser path auto-solves a `/sorry` reCAPTCHA wall — it extracts `data-sitekey` + `data-s`, submits to 2captcha with the same `proxy` (so the solving IP matches the browser's exit IP), injects the token, and submits. A failed solve falls through to the normal retry/fallback — it never blocks results.
+
+**Brave API:** set `BRAVE_API_KEY` and `engine=brave` goes through `api.search.brave.com` — typed JSON, 20 results per page, no browser at all; `auto` engages it for `limit > 20` while still short, before any browser render.
 
 **serpapi.com:** set the standard `SERPAPI_API_KEY` env var. It's the reliable way to get MORE than the free engines' ~10-result cap — serpapi honors `num` up to 100 — so for `limit > 10` it's tried **first** for google (the full best result set); for `limit <= 10` the free browser path stays primary and serpapi is a fallback. Unset key / quota-exhausted / 4xx degrades to the normal fallback with no error.
 

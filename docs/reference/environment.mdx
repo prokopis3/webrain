@@ -8,6 +8,11 @@ description: Every webrain environment variable — engine paths, browser cache 
 | Variable | Description | Default |
 |---|---|---|
 | `CDP_URL` | CDP endpoint to attach to | `http://127.0.0.1:9222` |
+| `WEBRAIN_PROXIES` | Proxy rotation pool — comma/newline-separated proxy URLs, round-robin in list order (first entry used first), with a walled exit resting 120 s before it is retried. Used by the HTTP engines (`webrain_serp`, `webrain_scrape`) and baked into the google/brave guest-Chrome launch. Process-global — an explicit per-call `proxy` overrides it and never rotates | unset (no pool) |
+| `WEBRAIN_HTTP_CACHE` | Set `0`/`off`/`false`/`no` to disable the HTTP revalidation cache (conditional GETs on repeat fetches) | on |
+| `WEBRAIN_HTTP_CACHE_DIR` | Dir holding the HTTP cache metadata file | platform cache dir (`%LOCALAPPDATA%\webrain`, `~/.cache/webrain`) |
+| `WEBRAIN_DOWNLOAD_MAX_BYTES` | Per-file size cap in bytes for the `webrain_download` http engine | `536870912` (512 MiB) |
+| `WEBRAIN_FETCH_TIMEOUT_SECS` | Per-attempt HTTP timeout for engine/package downloads — raise it on a slow link so a slow install is slow, not failed | `300` |
 | `WEBRAIN_CHROME` | Explicit Chrome binary path | auto-discovered |
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
@@ -16,12 +21,14 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` / `OPENROUTER_API_KEY` | Cloud STT (transcript) keys; all four also power the vision `ask` chain (OpenRouter → OpenAI → Fireworks → Groq → bundled local Qwen3-VL-2B) | — |
 | `SERPAPI_API_KEY` | serpapi.com paid Google SERP provider — used by `webrain_serp` when `limit > 10` | — |
+| `BRAVE_API_KEY` | Brave Search API (`api.search.brave.com`, 20/page) — makes `engine=brave` work **without a browser**, and `auto` uses it for `limit > 20` before any browser render | — |
 | `WEBRAIN_2CAPTCHA_KEY` | 2captcha API key for Google /sorry-wall reCAPTCHA solving (`webrain_serp` google/brave flows) | — |
 | `WEBRAIN_NO_STEALTH` | Set `1` to skip the injected stealth JS + UA override (e.g. the `webrain serp` google flow) | off |
 | `WEBRAIN_STEALTH_NOISE` | Set `0` to disable the canvas/audio fingerprint-noise injection (sites that distrust the spoofed profile) | on |
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
 | `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
 | `EMBED_URL` / `EMBED_MODEL` / `EMBED_API_KEY` | OpenAI-compatible `/v1/embeddings` endpoint + model + Bearer token for `webrain_vision` `op=index` / `retrieve` (any compatible server: OpenAI, Ollama, TEI, local vLLM) | `api.openai.com/v1/embeddings` + `text-embedding-3-small` |
+| `EMBED_FALLBACK_URL` / `EMBED_FALLBACK_MODEL` / `EMBED_FALLBACK_API_KEY` | Secondary embeddings endpoint tried automatically when the primary `EMBED_*` call fails | `http://127.0.0.1:8000/v1/embeddings` + `Qwen/Qwen3-VL-Embedding-2B` |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
 
 ## Local AI (watch & vision)
