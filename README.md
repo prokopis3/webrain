@@ -445,7 +445,7 @@ webrain (single binary)
 │   ├── launch.rs           spawn Chrome/lightpanda/obscura, wait for CDP
 │   ├── login.rs / vault.rs encrypted credential vault + CDP login injection (TOTP)
 │   └── vision.rs           screenshot-tile embedding + vector store
-├── webrain-mcp             MCP server: list_tools / call_tool, 15 consolidated tools (63 legacy via map_surface)
+├── webrain-mcp             MCP server: list_tools / call_tool, 17 intent-based tools (63 legacy via map_surface)
 └── webrain-cli             subcommand dispatch (mcp | install | launch | login | …)
 ```
 
