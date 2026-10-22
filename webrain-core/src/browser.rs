@@ -477,6 +477,9 @@ mod tests {
     #[test]
     fn challenge_is_not_crippled() {
         let elements: Vec<InteractiveElement> = (0..15).map(|i| el(i, false)).collect();
-        assert!(!detect_crippled(&Some("cloudflare_challenge".to_string()), &elements));
+        assert!(!detect_crippled(
+            &Some("cloudflare_challenge".to_string()),
+            &elements
+        ));
     }
 }

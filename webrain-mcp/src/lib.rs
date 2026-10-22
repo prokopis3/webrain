@@ -407,8 +407,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .get("browser")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let needs_browser =
-                    engine == "google" || engine == "brave" || (engine == "bing" && wants_browser);
+                // brave stops being browser-only once BRAVE_API_KEY is set (its
+                // keyed API needs no CDP engine).
+                let needs_browser = engine == "google"
+                    || (engine == "brave" && !webrain_core::serp::brave_api_ready())
+                    || (engine == "bing" && wants_browser);
                 if !needs_browser {
                     // `auto` also runs HTTP-only, but when a backend is already
                     // attached it joins google/brave into the merge (the core's
@@ -1063,11 +1066,18 @@ fn with_token_cost(mut resp: Value, start: std::time::Instant) -> Value {
             }
         }
         let chars = text.chars().count();
-        // vocab is compiled in via include_bytes! — this cannot fail at runtime.
-        let est_tokens = BPE
-            .get_or_init(|| tiktoken_rs::cl100k_base().expect("bundled cl100k_base vocab"))
-            .encode_with_special_tokens(&text)
-            .len();
+        // Big replies (base64 screenshots, vision tiles, PDF pages) cost ~1M u32
+        // tokens of CPU and memory to measure exactly, for a number nobody acts
+        // on. Above the cap, report the chars/4 estimate the field name already
+        // promises. shortcut: 32 KiB, raise it if exact counts for huge payloads
+        // ever matter.
+        let est_tokens = if text.len() > 32 * 1024 {
+            chars / 4
+        } else {
+            BPE.get_or_init(|| tiktoken_rs::cl100k_base().expect("bundled cl100k_base vocab"))
+                .encode_with_special_tokens(&text)
+                .len()
+        };
         result["tokens"] = json!({"chars": chars, "est_tokens": est_tokens});
         result["ms"] = json!(start.elapsed().as_millis() as u64);
     }
@@ -1115,6 +1125,8 @@ struct SessionMeta {
     backend: tokio::sync::Mutex<Option<CdpBackend>>,
     /// CDP_URL this session was opened with (None = inherited from env).
     cdp_url: Option<String>,
+    /// Last time this session served a request — drives LRU eviction at the cap.
+    used: std::sync::Mutex<std::time::Instant>,
 }
 
 impl Default for SessionMeta {
@@ -1122,6 +1134,7 @@ impl Default for SessionMeta {
         Self {
             backend: tokio::sync::Mutex::new(None),
             cdp_url: None,
+            used: std::sync::Mutex::new(std::time::Instant::now()),
         }
     }
 }
@@ -1357,7 +1370,19 @@ async fn handle_http_conn(
                 // when the cap is hit — cooperative clients use webrain_close_session.
                 const MAX_SESSIONS: usize = 64;
                 if map.len() >= MAX_SESSIONS {
-                    if let Some(stale) = map.keys().next().cloned() {
+                    // Evict the least-recently-used session, not an arbitrary key:
+                    // HashMap order is hash order, so `keys().next()` could drop the
+                    // caller's own live session while idle ones survived.
+                    let stale = map
+                        .iter()
+                        .min_by_key(|(_, s)| {
+                            s.used
+                                .lock()
+                                .map(|t| *t)
+                                .unwrap_or_else(|_| std::time::Instant::now())
+                        })
+                        .map(|(k, _)| k.clone());
+                    if let Some(stale) = stale {
                         map.remove(&stale);
                     }
                 }
@@ -1418,6 +1443,10 @@ async fn handle_http_conn(
                     .or_insert_with(|| Arc::new(Default::default()))
                     .clone()
             };
+            // Touch the stamp so cap eviction sees this session as in use.
+            if let Ok(mut t) = session.used.lock() {
+                *t = std::time::Instant::now();
+            }
             let mut backend = session.backend.lock().await;
 
             let resp = match method {
@@ -1457,6 +1486,7 @@ async fn handle_http_conn(
                         let meta = Arc::new(SessionMeta {
                             backend: tokio::sync::Mutex::new(None),
                             cdp_url: cdp.clone(),
+                            used: std::sync::Mutex::new(std::time::Instant::now()),
                         });
                         let mut map = state.sessions.lock().await;
                         let exists = map.contains_key(&sid);

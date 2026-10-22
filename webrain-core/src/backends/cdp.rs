@@ -305,12 +305,19 @@ fn resolve_ws(http_url: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// In-flight command replies, keyed by CDP id. Filled by the socket reader.
+type Pending = Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>;
+
 /// Clone shares the same CDP connection + tab registry (all Arc internals), so
 /// concurrent tasks can each own a handle to drive their OWN tab concurrently.
 #[derive(Clone)]
 pub struct CdpBackend {
     /// Browser-level WebSocket; commands are routed per-tab via sessionId.
+    /// Held only long enough to allocate an id and write — never across the
+    /// reply wait, or one slow tab would serialize every other tab.
     inner: Arc<Mutex<CdpConnection>>,
+    /// Replies awaiting their caller.
+    pending: Pending,
     /// Attached page tabs: id → target/session. The active tab receives commands.
     tabs: Arc<Mutex<HashMap<String, Tab>>>,
     active: Arc<Mutex<String>>,
@@ -318,9 +325,9 @@ pub struct CdpBackend {
     /// D1 fingerprint cache: (element count, text hash) → last PageState.
     fp: Arc<Mutex<Option<(usize, usize)>>>,
     snap: Arc<Mutex<Option<PageState>>>,
-    /// Network capture: while net_capture is set, requestWillBeSent URLs are
-    /// buffered in net_urls (browsemind NetworkCapture pattern).
-    net_capture: Arc<Mutex<bool>>,
+    /// Network capture: `Some(session)` arms the reader to buffer
+    /// requestWillBeSent URLs for that session ("" = browser-level); None = off.
+    net_capture: Arc<Mutex<Option<String>>>,
     net_urls: Arc<Mutex<Vec<String>>>,
     /// User-registered init scripts (agent-browser `--init-script` borrow):
     /// replayed via Page.addScriptToEvaluateOnNewDocument in attach_and_init so
@@ -347,9 +354,65 @@ struct Tab {
 struct CdpConnection {
     /// JSON payloads out to the browser (WS Text frame, or pipe length-framed).
     write: tokio::sync::mpsc::Sender<String>,
-    /// JSON payloads in from the browser, bridged by a background task.
-    read: tokio::sync::mpsc::Receiver<String>,
     cmd_id: u64,
+}
+
+/// Sole reader of the CDP socket: routes replies to the waiting caller by `id`
+/// and buffers `Network.requestWillBeSent` while a capture is armed.
+///
+/// This exists so `send_cmd_with` never holds the connection lock while awaiting
+/// a reply. Before it, the lock was held for the whole wait, so one 120s PDF or
+/// screenshot serialized every command on every tab of the shared backend. It
+/// also drains events with no command in flight, which is why `capture_media`
+/// no longer has to fake traffic with evals.
+fn spawn_cdp_reader(
+    mut in_rx: tokio::sync::mpsc::Receiver<String>,
+    pending: Pending,
+    net_capture: Arc<Mutex<Option<String>>>,
+    net_urls: Arc<Mutex<Vec<String>>>,
+) {
+    tokio::spawn(async move {
+        while let Some(text) = in_rx.recv().await {
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
+                if let Some(tx) = pending.lock().await.remove(&id) {
+                    let _ = tx.send(v);
+                }
+                continue;
+            }
+            if v.get("method").and_then(|m| m.as_str()) != Some("Network.requestWillBeSent") {
+                continue;
+            }
+            let ev_session = v.get("sessionId").and_then(|s| s.as_str());
+            let armed = {
+                let armed = net_capture.lock().await;
+                match armed.as_deref() {
+                    Some("") => Some(ev_session.is_none()),
+                    Some(want) => Some(ev_session == Some(want)),
+                    None => None,
+                }
+            };
+            if armed != Some(true) {
+                continue;
+            }
+            let Some(u) = v
+                .get("params")
+                .and_then(|p| p.get("request"))
+                .and_then(|r| r.get("url"))
+                .and_then(|u| u.as_str())
+            else {
+                continue;
+            };
+            let mut urls = net_urls.lock().await;
+            // Cap: a chatty page emits thousands of requests and only the media
+            // ones matter — an uncapped buffer grows without bound on long sessions.
+            if urls.len() < 2048 {
+                urls.push(u.to_string());
+            }
+        }
+    });
 }
 
 impl CdpBackend {
@@ -407,19 +470,28 @@ impl CdpBackend {
 
         let inner = CdpConnection {
             write: out_tx,
-            read: in_rx,
             cmd_id: 1,
         };
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let net_capture = Arc::new(Mutex::new(None));
+        let net_urls = Arc::new(Mutex::new(Vec::new()));
+        spawn_cdp_reader(
+            in_rx,
+            pending.clone(),
+            net_capture.clone(),
+            net_urls.clone(),
+        );
 
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
+            pending,
             tabs: Arc::new(Mutex::new(HashMap::new())),
             active: Arc::new(Mutex::new(String::new())),
             next_id: Arc::new(Mutex::new(0)),
             fp: Arc::new(Mutex::new(None)),
             snap: Arc::new(Mutex::new(None)),
-            net_capture: Arc::new(Mutex::new(false)),
-            net_urls: Arc::new(Mutex::new(Vec::new())),
+            net_capture,
+            net_urls,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
             no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
@@ -512,19 +584,29 @@ impl CdpBackend {
             let _ = child.kill().await;
         });
 
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let net_capture = Arc::new(Mutex::new(None));
+        let net_urls = Arc::new(Mutex::new(Vec::new()));
+        spawn_cdp_reader(
+            in_rx,
+            pending.clone(),
+            net_capture.clone(),
+            net_urls.clone(),
+        );
+
         Ok(Self {
             inner: Arc::new(Mutex::new(CdpConnection {
                 write: out_tx,
-                read: in_rx,
                 cmd_id: 1,
             })),
+            pending,
             tabs: Arc::new(Mutex::new(HashMap::new())),
             active: Arc::new(Mutex::new(String::new())),
             next_id: Arc::new(Mutex::new(0)),
             fp: Arc::new(Mutex::new(None)),
             snap: Arc::new(Mutex::new(None)),
-            net_capture: Arc::new(Mutex::new(false)),
-            net_urls: Arc::new(Mutex::new(Vec::new())),
+            net_capture,
+            net_urls,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
             no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
@@ -588,65 +670,46 @@ impl CdpBackend {
         method: &str,
         params: Value,
     ) -> anyhow::Result<Value> {
-        let mut conn = self.inner.lock().await;
-        let id = conn.cmd_id;
-        conn.cmd_id += 1;
+        let (id, rx) = {
+            let mut conn = self.inner.lock().await;
+            let id = conn.cmd_id;
+            conn.cmd_id += 1;
 
-        let mut msg = json!({"id": id, "method": method, "params": params});
-        if let Some(sid) = session {
-            msg["sessionId"] = json!(sid);
-        }
+            let mut msg = json!({"id": id, "method": method, "params": params});
+            if let Some(sid) = session {
+                msg["sessionId"] = json!(sid);
+            }
+            let text = serde_json::to_string(&msg)?;
 
-        let text = serde_json::to_string(&msg)?;
-        conn.write.send(text).await?;
+            // Register before writing: the reply can land before send() returns.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.pending.lock().await.insert(id, tx);
+            if let Err(e) = conn.write.send(text).await {
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!("CDP write failed: {e}");
+            }
+            (id, rx)
+        }; // connection lock released here — nothing else waits on this command
 
         // 30s response cap: an unanswered command (renderer paused on a dialog,
-        // tab crash, half-open socket) must fail fast instead of holding the
-        // single connection Mutex forever and stalling every other command.
-        let wait = async {
-            loop {
-                let Some(text) = conn.read.recv().await else {
-                    anyhow::bail!("CDP connection closed");
-                };
-                let v: Value = serde_json::from_str(&text)?;
-                if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
-                    if let Some(err) = v.get("error") {
-                        anyhow::bail!("CDP error [{}]: {}", method, err);
-                    }
-                    return Ok::<Value, anyhow::Error>(
-                        v.get("result").cloned().unwrap_or(json!({})),
-                    );
-                }
-                // Event (no id). Network capture: while net_capture is set,
-                // requestWillBeSent URLs are buffered (browsemind pattern).
-                let ev_session = v.get("sessionId").and_then(|s| s.as_str());
-                if ev_session == session {
-                    if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                        if m == "Network.requestWillBeSent" && *self.net_capture.lock().await {
-                            if let Some(u) = v
-                                .get("params")
-                                .and_then(|p| p.get("request"))
-                                .and_then(|r| r.get("url"))
-                                .and_then(|u| u.as_str())
-                            {
-                                self.net_urls.lock().await.push(u.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        // Flat 30s is too short for the slow-but-legit operations (full-page
-        // PDF/screenshot, awaitPromise evaluate) — give them a longer budget.
+        // tab crash, half-open socket) must fail fast. Only this command's slot
+        // is dropped, so the shared connection stays usable for other tabs.
         let cap = match method {
             "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
             _ => std::time::Duration::from_secs(30),
         };
-        match tokio::time::timeout(cap, wait).await {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(e),
-            Err(_) => anyhow::bail!("CDP command {method} timed out after {cap:?}"),
+        let reply = match tokio::time::timeout(cap, rx).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => anyhow::bail!("CDP connection closed"),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!("CDP command {method} timed out after {cap:?}");
+            }
+        };
+        if let Some(err) = reply.get("error") {
+            anyhow::bail!("CDP error [{}]: {}", method, err);
         }
+        Ok(reply.get("result").cloned().unwrap_or(json!({})))
     }
 
     async fn active_session(&self) -> Option<String> {
@@ -1328,30 +1391,31 @@ impl CdpBackend {
     /// captures the whole load (the antenna player's JS-loaded .m3u8/.mp4 appear
     /// here even though they're invisible to the performance buffer). Without it,
     /// just captures the tail of the current page's traffic for `wait_ms`.
-    /// ponytail: Network.requestWillBeSent buffered by the WS reader; pump with
-    /// trivial evals since events are only read while a command is in flight.
+    /// ponytail: Network.requestWillBeSent buffered by the shared WS reader, so
+    /// the dwell below is a plain sleep instead of faked eval traffic.
     pub async fn capture_media(&self, url: Option<&str>, wait_ms: u64) -> anyhow::Result<Value> {
         self.ensure_page_attached().await?;
         let sid = self.active_session().await;
         self.send_cmd_with(sid.as_deref(), "Network.enable", json!({}))
             .await?;
-        *self.net_capture.lock().await = true;
+        // Arm for THIS page session ("" would mean browser-level events only).
+        *self.net_capture.lock().await = Some(sid.clone().unwrap_or_default());
         self.net_urls.lock().await.clear();
 
         let start = std::time::Instant::now();
         if let Some(u) = url.filter(|u| !u.is_empty()) {
-            let _ = self.navigate(u).await; // its evals pump events into net_urls
+            let _ = self.navigate(u).await;
         }
-        // Pump: keep commands flowing so late XHR/fetch (player) URLs get read.
-        let mut waited = start.elapsed().as_millis() as u64;
-        while waited < wait_ms {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            let _ = self.eval_js("1").await;
-            waited = start.elapsed().as_millis() as u64;
+        // Dwell so late XHR/fetch (player) URLs arrive; the reader buffers them.
+        let waited = start.elapsed().as_millis() as u64;
+        if wait_ms > waited {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms - waited)).await;
         }
 
-        let urls = self.net_urls.lock().await.clone();
-        *self.net_capture.lock().await = false;
+        *self.net_capture.lock().await = None;
+        // take() instead of clone(): the buffer is consumed here and cleared on
+        // the next arm, so copying it only doubled peak memory.
+        let urls = std::mem::take(&mut *self.net_urls.lock().await);
         let _ = self
             .send_cmd_with(sid.as_deref(), "Network.disable", json!({}))
             .await;
