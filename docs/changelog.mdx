@@ -8,7 +8,31 @@ description: Version history for webrain — the 17-tool MCP surface, watch/vide
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
-## Unreleased
+## v0.9.0
+
+<p className="text-[#888] text-sm">October 23, 2026</p>
+
+### Added
+
+- **Brave Search API provider** — `BRAVE_API_KEY` routes `brave` through
+  `api.search.brave.com` (typed JSON, `count` ≤ 20, no browser needed),
+  authenticated with `X-Subscription-Token`. `--engine brave` now works headless
+  with a key instead of demanding a CDP browser, and `serp::brave_api_ready()`
+  is the one predicate the core, MCP and CLI layers share.
+
+### Fixed
+
+- **SERP pagination** — offsets advance by the results a page actually
+  delivered. The guessed stride truncated deep requests: duckduckgo stepped `s`
+  by 30 while the endpoint serves ~10 per page, so `limit=50` returned 11.
+
+### Performance
+
+- **CDP replies are dispatched off the connection lock** — one slow
+  `Page.captureScreenshot` (or a paused renderer) no longer stalls every other
+  tab, so `webrain_batch` concurrency is real. Network capture is armed per page
+  session and capped; the vision store stores unit vectors; token counting uses
+  the `chars/4` estimate above 32 KiB replies; session eviction is LRU.
 
 ### Changed
 
