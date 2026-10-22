@@ -1,0 +1,24 @@
+sequenceDiagram
+  autonumber
+  participant U as Angular deepscrape
+  participant A as arachnefly
+  participant W as webrain worker
+  participant T as Target site
+
+  U->>A: POST /scrape with Bearer token
+  A->>A: verify entitlement + quota
+  alt over quota
+    A-->>U: 429 with retry-after
+  else within quota
+    A->>W: MCP tools/call over private 6PN
+    W->>T: CDP navigate
+    T-->>W: DOM plus challenge field
+    alt challenge detected
+      W-->>A: challenge is non-null
+      A-->>U: 409 needs session or real Chrome
+    else page rendered clean
+      W->>W: zero-LLM extraction
+      W-->>A: typed JSON
+      A-->>U: typed JSON plus credits consumed
+    end
+  end

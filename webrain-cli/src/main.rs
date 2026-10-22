@@ -83,9 +83,17 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("Fetching: {url}");
             let state = rt.block_on(backend.navigate(url))?;
             println!("Title: {}", state.title);
-            // floor_char_boundary: slicing at an arbitrary byte offset panics if
-            // the cut lands mid multi-byte UTF-8 (any non-ASCII page > 2000 B).
-            let end = state.text.floor_char_boundary(state.text.len().min(2000));
+            // Slicing at an arbitrary byte offset panics if the cut lands mid
+            // multi-byte UTF-8 (any non-ASCII page > 2000 B), so walk back to the
+            // nearest char boundary. `str::floor_char_boundary` is the direct
+            // call, but it is still unstable — rustc 1.88 rejects it with E0658,
+            // and a `--release` build treats that as a hard error — so this is
+            // the stable equivalent. 0 is always a boundary, hence unwrap_or(0).
+            let cap = state.text.len().min(2000);
+            let end = (0..=cap)
+                .rev()
+                .find(|&i| state.text.is_char_boundary(i))
+                .unwrap_or(0);
             println!("Text:  {}", &state.text[..end]);
             println!("Elements: {} interactive", state.elements.len());
         }
@@ -109,9 +117,19 @@ fn main() -> anyhow::Result<()> {
         }
         Some("spider") => {
             let seed = args.get(2).map(|s| s.as_str()).unwrap_or("about:blank");
-            // lazy CLI flags: --dfs, --depth N, --pages N, --no-same-domain, --json-urls
+            // lazy CLI flags: --dfs, --depth N, --pages N, --concurrency N,
+            // --no-same-domain, --json-urls
             let json_urls = args.contains(&"--json-urls".to_string());
             let dfs = args.contains(&"--dfs".to_string());
+            // Parallel multi-tab crawl (matches webrain_crawl's concurrency): N
+            // workers on multi-target backends (Chrome/obscura); 1/single-target
+            // (lightpanda) = sequential, the legacy default.
+            let concurrency: usize = args
+                .iter()
+                .position(|a| a == "--concurrency")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
             let depth: usize = args
                 .iter()
                 .position(|a| a == "--depth")
@@ -146,7 +164,8 @@ fn main() -> anyhow::Result<()> {
                 .with_same_domain(same_domain)
                 .with_discover_only(discover_only)
                 .with_respect_robots(respect_robots)
-                .with_keywords(keywords);
+                .with_keywords(keywords)
+                .with_concurrency(concurrency);
             let results = rt.block_on(spider.crawl(&backend, seed));
             if json_urls {
                 let all_urls: Vec<&String> = results.iter().flat_map(|r| r.links.iter()).collect();
@@ -241,7 +260,7 @@ fn main() -> anyhow::Result<()> {
                     "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
                 );
                 println!(
-                    "  duckduckgo|auto need no browser; bing/brave use the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
+                    "  duckduckgo|auto need no browser; brave uses its keyed API when BRAVE_API_KEY is set, else the connected CDP engine; bing uses the CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
                 );
                 return Ok(());
             }
@@ -363,7 +382,8 @@ fn main() -> anyhow::Result<()> {
                         Ok(b) => Some(b),
                         Err(_)
                             if opts.engine == "google"
-                                || opts.engine == "brave"
+                                || (opts.engine == "brave"
+                                    && !webrain_core::serp::brave_api_ready())
                                 || opts.engine == "bing" =>
                         {
                             // GUEST MODE auto-launch for all browser engines
@@ -402,9 +422,14 @@ fn main() -> anyhow::Result<()> {
                                     Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
                                 }
                                 // bing has a working pure-HTTP path — no Chrome →
-                                // fall back to HTTP (google/brave NEED a browser, so
-                                // their launch error still propagates).
-                                Err(e) if opts.engine == "bing" => {
+                                // fall back to HTTP (google NEEDS a browser, and
+                                // brave does too unless BRAVE_API_KEY is set — those
+                                // launch errors still propagate).
+                                Err(e)
+                                    if opts.engine == "bing"
+                                        || (opts.engine == "brave"
+                                            && webrain_core::serp::brave_api_ready()) =>
+                                {
                                     if !json_out {
                                         eprintln!(
                                             "no Chrome for bing browser path ({e}); falling back to pure HTTP"

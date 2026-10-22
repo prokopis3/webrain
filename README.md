@@ -368,6 +368,10 @@ anything's missing.
 | Variable | Description | Default |
 |---|---|---|
 | `CDP_URL` | CDP endpoint to attach to | `http://127.0.0.1:9222` |
+| `WEBRAIN_HTTP_TOKEN` | Shared secret for the HTTP transport — when set, every request must carry `Authorization: Bearer <value>` (compared in constant time). Unset means no auth, which is only permitted on a loopback bind (see `WEBRAIN_ALLOW_UNAUTHENTICATED`) | unset |
+| `WEBRAIN_HTTP_ADDR` | Bind address for `webrain mcp --http`. Defaults to loopback; set `0.0.0.0:9223` inside a container | `127.0.0.1:<port>` |
+| `WEBRAIN_ALLOW_UNAUTHENTICATED` | Truthy value permits a **non-loopback** HTTP bind with no token. Without it, webrain refuses to start in that combination rather than silently serving as an open engine | off |
+| `WEBRAIN_NO_STATE` | Truthy value disables every stateful/session tool (shared-instance mode) and caps tab fan-out at 6 | off |
 | `WEBRAIN_CHROME` | Explicit Chrome binary path | auto-discovered |
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |

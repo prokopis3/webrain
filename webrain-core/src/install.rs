@@ -1030,9 +1030,20 @@ fn fetch_chunk(
     // Per-attempt timeout: ureq's default is no timeout, so a stalled server
     // would block the worker thread forever (combined with the byte-count-only
     // progress loop, the whole install would hang).
+    //
+    // It is PER ATTEMPT and this is a range request, so the value only has to
+    // clear ONE chunk. 60 s was too tight in practice: the ~180 MB lightpanda
+    // tarball failed with `timeout: global` on a slow link while the 67.6 MB
+    // obscura tarball went through in 44 s. Overridable so a slow CI or a cold
+    // machine is a SLOW build rather than a FAILED one.
+    let timeout_secs = std::env::var("WEBRAIN_FETCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(300);
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
             .build(),
     );
     let resp = agent

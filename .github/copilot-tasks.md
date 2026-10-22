@@ -1,40 +1,52 @@
 
-"""
-Semantic Page Graph — DOM Analysis Outside the LLM
-=====================================================
-Builds a structured, queryable graph from page DOM data.
-Inspired by PageAgent's philosophy: move as much logic as possible
-OUTSIDE the LLM.
+# Tasks — webrain
 
-Core idea: Instead of dumping raw DOM into the LLM prompt,
-pre-compute element relationships, semantic roles, interaction types,
-and ranked candidates. The LLM only sees the TOP 12 candidates
-instead of 500+ raw DOM nodes.
+Current backlog, ordered. Each item names its file and approximate size, and every
+item traces to a verified gap — nothing here is speculative.
 
-This runs at the Python level (from crawl4ai CrawlResult data),
-not as in-page JS — fully compatible with crawl4ai.
+> **P0 and P1 shipped 2026-09-30.** `WEBRAIN_NO_STATE`, `WEBRAIN_HTTP_TOKEN`
+bearer auth, `GET /health`, the SIGTERM drain, and the shared-instance concurrency
+> cap all landed in `webrain-mcp`. P2 is still open.
 
-Usage:
-    graph = SemanticGraph()
-    graph.build_from_page_state(page_state, url="https://...")
+## P0 — blocks the shared / free tier
 
-    # Get pre-filtered candidates for LLM
-    candidates = graph.get_candidates(max_results=12)
+- [ ] **`WEBRAIN_NO_STATE` guard.** Refuse `vault*`, `launch`, `login`,
+      `session(op=login)` when set. **One check in the dispatcher**, not one per
+      tool: every stateful tool routes through the same place, so a per-tool
+      guard would leave siblings open — the exact failure a shared pool must not
+      have. (~25 ln, `webrain-mcp/src/lib.rs`)
+- [ ] **Optional bearer auth.** `WEBRAIN_HTTP_TOKEN` → require
+      `Authorization: Bearer <secret>`. Unset = today's behaviour, so local and
+      stdio users are untouched. Not a substitute for arachnefly; it is what
+      makes a mis-published port survivable. (~20 ln, `run_http`)
 
-    # Query by semantic role
-    nav = graph.find_by_role("navigation")
-    forms = graph.find_by_role("form")
-    links = graph.find_by_role("link")
+## P1 — required for Fly autoscale and rolling deploy
 
-    # Get interaction history
-    visited = graph.visited_nodes
-    clicked = graph.get_interaction_history()
-"""
-#githubRepo #search_graph migrate this into memory so that will improve the robustness and accurancy like alibaba/page-agent.js
+- [ ] **`/health` + `/readyz`.** Unauthenticated, no CDP touch; `/readyz` returns
+      503 until the backend is attached. `fly-autoscaler.toml` currently has
+      nothing to check. (~25 ln)
+- [ ] **Graceful shutdown on SIGTERM.** Stop accepting, drain in-flight tool
+      calls under a deadline, close tabs. Scale-in currently loses batch work.
+      (~30 ln)
+- [ ] **Per-session concurrency cap** when `no_state` is on — one tenant can
+      otherwise starve the others with a large `webrain_batch` `concurrency`.
+      (~15 ln, `tools.rs`)
 
-FIND MORE IMPROVEMENTS
-  just we improve the codebase totally architecture and workflow based on information we have  
- #detect_changes 
- do not stop until ensure all phases done compltetly - validate
- if you dont find anything just say all fine, done
- #get_code_snippet #search_code #search_graph 
+## P2 — platform
+
+- [ ] Proxy lanes per tenant (`WEBRAIN_PROXIES` is process-global today).
+- [ ] Leased-instance sticky routing (arachnefly side).
+- [ ] deepscrape BFF: route scrapes through arachnefly; surface `challenge` and
+      quota errors in the UI.
+
+## Docs out of sync
+
+- [ ] `docs/INTEGRATION_PLAN.md` is stale — it claims "zero distribution" while
+      the repo ships Scoop / Homebrew / Docker artifacts and install scripts, and
+      it lists `webrain_fetch_http` as CDP-dependent when a no-browser path
+      exists.
+- [ ] `docs/FEATURE_GAPS.md` build order still shows 9b (proxy rotation pool)
+      and the 304 cache as unbuilt; both shipped 2026-09-30.
+
+See `docs/PLATFORM_EXPOSURE_PLAN.md` for the reasoning behind P0/P1.
+

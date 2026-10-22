@@ -126,13 +126,18 @@ pub fn detect_chrome_error(title: &str, text: &str) -> Option<String> {
     None
 }
 
-/// A loaded page with almost no interactive elements and no challenge is likely
-/// a bot-limited "crippled" shell (YouTube/Twitter/X serve stripped pages to
-/// automation). Soft hint, not a block.
-/// ponytail: naive count heuristic; a <5-element real page (login) trips it too —
-/// raise the threshold or scope per-site if it's noisy.
-pub fn detect_crippled(challenge: &Option<String>, element_count: usize) -> bool {
-    challenge.is_none() && element_count < 5
+/// A loaded page with almost no *visible* interactive elements and no challenge
+/// is likely a bot-limited "crippled" shell (YouTube/Twitter/X serve stripped
+/// pages to automation). Soft hint, not a block.
+///
+/// Counts visible elements only: a stripped shell can still expose a dozen
+/// invisible footer links, and a raw `elements.len()` read those as a healthy
+/// page — silently suppressing the hint on exactly the pages it targets.
+/// ponytail: naive count heuristic; a <5-visible-element real page (login) trips
+/// it too — raise the threshold or scope per-site if it's noisy.
+pub fn detect_crippled(challenge: &Option<String>, elements: &[InteractiveElement]) -> bool {
+    let visible = elements.iter().filter(|e| e.visible).count();
+    challenge.is_none() && visible < 5
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -409,7 +414,7 @@ pub trait BrowserBackend: Send + Sync {
         let links: Vec<String> =
             serde_json::from_value(self.evaluate(LINKS_JS).await?).unwrap_or_default();
         let challenge = detect_antibot(&title, &text);
-        let crippled = elements_ok && detect_crippled(&challenge, elements.len());
+        let crippled = elements_ok && detect_crippled(&challenge, &elements);
         let chrome_error = detect_chrome_error(&title, &text);
         Ok(PageState {
             url,
@@ -424,4 +429,57 @@ pub trait BrowserBackend: Send + Sync {
     }
 
     fn backend_name(&self) -> &'static str;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn el(index: usize, visible: bool) -> InteractiveElement {
+        InteractiveElement {
+            index,
+            tag: "a".to_string(),
+            text: String::new(),
+            selector: format!("a:nth-of-type({})", index + 1),
+            visible,
+        }
+    }
+
+    /// Real capture from the YouTube results shell: 15 anchors, every one
+    /// `visible: false` (About / Press / Copyright / ... footer links).
+    /// The old `elements.len()` count saw 15 and called it a healthy page.
+    #[test]
+    fn youtube_shell_is_flagged_crippled() {
+        let elements: Vec<InteractiveElement> = (0..15).map(|i| el(i, false)).collect();
+        assert_eq!(elements.len(), 15, "raw count still looks healthy");
+        assert!(
+            detect_crippled(&None, &elements),
+            "0 visible elements must be flagged as a crippled shell"
+        );
+    }
+
+    /// A genuinely interactive page must not be flagged.
+    #[test]
+    fn healthy_page_is_not_flagged() {
+        let elements: Vec<InteractiveElement> = (0..5).map(|i| el(i, true)).collect();
+        assert!(!detect_crippled(&None, &elements));
+    }
+
+    /// Pre-existing caveat, still true: a small real page (e.g. a login form)
+    /// trips the heuristic. Documented in the ponytail note, not fixed here.
+    #[test]
+    fn small_real_page_still_trips() {
+        let elements: Vec<InteractiveElement> = (0..4).map(|i| el(i, true)).collect();
+        assert!(detect_crippled(&None, &elements));
+    }
+
+    /// A challenge is a block, not a crippled shell — different signal.
+    #[test]
+    fn challenge_is_not_crippled() {
+        let elements: Vec<InteractiveElement> = (0..15).map(|i| el(i, false)).collect();
+        assert!(!detect_crippled(
+            &Some("cloudflare_challenge".to_string()),
+            &elements
+        ));
+    }
 }

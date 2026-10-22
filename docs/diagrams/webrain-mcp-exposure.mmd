@@ -1,0 +1,45 @@
+flowchart LR
+  subgraph public["Public surface — the only thing with ingress"]
+    Anon["Anonymous / free user"]
+    Paid["Entitled user"]
+    Probe["Fly / k8s liveness probe"]
+  end
+
+  subgraph gate["arachnefly — the auth boundary"]
+    Auth["Bearer + entitlement check"]
+    Quota["Per-tier quota<br/>rate · concurrent tabs · pages"]
+    Route["Route to pool or lease"]
+  end
+
+  subgraph pool["Webrain workers — unauthenticated, private only"]
+    FreeW["Shared pool<br/>N sessions per instance<br/>WEBRAIN_NO_STATE=1"]
+    PaidW["Leased instance<br/>single tenant<br/>vault allowed"]
+  end
+
+  subgraph guards["Per-request guards — webrain-mcp/src/lib.rs"]
+    Health["GET /health<br/>unauthenticated, answered pre-parse"]
+    Token["WEBRAIN_HTTP_TOKEN<br/>bearer, constant-time compare"]
+    NoState["WEBRAIN_NO_STATE<br/>refuses vault / profiles / launch / login<br/>clamps fan-out to 6"]
+    Drain["SIGTERM drain<br/>20s bounded, unverified on Windows"]
+  end
+
+  subgraph inner["Per-session state"]
+    Sess["Mcp-Session-Id map<br/>one CDP backend per session"]
+    Cache["httpcache<br/>revalidation-only, 256 bounded"]
+    Proxy["proxy rotation<br/>WEBRAIN_PROXIES, 120s cooldown"]
+  end
+
+  Anon --> Auth
+  Paid --> Auth
+  Auth --> Quota
+  Quota --> Route
+  Route -->|"free tier"| FreeW
+  Route -->|"paid tier"| PaidW
+  Probe -.->|"liveness, no credential"| Health
+  FreeW --> Token
+  PaidW --> Token
+  Token --> NoState
+  NoState --> Sess
+  NoState --> Drain
+  Sess --> Cache
+  Sess --> Proxy

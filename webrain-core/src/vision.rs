@@ -142,7 +142,17 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 fn norm(a: &[f32]) -> f32 {
     dot(a, a).sqrt()
 }
-
+/// `v` scaled to unit length (returned unchanged when it is all zeros).
+/// Stored vectors are kept unit-length so `search` needs no per-candidate sqrt.
+fn unit(mut v: Vec<f32>) -> Vec<f32> {
+    let n = norm(&v);
+    if n > 0.0 {
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+    }
+    v
+}
 /// In-memory cosine index with JSONL append persistence (one line per record:
 /// `{"id": "...", "vec": [...]}`) at `dir/{index}.jsonl`.
 pub struct VectorStore {
@@ -183,7 +193,9 @@ impl VectorStore {
                     })
                     .unwrap_or_default();
                 if !id.is_empty() && !vec.is_empty() {
-                    self.map.insert(id.clone(), vec);
+                    // Indexes written before add() normalized may hold raw
+                    // vectors; normalizing on read keeps search() correct.
+                    self.map.insert(id.clone(), unit(vec));
                 }
                 if let Some(text) = v["text"].as_str() {
                     if !id.is_empty() {
@@ -201,7 +213,7 @@ impl VectorStore {
         // same id (and vice-versa), so has_text()/len()/save() never mix modes
         // or double-count an id.
         self.texts.remove(id);
-        self.map.insert(id.to_string(), vec);
+        self.map.insert(id.to_string(), unit(vec));
         self.dirty = true;
     }
 
@@ -257,7 +269,8 @@ impl VectorStore {
         let mut scored: Vec<(String, f32)> = self
             .map
             .iter()
-            .map(|(id, v)| (id.clone(), dot(v, q) / (norm(v) * qn).max(1e-8)))
+            // Stored vectors are unit length (add/load) — no sqrt here.
+            .map(|(id, v)| (id.clone(), dot(v, q) / qn.max(1e-8)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
@@ -569,10 +582,10 @@ pub async fn index_current_page(
     let url_for = url.clone();
     let tag_for = tag.to_string();
     let client = EmbeddingClient::from_env();
-    let inputs: Vec<EmbedInput> = tiles
-        .iter()
-        .map(|t| EmbedInput::Image(t.png_b64.clone()))
-        .collect();
+    // One copy of the PNG payloads per call: the embedder needs owned Strings,
+    // but describe/caption borrow this same set instead of cloning it again.
+    let pngs: Vec<String> = tiles.iter().map(|t| t.png_b64.clone()).collect();
+    let inputs: Vec<EmbedInput> = pngs.iter().cloned().map(EmbedInput::Image).collect();
     // Blocking ureq embed + caption HTTP (with 5s retry sleeps) + store fs IO —
     // off the executor so a slow embedder/captioner can't tie up a tokio worker.
     let (mode, vision, total) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Option<String>, usize)> {
@@ -594,10 +607,7 @@ pub async fn index_current_page(
                 }
                 let v = crate::install::vision_local()
                     .is_some()
-                    .then(|| {
-                        let t: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
-                        describe_tiles(&t).ok()
-                    })
+                    .then(|| describe_tiles(&pngs).ok())
                     .flatten();
                 ("embed", v)
             }
@@ -605,8 +615,7 @@ pub async fn index_current_page(
                 // ponytail: offline fallback — caption each tile with the bundled
                 // local Qwen3-VL so webrain_vision works without a cloud embed key.
                 if crate::install::vision_local().is_some() {
-                    let b: Vec<String> = tiles.iter().map(|x| x.png_b64.clone()).collect();
-                    let caps = caption_tiles(&b)?;
+                    let caps = caption_tiles(&pngs)?;
                     for (i, t) in tiles.iter().enumerate() {
                         store.add_text(&format!("{url_for}#tile{}", t.index), &caps[i]);
                     }

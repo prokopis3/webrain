@@ -1597,6 +1597,142 @@ pub fn build_extract_js(base_selector: &str, base_fields: &[Value], fields: &[Va
     )
 }
 
+/// Browserless counterpart to `build_extract_js`: the same schema, applied to
+/// fetched HTML instead of a live page.
+///
+/// The field vocabulary is `build_field_js`'s on purpose — `text` (default),
+/// `attr`, `html`, `list`, `nested_list`, each scoped to the current
+/// `base_selector` match — so ONE schema means the same thing on the HTTP path
+/// as on the browser path. A type this cannot express (e.g. an xpath field)
+/// yields null rather than a plausible wrong value, which is what makes a
+/// half-supported schema visible instead of silent.
+///
+/// This is what lets the shared pool serve structured extraction at all: no
+/// browser, no "current page", so nothing to attribute to another tenant.
+pub fn extract_fields(html: &str, base_selector: &str, fields: &[Value]) -> Vec<Value> {
+    let doc = scraper::Html::parse_document(html);
+    let base = match scraper::Selector::parse(base_selector) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for el in doc.select(&base) {
+        out.push(Value::Object(field_map(&el, fields)));
+    }
+    out
+}
+
+/// One base element's fields, keyed by the schema's own `name`.
+fn field_map(el: &scraper::ElementRef<'_>, fields: &[Value]) -> serde_json::Map<String, Value> {
+    let mut row = serde_json::Map::new();
+    for (i, f) in fields.iter().enumerate() {
+        let name = match f.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => format!("field{i}"),
+        };
+        row.insert(name, field_value(el, f));
+    }
+    row
+}
+
+/// One field's value, with `build_field_js`'s per-type semantics.
+fn field_value(el: &scraper::ElementRef<'_>, f: &Value) -> Value {
+    let sel = f.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = f.get("type").and_then(|v| v.as_str()).unwrap_or("text");
+    let attr = f.get("attr").and_then(|v| v.as_str()).unwrap_or("");
+    let parsed = scraper::Selector::parse(sel).ok();
+
+    if kind == "list" {
+        let mut items = Vec::new();
+        if let Some(s) = &parsed {
+            for c in el.select(s) {
+                items.push(Value::String(elem_text(&c)));
+            }
+        }
+        return Value::Array(items);
+    }
+
+    if kind == "nested_list" {
+        let inner = f
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut items = Vec::new();
+        if let Some(s) = &parsed {
+            for c in el.select(s) {
+                items.push(Value::Object(field_map(&c, &inner)));
+            }
+        }
+        return Value::Array(items);
+    }
+
+    let first = match &parsed {
+        Some(s) => el.select(s).next(),
+        None => None,
+    };
+    match first {
+        None => Value::Null,
+        Some(e) => match kind {
+            "attr" => e
+                .value()
+                .attr(attr)
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null),
+            "html" => Value::String(e.inner_html()),
+            _ => Value::String(elem_text(&e)),
+        },
+    }
+}
+
+/// An element's text, matching `build_field_js`'s `.textContent?.trim()??null`.
+fn elem_text(e: &scraper::ElementRef<'_>) -> String {
+    e.text().collect::<String>().trim().to_string()
+}
+
+#[cfg(test)]
+mod extract_fields_tests {
+    use super::*;
+
+    /// The whole point is that a schema means the SAME thing on the HTTP path as
+    /// on the browser path, so this pins each field kind against static HTML.
+    #[test]
+    fn each_field_kind_is_extracted_from_static_html() {
+        let html = r#"<ul>
+            <li class="item"><h2>One</h2><a href="/a">link a</a></li>
+            <li class="item"><h2>Two</h2><a href="/b">link b</a></li>
+        </ul>"#;
+        let fields = json!([
+            {"name": "title", "selector": "h2"},
+            {"name": "href", "selector": "a", "type": "attr", "attr": "href"},
+            {"name": "raw", "selector": "h2", "type": "html"},
+            {"name": "links", "selector": "a", "type": "list"}
+        ]);
+        let rows = extract_fields(html, ".item", fields.as_array().unwrap());
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["title"], json!("One"));
+        assert_eq!(rows[0]["href"], json!("/a"));
+        assert_eq!(rows[0]["raw"], json!("One"));
+        assert_eq!(rows[0]["links"], json!(["link a"]));
+        assert_eq!(rows[1]["title"], json!("Two"));
+    }
+
+    /// A schema whose selector matches nothing is a caller mistake, and an empty
+    /// list is the honest answer -- not a panic and not a fabricated row.
+    #[test]
+    fn a_selector_that_matches_nothing_yields_no_rows() {
+        assert!(extract_fields("<p>x</p>", ".absent", &[]).is_empty());
+    }
+
+    /// A malformed selector is also caller input. It must degrade to no rows
+    /// rather than unwinding the whole scrape.
+    #[test]
+    fn a_malformed_selector_yields_no_rows_not_a_panic() {
+        assert!(extract_fields("<p>x</p>", ">>bad", &[]).is_empty());
+    }
+}
+
 /// Adaptive extraction (Scrapling-style `adaptive=True`): try the exact base selector, and if it
 /// matches nothing (site redesigned/class renamed), relocate to elements that still contain >= 2 of
 /// the field selectors, keeping only the deepest (row-level) candidates.
@@ -2229,13 +2365,98 @@ fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
 /// 3000 chars (fine for probes, useless for parsing a results page). Returns
 /// `(status, body)` with the FULL body. Reuses the pooled agent + Chrome headers.
 /// ponytail: one new fn instead of widening http_fetch's cap for every caller.
+///
+/// When the cache holds a validator this sends `If-None-Match` /
+/// `If-Modified-Since`; a 304 is answered from the stored body as a synthetic
+/// 200, so the SERVER vouches freshness and we never serve unvalidated stale
+/// content. A 200 replaces the entry. See `crate::httpcache`.
 pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u16, String)> {
     let agent = http_agent(proxy)?;
-    let resp = browser_req(agent.get(url)).call()?;
+    let cacheable = !crate::httpcache::disabled();
+    // The proxy is part of the key: the same URL through a different exit is
+    // not the same resource (that is why we rotate).
+    let ck = crate::httpcache::key(proxy, url);
+    let validators = if cacheable {
+        crate::httpcache::validators(&ck)
+    } else {
+        None
+    };
+    let (status, etag, last_modified, text) = get_full(&agent, url, validators.as_ref())?;
+    if status == 304 {
+        if let Some(body) = crate::httpcache::body(&ck) {
+            crate::httpcache::touch(&ck);
+            return Ok((200, body));
+        }
+        // Entry aged out between the validator read and the 304 (bounded cache
+        // raced by concurrent tabs). One unconditional GET beats handing a
+        // parser a bodyless 304.
+        let (s, e, l, t) = get_full(&agent, url, None)?;
+        if s == 200 {
+            crate::httpcache::store(&ck, e, l, &t);
+        }
+        return Ok((s, t));
+    }
+    if status == 200 {
+        crate::httpcache::store(&ck, etag, last_modified, &text);
+    }
+    Ok((status, text))
+}
+
+/// Like `serp_http_get`, plus request headers — keyed SERP APIs authenticate
+/// with a header (Brave: `X-Subscription-Token`), not a query param. No
+/// httpcache: a keyed response must never be replayed for another key.
+pub(crate) fn serp_http_get_auth(
+    url: &str,
+    proxy: Option<&str>,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<(u16, String)> {
+    let agent = http_agent(proxy)?;
+    let mut req = browser_req(agent.get(url));
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.call()?;
     let status = resp.status().as_u16();
     let bytes = resp.into_body().read_to_vec()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok((status, text))
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// One GET, returning `(status, etag, last-modified, body)`. Validators are
+/// optional so the same helper serves both the conditional and the plain path.
+fn get_full(
+    agent: &ureq::Agent,
+    url: &str,
+    validators: Option<&(Option<String>, Option<String>)>,
+) -> anyhow::Result<(u16, Option<String>, Option<String>, String)> {
+    let mut req = browser_req(agent.get(url));
+    if let Some((etag, lm)) = validators {
+        if let Some(e) = etag {
+            req = req.header("If-None-Match", e);
+        }
+        if let Some(l) = lm {
+            req = req.header("If-Modified-Since", l);
+        }
+    }
+    let resp = req.call()?;
+    let status = resp.status().as_u16();
+    // Headers must be read before the body is consumed.
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let last_modified = resp
+        .headers()
+        .get("last-modified")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = resp.into_body().read_to_vec()?;
+    Ok((
+        status,
+        etag,
+        last_modified,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
 }
 
 /// Form-POST variant of `serp_http_get` for endpoints that must not leak
@@ -2257,21 +2478,45 @@ pub(crate) fn serp_http_post(
     Ok((status, text))
 }
 
-/// Shared ureq agent for the serp helpers: one-off proxied agent when a proxy
-/// is set (fresh pool per proxied call), otherwise the shared pooled agent.
+/// Per-proxy agent cache. Building a fresh agent per proxied call threw away
+/// the connection pool, so every proxied request paid a new TCP+TLS handshake
+/// — the exact cost the shared agent above exists to avoid — and rotation
+/// (crate::proxy) multiplied it by the number of exits. Agents are cheap to
+/// clone (inner Arc → same pool).
+/// ponytail: unbounded map, but the key space is proxy URLs, which is a small
+/// finite list, not the URL space.
+fn proxy_agents() -> &'static std::sync::Mutex<std::collections::HashMap<String, ureq::Agent>> {
+    static AGENTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ureq::Agent>>,
+    > = std::sync::OnceLock::new();
+    AGENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Shared ureq agent for the serp helpers: one pooled agent per proxy URL when
+/// a proxy is set, otherwise the shared unproxied pool.
 fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
-    Ok(match proxy {
-        Some(p) => {
-            let proxy = ureq::Proxy::new(p)?;
-            ureq::Agent::new_with_config(
-                ureq::config::Config::builder()
-                    .timeout_global(Some(std::time::Duration::from_secs(30)))
-                    .proxy(Some(proxy))
-                    .build(),
-            )
-        }
-        None => browser_agent(),
-    })
+    let Some(p) = proxy else {
+        return Ok(browser_agent());
+    };
+    if let Some(a) = proxy_agents()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(p)
+    {
+        return Ok(a.clone());
+    }
+    let parsed = ureq::Proxy::new(p)?;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .proxy(Some(parsed))
+            .build(),
+    );
+    proxy_agents()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(p.to_string(), agent.clone());
+    Ok(agent)
 }
 
 /// No-browser HTTP fetch (browsemind `http_crawl`): GET a URL, return status +
@@ -2316,6 +2561,276 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
         v["headers"] = serde_json::Value::Object(hdrs);
     }
     Ok(v)
+}
+
+/// Fetch a URL's FULL body, with status and content-type.
+///
+/// No truncation, unlike `http_fetch`: every caller here needs the whole
+/// document. A schema parsed from a 3000-char prefix would return zero rows on
+/// nearly every real page -- silently, since an empty result is a valid answer
+/// and nothing would look broken.
+fn http_get_full(url: &str) -> anyhow::Result<(u16, String, String)> {
+    let resp = browser_req(browser_agent().get(url)).call()?;
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = resp.into_body().read_to_string()?;
+    Ok((status, content_type, body))
+}
+
+/// `http_fetch` with a CSS schema applied to the full body.
+///
+/// No browser and no "current page", which is what makes it safe on the shared
+/// pool: the caller names the URL, so there is nothing to attribute to a
+/// previous tenant.
+pub fn http_fetch_extract(
+    url: &str,
+    base_selector: &str,
+    fields: &[Value],
+) -> anyhow::Result<Value> {
+    let (status, content_type, html) = http_get_full(url)?;
+    let rows = extract_fields(&html, base_selector, fields);
+    Ok(json!({
+        "url": url,
+        "status": status,
+        "content_type": content_type,
+        "rows": rows.len(),
+        "data": rows,
+        "bytes": html.len(),
+    }))
+}
+
+/// Propose CSS schemas for a page, browserlessly.
+///
+/// The same job `webrain_autoschema` does, answering in its shape
+/// (`{"selector", "count"}`): count repeated containers and offer the most common
+/// as candidate base selectors. Browserless is the whole point -- autoschema is
+/// the step that spares a caller from inventing a selector, so having it require
+/// a private browser made it unavailable to exactly the callers who need it.
+pub fn autoschema_candidates(html: &str, min_occurrences: usize) -> Vec<Value> {
+    let doc = scraper::Html::parse_document(html);
+    let sel = match scraper::Selector::parse("div[class],li,tr,article,section") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for el in doc.select(&sel) {
+        let mut key = el.value().name().to_lowercase();
+        for class in el
+            .value()
+            .attr("class")
+            .unwrap_or("")
+            .split_whitespace()
+            .take(2)
+        {
+            key.push('.');
+            key.push_str(class);
+        }
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    let mut hits: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(_, n)| *n >= min_occurrences)
+        .collect();
+    // Classed candidates first, then count, then the selector.
+    //
+    // Count alone is wrong, and a live run against books.toscrape.com is what
+    // showed it: bare `li` repeats 52 times and buried `article.product_pod` at
+    // 20, so the top proposal selected list chrome and extracted nothing. A bare
+    // tag is usually layout -- `li` is the most repeated element on almost every
+    // page -- so it should not outrank a named container.
+    //
+    // Selector third so equal candidates come back in a stable order; the browser
+    // version leaves ties to hash order, so the same page can propose two
+    // different schemas on two runs.
+    //
+    // ponytail: still a heuristic. The real discriminator is whether a candidate
+    // yields non-empty fields, which the caller can settle by extracting with it.
+    hits.sort_by(|a, b| {
+        let a_classed = a.0.contains('.');
+        let b_classed = b.0.contains('.');
+        b_classed
+            .cmp(&a_classed)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    hits.truncate(8);
+    hits.into_iter()
+        .map(|(selector, count)| json!({"selector": selector, "count": count}))
+        .collect()
+}
+
+/// Inner HTML of the FIRST element matching `sel`, truncated to `max` chars.
+///
+/// Why this exists: the step autoschema cannot do is authoring FIELD selectors,
+/// and that needs a text LLM, which needs to SEE one record. A whole page is a
+/// wasteful prompt and the visible text is useless (no tags). One container's
+/// markup is a few KB and is exactly the context needed to write selectors that
+/// match. Truncation is the prompt budget, not a correctness boundary.
+fn sample_html(html: &str, sel: &str, max: usize) -> Option<String> {
+    let doc = scraper::Html::parse_document(html);
+    let sel = scraper::Selector::parse(sel).ok()?;
+    let el = doc.select(&sel).next()?;
+    Some(el.inner_html().chars().take(max).collect())
+}
+
+/// Candidate schemas for a URL, fetched browserlessly.
+///
+/// `sample` is the top candidate's markup -- see `sample_html`. It is what
+/// turns "where are the rows" into "here is what a row looks like", the input
+/// the schema compiler needs.
+pub fn http_fetch_autoschema(url: &str, min_occurrences: usize) -> anyhow::Result<Value> {
+    let (status, content_type, html) = http_get_full(url)?;
+    let candidates = autoschema_candidates(&html, min_occurrences);
+    let sample = candidates
+        .first()
+        .and_then(|c| c["selector"].as_str())
+        .and_then(|s| sample_html(&html, s, 6000));
+    Ok(json!({
+        "url": url,
+        "status": status,
+        "content_type": content_type,
+        "candidates": candidates,
+        "sample": sample,
+        "bytes": html.len(),
+    }))
+}
+
+#[cfg(test)]
+mod autoschema_tests {
+    use super::*;
+
+    /// The candidate a caller is handed must be a selector that actually selects
+    /// something, so this checks the proposal ROUND-TRIPS through extraction
+    /// rather than just asserting a string.
+    #[test]
+    fn proposes_the_repeated_container_that_extraction_then_uses() {
+        let html = r#"<div class="wrap">
+            <article class="card x"><h2>One</h2></article>
+            <article class="card x"><h2>Two</h2></article>
+            <article class="card x"><h2>Three</h2></article>
+        </div>"#;
+        let found = autoschema_candidates(html, 3);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["selector"], json!("article.card.x"));
+        assert_eq!(found[0]["count"], json!(3));
+
+        // Round-trip: feed the proposal straight back into extraction.
+        let fields = json!([{"name": "title", "selector": "h2"}]);
+        let rows = extract_fields(html, "article.card.x", fields.as_array().unwrap());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["title"], json!("One"));
+    }
+
+    /// Below the threshold nothing is proposed -- a one-off container is not a
+    /// pattern, and offering it would send a caller down a dead end.
+    #[test]
+    fn proposes_nothing_below_the_occurrence_threshold() {
+        let html = r#"<article class="card"><h2>Only one</h2></article>"#;
+        assert!(autoschema_candidates(html, 3).is_empty());
+    }
+
+    /// The sample must be ONE container's markup, not the page: it is the whole
+    /// context a model gets when it writes field selectors, so page chrome in it
+    /// is a wrong answer waiting to be written.
+    #[test]
+    fn sample_is_one_container_not_the_page() {
+        let html = r#"<html><body><div class="noise">junk</div>
+            <article class="card"><h2>One</h2><span class="p">5</span></article>
+            <article class="card"><h2>Two</h2><span class="p">6</span></article>
+        </body></html>"#;
+        let s = sample_html(html, "article.card", 6000).expect("a sample");
+        assert!(s.contains("<h2>One</h2>"), "sample = {s}");
+        assert!(!s.contains("junk"), "sample = {s}");
+        // Only the FIRST record, so the prompt cannot show two records and
+        // invite a selector that matches the pair rather than the item.
+        assert!(!s.contains("<h2>Two</h2>"), "sample = {s}");
+        // Truncation is a prompt budget, not a correctness boundary.
+        assert_eq!(
+            sample_html(html, "article.card", 10)
+                .unwrap()
+                .chars()
+                .count(),
+            10
+        );
+        // An unparsable selector is "no sample", never a panic.
+        assert!(sample_html(html, "article.card >", 100).is_none());
+    }
+
+    /// Equal counts must come back in a stable order, or the same page proposes
+    /// different schemas on different runs.
+    #[test]
+    fn ties_are_ordered_stably() {
+        let html = r#"<ul><li class="a">1</li><li class="b">2</li></ul>"#;
+        let first = autoschema_candidates(html, 1);
+        let second = autoschema_candidates(html, 1);
+        assert_eq!(first, second);
+        assert_eq!(first[0]["selector"], json!("li.a"));
+    }
+
+    /// Live network test. Not run by default -- a unit suite must not need the
+    /// internet -- so run it explicitly:
+    ///
+    /// `cargo test -p webrain-core --lib live_autoschema -- --ignored --nocapture`
+    ///
+    /// This is the whole claim in one place, against real HTML: fetch the FULL
+    /// body (not a 3000-char probe), propose a schema, then feed the proposal
+    /// back and get rows. One request, deliberately.
+    #[test]
+    #[ignore]
+    fn live_autoschema_then_extract_on_a_real_page() {
+        // books.toscrape.com is a static catalogue published for scraping
+        // practice: a fair target, and stable enough to assert on.
+        let (status, _, html) =
+            http_get_full("https://books.toscrape.com/").expect("live fetch should succeed");
+        println!("status = {status}, bytes = {}", html.len());
+        assert_eq!(status, 200);
+        // The core risk this whole feature exists around: `http_fetch` would have
+        // handed us 3000 chars, and every selector below would have found nothing.
+        assert!(
+            html.len() > 3000,
+            "must be the full body, not the truncated probe"
+        );
+
+        let candidates = autoschema_candidates(&html, 5);
+        println!("candidates = {candidates:#?}");
+        assert!(
+            !candidates.is_empty(),
+            "a catalogue page must expose a repeated container"
+        );
+
+        // Round-trip: use the proposal the engine made, not a hardcoded selector.
+        let best = candidates[0]["selector"].as_str().unwrap().to_string();
+        let fields = json!([
+            {"name": "title", "selector": "h3 a", "type": "attr", "attr": "title"},
+            {"name": "price", "selector": ".price_color"},
+            {"name": "link", "selector": "h3 a", "type": "attr", "attr": "href"}
+        ]);
+        let rows = extract_fields(&html, &best, fields.as_array().unwrap());
+        println!("selector = {best}, rows = {}", rows.len());
+        println!("first row = {:#?}", rows.first());
+        assert!(rows.len() >= 5, "the proposed selector should yield rows");
+        // A proposal that selects containers but extracts nothing is not a
+        // schema, so require real values on a real page.
+        assert!(rows[0]["title"].is_string(), "title should be extracted");
+        assert!(rows[0]["price"].is_string(), "price should be extracted");
+        // Codepoints, not the rendered string: a console re-encodes to its own
+        // codepage, so a correct `£` and a double-decoded `Â£` can print alike.
+        // Correct is [163, 53, ...] (£); a latin-1 mis-decode starts [194, 163].
+        println!(
+            "price codepoints = {:?}",
+            rows[0]["price"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .map(|c| c as u32)
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 /// Discover crawlable URLs from the site's sitemap (spider-rs `crawl_sitemap` /
@@ -2542,6 +3057,30 @@ pub fn download_ytdlp(
     }
 }
 
+/// The ceiling on bytes `download_files` writes for ONE url.
+///
+/// It exists because the copy used to be unbounded: `std::io::copy` has no cap,
+/// so a single URL could fill the disk of whichever process served the call --
+/// and on a shared worker that process is every other caller's too. 512 MiB is
+/// generous for the files this path is for (documents, images, archives) and
+/// still bounded, so a runaway URL costs a bounded amount and a named error
+/// rather than the whole filesystem.
+///
+/// Deliberately NOT applied to `download_ytdlp`: that path exists for video and
+/// audio, where large is the expected size rather than a runaway, and yt-dlp
+/// already has its own `--max-filesize` for a caller who wants one.
+///
+/// `WEBRAIN_DOWNLOAD_MAX_BYTES` overrides it, in the same shape as
+/// `WEBRAIN_FETCH_TIMEOUT_SECS`: a positive number, with a sane default rather
+/// than a value that happens to suit one artefact.
+fn download_max_bytes() -> u64 {
+    std::env::var("WEBRAIN_DOWNLOAD_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512 * 1024 * 1024)
+}
+
 pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
     std::fs::create_dir_all(dir).ok();
     let agent = browser_agent();
@@ -2559,12 +3098,23 @@ pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
                 .unwrap_or("download");
             let path = format!("{dir}/{i}_{name}");
             let mut f = std::fs::File::create(&path)?;
-            let mut reader = resp.into_body().into_reader();
-            let n = std::io::copy(&mut reader, &mut f)?;
+            let reader = resp.into_body().into_reader();
+            // ponytail: bound the write. `Read::take` stops the READ, so the
+            // excess is never written -- the file on disk is short, not
+            // truncated after the fact. `n == cap` is reported as "capped"
+            // rather than "truncated" because a source of EXACTLY `cap` bytes
+            // takes the same branch and calling that truncated would be a lie.
+            let cap = download_max_bytes();
+            let mut limited = std::io::Read::take(reader, cap);
+            let n = std::io::copy(&mut limited, &mut f)?;
             Ok(BatchResult {
                 url: url.clone(),
                 title: path,
-                text: format!("{n} bytes"),
+                text: if n == cap {
+                    format!("{n} bytes (capped at WEBRAIN_DOWNLOAD_MAX_BYTES)")
+                } else {
+                    format!("{n} bytes")
+                },
                 data: None,
                 error: None,
                 ms: 0,

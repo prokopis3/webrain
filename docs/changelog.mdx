@@ -1,6 +1,6 @@
 ---
 title: Changelog
-description: Version history for webrain — the 16-tool MCP surface, watch/video, bundled local vision (Qwen3-VL-2B), stealth login, and every release.
+description: Version history for webrain — the 17-tool MCP surface, watch/video, bundled local vision (Qwen3-VL-2B), stealth login, and every release.
 ---
 
 # Changelog
@@ -12,14 +12,16 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Changed
 
-- **docs** — accuracy audit against the 16-tool surface: `quickstart` /
+- **docs** — accuracy audit against the 17-tool surface: `quickstart` /
   `cursor` / `agent-decision-guide` / `runtime-flow` stale "15"/"63-tool"
   counts fixed (the agent-guide table gained the missing `webrain_serp` row);
-  the CLI reference drops the non-existent `webrain snapshot` and the false
-  click-with-`selector` claim; the environment reference adds the SERP /
-  vision / stealth env vars; the agent decision guide's tool dialect is
-  modernized to the consolidated names; two unreferenced landing images
-  removed.
+  the CLI reference drops the non-existent `webrain snapshot`, the false
+  click-with-`selector` claim, and gains the missing `webrain serp` command;
+  the environment reference adds the SERP / vision / stealth env vars, the
+  `WEBRAIN_PROXIES` rotation pool, the HTTP-cache, download-cap and
+  fetch-timeout knobs, and `EMBED_FALLBACK_*`; the agent decision guide's tool
+  dialect is modernized to the consolidated names; two unreferenced landing
+  images removed.
 
 ## v0.7.3
 

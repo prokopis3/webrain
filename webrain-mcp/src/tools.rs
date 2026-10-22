@@ -334,7 +334,11 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_scrape",
             "description": "Fetch ONE URL's content over plain HTTP — no browser, 10-100x faster, zero memory. Returns {url, status, text, needs_js}. For static pages / quick probes / pagination probing. For JS/SPA pages use webrain_navigate.",
             "inputSchema": {"type": "object", "properties": {
-                "url": {"type": "string"}
+                "url": {"type": "string"},
+                "base_selector": {"type": "string", "description": "optional CSS schema: selector per repeated item. With it the FULL page is fetched (no 3000-char probe cap) and parsed with the same field vocabulary as webrain_extract mode=schema -- no browser, so it runs on the shared pool."},
+                "fields": {"type": "array", "items": {"type": "object"}, "description": "optional CSS schema fields: [{name, selector, type: text|attr|html|list|nested_list, attr?}]"},
+                "autoschema": {"type": "boolean", "default": false, "description": "propose candidate CSS base selectors for this page instead of returning its text -- the browserless form of webrain_autoschema, so it runs on the shared pool. Answers [{selector, count}] to build a schema from."},
+                "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"}
             }, "required": ["url"]}
         }),
         json!({
@@ -408,14 +412,15 @@ pub fn list_tools() -> Vec<Value> {
             "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached, sequential), relevance-filters junk pages, merges + dedupes, limit 1..=100. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown + source (actual provider after a fallback) in the reply, retry with backoff. Returns {status, query, engine, source, results[], per_engine[], request_id, ms, skipped[]}.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
-                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); google|brave = guest-browser flow"},
+                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); brave = keyed API when BRAVE_API_KEY is set, else guest-browser flow; google = guest-browser flow"},
                 "limit": {"type": "integer", "default": 10, "description": "max results, 1..=100"},
                 "page": {"type": "integer", "default": 0, "description": "0-based results page"},
                 "safe": {"type": "boolean", "default": false},
                 "region": {"type": "string", "description": "locale/region, e.g. us-en, gb-en, gr-el, de-de"},
+                "browser": {"type": "boolean", "default": false, "description": "bing only: true attaches/launches a guest Chrome and paginates its results page for more than ~10 results. Default false keeps the pure-HTTP path (measured 2026-10-10: 11 results for duckduckgo, 10 for bing at limit=50). google always needs a browser; brave needs one only when BRAVE_API_KEY is unset. Both ignore this flag."},
                 "fallback": {"type": "boolean", "default": true, "description": "fall back to another provider when the requested engine errors or returns zero"},
                 "retries": {"type": "integer", "default": 2, "description": "transient-failure retries with backoff, 0..=5"},
-                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL (e.g. http://user:pass@host:port) for the HTTP engines (duckduckgo/bing/auto) and baked into the guest Chrome launch for google/brave."}
+                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL (e.g. http://user:pass@host:port) for the HTTP engines (duckduckgo/bing/auto) and baked into the guest Chrome launch for google/brave. Omit to use the WEBRAIN_PROXIES rotation pool instead (round-robin across exits, auto-rotating off a 403/429/503 wall); an explicit URL here is honored as-is and never rotates."}
             }, "required": ["q"]}
         }),
         json!({
@@ -453,11 +458,11 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_session",
-            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile+port), profiles (vault names), login (auto-login from vault: service+profile+url), close_launch (stop a launched Chrome: service+profile).",
+            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile, plus port or cdp_url), profiles (vault names), login (auto-login from vault: service+profile+url, plus port or cdp_url), close_launch (stop a launched Chrome: service+profile).",
             "inputSchema": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": ["open","close","list","cookies","setcookies","save_state","restore_state","profiles","login","close_launch"]},
                 "session_id": {"type": "string", "description": "open/close: session name"},
-                "cdp_url": {"type": "string", "description": "open: CDP URL for this session"},
+                "cdp_url": {"type": "string", "description": "open: CDP URL for this session; save_state/restore_state/login: the caller's own browser, used INSTEAD of `port`"},
                 "cookies": {"type": "array", "items": {"type": "object"}, "description": "setcookies: cookie objects (name, value, domain, path, ...)"},
                 "service": {"type": "string", "description": "save/restore_state, login, close_launch: service"},
                 "profile": {"type": "string", "description": "save/restore_state, login, close_launch: profile"},
@@ -816,6 +821,42 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
         "webrain_crawl" => {
             let mode = s("mode")?;
             dropk(&mut a, "mode");
+            // ONE normalisation, at the only place crawl picks a mode.
+            //
+            // The schema advertises three seed spellings flat (`url`, `urls`,
+            // `seed_url`) while each mode reads exactly one of them, so a caller
+            // -- a model reading the schema, or the platform gateway in front of
+            // it -- picks the wrong spelling and is answered "<x> required" for a
+            // request that named a perfectly good URL. Measured against this
+            // binary: spider wants `seed_url`, validate wants `urls`,
+            // sitemap/scan want `url`.
+            //
+            // Filling in all three from whichever was supplied makes the mode
+            // irrelevant to the caller, and doing it HERE rather than in each arm
+            // means the next mode inherits it instead of re-learning it.
+            let scalar = a
+                .get("seed_url")
+                .or_else(|| a.get("url"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    a.get("urls")
+                        .and_then(|v| v.as_array())
+                        .and_then(|list| list.first())
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+            if let (Some(one), Some(obj)) = (scalar, a.as_object_mut()) {
+                if !obj.contains_key("url") {
+                    obj.insert("url".into(), json!(one.clone()));
+                }
+                if !obj.contains_key("seed_url") {
+                    obj.insert("seed_url".into(), json!(one.clone()));
+                }
+                if !obj.contains_key("urls") {
+                    obj.insert("urls".into(), json!([one]));
+                }
+            }
             Some((
                 match mode {
                     "spider" => "webrain_spider",
@@ -1077,9 +1118,30 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         // isolated browsers (obscura stealth) share the imported session.
         // Chrome login -> webrain_cookies -> webrain_setcookies -> webrain_batch
         // (no cdp_urls) keeps cookies on one connection end-to-end.
-        "webrain_cookies" => match backend.cookies().await {
-            Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
-            Err(e) => err(e),
+        //
+        // A caller-supplied `cdp_url` overrides that and uses THEIR browser. It
+        // is resolved HERE rather than left to the session, and the reason is not
+        // symmetry with the vault ops: these ops act on a CONNECTION. Reading the
+        // endpoint from the argument is what lets the deepscrape gateway treat "a
+        // caller brought their own browser" as verified. If this arm kept using
+        // the session backend while the caller passed `cdp_url`, the gateway
+        // would clear its own cross-tenant guard on the strength of an argument
+        // the worker ignores -- and then read whatever Chrome the session held.
+        "webrain_cookies" => match crate::caller_cdp(args) {
+            Some(target) => match CdpBackend::connect_with_url(&target).await {
+                Ok(b) => match b.cookies().await {
+                    Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
+                    Err(e) => err(e),
+                },
+                Err(e) => json!({
+                    "status": "error",
+                    "message": format!("cannot connect to {target}: {e}")
+                }),
+            },
+            None => match backend.cookies().await {
+                Ok(c) => json!({"status": "ok", "count": c.len(), "cookies": c}),
+                Err(e) => err(e),
+            },
         },
         "webrain_setcookies" => {
             let cookies = args
@@ -1090,15 +1152,33 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if cookies.is_empty() {
                 return json!({"status": "error", "message": "cookies array required"});
             }
-            match backend.set_cookies(&cookies).await {
-                Ok(_) => {
-                    let back = match backend.cookies().await {
-                        Ok(c) => c.len(),
-                        Err(_) => 0,
-                    };
-                    json!({"status": "ok", "set": cookies.len(), "readback": back})
-                }
-                Err(e) => err(e),
+            match crate::caller_cdp(args) {
+                Some(target) => match CdpBackend::connect_with_url(&target).await {
+                    Ok(b) => match b.set_cookies(&cookies).await {
+                        Ok(_) => {
+                            let back = match b.cookies().await {
+                                Ok(c) => c.len(),
+                                Err(_) => 0,
+                            };
+                            json!({"status": "ok", "set": cookies.len(), "readback": back})
+                        }
+                        Err(e) => err(e),
+                    },
+                    Err(e) => json!({
+                        "status": "error",
+                        "message": format!("cannot connect to {target}: {e}")
+                    }),
+                },
+                None => match backend.set_cookies(&cookies).await {
+                    Ok(_) => {
+                        let back = match backend.cookies().await {
+                            Ok(c) => c.len(),
+                            Err(_) => 0,
+                        };
+                        json!({"status": "ok", "set": cookies.len(), "readback": back})
+                    }
+                    Err(e) => err(e),
+                },
             }
         }
         "webrain_spider" => {
@@ -1195,11 +1275,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_i64())
                 .unwrap_or(10)
                 .max(1) as usize;
-            let concurrency = args
-                .get("concurrency")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(4)
-                .max(1) as usize;
+            let concurrency = crate::clamp_concurrency(
+                args.get("concurrency")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(4)
+                    .max(1) as usize,
+            );
             let spider = SpiderEngine::new(depth, pages)
                 .with_strategy(strategy)
                 .with_same_domain(same_domain)
@@ -1367,6 +1448,42 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if url.is_empty() {
                 return json!({"status": "error", "message": "url required"});
+            }
+            // Autoschema first: it PROPOSES a selector, so it is the answer when
+            // the caller has none -- the case that otherwise sends them to
+            // `webrain_autoschema`, which needs a browser.
+            if args
+                .get("autoschema")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let min = args
+                    .get("min_occurrences")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(3) as usize;
+                return match webrain_core::engines::http_fetch_autoschema(url, min) {
+                    Ok(v) => json!({"status": "ok", "result": v}),
+                    Err(e) => err(e),
+                };
+            }
+            // A schema switches to the full-body path: `http_fetch` caps HTML at
+            // 3000 chars, so parsing its `text` would silently return no rows for
+            // any target past the cap.
+            let base_selector = args
+                .get("base_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !base_selector.is_empty() {
+                let fields = args
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                return match webrain_core::engines::http_fetch_extract(url, base_selector, &fields)
+                {
+                    Ok(v) => json!({"status": "ok", "result": v}),
+                    Err(e) => err(e),
+                };
             }
             match http_fetch(url) {
                 Ok(v) => json!({"status": "ok", "result": v}),
@@ -1641,10 +1758,15 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if urls.is_empty() {
                 return json!({"status": "error", "message": "urls required"});
             }
-            let concurrency = args
-                .get("concurrency")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(4) as usize;
+            // `.max(1)` BEFORE the cast: a negative i64 `as usize` wraps to a
+            // colossal value, which would hand the semaphore an effectively
+            // unbounded permit count (a client could ask for `concurrency: -1`).
+            let concurrency = crate::clamp_concurrency(
+                args.get("concurrency")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(4)
+                    .max(1) as usize,
+            );
             let opts = nav_opts(args);
 
             // The per-backend op dispatcher — shared by the single-backend path and
@@ -1741,11 +1863,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             // which OOMs on huge jobs. `per_backend_concurrency` bounds tabs per browser
             // (default = concurrency, i.e. current behavior). ponytail: total tabs =
             // per_backend_concurrency × backends; raise it only when memory allows.
-            let per_backend_concurrency = args
-                .get("per_backend_concurrency")
-                .and_then(|v| v.as_i64())
-                .map(|n| n.max(1) as usize)
-                .unwrap_or(concurrency);
+            let per_backend_concurrency = crate::clamp_concurrency(
+                args.get("per_backend_concurrency")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.max(1) as usize)
+                    .unwrap_or(concurrency),
+            );
             let results = if cdp_urls.is_empty() {
                 run_batch(backend, op, &urls, args, &opts, concurrency).await
             } else {
@@ -2317,9 +2440,11 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
     };
     // google/brave need a browser — the lib.rs short-circuit routes HTTP engines
     // around the backend; here (call_tool) a backend may or may not be attached,
-    // and lib.rs auto-launches a guest browser when none is.
-    if (opts.engine == "brave" || opts.engine == "google") && backend.is_none() {
-        return json!({"status": "error", "message": "engine 'google'/'brave' requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|auto work without one"});
+    // and lib.rs auto-launches a guest browser when none is. brave is
+    // browser-optional once its keyed API is configured.
+    let brave_needs_browser = opts.engine == "brave" && !webrain_core::serp::brave_api_ready();
+    if (brave_needs_browser || opts.engine == "google") && backend.is_none() {
+        return json!({"status": "error", "message": "engine 'google' (and 'brave' without BRAVE_API_KEY) requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|auto work without one"});
     }
     match webrain_core::serp::serp_search(&opts, backend).await {
         Ok(r) => json!({
@@ -2403,6 +2528,47 @@ mod surface_tests {
             fold("webrain_crawl", json!({"mode": "validate"})).0,
             "webrain_validate_urls"
         );
+    }
+
+    /// The three seed spellings are advertised flat while each mode reads one of
+    /// them, so the fold has to hand every mode the field it wants. Measured
+    /// against the shipped binary: `{"mode":"spider","url":...}` was answered
+    /// `seed_url required`, and `{"mode":"validate","url":...}` `urls required`.
+    #[test]
+    fn crawl_seed_spelling_does_not_depend_on_the_mode() {
+        let (tool, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "spider", "url": "https://e.com"}),
+        );
+        assert_eq!(tool, "webrain_spider");
+        assert_eq!(args["seed_url"], json!("https://e.com"));
+
+        let (tool, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "validate", "url": "https://e.com"}),
+        );
+        assert_eq!(tool, "webrain_validate_urls");
+        assert_eq!(args["urls"], json!(["https://e.com"]));
+
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "sitemap", "seed_url": "https://e.com"}),
+        );
+        assert_eq!(args["url"], json!("https://e.com"));
+
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "scan", "urls": ["https://e.com", "https://f.com"]}),
+        );
+        assert_eq!(args["url"], json!("https://e.com"));
+
+        // A caller that already names the field correctly is left alone.
+        let (_, args) = fold(
+            "webrain_crawl",
+            json!({"mode": "spider", "seed_url": "https://given.com", "urls": ["https://kept.com"]}),
+        );
+        assert_eq!(args["seed_url"], json!("https://given.com"));
+        assert_eq!(args["urls"], json!(["https://kept.com"]));
     }
 
     #[test]
