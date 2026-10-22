@@ -2402,6 +2402,25 @@ pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u
     Ok((status, text))
 }
 
+/// Like `serp_http_get`, plus request headers — keyed SERP APIs authenticate
+/// with a header (Brave: `X-Subscription-Token`), not a query param. No
+/// httpcache: a keyed response must never be replayed for another key.
+pub(crate) fn serp_http_get_auth(
+    url: &str,
+    proxy: Option<&str>,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<(u16, String)> {
+    let agent = http_agent(proxy)?;
+    let mut req = browser_req(agent.get(url));
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.call()?;
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().read_to_vec()?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// One GET, returning `(status, etag, last-modified, body)`. Validators are
 /// optional so the same helper serves both the conditional and the plain path.
 fn get_full(

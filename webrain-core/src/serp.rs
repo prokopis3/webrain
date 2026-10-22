@@ -11,9 +11,11 @@
 // agent (no browser at all). `google`/`brave` are JS-gated → rendered in
 // whatever CDP engine is attached (Chrome/obscura/lightpanda) via navigate +
 // get_html. `auto` fetches duckduckgo+bing concurrently (no browser) and merges;
-// google/brave join the merge when a browser is attached. Every result is
-// relevance-filtered against the query (unrelated junk pages never enter the
-// reply — engines on flagged/GeoIP'd IPs sometimes serve garbage).
+// google/brave join the merge when a browser is attached. Optional keyed
+// providers fill deep requests: `BRAVE_API_KEY` (Brave's own API, 20/page, no
+// browser) then `SERPAPI_API_KEY` (aggregator, num<=100) as the last resort.
+// Every result is relevance-filtered against the query (unrelated junk pages
+// never enter the reply — engines on flagged/GeoIP'd IPs sometimes serve garbage).
 //
 // Recommended features (from the reference app's list) that make sense for a
 // local portable tool: provider fallback, URL dedupe, pagination, safe search +
@@ -140,11 +142,14 @@ const AUTO_BROWSER_ENGINES: [&str; 2] = ["google", "brave"];
 /// reply, so the browser join is best-effort and timed out.
 const SERP_BROWSER_CAP: Duration = Duration::from_secs(20);
 
-/// Build the provider URL for one engine + params.
+/// Build the provider URL for one engine + params. `offset` is a RESULT offset
+/// (how many results to skip) for the HTTP engines — the caller advances it by
+/// what a page actually delivered, so no guessed page size can overshoot. Brave
+/// is the exception: its `offset` param is a PAGE index.
 fn engine_url(
     engine: &str,
     q: &str,
-    page: usize,
+    offset: usize,
     safe: bool,
     region: Option<&str>,
     limit: usize,
@@ -159,8 +164,10 @@ fn engine_url(
             let mut u = Url::parse("https://html.duckduckgo.com/html/")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // ddg html paginates ~30 results per page via `s` (0, 30, 60, ...).
-            p.append_pair("s", &(page * 30).to_string());
+            // `s` is a result offset. A hardcoded stride (page*30) overshot
+            // ddg's ~10-per-page and served empty pages, so a limit=50 request
+            // stopped at ~11 — advance by what the page actually returned.
+            p.append_pair("s", &offset.to_string());
             // k5=1 disables the /l/?uddg= redirect wrapper → direct result hrefs.
             p.append_pair("k5", "1");
             // k1: -1 off, 1 moderate, 2 strict.
@@ -173,12 +180,12 @@ fn engine_url(
             let mut u = Url::parse("https://www.bing.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // Bing paginates 10/page via `first` (1, 11, 21, ...), but when
+            // Bing paginates via `first` (1-based: offset 10 -> first=11), but when
             // `first` is present bing may ignore a custom `count` and return
             // the default page size (10). So send `first` only past page 0 and
             // let `count` drive page 0's result count (open-serp's bing rule).
-            if page > 0 {
-                p.append_pair("first", &(page * 10 + 1).to_string());
+            if offset > 0 {
+                p.append_pair("first", &(offset + 1).to_string());
             }
             p.append_pair("adlt", if safe { "strict" } else { "off" });
             // Locale (mkt/setlang/cc) + request more than the 10-result page.
@@ -201,8 +208,8 @@ fn engine_url(
             // flagged/automated sessions — verified live). `start` only past
             // page 0 (google's canonical page 0 omits it). `hl`/`gl` pin the
             // locale without the aggressive `lr` restriction.
-            if page > 0 {
-                p.append_pair("start", &(page * 10).to_string());
+            if offset > 0 {
+                p.append_pair("start", &offset.to_string());
             }
             p.append_pair("safe", if safe { "active" } else { "off" });
             p.append_pair("hl", lang);
@@ -214,8 +221,8 @@ fn engine_url(
             let mut u = Url::parse("https://search.brave.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // ponytail: Brave offset is page-indexed (0,1,2...): page*10 = nonexistent page (no-results).
-            p.append_pair("offset", &page.to_string());
+            // ponytail: Brave offset is page-indexed (0,1,2...): offset*10 = nonexistent page (no-results).
+            p.append_pair("offset", &offset.to_string());
             p.append_pair("hl", lang);
             p.append_pair("gl", cc);
             drop(p);
@@ -611,6 +618,14 @@ fn dedupe_key(url: &str) -> String {
     }
 }
 
+/// Renumber positions 1..N in place. Every path that filters or merges results
+/// needs it; five hand-written copies drifted apart before this existed.
+fn renumber(rs: &mut [SerpResult]) {
+    for (i, r) in rs.iter_mut().enumerate() {
+        r.position = i + 1;
+    }
+}
+
 /// Dedupe by normalized URL, cap at limit, renumber positions 1..N.
 fn dedupe_cap(results: Vec<SerpResult>, limit: usize) -> Vec<SerpResult> {
     let mut seen: HashSet<String> = HashSet::new();
@@ -623,9 +638,7 @@ fn dedupe_cap(results: Vec<SerpResult>, limit: usize) -> Vec<SerpResult> {
             out.push(r);
         }
     }
-    for (i, r) in out.iter_mut().enumerate() {
-        r.position = i + 1;
-    }
+    renumber(&mut out);
     out
 }
 
@@ -678,9 +691,7 @@ fn filter_relevant(results: Vec<SerpResult>, query: &str) -> Vec<SerpResult> {
             out.push(r);
         }
     }
-    for (i, r) in out.iter_mut().enumerate() {
-        r.position = i + 1;
-    }
+    renumber(&mut out);
     out
 }
 
@@ -783,11 +794,13 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
     // is what still stops a hostile or GeoIP-locked engine looping forever.
     let max_pages = (opts.limit / 5).clamp(1, 20);
     let mut dry_pages = 0usize;
-    for page in opts.page..opts.page + max_pages {
+    // `--page N` = skip N pages' worth (~10 results) of this engine.
+    let mut offset = opts.page * 10;
+    for _ in 0..max_pages {
         let url = engine_url(
             engine,
             &opts.query,
-            page,
+            offset,
             opts.safe,
             opts.region.as_deref(),
             opts.limit,
@@ -798,12 +811,17 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
         // pagination early instead of filling `limit` with garbage.
         let rs = filter_relevant(rs, &opts.query);
         let mut fresh = 0usize;
+        let mut delivered = 0usize;
         for r in rs {
+            delivered += 1;
             if seen.insert(dedupe_key(&r.url)) {
                 all.push(r);
                 fresh += 1;
             }
         }
+        // Advance by what the page actually gave us: engines serve 10-30/page,
+        // so a guessed stride either skips results or re-reads the same page.
+        offset += delivered;
         if all.len() >= opts.limit {
             break;
         }
@@ -817,9 +835,7 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
             break;
         }
     }
-    for (i, r) in all.iter_mut().enumerate() {
-        r.position = i + 1;
-    }
+    renumber(&mut all);
     all.truncate(opts.limit);
     Ok(all)
 }
@@ -935,10 +951,12 @@ async fn browser_search<B: BrowserBackend>(
         };
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
+            // brave's `offset` is a PAGE index; google/bing take a result offset.
+            let off = if engine == "brave" { page } else { page * 10 };
             let url = engine_url(
                 engine,
                 &opts.query,
-                page,
+                off,
                 opts.safe,
                 opts.region.as_deref(),
                 opts.limit,
@@ -995,17 +1013,20 @@ async fn browser_search<B: BrowserBackend>(
             // pagination, but keep it fast).
             tokio::time::sleep(Duration::from_millis(jitter(500, 900))).await;
         }
-        for (i, r) in all.iter_mut().enumerate() {
-            r.position = i + 1;
-        }
+        renumber(&mut all);
         all.truncate(opts.limit);
         return Ok(all);
     }
 
+    let off = if engine == "brave" {
+        opts.page
+    } else {
+        opts.page * 10
+    };
     let url = engine_url(
         engine,
         &opts.query,
-        opts.page,
+        off,
         opts.safe,
         opts.region.as_deref(),
         opts.limit,
@@ -1100,6 +1121,127 @@ async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
         return Ok(Vec::new());
     }
     Ok(parse_serpapi_json(&body, opts.limit))
+}
+
+/// Brave Search API key (optional). Unset → empty with no network, so an unkeyed
+/// install behaves exactly as before.
+fn brave_api_key() -> Option<String> {
+    std::env::var("BRAVE_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+/// Is the keyed Brave API configured? The MCP/CLI layers use this to stop
+/// treating `brave` as browser-only — its API needs no CDP engine.
+pub fn brave_api_ready() -> bool {
+    brave_api_key().is_some()
+}
+
+/// Brave's own API (`BRAVE_API_KEY`) — typed JSON over HTTP, so it needs NO
+/// browser where the HTML path does. `count` maxes at 20 and `offset` is a PAGE
+/// index, so a deep limit costs `⌈limit/20⌉` calls (sequential: the free tier is
+/// rate-limited). Returns empty on unset key / non-2xx / parse failure so the
+/// caller's tier chain continues.
+async fn brave_api_search(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
+    let Some(key) = brave_api_key() else {
+        return Ok(Vec::new());
+    };
+    let region = opts.region.as_deref().unwrap_or("us-en");
+    let (cc, lang) = region.split_once('-').unwrap_or(("us", "en"));
+    let count = opts.limit.clamp(1, 20);
+    let max_pages = opts.limit.div_ceil(count).clamp(1, 5);
+    let mut all: Vec<SerpResult> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for page in opts.page..opts.page + max_pages {
+        let mut u = Url::parse("https://api.search.brave.com/res/v1/web/search")?;
+        {
+            let mut p = u.query_pairs_mut();
+            p.append_pair("q", &opts.query);
+            p.append_pair("count", &count.to_string());
+            p.append_pair("offset", &page.to_string());
+            p.append_pair("country", cc);
+            p.append_pair("search_lang", lang);
+            p.append_pair("safesearch", if opts.safe { "strict" } else { "off" });
+        }
+        let url = u.as_str().to_string();
+        let k = key.clone();
+        let proxy = opts.proxy.clone();
+        let fetched = tokio::task::spawn_blocking(move || {
+            crate::engines::serp_http_get_auth(
+                &url,
+                proxy.as_deref(),
+                &[
+                    ("X-Subscription-Token", k.as_str()),
+                    ("Accept", "application/json"),
+                ],
+            )
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("brave api task failed: {e}")))?;
+        let (status, body) = fetched;
+        if !(200..300).contains(&status) {
+            break;
+        }
+        let rs = filter_relevant(parse_brave_api_json(&body, opts.limit), &opts.query);
+        let mut fresh = 0usize;
+        for r in rs {
+            if seen.insert(dedupe_key(&r.url)) {
+                all.push(r);
+                fresh += 1;
+            }
+        }
+        if all.len() >= opts.limit || fresh == 0 {
+            break;
+        }
+    }
+    renumber(&mut all);
+    all.truncate(opts.limit);
+    Ok(all)
+}
+
+/// Strip HTML tags — Brave's API returns `<strong>`-highlighted descriptions and
+/// the contract forbids raw markup in tool output.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Parse Brave web-search JSON. Organic hits live under `web.results`; location
+/// rows carry no `url` and are skipped. Pure — unit-tested below.
+fn parse_brave_api_json(body: &str, limit: usize) -> Vec<SerpResult> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let mut out = Vec::new();
+    if let Some(arr) = v["web"]["results"].as_array() {
+        for r in arr {
+            if out.len() >= limit {
+                break;
+            }
+            let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("");
+            let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
+            let snippet = r.get("description").and_then(|x| x.as_str()).unwrap_or("");
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            out.push(SerpResult {
+                position: out.len() + 1,
+                title: clean(title),
+                url: url.to_string(),
+                domain: domain(url),
+                snippet: clean(&strip_tags(snippet)),
+            });
+        }
+    }
+    out
 }
 
 /// Parse serpapi `/search.json` organic results into typed results. Pure —
@@ -1342,6 +1484,27 @@ pub async fn serp_search<B: BrowserBackend>(
                     }
                 }
             }
+            // Keyed Brave API — cheap diversity before any browser render and
+            // the only way to reach a deep limit without a browser. Gated like
+            // serpapi (deep requests only) and inert without BRAVE_API_KEY.
+            let mut brave_api_used = false;
+            if opts.limit > 20 && merged.len() < opts.limit {
+                let rs = brave_api_search(opts).await.unwrap_or_default();
+                if !rs.is_empty() {
+                    brave_api_used = true;
+                    let count = rs.len();
+                    merged.extend(rs);
+                    per_engine.push(SerpEngineReport {
+                        engine: "brave".to_string(),
+                        status: "ok".to_string(),
+                        count,
+                    });
+                }
+            }
+            // Browser renders cost ~20s each and are only worth paying for while
+            // the reply is still SHORT — an unconditional join burned ~40s
+            // rendering results a default (limit=10) search already had.
+            let short = merged.len() < opts.limit;
             if let Some(b) = backend {
                 // SEQUENTIAL, not concurrent: browser_search drives the ONE
                 // active tab/session of the shared CDP backend, and Google walls
@@ -1350,6 +1513,9 @@ pub async fn serp_search<B: BrowserBackend>(
                 // browser flows would race the same tab. The HTTP engines above
                 // stay in parallel — only the browser join is serialized.
                 for e in AUTO_BROWSER_ENGINES {
+                    if !short || (brave_api_used && e == "brave") {
+                        continue;
+                    }
                     match tokio::time::timeout(SERP_BROWSER_CAP, browser_search(b, e, opts)).await {
                         Ok(Ok(rs)) => {
                             let count = rs.len();
@@ -1370,7 +1536,7 @@ pub async fn serp_search<B: BrowserBackend>(
                         }
                     }
                 }
-            } else {
+            } else if short {
                 for e in AUTO_BROWSER_ENGINES {
                     skipped.push(format!("{e} (no browser attached)"));
                     per_engine.push(SerpEngineReport {
@@ -1406,21 +1572,31 @@ pub async fn serp_search<B: BrowserBackend>(
                     }
                 }
             }
+            // Every provider already relevance-filtered its own results
+            // (http_search per page, brave_api_search, browser_search), so the
+            // merge only needs dedupe + cap — filtering again parsed every URL
+            // twice for nothing.
             (
-                dedupe_cap(filter_relevant(merged, &opts.query), opts.limit),
+                dedupe_cap(merged, opts.limit),
                 skipped,
                 per_engine,
                 String::new(), // auto = merged aggregate, no single source
             )
         }
         "brave" => {
-            let b = backend.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "engine 'brave' requires a connected browser (set CDP_URL or start Chrome \
-                     with --remote-debugging-port=9222); duckduckgo|bing|google|auto work without one"
-                )
-            })?;
-            let rs = browser_search(b, "brave", opts).await?;
+            // Keyed API first — it needs NO browser (only the HTML path does) and
+            // returns typed JSON, so a BRAVE_API_KEY makes brave work headless.
+            let mut rs = brave_api_search(opts).await.unwrap_or_default();
+            if rs.is_empty() {
+                let b = backend.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "engine 'brave' requires a connected browser (set CDP_URL or start Chrome \
+                         with --remote-debugging-port=9222) or a BRAVE_API_KEY; \
+                         duckduckgo|bing|google|auto work without either"
+                    )
+                })?;
+                rs = browser_search(b, "brave", opts).await?;
+            }
             let count = rs.len();
             (
                 rs,
@@ -1710,15 +1886,21 @@ mod tests {
 
     #[test]
     fn engine_url_encodes_params() {
-        let u = engine_url("duckduckgo", "rust & web", 1, true, Some("gb-en"), 10).unwrap();
+        // `offset` is a RESULT offset (no hardcoded 30/10 stride).
+        let u = engine_url("duckduckgo", "rust & web", 10, true, Some("gb-en"), 10).unwrap();
         assert!(u.contains("q=rust+%26+web"), "query percent-encoded: {u}");
-        assert!(u.contains("s=30"), "page 1 offset: {u}");
+        assert!(u.contains("s=10"), "result offset 10 -> s=10: {u}");
         assert!(u.contains("k1=2"), "safe on: {u}");
         assert!(u.contains("kl=gb-en"), "region: {u}");
         assert!(u.contains("k5=1"), "no-redirect: {u}");
+        // The regression this fixes: page 1 used to emit s=30, overshooting ddg's
+        // ~10-per-page and serving empty pages (limit=50 stopped at ~11).
+        let u0 = engine_url("duckduckgo", "rust", 0, false, None, 10).unwrap();
+        assert!(u0.contains("s=0"), "page 0 offset: {u0}");
+        assert!(!u.contains("s=30"), "no 30-stride overshoot: {u}");
 
-        let b = engine_url("bing", "rust", 2, false, None, 10).unwrap();
-        assert!(b.contains("first=21"), "bing page 2: {b}");
+        let b = engine_url("bing", "rust", 20, false, None, 10).unwrap();
+        assert!(b.contains("first=21"), "bing offset 20 -> first=21: {b}");
         assert!(b.contains("adlt=off"), "bing safe off: {b}");
         // No region -> en-US market pinned (locale garbage fix).
         assert!(b.contains("mkt=en-US"), "bing en-US market: {b}");
@@ -1730,7 +1912,7 @@ mod tests {
             "page 0 must omit `first` so bing honors `count`: {b20}"
         );
 
-        let g = engine_url("google", "rust", 1, true, None, 10).unwrap();
+        let g = engine_url("google", "rust", 10, true, None, 10).unwrap();
         assert!(g.contains("start=10"));
         assert!(g.contains("safe=active"));
         assert!(g.contains("hl=en"), "google en-US lang: {g}");
@@ -1743,7 +1925,7 @@ mod tests {
         assert!(!g0.contains("num="), "no num param: {g0}");
         assert!(!g0.contains("lr="), "no lr language-restrict: {g0}");
         assert!(g0.contains("q=rust"), "query kept: {g0}");
-        let g1 = engine_url("google", "rust", 1, false, None, 100).unwrap();
+        let g1 = engine_url("google", "rust", 10, false, None, 100).unwrap();
         assert!(g1.contains("start=10"), "page 1 start offset: {g1}");
         assert!(!g1.contains("num="), "no num on later pages either: {g1}");
 
@@ -1768,6 +1950,29 @@ mod tests {
         };
         assert_eq!(opts.limit, 1);
         assert!(request_id().len() > 10);
+    }
+
+    #[test]
+    fn brave_api_parse_results() {
+        // Brave's API nests organic hits under web.results; `description` carries
+        // <strong> highlights (stripped — tool output must not be raw markup).
+        let body = r#"{"web":{"results":[
+            {"title":"Tokio","url":"https://tokio.rs/","description":"An <strong>async</strong> runtime."},
+            {"title":"location hit","description":"no url -> skipped"},
+            {"title":"tokio docs","url":"https://docs.rs/tokio","description":"API docs."}
+        ]}}"#;
+        let rs = parse_brave_api_json(body, 10);
+        assert_eq!(rs.len(), 2, "url-less rows skipped");
+        assert_eq!(rs[0].position, 1);
+        assert_eq!(rs[0].title, "Tokio");
+        assert_eq!(rs[0].url, "https://tokio.rs/");
+        assert_eq!(rs[0].domain, "tokio.rs");
+        assert_eq!(rs[0].snippet, "An async runtime.", "tags stripped");
+        assert_eq!(rs[1].url, "https://docs.rs/tokio");
+        assert_eq!(rs[1].position, 2);
+        assert_eq!(parse_brave_api_json(body, 1).len(), 1, "limit respected");
+        assert!(parse_brave_api_json("{}", 10).is_empty());
+        assert!(parse_brave_api_json("not json", 10).is_empty());
     }
 
     #[test]

@@ -260,7 +260,7 @@ fn main() -> anyhow::Result<()> {
                     "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
                 );
                 println!(
-                    "  duckduckgo|auto need no browser; bing/brave use the connected CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
+                    "  duckduckgo|auto need no browser; brave uses its keyed API when BRAVE_API_KEY is set, else the connected CDP engine; bing uses the CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
                 );
                 return Ok(());
             }
@@ -382,7 +382,8 @@ fn main() -> anyhow::Result<()> {
                         Ok(b) => Some(b),
                         Err(_)
                             if opts.engine == "google"
-                                || opts.engine == "brave"
+                                || (opts.engine == "brave"
+                                    && !webrain_core::serp::brave_api_ready())
                                 || opts.engine == "bing" =>
                         {
                             // GUEST MODE auto-launch for all browser engines
@@ -421,9 +422,14 @@ fn main() -> anyhow::Result<()> {
                                     Some(rt.block_on(CdpBackend::connect_with_url(&url))?)
                                 }
                                 // bing has a working pure-HTTP path — no Chrome →
-                                // fall back to HTTP (google/brave NEED a browser, so
-                                // their launch error still propagates).
-                                Err(e) if opts.engine == "bing" => {
+                                // fall back to HTTP (google NEEDS a browser, and
+                                // brave does too unless BRAVE_API_KEY is set — those
+                                // launch errors still propagate).
+                                Err(e)
+                                    if opts.engine == "bing"
+                                        || (opts.engine == "brave"
+                                            && webrain_core::serp::brave_api_ready()) =>
+                                {
                                     if !json_out {
                                         eprintln!(
                                             "no Chrome for bing browser path ({e}); falling back to pure HTTP"

@@ -412,12 +412,12 @@ pub fn list_tools() -> Vec<Value> {
             "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached, sequential), relevance-filters junk pages, merges + dedupes, limit 1..=100. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown + source (actual provider after a fallback) in the reply, retry with backoff. Returns {status, query, engine, source, results[], per_engine[], request_id, ms, skipped[]}.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
-                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); google|brave = guest-browser flow"},
+                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); brave = keyed API when BRAVE_API_KEY is set, else guest-browser flow; google = guest-browser flow"},
                 "limit": {"type": "integer", "default": 10, "description": "max results, 1..=100"},
                 "page": {"type": "integer", "default": 0, "description": "0-based results page"},
                 "safe": {"type": "boolean", "default": false},
                 "region": {"type": "string", "description": "locale/region, e.g. us-en, gb-en, gr-el, de-de"},
-                "browser": {"type": "boolean", "default": false, "description": "bing only: true attaches/launches a guest Chrome and paginates its results page for more than ~10 results. Default false keeps the pure-HTTP path (measured 2026-10-10: 11 results for duckduckgo, 10 for bing at limit=50). google|brave always need a browser and ignore this flag."},
+                "browser": {"type": "boolean", "default": false, "description": "bing only: true attaches/launches a guest Chrome and paginates its results page for more than ~10 results. Default false keeps the pure-HTTP path (measured 2026-10-10: 11 results for duckduckgo, 10 for bing at limit=50). google always needs a browser; brave needs one only when BRAVE_API_KEY is unset. Both ignore this flag."},
                 "fallback": {"type": "boolean", "default": true, "description": "fall back to another provider when the requested engine errors or returns zero"},
                 "retries": {"type": "integer", "default": 2, "description": "transient-failure retries with backoff, 0..=5"},
                 "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL (e.g. http://user:pass@host:port) for the HTTP engines (duckduckgo/bing/auto) and baked into the guest Chrome launch for google/brave. Omit to use the WEBRAIN_PROXIES rotation pool instead (round-robin across exits, auto-rotating off a 403/429/503 wall); an explicit URL here is honored as-is and never rotates."}
@@ -2440,9 +2440,11 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
     };
     // google/brave need a browser — the lib.rs short-circuit routes HTTP engines
     // around the backend; here (call_tool) a backend may or may not be attached,
-    // and lib.rs auto-launches a guest browser when none is.
-    if (opts.engine == "brave" || opts.engine == "google") && backend.is_none() {
-        return json!({"status": "error", "message": "engine 'google'/'brave' requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|auto work without one"});
+    // and lib.rs auto-launches a guest browser when none is. brave is
+    // browser-optional once its keyed API is configured.
+    let brave_needs_browser = opts.engine == "brave" && !webrain_core::serp::brave_api_ready();
+    if (brave_needs_browser || opts.engine == "google") && backend.is_none() {
+        return json!({"status": "error", "message": "engine 'google' (and 'brave' without BRAVE_API_KEY) requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|auto work without one"});
     }
     match webrain_core::serp::serp_search(&opts, backend).await {
         Ok(r) => json!({
