@@ -253,6 +253,19 @@ fn launch_chrome_opt(
         format!("--user-data-dir={}", profile_dir.display()),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
+        // Never throttle an occluded/background window. An automated browser
+        // normally sits behind the editor, and Chrome deprioritizes (and on
+        // Windows HIDES) a window it believes nobody is looking at: measured
+        // 2026-10-23, one google SERP page took 16-22s behind the editor vs 3.4s
+        // once visible, and `document.visibilityState` read "hidden" while it
+        // sat behind VS Code. CalculateNativeWinOcclusion is the Windows flag
+        // that stops Chrome declaring the window hidden at all; the other three
+        // keep renderer/timer priority. Standard automation flags — none raises
+        // the "unsupported command-line flag" banner.
+        "--disable-features=CalculateNativeWinOcclusion".to_string(),
+        "--disable-backgrounding-occluded-windows".to_string(),
+        "--disable-background-timer-throttling".to_string(),
+        "--disable-renderer-backgrounding".to_string(),
     ];
     if guest {
         args.push("--guest".to_string());
@@ -337,7 +350,13 @@ pub async fn launch_chrome_pipe(
     cmd.arg("--remote-debugging-pipe")
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .arg("--no-first-run")
-        .arg("--no-default-browser-check");
+        .arg("--no-default-browser-check")
+        // Same occluded-window throttle guard as launch_chrome_opt: a pipe
+        // Chrome sits behind the editor too.
+        .arg("--disable-features=CalculateNativeWinOcclusion")
+        .arg("--disable-backgrounding-occluded-windows")
+        .arg("--disable-background-timer-throttling")
+        .arg("--disable-renderer-backgrounding");
     if !headed {
         cmd.arg("--headless=new");
     }
