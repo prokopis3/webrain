@@ -7,6 +7,296 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-26
+
+### Added
+
+- **mcp**: `webrain_guide` answers **progressively**. With no `topic` it returns
+  the tool list plus an index of every section; `topic=<section>` (case-insensitive
+  substring) returns just that one, and `topic="all"` returns the whole guide.
+  Measured on this build: 827 tokens for the index, 763 for one section, 2745 for
+  everything — the call an agent makes when it is *least* sure what to do no longer
+  costs the full briefing. Topic selection stays the model's job on purpose:
+  matching a user prompt to a section in Rust would be the intent detection this
+  server exists to avoid. The logic lives in `tools::guide_from_args`, called by
+  both the stdio and HTTP transports, so the two can no longer diverge (they did:
+  `lib.rs` served the raw `AGENT_GUIDE` and ignored arguments entirely).
+- **mcp**: operator **skills** via `WEBRAIN_SKILLS_DIR` — `webrain_guide`
+  `topic="skills"` lists `*.md` files in that directory and `topic="skill:<name>"`
+  returns one, so house rules can reach the agent without recompiling. Opt-in:
+  unset means the feature is off, so a shared instance never serves files by
+  default. Names are validated to `a-z A-Z 0-9 _ -` (max 64) *before* the join and
+  both sides are canonicalized, because the argument would otherwise be an
+  arbitrary file read on behalf of a remote model.
+- **cli**: `webrain --help`, `webrain <command> --help` and `webrain help <command>`
+  are now real pages, driven by one `HELP` table that also prints the overview, so
+  a new subcommand is described in one place instead of a usage `println!` per arm.
+  `webrain serp` with no query prints its page (with the `--fresh` / `--pipe` /
+  `--hold` notes) instead of an 800-character usage blob.
+- **mcp**: the agent guide now documents **environment variables**, so a binary on
+  a machine with no repo checkout can explain its own knobs — new
+  `webrain_guide(topic="env")` section covering `CDP_URL`,
+  `WEBRAIN_STEALTH_NOISE`, `WEBRAIN_NO_STEALTH`, `WEBRAIN_NO_STATE`, HTTP auth,
+  `WEBRAIN_PROXIES`, profiles/vault, engine paths, provider keys and transport
+  limits. It also states the fact that decides most failures: these are read **at
+  process start / CDP attach**, so no tool call can change one — the agent must
+  name the `VAR=value`, the server must restart, and anything injected needs a
+  fresh tab.
+- **cli**: `webrain --help` prints that same environment block instead of naming
+  four variables, so the CLI path carries the knowledge the MCP path does.
+- **docs**: `README.md`, `docs/reference/environment.mdx`,
+  `docs/AGENT_DECISION_GUIDE.md` (§8) and `skills/webrain/SKILL.md` now describe
+  each variable's *agent-visible* effect. `WEBRAIN_STEALTH_NOISE` carries the
+  verified hydration cause (Next.js aborting on the spoofed
+  `Object.defineProperty`/canvas hooks, measured on `ab.gr/storelocator`) instead
+  of the earlier guess "sites that distrust the spoofed profile".
+
+### Fixed
+
+- **mcp**: `wait_selectors` is honoured on the `cdp_urls` path. The grouping that
+  turns per-URL wait lists into batches was built **inside** the
+  `if cdp_urls.is_empty()` branch, so with `cdp_urls` set the plural argument was
+  silently dropped and no wait was applied — a site that hydrates after
+  `readyState: complete` (masoutis.gr: cards render ~1 s later) came back as
+  shells with an empty title. Probed against the live server with a
+  never-matching selector and a 5 s cap: plural returned in 492 ms (ignored),
+  singular took 12 604 ms. The grouping now runs before the branch, and the
+  per-group batches fan out per backend inside one `fan_out()`, so a
+  multi-backend call applies its waits too. Re-probed: 13 019 ms, and masoutis
+  then honoured `h1.item-title` and returned names + prices on the `cdp_urls`
+  path.
+- **core**: `wss://` CDP endpoints now connect at all. `tokio-tungstenite` was
+  built with `features = ["connect"]` and **no TLS connector**, so every hosted
+  CDP endpoint — Lightpanda Cloud included — failed with "CDP WebSocket
+  connection failed" even though `resolve_ws` happily passed `wss://` through.
+  Added `rustls-tls-webpki-roots` (roots ship in the binary; no OpenSSL or
+  system-cert dependency). Verified against
+  `wss://euwest.cloud.lightpanda.io/ws?…&browser=lightpanda`: 6/6 URLs, titles
+  extracted, and it behaves exactly like a local container — one page per
+  connection, `effective_concurrency: 1`.
+- **mcp**: a call that names its own browsers in `cdp_urls` no longer **fails
+  before the fan-out runs** when nothing listens on the shared `CDP_URL`. The
+  shared backend was connected up-front and its failure aborted the whole arm,
+  so the recipe the guide recommends — a box running only lightpanda containers,
+  listed in `cdp_urls` — died with "CDP endpoint not reachable" on the default
+  9222. It now falls back to `cdp_urls[0]` as the shared backend.
+- **mcp**: `webrain_batch` results from `cdp_urls` come back in **input order**.
+  Rows were appended per backend, so `results[i].url` did not match `urls[i]`
+  (a 25-URL, 10-backend run returned url 0, 10, 20, 1, 11, …). Round-robin
+  placement makes the original order exactly reconstructable; a backend that
+  returns nothing for a URL now shows as an error on that URL instead of a
+  silently shorter list.
+- **mcp**: the tab budget now counts **backends**, not just one pool. `cdp_urls`
+  multiplies `per_backend_concurrency`, so 10 backends at the default 4 was 40
+  tabs against a 32-tab budget with nothing reported; `per_backend_concurrency`
+  is clamped to `tab_budget / backends`. `effective_concurrency` also stops
+  claiming more workers than there are URLs.
+- **docs**: corrected the lightpanda parallelism rule. The limit is per CDP
+  **connection**, not per process: `serve` builds `Worker.Pool.init(allocator,
+  config.maxConnections())` and spawns a worker (own browser context + page) per
+  WebSocket, capped by `--cdp-max-connections` (default 16). Measured against ONE
+  container: 1 connection 8 URLs 6.15 s, 4 connections 1.17 s, 8 connections
+  16 URLs 4.19 s. So repeating the endpoint in `cdp_urls` is a real lever, not
+  "spin up containers". But workers in one process share its HTTP pool
+  (`--http-max-concurrent` 40, `--http-max-host-open` **6 per host**): on 25 URLs
+  hitting the same hosts, 8 connections to one container took 9.6 s (Σ page
+  times 60.9 s) against 3.5 s across 10 separate containers, which each get their
+  own pool. The guide now says which to pick (connections for many hosts,
+  processes for one host or per-IP isolation) and that CPU is the ceiling.
+- **docs**: the browser guide documents **Lightpanda Cloud** — a raw `wss://`
+  endpoint accepted directly as `CDP_URL` / `cdp_urls` (passed through, no
+  `/json/version` probe).
+- **mcp**: `webrain_batch` with `cdp_urls` now runs the per-backend batches
+  **concurrently**. The loop awaited each backend in turn, so `cdp_urls` paid N
+  connects and bought zero extra throughput — while the guide advertised it as a
+  parallel lever. That made it useless for the one engine that cannot parallelize
+  any other way: **lightpanda holds ONE page per process** (`Target.createTarget`
+  → `TargetAlreadyLoaded`; a 2nd `Target.createBrowserContext` is refused with
+  "Cannot have more than one browser context at a time", lightpanda
+  `src/server/cdp/domains/target.zig`), so `concurrency` is inert there and N
+  containers is the only lever. Measured on 4 URLs with `per_backend_concurrency:
+  1`: one container 1721 ms wall (`effective_concurrency: 1`, wall ≈ sum of page
+  times), two containers 1060 ms = **0.62×**; two Chrome backends 0.66×. Result
+  order stays grouped by backend, so completion order cannot reshuffle the rows.
+  Also corrected `stats.effective_concurrency` for the `cdp_urls` path, which
+  reported `1` whenever the engine was single-target even with a tab per backend.
+- **docs**: the decision guide now states parallelism **per engine** as a rule
+  rather than a footnote — Chrome/obscura: `concurrency` is the lever; lightpanda:
+  one page per process, so N containers in `cdp_urls`, and the batch reply says
+  `single_target: true, effective_concurrency: 1` rather than leaving the caller
+  to tune a knob the engine ignores.
+- **core**: `webrain_batch` now runs a **fixed tab pool** instead of opening and
+  closing a target per URL. The old path paid an attach + init per URL, so peak
+  live documents scaled with the URL list; workers now hold one tab each and drain
+  a shared queue (the shape `SpiderEngine`'s worker already used), so live tabs are
+  bounded by `concurrency` no matter how long the list is. A failed URL recycles
+  its tab so one bad navigation cannot poison the rest of that worker's queue, and
+  results are sorted back into input order. Measured on 9 mixed URLs at
+  `concurrency: 3`: 9/9 returned, order preserved, `ms_wall` 3.9 s against
+  `ms_total` 8.7 s (2.2× real parallelism).
+- **core**: `single_target_probe` is **cached per connection**. The answer is a
+  property of the engine binary (lightpanda refuses a 2nd `createTarget`), yet the
+  probe opened and closed two scratch targets on *every* batch call. Transient
+  errors are still not cached, so a flaky first probe can be retried.
+- **mcp**: batch `stats` now reports what the engine actually did —
+  `requested_concurrency`, `effective_concurrency`, `single_target` and `ms_wall`.
+  lightpanda serve silently collapses to one tab, so a caller asking for
+  `concurrency: 3` got one tab and no way to know; it now reports
+  `single_target: true, effective_concurrency: 1` (`ms_wall` 793 ms vs `ms_total`
+  780 ms) against Chrome's `single_target: false, effective_concurrency: 3`
+  (`ms_wall` 330 ms vs `ms_total` 391 ms). `ms_wall` also makes the real
+  parallelism visible: `ms_total` alone sums per-URL times and cannot show it.
+- **mcp**: `clamp_concurrency` is bounded by a **tab budget** (`available_parallelism`
+  × 2, override with `WEBRAIN_MAX_TABS`) instead of only capping shared instances.
+  A local caller could ask for a thousand tabs and reach 4.4 GB on a 100-page run;
+  the budget is a property of the box, not of the tenant model. Verified:
+  `WEBRAIN_MAX_TABS=2` with `concurrency: 6` reports `requested_concurrency: 2`.
+- **mcp**: a killed browser no longer **wedges the server for good**.
+  `is_connection_error` is what drops the cached `CdpBackend` so the next call
+  reconnects; it matched socket phrases (`connection closed`, `broken pipe`,
+  `stream closed`, `eof`). But after a browser kill the error does not come from
+  the socket — `CdpBackend::send_cmd_with` bails with **`CDP write failed: channel
+  closed`** when its writer task has died, and `channel closed` shares no phrase
+  with `connection closed`, so the guard never fired and every later tool call
+  replayed the dead-socket error. Observed this session: `webrain_navigate` and
+  `webrain_observe` were unusable until the MCP process itself was restarted,
+  while `webrain_batch` with an explicit `cdp_urls` worked because it bypasses the
+  cached backend. The matcher now covers `channel closed`, `cdp write failed`,
+  `cdp connection closed` and `cdp command` (the half-open-socket
+  `Target.getTargets timed out after 30s` case), pinned by `dead_socket_detection`.
+- **docs**: corrected the claim that **obscura has no paint engine**. Obscura's
+  own docs and a direct test disagree: release archives ship the renderer, and
+  `obscura.exe fetch https://example.com -s out.png` wrote a 63 KB PNG on v0.2.5.
+  What actually fails on a data-driven SPA is **boot, not paint** —
+  `ab.gr/eshop/search` returns a ~1 MB shell with an empty Apollo cache (~518 B),
+  0 product links and 0 prices, both at the default 30 s
+  `OBSCURA_SCRIPT_DEADLINE_MS` and at 120 s, through `webrain_batch` and through
+  the bare binary with no webrain injection. `AGENTS.md`,
+  `docs/AGENT_DECISION_GUIDE.md`, `docs/index.mdx` and both `web-research` skills
+  now say that instead of the wrong reason.
+- **docs**: the MCP **relaunch recipe** is now written down, including the trap
+  that cost a debug cycle: `webrain serp` sets `WEBRAIN_NO_STEALTH=1` on itself
+  (`webrain-cli/src/main.rs:207`), so a server started from that shell boots with
+  **all** stealth off — silently, and every later measurement is against a
+  different browser identity. The recipe is "CDP_URL + `WEBRAIN_STEALTH_NOISE=0`
+  if the page needs it + `WEBRAIN_NO_STEALTH` **deleted**", and it now appears in
+  `AGENT_GUIDE` (so the binary explains it), `docs/AGENT_DECISION_GUIDE.md` §8,
+  `docs/reference/environment.mdx`, `skills/webrain/SKILL.md` and `AGENTS.md`.
+- **docs**: obscura's ab.gr failure now has a named cause instead of a guess. It
+  is not the renderer and not our injection: obscura gives **every** element one
+  shared `Element` prototype (`HTMLTemplateElement.prototype === Element.prototype`),
+  so an app that feature-detects and polyfills `HTMLTemplateElement.firstChild`
+  patches `firstChild` **for all elements**, and `this.content.firstChild` throws
+  on plain nodes. Verified: `sameProto: true` → `TypeError`; Chrome `sameProto:
+  false` → no throw. React then never hydrates and the app's data query never
+  fires. Obscura's own manual (`llms-full.txt`) documents per-interface prototype
+  ancestry for **SVG only** — "supports interface checks in page scripts" — and
+  never mentions `HTMLElement`, `customElements` or `tagName`, so this is an
+  undocumented engine limitation, not a misconfiguration. Probe before trusting
+  any engine on an SPA: `HTMLTemplateElement.prototype === Element.prototype` must
+  be `false`.
+- **mcp**: `webrain_scrape` can finally **parse instead of probe**. The
+  browserless fetch capped every HTML body at 3000 chars, so 3 KB of `<head>`
+  was all a caller ever saw and the only way to read a real listing was to
+  upgrade to a browser. `max_chars` (and `full: true` for no cap) lift it, and
+  the reply now reports the **true** `bytes` plus `truncated`, so a cut body is
+  visible instead of silently empty. Measured: Sklavenitis search page is 427 KB
+  in **266 ms**, My Market 830 KB in **415 ms**, and
+  `webrain_scrape(base_selector="div.product", fields=[...])` returns all 24
+  rows of a results page in one HTTP request — 3–8× faster than the same page in
+  a browser tab and with no tab pool to exhaust.
+- **mcp**: `webrain_batch` accepts **`wait_selectors`**, index-parallel to
+  `urls`, so ONE call can span hosts that render differently. `NavOpts` is
+  per-call, so instead of threading a `Vec<NavOpts>` through every `batch_*`
+  signature the dispatcher groups URLs by their effective options, reuses the
+  single-opt path per group, and restores input order. Verified with Sklavenitis
+  (`div.product`) + My Market (`article.product--teaser`) in one call: 2.0 s and
+  1.3 s, both populated. `wait_timeout_secs` stays one value — size it for the
+  slowest host.
+- **core**: `webrain_batch(op="interact")` **discarded the interaction's return
+  value**. It ran the JS and then re-read `document.body.innerText` (or the
+  schema), so an interaction that returned `JSON.stringify(rows)` — the normal way
+  to "act then read" on an SPA — came back with `data: null` and the agent had to
+  issue a second `eval` per tab. The interaction's own result is now the payload
+  (JSON → `data`, text → `text`); a side-effects-only interaction that returns
+  nothing still falls back to innerText, so existing callers are unchanged.
+- **skills**: new `web-research` and `product-market-research` skills under
+  `.github/skills/` — the discover → batch → persist → verify loop, plus the
+  per-unit/spec traps (per-serving vs per-100 g columns, pack-size normalisation,
+  cross-shop SKU matching) that a grocery price comparison hits on every run.
+- **core**: **bing returned zero results on every query** — and had for a while,
+  silently, since `auto` just merged duckduckgo and moved on. Bing's HTML SERP is
+  now JS-rendered for programmatic clients: measured 2026-10-23 the body was 3 KB
+  with 19 visible chars and no `li.b_algo`, so `parse_bing` had nothing to read.
+  Page 0 now uses the RSS form Bing advertises in its own `<link rel="alternate">`
+  and parses `<item>` (new `parse_bing_rss`, entity-decoded then markup-stripped);
+  deeper offsets keep the HTML form and its older parser. The RSS form
+  deliberately omits `mkt`/`cc` — both empty the feed (10 items → 0), which is why
+  the first attempt at this still returned nothing — and `count`/`first` are
+  ignored there, so bing is a one-page provider by measurement, not by choice.
+  Verified live: `serp --limit 20` now reports `bing ok(10)` where it used to
+  report `bing empty(0)`.
+- **mcp**: `webrain_scrape` / `webrain_fetch_http` ignored `base_selector` and
+  `autoschema` whenever the call was served by lib.rs's no-browser short-circuit,
+  which called `http_fetch` directly and returned 3 KB of truncated HTML instead
+  of extracted rows. The whole path now lives in one sync helper
+  (`tools::fetch_http_from_args`) called by both layers, and the `visible_chars` /
+  `needs_js` enrichment is no longer applied on only one of them. Verified live:
+  `webrain_scrape` with a schema returns `data: [{title: …}]` from a 34 KB page.
+- **core**: **google returned zero results from a perfectly good page.** Google no
+  longer puts the target in the result anchor: it ships an opaque token
+  (`/goto?url=CAES…`, and the same token in `ping`), so `google_href` resolved
+  every row to `https://www.google.com/...` and `parse_google` discarded it as an
+  internal link. Measured live 2026-10-23: the results page had 9 `#search a h3`
+  and 57 containers — the page was fine, the parser was blind. The URL is now
+  recovered from the `<cite>` line (`https://github.com › user › repo` → the same
+  path joined with slashes), which carried a usable URL for 9 of 10 organic rows;
+  a cite holding metadata instead ("10+ comments · 2 years ago") still yields
+  nothing rather than a fabricated link. `--engine google` now returns 10 results
+  in ~9.6 s where it reported `empty(0)` before. Truncated cites give an
+  approximate path (`oneuptime.com/Blog`), which the code comment states.
+- **core**: `auto` asked the browser engines for the **full** limit, so a deep
+  request became 8 google pages — and the fixed 20 s browser cap then threw the
+  whole render away. Measured 2026-10-23: `auto --limit 50` reported google and
+  brave `skipped` after 45 s (n=26), while `--engine google --limit 50` returned
+  all 50 in 296 s. The browser stage in `auto` is a diversity top-up, not a bulk
+  provider, so it now asks for exactly one page (`SERP_AUTO_PAGE`, shared
+  `browser_pages` budget). Verified live: `auto --limit 50` → n=42/45 in ~12.6 s
+  with `google ok(7)` and `brave ok(7)`. Deep paging stays on `--engine google`.
+- **core**: **Chrome's own throttling, not the SERP code, made browser searches
+  slow by 5-30×.** An automated window sits behind the editor, and Chrome marks it
+  occluded: measured 2026-10-23, `document.visibilityState` read `hidden` on a
+  browser behind VS Code, and one google page took 16-22 s there against 3.4 s
+  with the window visible. `webrain launch` and pipe mode now pass
+  `--disable-features=CalculateNativeWinOcclusion` plus the backgrounding/timer
+  flags; the same A/B under identical conditions reads `visible` for a
+  webrain-launched browser versus `hidden` for one started by hand. A
+  hand-started Chrome keeps the throttle until it is relaunched via `webrain
+  launch` (or brought to the front).
+- **core**: `consent_button` clicked **the last button inside any dialog** when no
+  accept/reject label matched. Google's own "About this result" panel is a
+  dialog, so every SERP run logged `consent=clicked:About this result` and opened
+  a side panel over a good results page — the same shape as the earlier
+  "clicked a result link → 0 results → retries" incident. The blind fallback is
+  deleted; pattern matching already covers the real consent buttons in every
+  language the list knows, and guessing is worse than not dismissing.
+- **cli/core**: new `serp --http` (MCP: `"http": true`) — never touch a browser:
+  no render, no guest launch, whatever is attached. `--engine bing --limit 50`
+  used to guest-launch Chrome for **26 s** and return 10 results; with `--http`
+  it returns the same 10 in **0.3 s**, and `auto --limit 50 --http` answers
+  ddg+bing in ~7 s with `google (http only) | brave (http only)` in `skipped`.
+- **core**: HTTP paging advanced its offset by the **post-relevance-filter** page
+  size, which drifts off the engine's own 10-result grid (`s=16` re-serves page 1
+  and the pager then sees two "dry" pages). It now advances by the raw page size.
+- **core**: bing's paged URL dropped `mkt`/`cc` (either one empties the RSS feed)
+  and, measured 2026-10-23, bing is a **hard 10 regardless of paging**: its HTML
+  SERP is *not* a JS shell for a Chrome-headered client (126 KB, 10 `b_algo` at
+  `first=1|11|21`), but every offset returns the *same* ten titles, and a
+  cookie-bearing session does not change that. duckduckgo likewise serves exactly
+  two distinct pages (`s=10` differs, `s=20|30` repeat it). So the no-browser
+  ceiling is ~30 total and `--limit 50` cannot be met without a browser or a
+  keyed API — now stated in `webrain serp --help` instead of looking like a bug.
+
 ## [0.9.0] - 2026-10-23
 
 ### Added
