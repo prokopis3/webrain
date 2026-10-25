@@ -104,6 +104,10 @@ pub struct SerpOpts {
     /// the CDP engine was launched with one (CLI `--proxy` bakes it into `--proxy-server`
     /// on google auto-launch; an attached browser keeps whatever proxy it was started with).
     pub proxy: Option<String>,
+    /// Never touch a browser: no render, no guest launch, whatever is attached.
+    /// The no-browser engines (duckduckgo, bing) answer in well under a second
+    /// each, so a caller who only wants them should not pay a Chrome startup.
+    pub http_only: bool,
 }
 
 impl Default for SerpOpts {
@@ -118,6 +122,7 @@ impl Default for SerpOpts {
             retries: 2,
             fallback: true,
             proxy: None,
+            http_only: false,
         }
     }
 }
@@ -141,6 +146,25 @@ const AUTO_BROWSER_ENGINES: [&str; 2] = ["google", "brave"];
 /// captcha can take ~10-20s to auto-resolve) must never stall the whole merged
 /// reply, so the browser join is best-effort and timed out.
 const SERP_BROWSER_CAP: Duration = Duration::from_secs(20);
+// `auto` asks each browser engine for exactly ONE page, never the caller's
+// limit: it already has the HTTP results and only wants a diverse top-up. Deep
+// browser pagination is slow (measured 2026-10-23: `--engine google --limit 50`
+// = 296 s over 8 pages, ~37 s/page against ~5 s shallow), so a deep ask blew the
+// 20 s cap and the timeout threw away rows that had already rendered — at limit
+// 50 `auto` reported google AND brave `skipped` while `--engine google` alone
+// returned 50. 7 is one page for every engine here (google/brave budget a page
+// per ~7 rows, bing per 10). `--engine google` stays the deep path.
+const SERP_AUTO_PAGE: usize = 7;
+
+/// Pages a browser render attempts for `limit` (bing paginates 10/page,
+/// google/brave ~7). Shared with the `auto` top-up so it can ask for one page.
+fn browser_pages(engine: &str, limit: usize) -> usize {
+    if engine == "bing" {
+        (limit / 10).clamp(1, 10)
+    } else {
+        limit.div_ceil(7).clamp(1, 15)
+    }
+}
 
 /// Build the provider URL for one engine + params. `offset` is a RESULT offset
 /// (how many results to skip) for the HTTP engines — the caller advances it by
@@ -180,18 +204,29 @@ fn engine_url(
             let mut u = Url::parse("https://www.bing.com/search")?;
             let mut p = u.query_pairs_mut();
             p.append_pair("q", q);
-            // Bing paginates via `first` (1-based: offset 10 -> first=11), but when
-            // `first` is present bing may ignore a custom `count` and return
-            // the default page size (10). So send `first` only past page 0 and
-            // let `count` drive page 0's result count (open-serp's bing rule).
-            if offset > 0 {
+            // Bing's HTML SERP is NOT a JS shell for a Chrome-headered client
+            // (126 KB, 10 `b_algo` at any offset) — but `first` buys NOTHING.
+            // Measured 2026-10-23: `first=1|11|21` return the *same* ten titles,
+            // following bing's own `sb_pagN` next-link returns them again, and
+            // replaying a real browser's page-2 URL (`…&cvid=…&FPIG=…&first=11&
+            // FORM=PERE`) from this client also returns page 1; after priming
+            // bing's own cookies (`MUID`, `_EDGE_S`, `SRCHHPGUSR`…) page 2 parses
+            // to ZERO. So bing's pagination is JS/session-gated per client and 10
+            // is the HTTP ceiling — page 0 uses the RSS form (flat 10, immune to
+            // layout churn) and the `first=` branch stays only so a future bing
+            // that honours it costs nothing to pick up. The pager's two-dry-page
+            // guard stops after the duplicate page.
+            //
+            // `mkt`/`cc` are deliberately absent: on the RSS form either one
+            // empties the feed (10 items → 0). Bing re-adds them by redirect.
+            p.append_pair("adlt", if safe { "strict" } else { "off" });
+            p.append_pair("setlang", lang);
+            if offset == 0 {
+                p.append_pair("format", "rss");
+            } else {
+                // `first` is 1-based: offset 10 → first=11 → results 11-20.
                 p.append_pair("first", &(offset + 1).to_string());
             }
-            p.append_pair("adlt", if safe { "strict" } else { "off" });
-            // Locale (mkt/setlang/cc) + request more than the 10-result page.
-            p.append_pair("mkt", &format!("{lang}-{}", cc.to_uppercase()));
-            p.append_pair("setlang", lang);
-            p.append_pair("cc", &cc.to_uppercase());
             if limit > 10 {
                 p.append_pair("count", &limit.to_string());
             }
@@ -286,6 +321,51 @@ fn parse_duckduckgo(html: &str, limit: usize) -> Vec<SerpResult> {
             url,
             snippet,
         });
+    }
+    out
+}
+
+/// Text of the first `<tag>…</tag>` in `s`, entity-decoded.
+fn tag_text(s: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = s.find(&open)? + open.len();
+    let end = s[start..].find(&close)? + start;
+    Some(xml_unescape(&s[start..end]))
+}
+
+/// Decode the five predefined XML entities. `&amp;` goes last so `&amp;lt;`
+/// decodes to `&lt;` rather than being eaten twice.
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Parse bing's RSS SERP — the only form it serves without a JS engine.
+/// One page of 10 by design (see `engine_url`): `count`/`first` are ignored.
+fn parse_bing_rss(xml: &str, limit: usize) -> Vec<SerpResult> {
+    let mut out: Vec<SerpResult> = Vec::new();
+    for block in xml.split("<item>").skip(1) {
+        let (Some(title), Some(url)) = (tag_text(block, "title"), tag_text(block, "link")) else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        let snippet = tag_text(block, "description").unwrap_or_default();
+        out.push(SerpResult {
+            position: out.len() + 1,
+            title: strip_tags(&title),
+            url: url.clone(),
+            domain: domain(&url),
+            snippet: strip_tags(&snippet),
+        });
+        if out.len() >= limit {
+            break;
+        }
     }
     out
 }
@@ -388,6 +468,9 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
     let Ok(snip_sel) = scraper::Selector::parse(".VwiC3b, span.aCOpRe, div[data-sncf]") else {
         return Vec::new();
     };
+    let Ok(cite_sel) = scraper::Selector::parse("cite") else {
+        return Vec::new();
+    };
 
     let mut out = Vec::new();
     // div[data-hveid] matches NESTED result blocks (a result's sub-divs carry
@@ -403,26 +486,46 @@ fn parse_google(html: &str, limit: usize) -> Vec<SerpResult> {
         // the title (ad/related links point at google.com internals). Title is
         // the h3 ONLY — never the anchor's full text, which can include an
         // inline <style> block (CSS-junk titles on google's denser layouts).
-        let mut chosen: Option<(String, String)> = None; // (title, href)
+        let mut title = String::new();
+        let mut url = String::new();
         for a in el.select(&a_sel) {
             let Some(href) = a.value().attr("href") else {
                 continue;
             };
-            let url = google_href(href);
-            if url.is_empty() || url.starts_with("https://www.google.") {
-                continue;
-            }
-            let title = a
+            let Some(t) = a
                 .select(&h3_sel)
                 .next()
                 .map(|h| clean(&h.text().collect::<Vec<_>>().join(" ")))
-                .filter(|t| !t.is_empty());
-            if let Some(t) = title {
-                chosen = Some((t, url));
-                break;
+                .filter(|t| !t.is_empty())
+            else {
+                continue;
+            };
+            let resolved = google_href(href);
+            title = t;
+            if !resolved.is_empty() && !resolved.starts_with("https://www.google.") {
+                url = resolved;
             }
+            break;
         }
-        let Some((title, url)) = chosen else { continue };
+        if title.is_empty() {
+            continue;
+        }
+        // Modern google no longer puts the target in the href: it ships an opaque
+        // token (`/goto?url=CAES…`, and the same token in `ping`). The only place
+        // the real path survives is the <cite> line, so recover from there.
+        // Verified live 2026-10-23: 9 of 10 organic rows carry a URL-shaped cite,
+        // and without this EVERY google result was dropped as an internal link —
+        // which is why `auto` reported google as empty from a perfect page.
+        if url.is_empty() {
+            url = el
+                .select(&cite_sel)
+                .next()
+                .map(|c| cite_url(&clean(&c.text().collect::<Vec<_>>().join(" "))))
+                .unwrap_or_default();
+        }
+        if url.is_empty() {
+            continue;
+        }
         if !seen.insert(url.clone()) {
             continue;
         }
@@ -466,6 +569,36 @@ fn google_href(href: &str) -> String {
         return format!("https://www.google.com/{rest}");
     }
     normalize_url(href)
+}
+
+/// Rebuild a result URL from google's `<cite>` line — the only place the target
+/// still appears, because the result anchors now carry an opaque
+/// `/goto?url=CAES…` token instead of the URL (the `ping` attribute carries the
+/// same token, so it is no help either).
+///
+/// `https://github.com › junkurihara › rust-rpxy` becomes the same path joined
+/// with slashes. Long paths are truncated with an ellipsis, so the partial last
+/// segment is dropped rather than emitting a URL that cannot resolve; a cite that
+/// holds metadata instead ("10+ comments · 2 years ago") yields nothing, and the
+/// caller skips that row instead of fabricating a link.
+fn cite_url(cite: &str) -> String {
+    let mut parts = cite.split('\u{203a}').map(str::trim);
+    let Some(head) = parts.next() else {
+        return String::new();
+    };
+    if !(head.starts_with("http://") || head.starts_with("https://")) {
+        return String::new();
+    }
+    let mut out = head.trim_end_matches('/').to_string();
+    for p in parts {
+        let p = p.trim_end_matches(['\u{2026}', '.']).trim_end_matches('/');
+        if p.is_empty() {
+            continue;
+        }
+        out.push('/');
+        out.push_str(p);
+    }
+    out
 }
 
 fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
@@ -740,7 +873,13 @@ async fn http_search_page(
         };
         match res {
             Ok((status, body)) if (200..300).contains(&status) => {
-                let parsed = parse_results(engine, &body, opts.limit);
+                // Page 0 for bing asks for RSS (see engine_url); everything else —
+                // including deeper bing offsets — is an HTML page.
+                let parsed = if url.contains("format=rss") {
+                    parse_bing_rss(&body, opts.limit)
+                } else {
+                    parse_results(engine, &body, opts.limit)
+                };
                 // A 2xx body that parses to ZERO is usually a flaky empty /
                 // JS-shell page an engine serves under rate-limit pressure
                 // (bing intermittently returns one for an otherwise-fine
@@ -806,14 +945,19 @@ async fn http_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpRe
             opts.limit,
         )?;
         let rs = http_search_page(engine, &url, opts).await?;
+        // Advance by the RAW page size, BEFORE relevance filtering: the offset
+        // must stay on the engine's own page grid (ddg and bing stride by 10).
+        // Counting the post-filter size drifted the offset off that grid —
+        // measured 2026-10-23, ddg returned 10 at `s=0|10|20|30|40` but a
+        // `limit=50` run stopped at ~20 because `s=16` re-served page 1, which
+        // then looked like two dry pages.
+        let delivered = rs.len();
         // Junk-page guard: drop results that share no significant query token
         // BEFORE counting "fresh" — a page of unrelated results stops the
         // pagination early instead of filling `limit` with garbage.
         let rs = filter_relevant(rs, &opts.query);
         let mut fresh = 0usize;
-        let mut delivered = 0usize;
         for r in rs {
-            delivered += 1;
             if seen.insert(dedupe_key(&r.url)) {
                 all.push(r);
                 fresh += 1;
@@ -944,11 +1088,7 @@ async fn browser_search<B: BrowserBackend>(
         // the limit check bound the loop; this is just the ceiling.
         // bing paginates 10/page via `first` (1, 11, 21…), so budget /10
         // (google ~6.5-7/page stays /7).
-        let max_pages = if engine == "bing" {
-            (opts.limit / 10).clamp(1, 10)
-        } else {
-            opts.limit.div_ceil(7).clamp(1, 15)
-        };
+        let max_pages = browser_pages(engine, opts.limit);
         for page in opts.page..opts.page + max_pages {
             let t0 = std::time::Instant::now();
             // brave's `offset` is a PAGE index; google/bing take a result offset.
@@ -1322,7 +1462,8 @@ async fn specific_engine<B: BrowserBackend>(
     // when a browser is attached it goes straight to the browser path — the only
     // one that returns real Google results (browsemind recipe: real Chrome +
     // human-like init + wait-for-results + consent dismiss + data-hveid parse).
-    if let Some(b) = backend.filter(|_| engine == "google" || engine == "brave" || engine == "bing")
+    if let Some(b) =
+        backend.filter(|_| !opts.http_only && matches!(engine, "google" | "brave" | "bing"))
     {
         // Google/Brave intermittently serve a "unusual traffic / not a robot"
         // CAPTCHA page (rate-limited IP — Google /sorry, Brave's PoW "Verify
@@ -1505,7 +1646,7 @@ pub async fn serp_search<B: BrowserBackend>(
             // the reply is still SHORT — an unconditional join burned ~40s
             // rendering results a default (limit=10) search already had.
             let short = merged.len() < opts.limit;
-            if let Some(b) = backend {
+            if let Some(b) = backend.filter(|_| !opts.http_only) {
                 // SEQUENTIAL, not concurrent: browser_search drives the ONE
                 // active tab/session of the shared CDP backend, and Google walls
                 // simultaneous /search requests from one browser (the codebase
@@ -1513,10 +1654,20 @@ pub async fn serp_search<B: BrowserBackend>(
                 // browser flows would race the same tab. The HTTP engines above
                 // stay in parallel — only the browser join is serialized.
                 for e in AUTO_BROWSER_ENGINES {
-                    if !short || (brave_api_used && e == "brave") {
+                    // Re-checked per engine rather than once before the loop: a
+                    // google render that already filled the limit still paid for
+                    // the brave render behind it (~20 s each). The count is
+                    // pre-dedupe, so this can only skip work, never truncate.
+                    if merged.len() >= opts.limit || (brave_api_used && e == "brave") {
                         continue;
                     }
-                    match tokio::time::timeout(SERP_BROWSER_CAP, browser_search(b, e, opts)).await {
+                    let top_up = SerpOpts {
+                        limit: opts.limit.min(SERP_AUTO_PAGE),
+                        ..opts.clone()
+                    };
+                    match tokio::time::timeout(SERP_BROWSER_CAP, browser_search(b, e, &top_up))
+                        .await
+                    {
                         Ok(Ok(rs)) => {
                             let count = rs.len();
                             merged.extend(rs);
@@ -1538,7 +1689,11 @@ pub async fn serp_search<B: BrowserBackend>(
                 }
             } else if short {
                 for e in AUTO_BROWSER_ENGINES {
-                    skipped.push(format!("{e} (no browser attached)"));
+                    skipped.push(if opts.http_only {
+                        format!("{e} (http only)")
+                    } else {
+                        format!("{e} (no browser attached)")
+                    });
                     per_engine.push(SerpEngineReport {
                         engine: e.to_string(),
                         status: "skipped".to_string(),
@@ -1727,6 +1882,47 @@ mod tests {
         assert_eq!(rs[1].title, "Trannos: albums, songs");
     }
 
+    /// Bing's page 0 uses the RSS form (flat 10 items, immune to layout churn);
+    /// deeper offsets use the HTML form. Measured 2026-10-23: the HTML SERP is
+    /// NOT a JS shell for a Chrome-headered client (126 KB, 10 `b_algo` at
+    /// `first=1|11|21`) — but `first` is ignored, the same 10 titles come back
+    /// for every offset, even with session cookies. So paging bing over HTTP
+    /// yields exactly 10 and the pager's two-dry-page guard ends the loop; the
+    /// HTML branch still matters because it is the only shape that can page if
+    /// bing ever honours `first` again.
+    #[test]
+    fn bing_page0_uses_rss_and_parses_it() {
+        let u = engine_url("bing", "rust proxy", 0, false, None, 10).unwrap();
+        assert!(u.contains("format=rss"), "{u}");
+        // `mkt`/`cc` each empty the RSS feed (10 items -> 0), so no URL may carry them.
+        assert!(!u.contains("mkt="), "{u}");
+        assert!(!u.contains("cc="), "{u}");
+
+        let u = engine_url("bing", "rust proxy", 10, false, None, 10).unwrap();
+        assert!(!u.contains("format=rss"), "{u}");
+        assert!(u.contains("first=11"), "{u}");
+        assert!(!u.contains("mkt="), "{u}");
+        assert!(!u.contains("cc="), "{u}");
+
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+            <item><title>Rust &amp; proxies</title><link>https://example.com/a</link>
+              <description>A &lt;b&gt;page&lt;/b&gt; about proxies</description></item>
+            <item><title>Second</title><link>https://other.org/b</link>
+              <description>two</description></item>
+            </channel></rss>"#;
+        let rs = parse_bing_rss(xml, 10);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].position, 1);
+        assert_eq!(rs[0].title, "Rust & proxies");
+        assert_eq!(rs[0].url, "https://example.com/a");
+        assert!(rs[0].domain.contains("example.com"), "{}", rs[0].domain);
+        // Entities are decoded, then markup is stripped from the snippet.
+        assert!(rs[0].snippet.contains("page"), "{}", rs[0].snippet);
+        assert!(!rs[0].snippet.contains('<'), "{}", rs[0].snippet);
+        // `limit` truncates.
+        assert_eq!(parse_bing_rss(xml, 1).len(), 1);
+    }
+
     #[test]
     fn bing_parse_typed_results() {
         let html = r#"
@@ -1763,6 +1959,50 @@ mod tests {
         assert_eq!(bing_target("https://example.com/x"), None);
         // malformed base64 → None
         assert_eq!(bing_target("https://www.bing.com/ck/a?u=!!!"), None);
+    }
+
+    /// Modern google ships an opaque `/goto?url=CAES…` href (same token in `ping`),
+    /// so the target has to come from <cite>. Before this every google result was
+    /// dropped as an internal link, and `auto` reported google as empty from a page
+    /// that had ten results on it.
+    #[test]
+    fn google_recovers_url_from_cite_when_href_is_opaque() {
+        let html = r#"
+        <html><body><div id="search">
+          <div class="MjjYud">
+            <a href="/goto?url=CAESYwHrOzAVQkuwcSjOeZv"><h3>junkurihara/rust-rpxy</h3></a>
+            <cite>https://github.com &#8250; junkurihara &#8250; rust-rpxy</cite>
+            <div class="VwiC3b">A simple reverse proxy</div>
+          </div>
+          <div class="MjjYud">
+            <a href="/goto?url=CAESYQHrOzAVKlw9a5"><h3>High-Performance Proxy</h3></a>
+            <cite>10+ comments  &#183;  2 years ago</cite>
+          </div>
+          <div class="MjjYud">
+            <a href="/url?q=https://crates.io/crates/proxy-rs&amp;sa=U"><h3>proxy-rs</h3></a>
+            <cite>https://crates.io &#8250; crates &#8250; proxy-rs</cite>
+          </div>
+        </div></body></html>"#;
+        let rs = parse_google(html, 10);
+        // The metadata-cite row cannot be resolved, so it is skipped, not invented.
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].url, "https://github.com/junkurihara/rust-rpxy");
+        assert_eq!(rs[0].domain, "github.com");
+        assert_eq!(rs[0].snippet, "A simple reverse proxy");
+        // A resolvable /url?q= href still wins over the cite.
+        assert_eq!(rs[1].url, "https://crates.io/crates/proxy-rs");
+    }
+
+    /// `auto` asks each browser engine for ONE page (SERP_AUTO_PAGE) so a deep
+    /// request can't blow the 20 s browser cap and lose the whole render.
+    #[test]
+    fn auto_top_up_is_one_page() {
+        for e in ["google", "brave", "bing"] {
+            assert_eq!(browser_pages(e, SERP_AUTO_PAGE), 1, "{e}");
+        }
+        // An explicit deep engine request still pages for real.
+        assert_eq!(browser_pages("google", 50), 8);
+        assert_eq!(browser_pages("bing", 50), 5);
     }
 
     #[test]
@@ -1902,8 +2142,10 @@ mod tests {
         let b = engine_url("bing", "rust", 20, false, None, 10).unwrap();
         assert!(b.contains("first=21"), "bing offset 20 -> first=21: {b}");
         assert!(b.contains("adlt=off"), "bing safe off: {b}");
-        // No region -> en-US market pinned (locale garbage fix).
-        assert!(b.contains("mkt=en-US"), "bing en-US market: {b}");
+        // No `mkt`/`cc` on a paged URL: on the RSS form either one empties the
+        // feed, and the HTML form needs no market pin (setlang carries it).
+        assert!(!b.contains("mkt="), "no market pin on paged bing: {b}");
+        assert!(!b.contains("cc="), "no country pin on paged bing: {b}");
 
         let b20 = engine_url("bing", "rust", 0, false, None, 20).unwrap();
         assert!(b20.contains("count=20"), "bing limit respected: {b20}");
