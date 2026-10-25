@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use webrain_core::engines::{
     BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_eval, batch_extract, batch_fetch,
     batch_interact, batch_screenshot, bm25_filter, build_adaptive_extract_js, build_clean_js,
-    build_extract_js, download_files, http_fetch, regex_extract, sitemap_urls, validate_urls,
+    build_extract_js, download_files, regex_extract, sitemap_urls, validate_urls,
 };
 use webrain_core::vision::{ask_viewport, index_current_page, retrieve as vision_retrieve};
 
@@ -124,6 +124,27 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Need screenshots/rendering? Real Chrome. Fast no-challenge scraping? obscura.
   Static HTML, no JS/auth? webrain_scrape.
 
+RENDERED BUT NOT INTERACTIVE (hydration — check BEFORE calling a page frozen)
+A page can return status ok + challenge null + the right title and still never
+mount: submit stays disabled, lists stay empty, spinners spin forever. That is
+not a challenge and not a broken site.
+- navigate returns at readyState complete, BEFORE an SPA hydrates. Re-probe ~1s
+  later before declaring anything dead.
+- Test hydration on a real control (0 = never mounted):
+    const el = document.querySelector('input');
+    Object.keys(el).filter(k => k.startsWith('__react')).length
+- PROVEN CAUSE (ab.gr/storelocator, real Chrome, 2026-10-24): the injected stealth
+  shim aborts framework bootstrap. A fake navigator.plugins threw
+  TypeError: Illegal invocation inside page code, and the NOISE block (it replaces
+  Object.defineProperty globally and hooks canvas/audio/canPlayType) made Next.js
+  die with: Cannot read properties of undefined (reading getInitialProps).
+- FIX: WEBRAIN_STEALTH_NOISE=0 for the process owning the CDP connection (restart
+  an MCP server to apply — it is read at attach), then open a FRESH tab: init
+  scripts live for that target lifetime, so re-navigating the same tab keeps the
+  old shim and the env change looks ignored.
+- If a hand-opened tab of the same URL works while yours does not, the difference
+  is OUR injection, not the site. Never report the site as frozen.
+
 EXTRACTION MATRIX
 - structured list, schema known    -> extract(mode=schema, base_selector, fields)
 - schema unknown                   -> extract(mode=autoschema) + eval, then mode=schema
@@ -203,6 +224,23 @@ MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
 - LAST PARALLEL LEVER: a single browser ALREADY parallelizes (webrain_batch
   concurrency=N, cdp_urls round-robin). Delegate only when in-browser
   parallelism is exhausted or you need DIFFERENT browsers/proxies.
+- ENGINE PARALLELISM IS NOT UNIFORM. Real Chrome and obscura open N parallel
+  tabs on one connection, so `concurrency` is the lever. **lightpanda is
+  single-target per CONNECTION**: Target.createTarget answers
+  TargetAlreadyLoaded once the context has a target, and a 2nd
+  Target.createBrowserContext is refused ("Cannot have more than one browser
+  context at a time"). A single endpoint therefore serializes and says so —
+  `single_target: true, effective_concurrency: 1` — and no `concurrency` value
+  changes that. BUT the process serves many connections: `serve` runs a worker
+  thread (own context + page) per CDP WebSocket, capped by
+  `--cdp-max-connections` (default 16). So one cheap lever is to **repeat the
+  same endpoint in `cdp_urls`** (measured, one container: 1 conn 8 URLs 6.15s,
+  4 conns 1.17s, 8 conns 16 URLs 4.19s). Workers in ONE process share its HTTP
+  pool (--http-max-concurrent 40, --http-max-host-open 6 per host), so when many
+  URLs hit the same host, separate processes win instead (25 URLs: 8 conns to 1
+  container 9.6s vs 10 containers 3.5s). Pick connections for many hosts,
+  processes for one host or per-IP isolation; either way CPU is the ceiling
+  (~4 productive workers per 4 cores).
 - DELEGATE BY PATTERN (shard the TASK, not the steps):
     catalog / "find all" / many urls -> links -> validate -> batch; >~100 urls
       or mixed engines -> shard urls across subagents
@@ -222,7 +260,246 @@ MULTI-AGENT DELEGATION (orchestrator pattern — when to spawn subagents)
   for relevance, merge into one answer with a count.
 - Subagents are just other LLMs with webrain MCP — they can nest or use
   webrain_batch concurrency inside their own shard.
+
+ENVIRONMENT — read at PROCESS START, a tool call cannot change them
+  Read once at server start / CDP attach. webrain cannot set one for you.
+  Tell the human the exact VAR=value and that the MCP server must restart; then
+  open a FRESH tab, because injected scripts outlive a navigate. This list ships
+  inside the binary so it works with no repo checkout (docs/reference/
+  environment.mdx adds the platform defaults).
+  A relaunch is THREE things at once, not one: CDP_URL pointing at the browser
+  you validated, WEBRAIN_STEALTH_NOISE=0 if that page needed it, and
+  WEBRAIN_NO_STEALTH DELETED — `webrain serp` sets WEBRAIN_NO_STEALTH=1 on
+  itself, so an inherited value silently boots the server with ALL stealth off.
+  - CDP_URL — CDP endpoint attached at startup (default http://127.0.0.1:9222).
+    This IS the browser choice: real Chrome, obscura, lightpanda, or a remote
+    Chrome. "Which engine" everywhere in this guide is a CDP_URL decision.
+    A raw ws:// or wss:// URL is accepted as-is (no /json/version probe), which
+    is how hosted endpoints like Lightpanda Cloud are reached; cdp_urls takes
+    the same forms.
+  - WEBRAIN_STEALTH_NOISE=0 — drop the canvas/audio/Object.defineProperty
+    fingerprint NOISE block. THE hydration fix (see RENDERED BUT NOT
+    INTERACTIVE). Without a server restart + fresh tab it looks ignored.
+  - WEBRAIN_NO_STEALTH=1 — drop the whole injected stealth JS + UA override.
+    Diagnostic for "is OUR shim breaking this page?"; the rest still works.
+    Leave stealth on for hostile sites — this is not a workaround for them.
+  - WEBRAIN_NO_STATE=1 — shared-instance mode: refuses vault/launch/login/
+    session and clamps tab fan-out. "disabled on this instance" is this var,
+    not a bug — report it instead of retrying.
+  - WEBRAIN_HTTP_TOKEN / WEBRAIN_ALLOW_UNAUTHENTICATED — bearer auth for the
+    HTTP transport; the second permits a non-loopback bind without a token. An
+    auth rejection is a deployment fact, never a page problem.
+  - WEBRAIN_PROXIES — proxy rotation pool (comma/newline list) for the HTTP
+    engines and the google/brave guest Chrome. A per-call `proxy` overrides it
+    and never rotates.
+  - WEBRAIN_SKILLS_DIR — operator .md skills, read here via topic="skills" or
+    topic="skill:<name>". Unset means the feature is off.
+  - WEBRAIN_BROWSERS_DIR / WEBRAIN_CHROME / WEBRAIN_LIGHTPANDA / WEBRAIN_OBSCURA
+    — engine discovery. "engine not found" means one of these is wrong or
+    nothing is installed (`webrain install --engine obscura|lightpanda`).
+  - WEBRAIN_PROFILES_DIR / WEBRAIN_VAULT_DIR — persistent browser profiles and
+    the encrypted vault. Profiles are what keeps a challenge solved across
+    calls; a moved profile root looks exactly like "logged out".
+  - WEBRAIN_USER / WEBRAIN_PASS — login env fallback (the vault is tried first).
+  - BRAVE_API_KEY / SERPAPI_API_KEY — paid SERP tiers; Brave also makes
+    engine=brave work with no browser. Unset only lowers the provider tier.
+  - GROQ_API_KEY / OPENAI_API_KEY / FIREWORKS_API_KEY / OPENROUTER_API_KEY —
+    cloud transcript + vision ask keys. Unset falls back to bundled local models.
+  - EMBED_URL / EMBED_MODEL / EMBED_API_KEY (and EMBED_FALLBACK_*) — embeddings
+    for webrain_vision index/retrieve.
+  - WEBRAIN_HTTP_CACHE=0, WEBRAIN_HTTP_CACHE_DIR, WEBRAIN_DOWNLOAD_MAX_BYTES,
+    WEBRAIN_FETCH_TIMEOUT_SECS, WEBRAIN_HTTP_ADDR — transport and cache limits.
+  - WEBRAIN_STT_MODEL, WEBRAIN_WHISPER_BIN, WEBRAIN_WHISPER_MODEL — transcript
+    model/binary overrides.
+  - RUST_LOG — log verbosity (webrain=info,tungstenite=warn).
 "#;
+
+/// Is this line a guide section header?
+///
+/// Headers are the unindented lines that OPEN with an all-caps word ("RULES",
+/// "EXTRACTION MATRIX", "17 TOOLS — …", "FROM-SCRATCH DISCOVERY (…)"); body lines
+/// are indented or start with a bullet, so the shape is enough and the const needs
+/// no markers. Testing the whole line would miss the three headers that carry a
+/// lowercase tail after their title.
+fn is_guide_header(t: &str) -> bool {
+    if t.is_empty() || !t.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let word = t
+        .split_whitespace()
+        .find(|w| w.chars().any(|c| c.is_alphabetic()))
+        .unwrap_or("");
+    let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+    letters.len() >= 2 && letters.iter().all(|c| c.is_uppercase())
+}
+
+/// Split AGENT_GUIDE on its header lines. Encoding the headers in the text's own
+/// shape (not markers) keeps the const readable and means adding a section needs
+/// no parser change.
+fn guide_sections() -> (Option<&'static str>, Vec<(&'static str, &'static str)>) {
+    let mut marks: Vec<(usize, usize)> = Vec::new(); // (title start, body start)
+    let mut pos = 0usize;
+    for line in AGENT_GUIDE.split_inclusive('\n') {
+        if is_guide_header(line.trim_end_matches(['\r', '\n'])) {
+            marks.push((pos, pos + line.len()));
+        }
+        pos += line.len();
+    }
+    let Some(first) = marks.first() else {
+        return (Some(AGENT_GUIDE), Vec::new());
+    };
+    let intro = AGENT_GUIDE[..first.0].trim_end();
+    let mut sections = Vec::with_capacity(marks.len());
+    for (i, &(title_start, body_start)) in marks.iter().enumerate() {
+        let end = marks.get(i + 1).map(|m| m.0).unwrap_or(AGENT_GUIDE.len());
+        sections.push((
+            AGENT_GUIDE[title_start..body_start].trim_end(),
+            &AGENT_GUIDE[body_start..end],
+        ));
+    }
+    (Some(intro), sections)
+}
+
+/// Directory of operator-supplied skill files. Opt-in on purpose: unset means the
+/// feature is off, so a shared instance never serves files unless its operator
+/// asked for it.
+fn skills_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("WEBRAIN_SKILLS_DIR").map(std::path::PathBuf::from)
+}
+
+/// Resolve `skill:<name>` to `<dir>/<name>.md`, or None.
+///
+/// The name is validated rather than trusted: this reads a file on behalf of a
+/// remote model, so a path in the argument would be an arbitrary file read. The
+/// charset check blocks `../`, and canonicalizing both sides also catches a
+/// symlink inside the directory pointing outside it.
+fn skill_path(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return None;
+    }
+    let real = dir.join(format!("{name}.md")).canonicalize().ok()?;
+    let base = dir.canonicalize().ok()?;
+    real.starts_with(&base).then_some(real)
+}
+
+fn list_skills(dir: &std::path::Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("md") {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                out.push(stem.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Read a skill file, capped. shortcut: 64 KiB, raise it if a real skill outgrows it.
+fn read_skill(p: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::fs::File::open(p)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_string(&mut buf)
+        .ok()?;
+    Some(buf)
+}
+
+/// `webrain_guide` body. Default is an INDEX plus the tool list; `topic` reads one
+/// section; `topic="all"` returns the whole guide; `skills` / `skill:<name>` read
+/// operator files.
+///
+/// The index exists because the guide is what an agent reads when it is LEAST
+/// sure what to do — paying ~3K tokens of doctrine at that moment is the expensive
+/// default. Progressive disclosure makes the first call cheap and the second
+/// precise. Selection is the model's job on purpose: matching a user prompt to a
+/// topic in Rust would be the intent-detection this server exists to avoid.
+pub fn guide_from_args(args: &Value) -> Value {
+    let topic = args
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let (intro, sections) = guide_sections();
+    let titles: Vec<String> = sections.iter().map(|(t, _)| t.to_string()).collect();
+
+    if topic.is_empty() {
+        let mut text = String::from(intro.unwrap_or(""));
+        text.push_str(
+            "\n\nTOPICS — call webrain_guide again with topic=<name> (or topic=\"all\" for everything):\n",
+        );
+        for (title, body) in &sections {
+            // The tool list is used on nearly every call, so it stays inline.
+            if title.starts_with("17 TOOLS") {
+                text.push_str(&format!("\n{title}\n{body}"));
+                continue;
+            }
+            let first: String = body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(120)
+                .collect();
+            text.push_str(&format!("  - {title}: {first}\n"));
+        }
+        return json!({"status": "ok", "guide": text, "topics": titles});
+    }
+    if topic == "all" {
+        return json!({"status": "ok", "topic": "all", "guide": AGENT_GUIDE});
+    }
+    if topic == "skills" {
+        let Some(dir) = skills_dir() else {
+            return json!({
+                "status": "ok",
+                "guide": "no skills configured — set WEBRAIN_SKILLS_DIR to a directory of .md files to add your own",
+                "skills": []
+            });
+        };
+        return json!({
+            "status": "ok",
+            "guide": format!("skills in {}: read one with webrain_guide(topic=\"skill:<name>\")", dir.display()),
+            "skills": list_skills(&dir)
+        });
+    }
+    if let Some(name) = topic.strip_prefix("skill:") {
+        let name = name.trim();
+        let text = skills_dir()
+            .and_then(|d| skill_path(&d, name))
+            .and_then(|p| read_skill(&p));
+        return match text {
+            Some(t) => json!({"status": "ok", "skill": name, "guide": t}),
+            None => json!({
+                "status": "error",
+                "message": format!("no skill named {name:?} (names are a-z A-Z 0-9 _ -, max 64; see topic=\"skills\")"),
+                "skills": skills_dir().map(|d| list_skills(&d)).unwrap_or_default()
+            }),
+        };
+    }
+    for (title, body) in &sections {
+        if title.to_ascii_lowercase().contains(&topic) {
+            return json!({"status": "ok", "topic": title, "guide": format!("{title}\n{body}")});
+        }
+    }
+    json!({
+        "status": "ok",
+        "guide": format!("no topic matching {topic:?} — pick one of: {}", titles.join(", ")),
+        "topics": titles
+    })
+}
 
 /// Consolidated MCP surface — 17 intent-based tools (firecrawl-style), each
 /// with a `what`/`action`/`op`/`mode` selector + when-to-use guidance so the
@@ -232,8 +509,10 @@ pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "webrain_guide",
-            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs webrain_scrape), challenge bypass, extraction matrix, delegation doctrine. Call FIRST when unsure which webrain tool to use.",
-            "inputSchema": {"type": "object", "properties": {}}
+            "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs webrain_scrape), challenge bypass, hydration failures, extraction matrix, delegation doctrine, and the environment variables that change all of it. Call FIRST when unsure which webrain tool to use. Returns an index (plus the tool list) by default; pass `topic` to read one section.",
+            "inputSchema": {"type": "object", "properties": {
+                "topic": {"type": "string", "description": "One section by name — `tools`, `browser`, `extraction`, `delegation`, `rules`, `env`, … (case-insensitive substring) — or `all` for the whole guide, or `skills` / `skill:<name>` to read an operator skill from WEBRAIN_SKILLS_DIR"}
+            }}
         }),
         json!({
             "name": "webrain_eval",
@@ -338,12 +617,14 @@ pub fn list_tools() -> Vec<Value> {
                 "base_selector": {"type": "string", "description": "optional CSS schema: selector per repeated item. With it the FULL page is fetched (no 3000-char probe cap) and parsed with the same field vocabulary as webrain_extract mode=schema -- no browser, so it runs on the shared pool."},
                 "fields": {"type": "array", "items": {"type": "object"}, "description": "optional CSS schema fields: [{name, selector, type: text|attr|html|list|nested_list, attr?}]"},
                 "autoschema": {"type": "boolean", "default": false, "description": "propose candidate CSS base selectors for this page instead of returning its text -- the browserless form of webrain_autoschema, so it runs on the shared pool. Answers [{selector, count}] to build a schema from."},
-                "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"}
+                "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
+                "max_chars": {"type": "integer", "description": "text cap in characters (default 3000). Raise it to PARSE the page rather than probe it; the reply reports truncated:true when the body was cut."},
+                "full": {"type": "boolean", "default": false, "description": "return the whole body (no 3000-char cap). Use instead of upgrading to a browser when the page is static."}
             }, "required": ["url"]}
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers (per-proxy isolation). The workhorse for at-scale scraping.",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
             "inputSchema": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": ["fetch","extract","interact","eval","screenshot"]},
                 "urls": {"type": "array", "items": {"type": "string"}},
@@ -360,6 +641,7 @@ pub fn list_tools() -> Vec<Value> {
                 "block_trackers": {"type": "boolean", "default": false},
                 "network_idle": {"type": "boolean", "default": false},
                 "wait_selector": {"type": "string"},
+                "wait_selectors": {"type": "array", "items": {"type": "string"}, "description": "per-URL wait selector, index-parallel to urls (empty string = no selector). Use when one batch spans HOSTS that render differently; overrides wait_selector per URL."},
                 "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
                 "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL"}
             }, "required": ["op", "urls"]}
@@ -967,7 +1249,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     }
 
     match name {
-        "webrain_guide" => json!({"status": "ok", "guide": AGENT_GUIDE}),
+        "webrain_guide" => guide_from_args(args),
         "webrain_add_init_script" => {
             let js = args.get("js").and_then(|v| v.as_str()).unwrap_or("");
             if js.is_empty() {
@@ -1444,52 +1726,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
-        "webrain_fetch_http" => {
-            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if url.is_empty() {
-                return json!({"status": "error", "message": "url required"});
-            }
-            // Autoschema first: it PROPOSES a selector, so it is the answer when
-            // the caller has none -- the case that otherwise sends them to
-            // `webrain_autoschema`, which needs a browser.
-            if args
-                .get("autoschema")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                let min = args
-                    .get("min_occurrences")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(3) as usize;
-                return match webrain_core::engines::http_fetch_autoschema(url, min) {
-                    Ok(v) => json!({"status": "ok", "result": v}),
-                    Err(e) => err(e),
-                };
-            }
-            // A schema switches to the full-body path: `http_fetch` caps HTML at
-            // 3000 chars, so parsing its `text` would silently return no rows for
-            // any target past the cap.
-            let base_selector = args
-                .get("base_selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !base_selector.is_empty() {
-                let fields = args
-                    .get("fields")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                return match webrain_core::engines::http_fetch_extract(url, base_selector, &fields)
-                {
-                    Ok(v) => json!({"status": "ok", "result": v}),
-                    Err(e) => err(e),
-                };
-            }
-            match http_fetch(url) {
-                Ok(v) => json!({"status": "ok", "result": v}),
-                Err(e) => err(e),
-            }
-        }
+        "webrain_fetch_http" => fetch_http_from_args(args),
         "webrain_bm25" => {
             // browsemind BM25 filter / crawl4ai ContentRelevanceFilter: rank text
             // items by query relevance, keep top_k. Zero LLM.
@@ -1768,6 +2005,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     .max(1) as usize,
             );
             let opts = nav_opts(args);
+            // Wall clock for the whole call: `ms_total` sums per-URL times, so the
+            // ratio ms_total/ms_wall is the only honest measure of how much of the
+            // requested concurrency the engine actually delivered.
+            let t_batch = std::time::Instant::now();
 
             // The per-backend op dispatcher — shared by the single-backend path and
             // the multi-backend round-robin so a fix here covers every caller.
@@ -1869,15 +2110,63 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     .map(|n| n.max(1) as usize)
                     .unwrap_or(concurrency),
             );
-            let results = if cdp_urls.is_empty() {
-                run_batch(backend, op, &urls, args, &opts, concurrency).await
+            // Each listed backend opens its OWN pool, so the real tab count is
+            // per_backend × backends. Bound that aggregate by the same box budget —
+            // 10 backends at the default 4 would otherwise be 40 tabs, silent.
+            let per_backend_concurrency = if cdp_urls.is_empty() {
+                per_backend_concurrency
             } else {
-                let mut all = Vec::new();
+                per_backend_concurrency.min((crate::tab_budget() / cdp_urls.len()).max(1))
+            };
+            // per-URL wait selectors. NavOpts is per-call, so group the URLs by
+            // their effective selector, dispatch once per group, then restore input
+            // order. This wraps BOTH dispatch paths on purpose: it used to live
+            // inside the no-`cdp_urls` branch, so `wait_selectors` was silently
+            // ignored whenever `cdp_urls` was set — i.e. on every lightpanda run
+            // (measured: plural 492 ms vs singular 12604 ms for the same URLs).
+            let per_url_wait: Vec<Option<String>> = args
+                .get("wait_selectors")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    (0..urls.len())
+                        .map(|i| {
+                            a.get(i)
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+            if per_url_wait.iter().any(|w| w.is_some()) {
+                for (i, w) in per_url_wait.iter().enumerate() {
+                    let key = w.clone().unwrap_or_default();
+                    match groups.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, idxs)) => idxs.push(i),
+                        None => groups.push((key, vec![i])),
+                    }
+                }
+            } else {
+                groups.push((String::new(), (0..urls.len()).collect()));
+            }
+
+            // One batch per `cdp_urls` backend, all CONCURRENTLY, results restored
+            // to `sub` order. Connect failures land in `errs` (per call, not per URL).
+            async fn fan_out(
+                cdp_urls: &[String],
+                op: &str,
+                sub: &[String],
+                args: &Value,
+                opts: &webrain_core::backends::cdp::NavOpts,
+                per_backend_concurrency: usize,
+                errs: &mut Vec<BatchResult>,
+            ) -> Vec<BatchResult> {
                 let mut backends = Vec::new();
-                for u in &cdp_urls {
+                for u in cdp_urls {
                     match CdpBackend::connect_with_url(u).await {
                         Ok(b) => backends.push(b),
-                        Err(e) => all.push(BatchResult {
+                        Err(e) => errs.push(BatchResult {
                             url: u.clone(),
                             title: String::new(),
                             text: String::new(),
@@ -1888,25 +2177,109 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                 }
                 let n = backends.len().max(1);
-                // Round-robin: url[i] -> backend[i % n]. Each backend runs its share
-                // at `per_backend_concurrency` tabs; backends themselves run
-                // sequentially (connect cost dominates; true cross-backend
-                // concurrency is the agent's job).
-                for (bi, b) in backends.iter().enumerate() {
-                    let share: Vec<String> = urls
+                // Round-robin: url[i] -> backend[i % n]. Backends run CONCURRENTLY:
+                // the old sequential loop paid N connects for zero extra throughput.
+                let mut slots: Vec<Option<Vec<BatchResult>>> =
+                    (0..backends.len()).map(|_| None).collect();
+                let mut handles = Vec::with_capacity(backends.len());
+                for (bi, b) in backends.into_iter().enumerate() {
+                    let share: Vec<String> = sub
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| i % n == bi)
                         .map(|(_, u)| u.clone())
                         .collect();
-                    if !share.is_empty() {
-                        all.extend(
-                            run_batch(b, op, &share, args, &opts, per_backend_concurrency).await,
-                        );
+                    if share.is_empty() {
+                        continue;
+                    }
+                    let op = op.to_string();
+                    let args = args.clone();
+                    let opts = opts.clone();
+                    handles.push((
+                        bi,
+                        tokio::spawn(async move {
+                            run_batch(&b, &op, &share, &args, &opts, per_backend_concurrency).await
+                        }),
+                    ));
+                }
+                for (bi, h) in handles {
+                    if let Ok(v) = h.await {
+                        slots[bi] = Some(v);
                     }
                 }
-                all
-            };
+                // Round-robin decides placement (url[i] -> backend i % n, ascending
+                // inside a backend), so the slots alone rebuild `sub` order.
+                let mut iters: Vec<std::vec::IntoIter<BatchResult>> = slots
+                    .into_iter()
+                    .map(|s| s.unwrap_or_default().into_iter())
+                    .collect();
+                let mut out = Vec::with_capacity(sub.len());
+                for (i, url) in sub.iter().enumerate() {
+                    out.push(
+                        iters
+                            .get_mut(i % n)
+                            .and_then(|it| it.next())
+                            .unwrap_or_else(|| BatchResult {
+                                url: url.clone(),
+                                title: String::new(),
+                                text: String::new(),
+                                data: None,
+                                error: Some("backend produced no result for this URL".to_string()),
+                                ms: 0,
+                            }),
+                    );
+                }
+                out
+            }
+
+            let mut ordered: Vec<Option<BatchResult>> = (0..urls.len()).map(|_| None).collect();
+            let mut connect_errs: Vec<BatchResult> = Vec::new();
+            for (gi, (sel, idxs)) in groups.into_iter().enumerate() {
+                let sub: Vec<String> = idxs.iter().map(|i| urls[*i].clone()).collect();
+                let mut o = opts.clone();
+                if !sel.is_empty() {
+                    o.wait_selector = Some(sel);
+                }
+                let got = if cdp_urls.is_empty() {
+                    run_batch(backend, op, &sub, args, &o, concurrency).await
+                } else if gi == 0 {
+                    fan_out(
+                        &cdp_urls,
+                        op,
+                        &sub,
+                        args,
+                        &o,
+                        per_backend_concurrency,
+                        &mut connect_errs,
+                    )
+                    .await
+                } else {
+                    // A dead backend is a per-CALL fact; reporting it once per group
+                    // would print the same connect error twice.
+                    let mut discarded = Vec::new();
+                    fan_out(
+                        &cdp_urls,
+                        op,
+                        &sub,
+                        args,
+                        &o,
+                        per_backend_concurrency,
+                        &mut discarded,
+                    )
+                    .await
+                };
+                for r in got {
+                    let slot = idxs
+                        .iter()
+                        .copied()
+                        .find(|&i| ordered[i].is_none() && urls[i] == r.url);
+                    if let Some(i) = slot {
+                        ordered[i] = Some(r);
+                    }
+                }
+            }
+            let mut results: Vec<BatchResult> = connect_errs;
+            results.extend(ordered.into_iter().flatten());
             let mut payload = json!({"status": "ok", "count": results.len(), "results": results});
             // ponytail: optional `output` path persists the batch payload to disk so a
             // temp-file GC (or a dropped MCP response) can't lose it between turns.
@@ -1937,8 +2310,32 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     .iter()
                     .filter_map(|r| r.get("ms").and_then(|v| v.as_u64()))
                     .sum();
-                payload["stats"] =
-                    json!({"total": res.len(), "ok": ok, "errors": errs, "ms_total": ms});
+                // lightpanda serve is single-target: its pool collapses to ONE tab
+                // whatever `concurrency` asked for (its 2nd createTarget errors
+                // TargetAlreadyLoaded). Report that instead of letting the caller
+                // tune concurrency against an engine that ignores it.
+                let single = backend.single_target_known();
+                // cdp_urls first: each entry is its own browser, so the tab
+                // ceiling there is per-backend tabs × backends — a single-target
+                // engine still gets a tab per container.
+                let effective = if !cdp_urls.is_empty() {
+                    per_backend_concurrency * cdp_urls.len().max(1)
+                } else if single == Some(true) {
+                    1
+                } else {
+                    // The pool never runs more workers than there are URLs.
+                    concurrency.min(urls.len()).max(1)
+                };
+                payload["stats"] = json!({
+                    "total": res.len(),
+                    "ok": ok,
+                    "errors": errs,
+                    "ms_total": ms,
+                    "ms_wall": t_batch.elapsed().as_millis() as u64,
+                    "requested_concurrency": concurrency,
+                    "effective_concurrency": effective,
+                    "single_target": single,
+                });
             }
             payload
         }
@@ -2321,6 +2718,77 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     }
 }
 
+/// Shared `webrain_scrape` / `webrain_fetch_http` implementation.
+///
+/// Called by the `call_tool` arm AND by lib.rs's no-browser short-circuit. That
+/// short-circuit used to call `http_fetch` directly, so the same tool answered
+/// differently depending on which layer served it — and silently dropped
+/// `base_selector` / `autoschema`, returning 3 KB of truncated HTML instead of
+/// extracted rows.
+pub fn fetch_http_from_args(args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() {
+        return json!({"status": "error", "message": "url required"});
+    }
+    // Autoschema first: it PROPOSES a selector, so it is the answer when the
+    // caller has none — the case that otherwise sends them to the browser-only
+    // `webrain_autoschema`.
+    if args
+        .get("autoschema")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let min = args
+            .get("min_occurrences")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3) as usize;
+        return match webrain_core::engines::http_fetch_autoschema(url, min) {
+            Ok(v) => json!({"status": "ok", "result": v}),
+            Err(e) => err(e),
+        };
+    }
+    // A schema switches to the full-body path: `http_fetch` caps HTML at 3000
+    // chars, so parsing its `text` would silently return no rows past the cap.
+    let base_selector = args
+        .get("base_selector")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !base_selector.is_empty() {
+        let fields = args
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        return match webrain_core::engines::http_fetch_extract(url, base_selector, &fields) {
+            Ok(v) => json!({"status": "ok", "result": v}),
+            Err(e) => err(e),
+        };
+    }
+    match webrain_core::engines::http_fetch_capped(url, scrape_max_chars(args)) {
+        Ok(mut v) => {
+            // spider-rs `smart` borrow: flag a JS shell so the caller upgrades to
+            // the browser instead of scraping an empty page.
+            let html = v["text"].as_str().unwrap_or("").to_string();
+            v["visible_chars"] = json!(visible_text_len(&html));
+            v["needs_js"] = json!(probe_needs_js(&html));
+            json!({"status": "ok", "result": v})
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// Text cap for `webrain_scrape`: `full` = no cap, `max_chars` = explicit, else 3000.
+fn scrape_max_chars(args: &Value) -> usize {
+    if args.get("full").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return 0;
+    }
+    args.get("max_chars")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(3000)
+}
+
 /// Shared webrain_watch implementation (single | batch). Called from the tool
 /// dispatch and from lib.rs's no-browser short-circuit, so the MCP server can
 /// watch videos before any browser is up.
@@ -2437,6 +2905,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         proxy: args.get("proxy").and_then(|v| v.as_str()).map(String::from),
+        http_only: args.get("http").and_then(|v| v.as_bool()).unwrap_or(false),
     };
     // google/brave need a browser — the lib.rs short-circuit routes HTTP engines
     // around the backend; here (call_tool) a backend may or may not be attached,
@@ -2459,6 +2928,110 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
             "skipped": r.skipped,
         }),
         Err(e) => json!({"status": "error", "message": e.to_string()}),
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sections_parse_and_topics_resolve() {
+        let (intro, sections) = guide_sections();
+        assert!(intro.unwrap().contains("agent decision guide"));
+        let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
+        assert!(titles.iter().any(|t| t.starts_with("17 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
+        assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
+
+        // The env section is what lets a binary on a machine with no repo explain
+        // its own knobs, so it must parse as a topic — and must not swallow the
+        // section above it.
+        assert!(titles.iter().any(|t| t.starts_with("ENVIRONMENT")));
+        let env = sections
+            .iter()
+            .find(|(t, _)| t.starts_with("ENVIRONMENT"))
+            .expect("environment section");
+        for var in ["CDP_URL", "WEBRAIN_STEALTH_NOISE", "WEBRAIN_NO_STATE"] {
+            assert!(env.1.contains(var), "env section names {var}");
+        }
+        let delegation = sections
+            .iter()
+            .find(|(t, _)| t.starts_with("MULTI-AGENT"))
+            .expect("delegation section");
+        assert!(!delegation.1.contains("WEBRAIN_STEALTH_NOISE"));
+        assert!(
+            guide_from_args(&json!({ "topic": "env" }))["guide"]
+                .as_str()
+                .unwrap()
+                .contains("CDP_URL")
+        );
+
+        // A body line that OPENS with an all-caps word is parsed as a header and
+        // splits its section in two — it happened with "NOT a challenge and NOT a
+        // broken site.", which showed up as a topic of its own. Prose must never
+        // start a line that way; indent it or start it with a bullet.
+        assert!(
+            !titles.iter().any(|t| t.starts_with("NOT ")),
+            "prose was read as a guide header: {titles:?}"
+        );
+        let hydration = sections
+            .iter()
+            .find(|(t, _)| t.starts_with("RENDERED BUT NOT"))
+            .expect("hydration section");
+        assert!(
+            hydration.1.contains("not a broken site"),
+            "hydration section stays whole"
+        );
+
+        // A section must end at the next header, not swallow the rest of the file.
+        let extraction = sections
+            .iter()
+            .find(|(t, _)| t.starts_with("EXTRACTION"))
+            .expect("extraction section");
+        assert!(extraction.1.contains("autoschema"));
+        assert!(!extraction.1.contains("SUBAGENT CONTRACT"));
+
+        // The default reply is the tool list + an index, and is cheaper than the file.
+        let idx = guide_from_args(&json!({}));
+        let text = idx["guide"].as_str().unwrap();
+        assert!(text.len() < AGENT_GUIDE.len());
+        assert!(text.contains("webrain_navigate"), "tool list stays inline");
+        for t in &titles {
+            assert!(text.contains(t), "index names every topic: {t}");
+        }
+
+        // Topic lookup is a case-insensitive substring, and `all` is the whole guide.
+        let one = guide_from_args(&json!({ "topic": "Extract" }));
+        assert!(one["guide"].as_str().unwrap().contains("EXTRACTION MATRIX"));
+        assert_eq!(
+            guide_from_args(&json!({ "topic": "all" }))["guide"],
+            AGENT_GUIDE
+        );
+
+        // An unknown topic answers with the valid list instead of an empty string.
+        let miss = guide_from_args(&json!({ "topic": "nope" }));
+        assert!(miss["topics"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    /// This reads files on behalf of a remote model, so the name must never carry
+    /// a path — `../` and separators have to be rejected before the join.
+    #[test]
+    fn skill_names_cannot_escape_the_dir() {
+        let dir = std::env::temp_dir().join("webrain-skill-path-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("demo.md"), "# demo skill").unwrap();
+
+        assert!(skill_path(&dir, "../etc/passwd").is_none());
+        assert!(skill_path(&dir, "a/b").is_none());
+        assert!(skill_path(&dir, "").is_none());
+        assert!(skill_path(&dir, &"x".repeat(65)).is_none());
+        assert!(skill_path(&dir, "missing").is_none());
+
+        let p = skill_path(&dir, "demo").expect("demo.md resolves inside the dir");
+        assert_eq!(read_skill(&p).unwrap(), "# demo skill");
+        assert_eq!(list_skills(&dir), vec!["demo".to_string()]);
     }
 }
 

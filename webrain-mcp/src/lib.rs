@@ -142,7 +142,28 @@ fn bearer_allows(expected: Option<&str>, authorization: Option<&str>) -> bool {
 /// box. Only enforced under `WEBRAIN_NO_STATE` — a local user owns the machine.
 const MAX_SHARED_CONCURRENCY: usize = 6;
 
+/// Tab budget for THIS box: two per logical core (the second absorbs network
+/// wait, not render work). Measured on 16 cores — past ~2× cores throughput
+/// stops improving while peak RSS keeps climbing (24 tabs / 100 pages → 4.4 GB).
+/// `WEBRAIN_MAX_TABS` overrides for boxes that must stay small or deliberately
+/// over-subscribe.
+pub(crate) fn tab_budget() -> usize {
+    if let Ok(v) = std::env::var("WEBRAIN_MAX_TABS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .saturating_mul(2)
+        .max(1)
+}
+
 pub fn clamp_concurrency(n: usize) -> usize {
+    let n = n.max(1).min(tab_budget());
     if no_state() {
         n.min(MAX_SHARED_CONCURRENCY)
     } else {
@@ -204,47 +225,27 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // No-browser tools: serve without a CDP backend, so they work
             // on a fresh install before any browser is up (any-LLM portability).
             if tool_name == "webrain_guide" {
+                // One implementation, both transports: the topic/skills logic lives
+                // in tools::guide_from_args, so stdio and HTTP can never diverge.
+                let out = tools::guide_from_args(&arguments);
                 return json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "ok", "guide": tools::AGENT_GUIDE})).unwrap_or_else(|_| "{}".into())}],
+                        "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
                         "isError": false
                     }
                 });
             }
             // ponytail: fetch_http uses ureq (no browser), so skip CDP connect too.
             if tool_name == "webrain_fetch_http" {
-                let url = arguments
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if url.is_empty() {
-                    return json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": "url required"})).unwrap_or_else(|_| "{}".into())}],
-                            "isError": true
-                        }
-                    });
-                }
-                // ponytail: ureq is blocking — run off the executor so a slow
-                // fetch can't stall other sessions on the multi-threaded server.
+                // ureq is blocking — run off the executor so a slow fetch can't
+                // stall other sessions. The work itself lives in
+                // `tools::fetch_http_from_args` so this layer and the dispatcher
+                // cannot drift (this short-circuit used to drop `base_selector`).
+                let args = arguments.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    match webrain_core::engines::http_fetch(&url) {
-                        Ok(mut v) => {
-                            // spider-rs `smart` borrow (lazy slice): probe whether the
-                            // raw HTML is a JS shell so the LLM can upgrade to the
-                            // browser instead of scraping an empty page.
-                            let html = v["text"].as_str().unwrap_or("").to_string();
-                            v["visible_chars"] = json!(crate::tools::visible_text_len(&html));
-                            v["needs_js"] = json!(crate::tools::probe_needs_js(&html));
-                            json!({"status": "ok", "result": v})
-                        }
-                        Err(e) => json!({"status": "error", "message": e.to_string()}),
-                    }
+                    crate::tools::fetch_http_from_args(&args)
                 })
                 .await
                 .unwrap_or_else(
@@ -933,11 +934,25 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             }
 
             if backend.is_none() {
-                let res = if let Some(url) = cdp_url {
+                let mut res = if let Some(url) = cdp_url {
                     CdpBackend::connect_with_url(url).await
                 } else {
                     CdpBackend::connect_default().await
                 };
+                // A call that names its own backends in `cdp_urls` does not need the
+                // shared endpoint: a box running only lightpanda containers has
+                // nothing on the default 9222, and the arm used to die here before
+                // the fan-out ever ran. Fall back to the first listed backend.
+                if res.is_err() {
+                    if let Some(first) = arguments
+                        .get("cdp_urls")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                    {
+                        res = CdpBackend::connect_with_url(first).await;
+                    }
+                }
                 match res {
                     Ok(b) => *backend = Some(b),
                     Err(e) => {
@@ -955,10 +970,15 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 }
             }
             // Reconnect: a browser kill/restart wedges the cached backend forever
-            // (dead socket → "os error 10054" on every write). Drop it on
-            // connection-level errors so the next call connects fresh. The rest
-            // of the error surface is tool-level and must NOT reset the session.
-            if is_connection_error(&result) {
+            // (a dead socket fails every later write). `CdpBackend` now LATCHES the
+            // death the moment the transport dies, so ask it directly — that answer
+            // cannot go stale the way a message-keyword list does. The substring
+            // heuristic stays only as a fallback for failures that never reach the
+            // backend at all (a refused dial, an OS-level reset mid-handshake).
+            // The rest of the error surface is tool-level and must NOT reset the
+            // session.
+            let transport_dead = backend.as_ref().is_some_and(|b| b.is_dead());
+            if transport_dead || is_connection_error(&result) {
                 *backend = None;
             }
             // MCP spec: tools/call result must be {content: [{type:"text",text}], isError}.
@@ -1040,6 +1060,16 @@ fn is_connection_error(result: &Value) -> bool {
                     "stream closed",
                     "eof",
                     "closed before message",
+                    // CdpBackend::send_cmd_with bails on the *writer task* dying:
+                    // `CDP write failed: {SendError}` renders as "channel closed",
+                    // which shares no phrase with "connection closed" above — so a
+                    // killed browser used to wedge the cached backend permanently.
+                    "channel closed",
+                    "cdp write failed",
+                    "cdp connection closed",
+                    // Unanswered command on a half-open socket
+                    // (Target.getTargets timed out after 30s) — same wedge.
+                    "cdp command",
                 ]
                 .iter()
                 .any(|k| m.contains(k))
@@ -1566,6 +1596,14 @@ mod tests {
         )));
         assert!(is_connection_error(&json!(
             {"status":"error","message":"the stream closed before message completed"}
+        )));
+        // The two shapes webrain itself emits after a browser kill. "channel closed"
+        // shares no phrase with "connection closed", which is the regression this pins.
+        assert!(is_connection_error(&json!(
+            {"status":"error","message":"CDP write failed: channel closed"}
+        )));
+        assert!(is_connection_error(&json!(
+            {"status":"error","message":"CDP command Target.getTargets timed out after 30s"}
         )));
         // Tool-level errors / success → keep the session.
         assert!(!is_connection_error(&json!(
