@@ -2011,35 +2011,88 @@ where
         return out;
     }
 
-    // Multi-target: original parallel path.
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-    let mut handles = Vec::with_capacity(urls.len());
-    for url in urls {
+    // Multi-target: a FIXED pool of `concurrency` tabs, each draining a shared
+    // queue — the same shape as SpiderEngine's worker (one tab per worker,
+    // closed when the queue drains). The old path opened a target per URL, so a
+    // 100-URL batch paid 100 attaches + a fresh tab at peak. The pool holds live
+    // documents at N regardless of URL count.
+    // ponytail: a worker's tab keeps state across ITS queue (cookies,
+    // localStorage, history). Same-origin only, and the browser profile is
+    // shared anyway — switch to a tab per URL if cross-URL isolation is ever
+    // required.
+    let workers = concurrency.max(1).min(urls.len());
+    let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let done: std::sync::Arc<tokio::sync::Mutex<Vec<(usize, BatchResult)>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(urls.len())));
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
         let b = browser.clone();
-        let sem = sem.clone();
-        let url = url.clone();
+        let next = next.clone();
+        let done = done.clone();
+        let urls = urls.to_vec();
         let opts = opts.clone();
         let per_url = per_url.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            let t0 = std::time::Instant::now();
-            let res = async {
-                let id = b.open_tab(&url).await?;
-                let r = run_on_tab(&b, id.clone(), url.clone(), opts, per_url).await;
-                let _ = b.close_tab(&id).await;
-                Ok::<_, anyhow::Error>(r)
+            // No tab → this worker retires; `next` was never touched, so the
+            // remaining workers still claim every URL.
+            let Ok(mut id) = b.open_tab("about:blank").await else {
+                return;
+            };
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= urls.len() {
+                    break;
+                }
+                let t0 = std::time::Instant::now();
+                let mut r = run_on_tab(
+                    &b,
+                    id.clone(),
+                    urls[i].clone(),
+                    opts.clone(),
+                    per_url.clone(),
+                )
+                .await;
+                r.ms = t0.elapsed().as_millis() as u64;
+                // A failed URL can leave the tab wedged (renderer crash, hung
+                // navigation). Recycle it so one bad URL costs one tab instead of
+                // poisoning the rest of this worker's queue.
+                if r.error.is_some() {
+                    let _ = b.close_tab(&id).await;
+                    match b.open_tab("about:blank").await {
+                        Ok(fresh) => id = fresh,
+                        Err(_) => break,
+                    }
+                }
+                done.lock().await.push((i, r));
             }
-            .await;
-            let mut r = res.unwrap_or_else(|e| batch_err(&url, e));
-            r.ms = t0.elapsed().as_millis() as u64;
-            r
+            let _ = b.close_tab(&id).await;
         }));
     }
-    let mut out = Vec::with_capacity(urls.len());
     for h in handles {
-        if let Ok(r) = h.await {
-            out.push(r);
-        }
+        let _ = h.await;
+    }
+    // Workers finish out of order; sort by claimed index to keep URL order.
+    let mut pairs: Vec<(usize, BatchResult)> = {
+        let mut g = done.lock().await;
+        g.drain(..).collect()
+    };
+    pairs.sort_by_key(|(i, _)| *i);
+    // A worker that could not get a tab retires without claiming anything, so a
+    // totally unavailable browser would otherwise return an EMPTY list — reading
+    // as "no URLs" instead of "every URL failed". Fill the gaps explicitly.
+    let mut out: Vec<BatchResult> = Vec::with_capacity(urls.len());
+    let mut rest = pairs.into_iter().peekable();
+    for (i, url) in urls.iter().enumerate() {
+        let taken = match rest.peek() {
+            Some((j, _)) if *j == i => rest.next().map(|(_, r)| r),
+            _ => None,
+        };
+        out.push(taken.unwrap_or_else(|| {
+            batch_err(
+                url,
+                anyhow::anyhow!("batch worker exited without a result (no tab available)"),
+            )
+        }));
     }
     out
 }
@@ -2221,8 +2274,11 @@ pub async fn batch_eval(
 /// sites" — one call replaces N serial agent loops (each tab drives its own
 /// session; the interaction JS does the waiting).
 ///
-/// `interaction` is async JS that returns nothing (side effects only). If
-/// `base_selector` is non-empty, a schema extract runs after the interaction.
+/// `interaction` is async JS that drives the page (clicks, scrolls, fills).
+/// Its **return value is the payload**: JSON → `data`, plain text → `text`.
+/// If it returns nothing (side-effects only), the page innerText is returned
+/// instead, so existing callers behave exactly as before.
+/// If `base_selector` is non-empty, a schema extract runs after the interaction.
 #[allow(clippy::too_many_arguments)] // public batch API: 8 genuinely-distinct params
 pub async fn batch_interact(
     browser: &CdpBackend,
@@ -2245,12 +2301,21 @@ pub async fn batch_interact(
         let extract_js = extract_js.clone();
         async move {
             // Run the interaction; it does its own waits (load-more clicks etc).
-            b.eval_session(&sid, &interaction).await?;
-            let raw = if extract_js.is_empty() {
-                b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
-                    .await?
-            } else {
+            let ret = b.eval_session(&sid, &interaction).await?;
+            let raw = if !extract_js.is_empty() {
                 b.eval_session(&sid, &extract_js).await?
+            } else {
+                // ponytail: the interaction's own return value is the cheapest
+                // payload — it already holds what the agent acted for. Falling
+                // back to innerText keeps side-effects-only interactions working.
+                let s = ret.as_str().unwrap_or("");
+                let empty = matches!(s.trim(), "" | "null" | "undefined");
+                if empty {
+                    b.eval_session(&sid, "document.body ? document.body.innerText || '' : ''")
+                        .await?
+                } else {
+                    ret
+                }
             };
             let data = raw
                 .as_str()
@@ -2527,6 +2592,18 @@ fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
 /// Returns pagination headers (X-Total-Count/Link/Content-Range) when present
 /// so an agent can discover `total` in one call instead of boundary-probing.
 pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
+    http_fetch_capped(url, 3000)
+}
+
+/// `http_fetch` with a caller-chosen text cap.
+///
+/// 3000 chars is the right default for a *probe* (cheap, and 3 KB is enough to
+/// see whether a page is server-rendered). It is the wrong cap for a caller who
+/// intends to **parse** the page: every row past the cap is silently missing and
+/// an empty result looks like a valid answer. `max_chars` (0 = no cap) lets one
+/// browserless call return the whole body, which is 10-100x cheaper than
+/// upgrading to a browser just to read past a truncation.
+pub fn http_fetch_capped(url: &str, max_chars: usize) -> anyhow::Result<Value> {
     let resp = browser_req(browser_agent().get(url)).call()?;
     let status = resp.status().as_u16();
     let content_type = resp
@@ -2544,18 +2621,21 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
         }
     }
     let text = resp.into_body().read_to_string()?;
+    let full_len = text.len();
     let is_json = content_type.contains("json") || text.trim_start().starts_with(['{', '[']);
-    let out_text = if is_json {
+    let out_text = if is_json || max_chars == 0 {
         text
     } else {
-        text.chars().take(3000).collect::<String>()
+        text.chars().take(max_chars).collect::<String>()
     };
+    let truncated = out_text.len() < full_len;
     let mut v = json!({
         "url": url,
         "status": status,
         "content_type": content_type,
         "text": out_text,
-        "bytes": out_text.len(),
+        "bytes": full_len,
+        "truncated": truncated,
     });
     if !hdrs.is_empty() {
         v["headers"] = serde_json::Value::Object(hdrs);

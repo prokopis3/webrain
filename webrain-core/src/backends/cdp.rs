@@ -12,6 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -36,20 +37,31 @@ fn stealth_js() -> String {
   apply(Navigator.prototype, 'languages', ['en-US', 'en']);
   // Real fake PluginArray built on the REAL prototype — Array.isArray stays false
   // (a plain array here is the classic detectable leak).
+  // ponytail: spoof ONLY when the browser reports none (headless). A headed Chrome
+  // already has real plugins, and this shell is not a real PluginArray: `arr.length = n`
+  // is silently swallowed by the native length accessor, so `Array.from(navigator.plugins)`
+  // invokes that native getter with a foreign `this` and throws "Illegal invocation"
+  // INSIDE page code. AB's Next.js hydration iterates navigator.plugins, threw, and the
+  // app never mounted (input had 0 react fibers, submit stayed disabled — an eternal
+  // "loading" page that loads fine in a hand-opened tab). Never trade a real array for a
+  // throwing fake: the real one is also the better fingerprint.
   try {
-    const proto = Object.getPrototypeOf(navigator.plugins);
-    const names = [['PDF Viewer', 'Portable Document Format'], ['Chrome PDF Viewer', ''], ['Chromium PDF Viewer', ''], ['Internal PDF Viewer', ''], ['Microsoft Edge PDF Viewer', '']];
-    const arr = Object.create(proto);
-    names.forEach(([n, d], i) => {
-      const p = Object.create(proto);
-      p.name = n; p.description = d; p.filename = n + '.dll'; p.length = 0;
-      arr[i] = p;
-    });
-    arr.length = names.length;
-    arr.item = (i) => arr[i] || null;
-    arr.namedItem = (n) => Array.from(arr).find((p) => p.name === n) || null;
-    apply(Navigator.prototype, 'plugins', arr);
-    apply(Navigator.prototype, 'mimeTypes', arr);
+    if (navigator.plugins.length === 0) {
+      const proto = Object.getPrototypeOf(navigator.plugins);
+      const names = [['PDF Viewer', 'Portable Document Format'], ['Chrome PDF Viewer', ''], ['Chromium PDF Viewer', ''], ['Internal PDF Viewer', ''], ['Microsoft Edge PDF Viewer', '']];
+      const arr = Object.create(proto);
+      names.forEach(([n, d], i) => {
+        const p = Object.create(proto);
+        p.name = n; p.description = d; p.filename = n + '.dll';
+        arr[i] = p;
+      });
+      // defineProperty, not `arr.length = n`: the native accessor swallows assignment.
+      Object.defineProperty(arr, 'length', { value: names.length });
+      arr.item = (i) => arr[i] || null;
+      arr.namedItem = (n) => names.map((_, i) => arr[i]).find((p) => p.name === n) || null;
+      apply(Navigator.prototype, 'plugins', arr);
+      apply(Navigator.prototype, 'mimeTypes', arr);
+    }
   } catch (e) {}
   apply(Navigator.prototype, 'maxTouchPoints', 1);
   apply(Navigator.prototype, 'platform', 'Win32');
@@ -342,6 +354,17 @@ pub struct CdpBackend {
     /// callers could both see an empty `tabs` map and each attach a separate
     /// page target (silently creating a second tab and repointing `active`).
     attach: Arc<Mutex<()>>,
+    /// Latched once the socket is proven dead (writer or reader task exited).
+    /// The socket is split and owned by those tasks, so this backend can never
+    /// recover — it must be dropped and reconnected. Recording that HERE is what
+    /// makes death a fact instead of something downstream had to guess from the
+    /// wording of an error string (see `is_dead`).
+    dead: Arc<AtomicBool>,
+    /// Engine capability cache: lightpanda refuses a 2nd createTarget, Chrome and
+    /// obscura accept many. That is a property of the binary, not of the call, so
+    /// the probe runs once per connection instead of costing two scratch targets
+    /// on every batch.
+    single_target: Arc<std::sync::OnceLock<bool>>,
 }
 
 /// A single attached page target (one browser tab).
@@ -493,8 +516,10 @@ impl CdpBackend {
             net_capture,
             net_urls,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
-            no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
+            dead: Arc::new(AtomicBool::new(false)),
+            single_target: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -608,8 +633,10 @@ impl CdpBackend {
             net_capture,
             net_urls,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
-            no_stealth: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
+            dead: Arc::new(AtomicBool::new(false)),
+            single_target: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -663,6 +690,15 @@ impl CdpBackend {
         Ok(())
     }
 
+    /// True once the underlying socket has been proven dead. A dead backend can
+    /// never recover (the socket is split and owned by its writer/reader tasks),
+    /// so a caller holding a cached handle must drop it and reconnect. This is
+    /// the deterministic answer the reconnect guard needs; matching on error
+    /// text is a guess that silently misses any newly-worded failure.
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
+    }
+
     /// Send a command, optionally scoped to a session id (None = browser-level).
     async fn send_cmd_with(
         &self,
@@ -670,6 +706,13 @@ impl CdpBackend {
         method: &str,
         params: Value,
     ) -> anyhow::Result<Value> {
+        // Fail the same way every time once the transport is gone. Without this,
+        // each later command re-sends into a closed channel and invents its own
+        // phrasing of the identical death, which a background task then inspects
+        // for keywords. The first failure already knew; latch it there instead.
+        if self.dead.load(Ordering::Relaxed) {
+            anyhow::bail!("CDP connection closed (transport already dead)");
+        }
         let (id, rx) = {
             let mut conn = self.inner.lock().await;
             let id = conn.cmd_id;
@@ -685,8 +728,12 @@ impl CdpBackend {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.pending.lock().await.insert(id, tx);
             if let Err(e) = conn.write.send(text).await {
+                // Writer task exited => out_rx dropped => this channel is closed
+                // for good. Latch it so the very next command short-circuits
+                // above rather than inventing a fresh error wording.
+                self.dead.store(true, Ordering::Relaxed);
                 self.pending.lock().await.remove(&id);
-                anyhow::bail!("CDP write failed: {e}");
+                anyhow::bail!("CDP connection closed (CDP write failed: {e})");
             }
             (id, rx)
         }; // connection lock released here — nothing else waits on this command
@@ -700,7 +747,12 @@ impl CdpBackend {
         };
         let reply = match tokio::time::timeout(cap, rx).await {
             Ok(Ok(v)) => v,
-            Ok(Err(_)) => anyhow::bail!("CDP connection closed"),
+            Ok(Err(_)) => {
+                // Reader task exited => in_tx dropped => no reply can ever land.
+                // Latch it: the same socket cannot be re-read.
+                self.dead.store(true, Ordering::Relaxed);
+                anyhow::bail!("CDP connection closed (reader task gone)");
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
                 anyhow::bail!("CDP command {method} timed out after {cap:?}");
@@ -917,7 +969,26 @@ impl CdpBackend {
     /// CDP behavior. lightpanda holds ONE browser context; its 2nd createTarget
     /// errors `TargetAlreadyLoaded` (src/cdp/domains/target.zig). Scratch
     /// targets are closed before returning so the caller starts clean.
+    ///
+    /// Cached: the answer is a property of the engine binary, so the probe runs
+    /// once per connection. A transient error is NOT cached, so a flaky first
+    /// call can still be retried.
     pub async fn single_target_probe(&self) -> anyhow::Result<bool> {
+        if let Some(v) = self.single_target.get() {
+            return Ok(*v);
+        }
+        let v = self.single_target_probe_uncached().await?;
+        let _ = self.single_target.set(v);
+        Ok(v)
+    }
+
+    /// Already-known answer, without triggering a probe. Lets batch stats report
+    /// `single_target` even when no probe was needed this call.
+    pub fn single_target_known(&self) -> Option<bool> {
+        self.single_target.get().copied()
+    }
+
+    async fn single_target_probe_uncached(&self) -> anyhow::Result<bool> {
         let first = self
             .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
             .await;
@@ -2665,21 +2736,19 @@ impl BrowserBackend for CdpBackend {
         // authorizes pattern-matched buttons. Without this, a page with a
         // stray `consent`-named element but no dialog could still get an
         // arbitrary last-link click.
-        let strict = "div[role='dialog'], [aria-modal='true'], form[action*='consent'], #onetrust-banner-sdk, [id^='onetrust']";
-        let strict_hit = self
-            .send_cmd(
-                "DOM.querySelector",
-                json!({"nodeId": root, "selector": strict}),
-            )
-            .await
-            .ok()?;
-        let overlay = strict_hit["nodeId"].as_i64().unwrap_or(0) != 0;
+        //
+        // 2026-10-23: the blind fallback is GONE. It clicked whatever button sat
+        // last inside any dialog, and Google's own "About this result" panel is
+        // a dialog — every SERP run logged `consent=clicked:About this result`,
+        // opening a side panel over a perfectly good results page (the same
+        // shape as the earlier "clicked a result link → 0 results → retries"
+        // incident). Pattern matching already covers the real consent buttons in
+        // every language this list knows; guessing is worse than not dismissing.
         let tree = self
             .send_cmd("Accessibility.getFullAXTree", json!({}))
             .await
             .ok()?;
         let nodes = tree["nodes"].as_array()?.clone();
-        let mut last_btn: Option<(i64, i64, String)> = None;
         for n in &nodes {
             let role = n
                 .get("role")
@@ -2721,9 +2790,8 @@ impl BrowserBackend for CdpBackend {
             if patterns.iter().any(|p| lower.contains(&p.to_lowercase())) {
                 return Some((x, y, name));
             }
-            last_btn = Some((x, y, name));
         }
-        if overlay { last_btn } else { None }
+        None
     }
 
     /// TRUSTED (no page JS): Page.getFrameTree → main-frame URL.

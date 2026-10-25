@@ -20,7 +20,10 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
-tokio-tungstenite = { version = "0.24", features = ["connect"] }
+# `connect` alone cannot dial a `wss://` endpoint (no TLS connector), which made
+# Lightpanda Cloud and every hosted CDP unreachable. webpki roots ship in the
+# binary, so no OpenSSL/system-cert dependency on any platform.
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
 base64 = "0.23"
