@@ -7,6 +7,156 @@ use std::env;
 use webrain_core::CdpBackend;
 use webrain_core::browser::BrowserBackend;
 
+/// One row per subcommand: (name, usage, one-line about, extra notes).
+///
+/// Help lives in ONE table used by both the overview and the per-command page, so
+/// a new subcommand is described in one place instead of a usage `println!` per
+/// arm — and `webrain <cmd> --help` can never drift from `webrain --help`.
+const HELP: &[(&str, &str, &str, &str)] = &[
+    (
+        "mcp",
+        "webrain mcp [--http <port>]",
+        "MCP server over stdio (default), or HTTP on 127.0.0.1:<port> for networked clients.",
+        "",
+    ),
+    (
+        "install",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper|vision [--model NAME]",
+        "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL).",
+        "",
+    ),
+    (
+        "doctor",
+        "webrain doctor",
+        "Diagnose the install: engines, CDP ports, MCP server, vault. Exit 0 healthy, 2 broken.",
+        "",
+    ),
+    (
+        "upgrade",
+        "webrain upgrade",
+        "Update webrain, detected per install method (brew, scoop, or self-update).",
+        "",
+    ),
+    (
+        "launch",
+        "webrain launch <service> <profile> [url] [--headless] [--port N]",
+        "Stealth Chrome with a persistent per-account profile.",
+        "",
+    ),
+    (
+        "login",
+        "webrain login <service> <profile> [url] [--port N]",
+        "Attach for an interactive login; credentials come from the vault (optional TOTP).",
+        "",
+    ),
+    (
+        "vault",
+        "webrain vault set|list|user|rm",
+        "Encrypted credential vault (AES-256-GCM). Secrets are prompted, never echoed.",
+        "",
+    ),
+    (
+        "cookies",
+        "webrain cookies [--port N] [--out FILE]",
+        "Export every cookie, including HttpOnly ones document.cookie cannot see.",
+        "",
+    ),
+    (
+        "setcookies",
+        "webrain setcookies <FILE> [--port N]",
+        "Import cookies into the CDP backend — cross-engine session migration.",
+        "",
+    ),
+    (
+        "fetch",
+        "webrain fetch <url>",
+        "Attach to CDP_URL and print the page text plus interactive elements.",
+        "",
+    ),
+    (
+        "screenshot",
+        "webrain screenshot <url>",
+        "Full-page screenshot written to disk.",
+        "",
+    ),
+    (
+        "spider",
+        "webrain spider <url> [--depth N] [--pages N] [--respect-robots] [--concurrency N]",
+        "Crawl a site from a seed URL.",
+        "",
+    ),
+    (
+        "click",
+        "webrain click <index>",
+        "Click an element by its index from fetch.",
+        "",
+    ),
+    (
+        "type",
+        "webrain type <index> <text>",
+        "Type into an element by index.",
+        "",
+    ),
+    (
+        "eval",
+        "webrain eval <js>",
+        "Evaluate JS in the current page and print the result.",
+        "",
+    ),
+    (
+        "serp",
+        "webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N]\n    [--safe] [--region R] [--http] [--no-fallback] [--json] [--proxy URL] [--headless]\n    [--fresh] [--pipe] [--hold]",
+        "Structured SERP JSON: one query per call, pages fetched sequentially.",
+        "duckduckgo|auto need no browser. bing uses the HTTP path. brave uses its keyed API\n  when BRAVE_API_KEY is set, else the connected CDP engine. google auto-launches a\n  Chrome with a persistent profile unless --fresh. --fresh starts a new profile and\n  cookies every run; --pipe makes that launch use --remote-debugging-pipe (no open\n  debugging port); --hold keeps it open afterwards. --http never touches a browser at\n  all: no render, no guest launch, whatever is attached — duckduckgo/bing answer in\n  under a second each that way, and it is the only correct mode when you just want\n  those two. Measured ceilings without a browser: bing 10 (its RSS feed and its HTML\n  SERP both ignore paging), duckduckgo ~20 (it serves two distinct pages, then repeats\n  them) — so --limit 50 over HTTP returns ~27, and a larger request needs a browser or\n  BRAVE_API_KEY/SERPAPI_API_KEY. For many queries, issue several calls (or\n  webrain_batch over SERP URLs) — the CLI takes one query.",
+    ),
+    (
+        "watch",
+        "webrain watch <video-url-or-file> [--vision] [--detail D] [--start S] [--end S]",
+        "Timestamped transcript plus frames, no browser needed.",
+        "",
+    ),
+    (
+        "obscura",
+        "webrain obscura [--port N]",
+        "Spawn the Obscura CDP server (default 9224).",
+        "",
+    ),
+    (
+        "lightpanda",
+        "webrain lightpanda [--port N]",
+        "Spawn the Lightpanda CDP server (default 9225).",
+        "",
+    ),
+];
+
+/// Render the overview (no command) or one command's page.
+fn help_page(cmd: &str) -> String {
+    let cmd = cmd.trim_start_matches('-');
+    let cmd = if cmd == "h" { "help" } else { cmd };
+    if cmd.is_empty() || cmd == "help" {
+        let mut s = String::from(
+            "webrain — portable MCP browser-automation & scraping server\n\nUSAGE\n  webrain <command> [args]\n  webrain <command> --help\n\nCOMMANDS\n",
+        );
+        for (name, _, about, _) in HELP {
+            s.push_str(&format!("  {name:<12} {about}\n"));
+        }
+        s.push_str(
+            "\nRun `webrain <command> --help` for one command's flags.\n\nENVIRONMENT (read at process start, restart to apply; full table with\nplatform defaults in docs/reference/environment.mdx):\n  CDP_URL                     CDP endpoint to attach (default 127.0.0.1:9222)\n  WEBRAIN_STEALTH_NOISE=0     drop the fingerprint-noise block (hydration fix)\n  WEBRAIN_NO_STEALTH=1        drop all injected stealth JS (diagnostic only)\n  WEBRAIN_PROFILES_DIR        persistent profile root (keeps auth/challenges)\n  WEBRAIN_VAULT_DIR           encrypted credential vault dir\n  WEBRAIN_BROWSERS_DIR        engine cache (Chrome for Testing, obscura)\n  WEBRAIN_CHROME / WEBRAIN_LIGHTPANDA / WEBRAIN_OBSCURA\n                              explicit engine binary paths\n  WEBRAIN_PROXIES             proxy rotation pool for the HTTP engines\n  WEBRAIN_SKILLS_DIR          operator .md skills read by webrain_guide\n  WEBRAIN_HTTP_TOKEN          bearer token for `mcp --http`\n  WEBRAIN_NO_STATE=1          shared-instance mode (no vault/session tools)\n",
+        );
+        return s;
+    }
+    match HELP.iter().find(|(name, _, _, _)| *name == cmd) {
+        Some((name, usage, about, notes)) => {
+            let mut s = format!("webrain {name} — {about}\n\nUSAGE\n  {usage}\n");
+            if !notes.is_empty() {
+                s.push_str(&format!("\nNOTES\n  {notes}\n"));
+            }
+            s
+        }
+        None => format!("unknown command: {cmd}\n\n{}", help_page("")),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -18,6 +168,20 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = env::args().collect();
+    // Help before anything else: `webrain --help`, `webrain <cmd> --help`,
+    // `webrain help <cmd>`. No side effects, so it works before engines exist.
+    if args.iter().skip(1).any(|a| a == "--help" || a == "-h")
+        || args.get(1).map(|s| s.as_str()) == Some("help")
+    {
+        let first = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        let cmd = if first == "help" {
+            args.get(2).map(|s| s.as_str()).unwrap_or("")
+        } else {
+            first
+        };
+        print!("{}", help_page(cmd));
+        return Ok(());
+    }
     // google serp runs with no injected stealth JS. edition-2024 set_var is
     // unsafe because concurrent env reads (in tokio's worker pool) are a data
     // race — set it HERE, before Runtime::new() spawns any threads.
@@ -256,12 +420,7 @@ fn main() -> anyhow::Result<()> {
             // --remote-debugging-port=9222, google auto-launches guest Chrome).
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
-                println!(
-                    "usage: webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]"
-                );
-                println!(
-                    "  duckduckgo|auto need no browser; brave uses its keyed API when BRAVE_API_KEY is set, else the connected CDP engine; bing uses the CDP engine; google auto-launches a persistent-profile Chrome when none is attached — DEFAULT = warm persistent profile + session (the browser stays alive on 9222 between runs and warms into a trusted google profile, the skill's real bypass path); CDP_URL / --remote-debugging-port=9222 to override, --headless for a headless one, --proxy http://user:pass@host:port to route HTTP engines + the google auto-launch through a proxy, --fresh to opt OUT of the warm session: brand-new profile + cookies every run so the consent modal always appears and is dismissed, --pipe (with --fresh) to launch that Chrome via --remote-debugging-pipe so there's NO open debugging port (the automation fingerprint that walls google), --hold to keep the launched Chrome open after the search so you can watch it — press Enter to close)"
-                );
+                print!("{}", help_page("serp"));
                 return Ok(());
             }
             let flag = |name: &str| -> Option<String> {
@@ -282,6 +441,11 @@ fn main() -> anyhow::Result<()> {
             let json_out = args.contains(&"--json".to_string());
             let headless = args.contains(&"--headless".to_string());
             let proxy = flag("--proxy");
+            // --http: never touch a browser. duckduckgo/bing answer over plain
+            // HTTP (0.5-0.7s each), so a caller asking only for them must not
+            // pay a Chrome launch — and `--engine bing --http` stays HTTP even
+            // though bing otherwise counts as a browser engine here.
+            let http_only = args.contains(&"--http".to_string());
             // --fresh: always start a brand-new google profile + cookies (never
             // attach a warm browser) so the consent modal ALWAYS appears and is
             // always dismissed — the deterministic anti-bot recipe.
@@ -306,6 +470,7 @@ fn main() -> anyhow::Result<()> {
                 retries: 2,
                 fallback,
                 proxy: proxy.clone(),
+                http_only,
             };
             // google: trusted-commands-only flow — no injected stealth JS
             // (WEBRAIN_NO_STEALTH, set before the runtime at the top of main)
@@ -321,9 +486,8 @@ fn main() -> anyhow::Result<()> {
             // watch it; only fresh holds — the warm 9222 guest keeps its session.
             let hold = args.contains(&"--hold".to_string());
             let mut _launched: Option<webrain_core::launch::Launched> = None;
-            let backend = if opts.engine == "brave"
-                || opts.engine == "google"
-                || opts.engine == "bing"
+            let backend = if !http_only
+                && (opts.engine == "brave" || opts.engine == "google" || opts.engine == "bing")
             {
                 if fresh && opts.engine == "google" {
                     // --fresh: a brand-new profile dir + unique port every run —
@@ -914,14 +1078,15 @@ fn main() -> anyhow::Result<()> {
             println!("webrain {}", env!("CARGO_PKG_VERSION"));
         }
         Some(cmd) => {
-            println!("Unknown command: {cmd}");
-            println!(
-                "Usage: webrain [mcp|doctor|install|obscura|lightpanda|launch|login|cookies|setcookies|fetch <url>|screenshot <url>|spider <seed_url>|click <i>|type <i> <text>|eval <js>|vault <set|list|user|rm>|upgrade]"
-            );
-            println!();
-            println!("Set CDP_URL to point to your browser:");
+            // Was a hand-written usage line that had drifted (no serp/watch/help)
+            // and left out the CDP hint only some commands need. Exit 2: a shell
+            // can tell a typo from a successful run.
+            println!("unknown command: {cmd}\n");
+            print!("{}", help_page(""));
+            println!("\nSet CDP_URL to point to your browser:");
             println!("  Chrome:  --remote-debugging-port=9222");
             println!("  Obscura: obscura serve --stealth");
+            std::process::exit(2);
         }
     }
 
