@@ -130,6 +130,57 @@ consent pages as target content · write sequential loops when `webrain_batch` e
 - `extract(mode=schema)` returns 0 items → verify the page isn't a block page
   (check `challenge`), re-run autoschema, or wait for JS/scroll then retry.
 
+### Rendered but never interactive (hydration check — do this first)
+
+A page can return `status: ok`, `challenge: null` and a correct title while the
+SPA never mounts: submit buttons stay `disabled`, lists stay empty, spinners spin
+forever. **That is not a site bug and not a challenge.** Two traps:
+
+1. **`navigate` returns at `readyState: complete`, before the app mounts.** Re-probe
+   ~1s later before declaring anything dead. (`/storelocator` read as frozen at
+   558 chars and hydrated to 4919 once given a moment.)
+2. **Our injected stealth shim can abort hydration.** Test it:
+
+```js
+const el = document.querySelector('input');
+Object.keys(el).filter(k => k.startsWith('__react')).length   // 0 = never mounted
+```
+
+Measured (`ab.gr/storelocator`, real Chrome, 2026-10-24): the fake `navigator.plugins`
+threw `TypeError: Illegal invocation` in page code (fixed: spoof only when the
+browser has none), and the NOISE block — it replaces `Object.defineProperty` and
+hooks canvas/audio/`canPlayType` — made Next.js abort with
+`Cannot read properties of undefined (reading 'getInitialProps')`. With
+`WEBRAIN_STEALTH_NOISE=0` the same browser mounted normally.
+
+Fix path: set `WEBRAIN_STEALTH_NOISE=0` for the process owning the CDP connection
+(restart an MCP server to pick it up) **and open a fresh tab** — init scripts are
+registered per target for its lifetime, so re-navigating the same tab keeps the
+old shim and the change looks ignored. Then compare with a hand-opened tab of the
+same URL; if the human tab works, it is our injection, not the site.
+
+## Environment knobs (read at process start)
+
+Read **once**, at server start or CDP attach — no tool call can change them.
+State the exact `VAR=value` to the human, say the server must restart, then open a
+**fresh tab**: injected scripts live as long as the tab, so re-navigating keeps
+the old one and the change looks ignored.
+
+| Variable | Effect on a task |
+|---|---|
+| `CDP_URL` | Which engine you are actually driving — `127.0.0.1:9222` real Chrome, 9224 obscura, 9225 lightpanda. The browser decision *is* this variable. |
+| `WEBRAIN_STEALTH_NOISE=0` | **The hydration fix.** Drop the fingerprint-noise block when a page renders but never mounts. |
+| `WEBRAIN_NO_STEALTH=1` | Drop all injected stealth JS — a diagnostic for "is our shim the problem?", not a challenge workaround. `webrain serp` sets it for itself: delete it before starting a server or every later call runs identity-less. |
+| `WEBRAIN_NO_STATE=1` | Shared instance: vault/launch/login/session are disabled by design. Report, don't retry. |
+| `WEBRAIN_HTTP_TOKEN` | Bearer token for `mcp --http`. Auth errors are deployment, not the site. |
+| `WEBRAIN_PROXIES` | Proxy rotation for the HTTP engines + guest Chrome; a per-call `proxy` overrides it. |
+| `WEBRAIN_PROFILES_DIR` / `WEBRAIN_VAULT_DIR` | Persistent profiles + encrypted vault — what keeps a challenge solved. A changed root reads as "logged out". |
+| `WEBRAIN_BROWSERS_DIR` / `WEBRAIN_CHROME` / `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Engine discovery; `engine not found` means install it or point the path. |
+| `WEBRAIN_SKILLS_DIR` | Operator skills readable via `webrain_guide(topic="skill:<name>")`. |
+
+Full table with defaults: `docs/reference/environment.mdx`. The same list ships in
+the binary as `webrain_guide(topic="env")`.
+
 ## Security & Permissions
 
 - Secrets live in the local vault (AES-256-GCM) and are decrypted in-process by
