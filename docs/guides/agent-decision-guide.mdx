@@ -1,6 +1,6 @@
 ---
 title: Agent Decision Guide
-description: Which webrain MCP tool should your AI agent use? Decision table mapping every task — navigate, observe, interact, extract, crawl, batch, PDF, video, sessions — to the 16 webrain tools.
+description: Which webrain MCP tool should your AI agent use? Decision table mapping every task — navigate, observe, interact, extract, crawl, batch, PDF, video, sessions — to the 17 webrain tools.
 ---
 
 # Agent Decision Guide
@@ -36,6 +36,25 @@ runtime by `webrain_guide`.
 
 **I need to reach a page** → `webrain_navigate`. Read the returned `challenge`
 field — if non-null, the page is gated (see [Challenges](/concepts/challenges)).
+
+**It rendered, but nothing is clickable** → hydration, not a block. `navigate`
+returns at `readyState: complete`, before an SPA mounts, so re-probe after ~1s
+and test a real control:
+
+```js
+const el = document.querySelector('input');
+Object.keys(el).filter(k => k.startsWith('__react')).length   // 0 = never mounted
+```
+
+A `disabled` submit button plus an empty list and a `challenge: null` response is
+an unmounted app, not a query result. If a hand-opened tab of the same URL works,
+the difference is our injected stealth shim — set `WEBRAIN_STEALTH_NOISE=0` for
+the process owning the CDP connection (restart an MCP server to apply) and open a
+**fresh tab**: init scripts live for the target's lifetime, so re-navigating the
+same tab keeps the old shim and the change looks ignored. Verified cause on
+`ab.gr/storelocator`: the NOISE block replaces `Object.defineProperty` and hooks
+canvas/audio/`canPlayType`, which made Next.js abort with
+`Cannot read properties of undefined (reading 'getInitialProps')`.
 
 **I need to see what's on the page** → `webrain_observe`:
 

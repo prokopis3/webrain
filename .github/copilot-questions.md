@@ -101,8 +101,10 @@ differs. It must never be described as stealth.
 
 1. Does arachnefly's domain layer already model entitlement and tenancy, or does
    that need introducing?
-2. Should the free pool run obscura or lightpanda? Note obscura has no paint engine,
-   so `webrain_screenshot` fails there.
+2. Should the free pool run obscura or lightpanda? Note that only **obscura render
+   builds** can `webrain_screenshot` (v0.2.5 verified: `fetch -s` → 63 KB PNG);
+   `-no-render` builds and lightpanda cannot. Also unresolved: is an unmounted-SPA
+   failure (ab.gr: empty Apollo cache, 0 products) a fixed Web-API gap or a tunable?
 3. How do we meter per-page vs per-session on a shared instance, when
    `Mcp-Session-Id` is the only per-client handle?
 4. Is the SIGTERM drain actually graceful on Linux? **Unverified** — the testing was

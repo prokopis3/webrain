@@ -20,6 +20,13 @@ using the `mcp_webrain-*` tools.
    separate.
 6. **Verify before returning.** Confirm target content exists before reporting
    success.
+7. **A rendered page is not a mounted page.** `navigate` returns at
+   `readyState: complete`, before the SPA hydrates. Test
+   `Object.keys(el).filter(k => k.startsWith('__react')).length` on a real control
+   before calling a page frozen — and if a hand-opened tab of the same URL works,
+   the difference is our injected stealth shim, not the site. Escape hatch:
+   `WEBRAIN_STEALTH_NOISE=0` (set at attach time; needs a fresh tab). Detail:
+   `docs/AGENT_DECISION_GUIDE.md` §2b.
 
 ## Webrain = portable MCP scraping tool
 
@@ -58,9 +65,22 @@ lightpanda cannot pass interactive challenges. No Python sidecar — interactive
 CAPTCHAs need a human in the headed browser.
 
 ### Interactive SPAs (Google Flights, Material UI, calendars, search UIs)
-Heavy JS apps with Material/segmented controls need **real Chrome** — obscura
-has NO paint engine, so its DOM is fine but (a) `webrain_screenshot` fails and
-(b) Material menus/comboboxes don't respond to synthetic clicks. Route the
+Heavy JS apps with Material/segmented controls need **real Chrome**. Obscura's
+render build **does** paint (`obscura fetch <url> -s out.png` writes a real PNG),
+but a data-driven SPA can stay **unmounted**: measured on `ab.gr/eshop/search`,
+obscura v0.2.5 — even with `OBSCURA_SCRIPT_DEADLINE_MS=120000` — returns a ~1 MB
+shell whose Apollo cache is empty (~518 B), with 0 product links and 0 prices.
+Obscura's own stderr names the cause: React hydration throws `TypeError: Cannot
+read properties of undefined (reading 'firstChild')` inside `_next/.../_app.js`,
+so the app never mounts and its data query never fires. Root cause is a missing
+DOM API: obscura has **one** `Element` prototype for every tag, so
+`HTMLTemplateElement.prototype === Element.prototype`, and AB's
+`HTMLTemplateElement.firstChild` polyfill therefore breaks `firstChild` on all
+elements. Probe it in two lines before trusting any engine on an SPA:
+`HTMLTemplateElement.prototype === Element.prototype` must be `false`, and
+`document.createElement('template').constructor.name` must be
+`HTMLTemplateElement`. Material menus/comboboxes
+also don't respond to synthetic clicks. Route the
 batch there with `cdp_urls: ["http://127.0.0.1:9222"]` (Chrome), NOT the obscura
 session backend. Recipe that works (Google Flights ATH→NYC):
 1. Google consent gate: set cookies `SOCS` + `CONSENT` on `.google.com` via

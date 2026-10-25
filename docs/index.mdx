@@ -426,7 +426,7 @@ mode: custom
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
               <div className="stat"><b>3</b><span>browser engines</span></div>
-              <div className="stat"><b>16</b><span>MCP tools</span></div>
+              <div className="stat"><b>17</b><span>MCP tools</span></div>
               <div className="stat"><b>0</b><span>Node runtime</span></div>
             </div>
           </div>
@@ -548,7 +548,7 @@ mode: custom
             <div className="serp-cap"><code>five engines + auto</code><span>duckduckgo, bing, google, brave, auto</span></div>
             <div className="serp-cap"><code>fallback + dedupe</code><span>providers fall back, duplicate URLs dropped</span></div>
             <div className="serp-cap"><code>pagination + safe + region</code><span>page offsets, safe search, en-US market default</span></div>
-            <div className="serp-cap"><code>proxy + captcha solve</code><span>route engines through HTTP(S)/SOCKS proxies; 2captcha /sorry auto-solve</span></div>
+            <div className="serp-cap"><code>proxy + keyed providers</code><span>route engines through HTTP(S)/SOCKS proxies; a Brave key and serpapi add browser-free providers</span></div>
             <div className="serp-cap"><code>request_id + retry</code><span>correlate every call, retry with backoff</span></div>
           </div>
           <p className="proven-note">One MCP tool and one CLI command: <a href="/reference/tools">webrain_serp</a> and <a href="/reference/cli">webrain serp</a>.</p>
@@ -610,7 +610,7 @@ mode: custom
         </div>
         <div className="engine">
           <img className="engine-logo" src="/images/landing/obscura-logo.png" alt="Obscura" width="36" height="36" style={{objectFit:'contain'}} />
-          <div><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. No paint engine, no screenshots.</p></div>
+          <div><h3>Obscura</h3><p>Fast batch scraping of non-challenged JS pages. Render build paints (PNG/PDF); a data-driven SPA may stay unmounted.</p></div>
           <span className="tag">Fast</span>
         </div>
         <div className="engine">

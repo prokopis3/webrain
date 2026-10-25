@@ -36,7 +36,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_batch` (`op=…`) | fetch · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
-| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto; optional proxy + 2captcha) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP) |
+| `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP) |
 | `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
@@ -60,6 +60,10 @@ dependency (`webrain_scrape`, `webrain_search`, `webrain_serp` HTTP engines,
 
 <Accordion title="webrain_guide">
 Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs fetch_http), how to handle Cloudflare/CAPTCHA/Turnstile challenges (check the `challenge` field after webrain_navigate; persistent profile + real Chrome + session via webrain_session(op=login)), and the extraction tool matrix. Call FIRST when unsure which webrain tool/browser to use.
+
+It answers **progressively**: with no `topic` you get the tool list plus an index of every section; `topic="extraction"` (or any section name — case-insensitive substring) returns just that section; `topic="all"` returns the whole guide. That keeps the "I'm not sure what to do" call at ~800 tokens instead of ~2.7K.
+
+`topic="skills"` lists operator skill files from `WEBRAIN_SKILLS_DIR`, and `topic="skill:<name>"` returns one — a way to hand the agent house rules (a customer's conventions, a login procedure) without recompiling. Names are validated (`a-z A-Z 0-9 _ -`, max 64) so the argument can never carry a path.
 </Accordion>
 
 <Accordion title="webrain_navigate">
@@ -313,7 +317,7 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 
 **Proxy:** `proxy` routes the HTTP engines through an HTTP(S)/SOCKS proxy (e.g. `http://user:pass@host:port`) and bakes `--proxy-server` into the google auto-launch. Bing/Google GeoIP-lock flagged/rotating IPs and ignore market params, so a clean-IP proxy is the reliable way to get correct, larger result sets. An attached CDP engine keeps whatever proxy it started with.
 
-**CAPTCHA solving:** set `WEBRAIN_2CAPTCHA_KEY` (a 2captcha API key) and the google browser path auto-solves a `/sorry` reCAPTCHA wall — it extracts `data-sitekey` + `data-s`, submits to 2captcha with the same `proxy` (so the solving IP matches the browser's exit IP), injects the token, and submits. A failed solve falls through to the normal retry/fallback — it never blocks results.
+**CAPTCHA walls:** detected, never solved automatically. `webrain_navigate` reports `challenge` (`cloudflare_challenge` · `captcha` · `blocked`) so the agent stops instead of extracting a challenge page; passing one needs real Chrome + a persistent profile + an interactive `webrain login`.
 
 **Brave API:** set `BRAVE_API_KEY` and `engine=brave` goes through `api.search.brave.com` — typed JSON, 20 results per page, no browser at all; `auto` engages it for `limit > 20` while still short, before any browser render.
 

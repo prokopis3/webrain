@@ -20,18 +20,73 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 | Situation | Browser | Why |
 |---|---|---|
 | **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns/comboboxes, segmented controls) | **real Chrome**, routed per-tab via `cdp_urls:["http://127.0.0.1:9222"]` | Material/Google widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda** for interactive Material: obscura v0.2.0 rendering is not full Chromium parity, and lightpanda has no layout engine. |
-| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only a real rendering engine can run/solve these. obscura has **no paint engine** and its V8 crashes on challenge JS. |
+| **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only a browser with a human-solvable session clears these. Obscura's render build **does** paint (PNG/PDF verified on v0.2.5), but its stealth cannot complete an interactive challenge — never read "it renders" as "it solves". |
 | JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material (not full layout parity). |
-| Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target CDP** — `webrain_batch` falls back to sequential single-tab reuse (probe detects it). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
+| Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target per CONNECTION** — a batch on one endpoint serializes (probe detects it, `single_target: true`), but the process serves many connections: repeat the endpoint in `cdp_urls` for parallel pages, up to `--cdp-max-connections` (16). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10-100× faster than a browser, zero memory. |
 
-> **lightpanda vs obscura batch note:** obscura opens N parallel tabs
-> (concurrency = real overlap). lightpanda `serve` holds ONE browser context —
-> its 2nd `Target.createTarget` errors `TargetAlreadyLoaded` — so `webrain_batch`
-> detects it and runs all URLs sequentially on one reused tab. Same tool call,
-> same schema; just no intra-call parallelism. Pick obscura for large parallel
-> crawls, lightpanda for footprint/velocity per page (verified: ~2-4s/page on
-> mymarket.gr vs ~12s/page on obscura).
+> **Batch parallelism is per CONNECTION, not per process — this is the rule.**
+> Real Chrome and obscura open N parallel tabs on one connection, so
+> `concurrency` is the lever there. **lightpanda is single-target per CDP
+> connection**: its `Target.createTarget` returns `TargetAlreadyLoaded` once the
+> context holds a target, and a second `Target.createBrowserContext` is refused
+> with *"Cannot have more than one browser context at a time"*
+> (`src/server/cdp/domains/target.zig`; `CDP.zig` keeps one `target_id` —
+> *"we only allow 1 open page at a time"*). So a single endpoint runs URLs
+> sequentially and the reply says so: `single_target: true,
+> effective_concurrency: 1`. **No `concurrency` value changes that.**
+>
+> **But one lightpanda process serves MANY connections.** `serve` builds
+> `Worker.Pool.init(allocator, config.maxConnections())` and spawns a worker
+> thread — its own browser context and page — per CDP WebSocket, capped by
+> `--cdp-max-connections` (**default 16**). Verified on `src/server/Server.zig`
+> (`spawnWorker` → `Worker.Pool.acquire`) and measured against ONE container:
+>
+> | connections to the same endpoint | URLs | wall | `effective_concurrency` |
+> |---|---|---|---|
+> | 1 | 8 | 6.15 s | 1 (wall ≈ Σ page times) |
+> | 4 | 8 | **1.17 s** | 4 |
+> | 8 | 16 | **4.19 s** (Σ 20.1 s) | 8 |
+>
+> So the cheap lever is **repeat the same endpoint in `cdp_urls`**, N times, up
+> to `--cdp-max-connections`.
+>
+> **Connections are not the whole story: workers in one process SHARE the HTTP
+> pool.** `Network` (on `App`) owns `--http-max-concurrent` (default 40) and
+> `--http-max-host-open` (**default 6 per host**), so 8 workers all pulling
+> Wikipedia queue behind 6 per-host slots and every page slows down. Measured on
+> 25 URLs: 8 connections to one container = **9.6 s** (Σ page times 60.9 s) vs
+> **3.5 s** across 10 separate containers (Σ 25.0 s). Separate processes each
+> get their own pool, plus their own profile, cookies and exit IP.
+>
+> **So pick by what you need:** a few extra connections (≈4 is the sweet spot on
+> this box) when the URLs are spread across many hosts; separate processes when
+> many URLs share a host, or you need per-IP isolation; and either way the real
+> ceiling is CPU — Docker here has `NCPU=4`, so ~4 productive workers per 4
+> cores. Connections cost nothing in RAM; a container costs ~85 MB and boot
+> time.
+>
+> **Lightpanda Cloud works with no container at all.** Its endpoint is a raw
+> `wss://` URL (`wss://euwest.cloud.lightpanda.io/ws?token=<token>&browser=lightpanda`)
+> and `CDP_URL` / `cdp_urls` accept `ws://` and `wss://` directly — passed
+> through, never probed for `/json/version`. Same rules: each connection is one
+> page, so list the cloud endpoint N times for N concurrent pages, up to your
+> plan's connection cap. Measured: 1 connection = 25 URLs in 16.5 s (Σ page
+> times 14.7 s, i.e. fully serial); per-page cost is close to local, the
+> handshake is what costs ~1.8 s. Treat the token as a credential: it is
+> billable, never commit it or paste it into a report.
+>
+> **Do not mix a slow remote backend into a fast local pool.** Round-robin
+> splits URLs evenly regardless of per-backend speed, so the slowest member sets
+> the wall clock. Measured on 25 URLs: 10 local containers = 3.5 s, cloud alone
+> = 16.5 s, **cloud + those same 10 local containers = 8.3 s** — worse than the
+> local pool alone, because the cloud connection's 3 URLs (one took 3.5 s) cost
+> more than the entire local run. Give a remote endpoint its own call, or rank
+> backends by measured per-page time before assigning shares.
+>
+> Pick obscura for large parallel crawls, lightpanda for footprint and
+> per-page velocity (verified: ~2-4s/page on mymarket.gr vs ~12s/page on
+> obscura), N lightpanda containers when you want that velocity at scale.
 
 ### a11y (observe what=a11y)
 Google/Material widgets are often NOT `button`: dropdowns are `combobox`, menu
@@ -85,6 +140,51 @@ After `webrain_navigate(url)`, check `challenge` in the response:
     the headed browser (`waiting_for_human:true`).
   - **Non-interactive** Turnstile / basic bot detection → obscura `--stealth`
     may pass (still verify via the `challenge` field).
+
+---
+
+## 2b. "It renders but never loads" — hydration check
+
+Do this before blaming the site. `webrain_navigate` returns when `readyState`
+is `complete`, which is BEFORE the SPA mounts, so an immediate probe can read a
+dead shell on a perfectly healthy page. Re-probe after ~1s, then:
+
+```js
+const el = document.querySelector('input');                    // a real control
+Object.keys(el).filter(k => k.startsWith('__react')).length    // 0 = not hydrated
+Object.keys(el).some(k => k.startsWith('__react'))             // true = React attrs
+```
+
+Gate on the **interaction**, not the markup: a page whose submit button is still
+`disabled` and whose list is empty has not mounted, even with the right title and
+`challenge: null`.
+
+Measured cause on `https://www.ab.gr/storelocator` (2026-10-24, real Chrome): the
+injected stealth shim, not the site.
+
+- A fake `navigator.plugins` (built with `Object.create(PluginArray.prototype)`)
+  made iteration throw `TypeError: Illegal invocation` in page code. Fixed:
+  spoof only when the browser reports none, and set `length` via
+  `Object.defineProperty`.
+- The NOISE block (default ON) replaces `Object.defineProperty` globally and hooks
+  `CanvasRenderingContext2D.getImageData`, `AudioBuffer.getChannelData`,
+  `HTMLMediaElement.canPlayType`. With NOISE on, Next.js aborted hydration
+  (`REJ Cannot read properties of undefined (reading 'getInitialProps')`, zero
+  react keys, 558-char body); with `WEBRAIN_STEALTH_NOISE=0` the same browser
+  hydrated (3 react keys, button enabled, 4919-char body).
+
+Procedure when you hit this:
+
+1. `WEBRAIN_STEALTH_NOISE=0` in the process env that owns the CDP connection
+   (read at attach — restart an MCP server to apply it).
+2. Open a FRESH tab. `Page.addScriptToEvaluateOnNewDocument` registrations last
+   for the target's lifetime; re-navigating the same tab silently keeps the old
+   shim, which is why an env-var change can appear to do nothing.
+3. Compare against a hand-opened tab of the same URL. If the human tab works and
+   ours does not, it is our injection — never report the site as frozen.
+
+Prefer real Chrome + a real fingerprint on real sites: the fingerprint noise
+buying Cloudflare coverage is exactly what costs SPA compatibility.
 
 ---
 
@@ -321,10 +421,45 @@ STEP 6: extract (§3) → done
 
 | Backend | Managed JS challenge (Just a moment) | Interactive Turnstile | Non-interactive Turnstile | Screenshot / render |
 |---|---|---|---|---|
-| obscura v0.1.11 `--stealth` | ❌ V8 crashes | ❌ no iframe | ✅ `obscura fetch --stealth --wait 30` | ❌ no paint engine |
+| obscura v0.1.11 `--stealth` | ❌ V8 crashes | ❌ no iframe | ✅ `obscura fetch --stealth --wait 30` | ⚠️ render builds only |
 | obscura v0.2.0 `--stealth` | ❌ V8 crashes (same) | ❌ no iframe | ✅ same recipe | ✅ native Rust renderer |
 | real Chrome + persistent profile/session (native login) | ✅ | ✅ auto-waits; ⚠️ interactive needs human | ✅ | ✅ |
 | lightpanda | ❌ | ❌ | ~ | ❌ fake placeholder PNG |
+
+Measured on **v0.2.5** (2026-10-24): the render build paints — `obscura fetch
+<url> -s out.png` wrote a 63 KB PNG — but a data-driven SPA can still stay
+**unmounted**. `ab.gr/eshop/search` returns a ~1 MB shell with an empty Apollo
+state (~518 B), 0 product links and 0 prices, both at the default 30 s script
+deadline and with `OBSCURA_SCRIPT_DEADLINE_MS=120000`, and both through
+`webrain_batch` and the bare binary (no webrain injection). Obscura's own stderr
+names the cause: React hydration throws `TypeError: Cannot read properties of
+undefined (reading 'firstChild')` in `_next/.../_app.js`, so the app never mounts.
+
+The missing DOM API is **per-tag element interfaces**. Obscura exposes one class
+for every element, so `HTMLTemplateElement.prototype === Element.prototype` is
+`true` (Chrome: `false`). AB's `_app.js` feature-detects `HTMLTemplateElement` and
+polyfills `firstChild` on it — which on obscura patches `firstChild` for **all**
+elements, and `get firstChild(){ return this.content.firstChild }` throws on any
+plain node. Verified both ways: obscura `sameProto: true` → `TypeError`; Chrome
+`sameProto: false` → no throw, `<div>.firstChild` still works. Obscura's docs
+document SVG interface ancestry ("supports interface checks in page scripts") but
+never mention `HTMLElement`, `customElements` or `tagName`.
+
+Probe before trusting any engine on a hydrating SPA — two lines, no navigation:
+`HTMLTemplateElement.prototype === Element.prototype` (must be `false`) and
+`document.createElement('template').constructor.name` (must be
+`HTMLTemplateElement`, not `Element`). That is the documented "some Web APIs …
+intentional relative to Chromium" class, not a rendering gap. **"Can paint" is
+not "can boot a data-driven SPA."**
+
+The probe is a property of the **engine build**, not of the site: it returns the
+same answer for every SPA on that build. A failing probe means "this engine
+cannot boot data-driven SPAs at all", so it is not a per-site verdict — do not
+read it as "obscura dislikes ab.gr". Obscura v0.2.5 fails it, so ab.gr is a
+Chrome case on both counts (Chrome also extracts it in ~2 s, so obscura would
+never have been the only viable engine). If a later obscura build returns `false`,
+the whole class is worth re-testing at once — and still verify the extracted
+fields, not the engine name.
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
 webrain auto-selects the best asset for your platform + stealth preference
@@ -424,4 +559,47 @@ TCP but answers nothing (docker-proxy → loopback mismatch). Start with
 `serve --port 9222 --host 0.0.0.0 --stealth` and point webrain at
 `ws://<host>:<mapped>/devtools/browser`. A curl `http://host:port/json/version`
 probe confirms reachability before any crawl.
+
+---
+
+## 8. Environment variables that change agent behaviour
+
+Every variable here is read **once**, at process start or at CDP attach. webrain
+cannot change one mid-run, and no tool call can set one: state the exact
+`VAR=value`, say the MCP server must restart, and then **open a fresh tab** —
+injected scripts live as long as the tab, so re-navigating the same tab keeps
+the old shim and the change looks ignored.
+
+Full table with platform defaults: [`docs/reference/environment.mdx`](reference/environment.mdx).
+The same list ships inside the binary, so `webrain_guide(topic="env")` answers
+on a machine with no repo checkout.
+
+| Variable | Why an agent cares |
+|---|---|
+| `CDP_URL` | **The real browser choice.** `127.0.0.1:9222` = real Chrome, 9224 = obscura, 9225 = lightpanda, any remote Chrome works. Every "which engine" decision in this guide is really this variable. A raw `ws://` / `wss://` URL is accepted and passed straight through (no `/json/version` probe) — that is how Lightpanda Cloud and other hosted CDP endpoints are reached. |
+| `WEBRAIN_STEALTH_NOISE=0` | The hydration fix (§2b) — drop the canvas/audio fingerprint-noise block when a page renders but never mounts. |
+| `WEBRAIN_NO_STEALTH=1` | Drops *all* injected stealth JS. A diagnostic for "is our shim breaking this page?" — never present it as the fix for a Cloudflare/CAPTCHA wall. ⚠️ `webrain serp` sets it **on itself** (`main.rs:207`) — see the relaunch recipe below. |
+| `WEBRAIN_NO_STATE=1` | Shared-instance mode: vault/launch/login/session answer "disabled on this instance". That is this variable, not a bug — report it. |
+| `WEBRAIN_HTTP_TOKEN`, `WEBRAIN_ALLOW_UNAUTHENTICATED` | Bearer auth for `mcp --http`. An auth rejection is a deployment fact, never a page problem. |
+| `WEBRAIN_PROXIES` | Rotation pool for the HTTP engines + the google/brave guest Chrome; a per-call `proxy` overrides it and never rotates. |
+| `WEBRAIN_PROFILES_DIR`, `WEBRAIN_VAULT_DIR` | Where persistent profiles and the encrypted vault live. A moved profile root behaves exactly like "logged out". |
+| `WEBRAIN_BROWSERS_DIR`, `WEBRAIN_CHROME`, `WEBRAIN_LIGHTPANDA`, `WEBRAIN_OBSCURA` | Engine discovery. `engine not found` = wrong path or nothing installed (`webrain install --engine …`). |
+| `WEBRAIN_SKILLS_DIR` | Operator `.md` skills served through `webrain_guide(topic="skill:<name>")`. |
+| `BRAVE_API_KEY`, `SERPAPI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `FIREWORKS_API_KEY`, `OPENROUTER_API_KEY`, `EMBED_*` | Provider tiers. Unset only means a cheaper tier or the bundled local model — never a reason to claim a scrape is impossible. |
+
+### 8b. Relaunching the MCP server without changing its identity
+
+A restart is **three** decisions, and getting one wrong changes the browser
+identity silently. The combination that actually works is:
+
+| Piece | Value | Why |
+|---|---|---|
+| `CDP_URL` | the port you validated (e.g. `http://127.0.0.1:9229`) | the server attaches at startup; with `9222` showing *no browser* it would have nothing to drive |
+| `WEBRAIN_STEALTH_NOISE` | `0` only if that page needed the hydration fix | reproduces the working combination; noise-ON makes those pages hang |
+| `WEBRAIN_NO_STEALTH` | **deleted from the shell** | `webrain serp` sets `WEBRAIN_NO_STEALTH=1` on itself (`main.rs:207`); if that leaks into the launching shell the server boots with **all** stealth off — no UA masking, no `webdriver` hiding — and every later result is measured against a different identity |
+
+Intent in words: **core stealth on, fingerprint noise off, attached to the
+profile you validated.** If a run "suddenly" behaves like a different browser,
+check this variable before re-diagnosing the site.
+
 

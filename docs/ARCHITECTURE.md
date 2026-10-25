@@ -126,7 +126,7 @@ webrain/
 │   └── src/
 │       ├── lib.rs              # run_stdio() / run_http(): initialize / ping /
 │       │                       #   tools/list / tools/call; lazy CDP connect
-│       └── tools.rs            # 34 tools (see §9) + dispatch; webrain_eval → JS→JSON
+│       └── tools.rs            # 17 tools (see §9) + dispatch; webrain_eval → JS→JSON
 ├── webrain-cli/
 │   ├── Cargo.toml
 │   └── src/

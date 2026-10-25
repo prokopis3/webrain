@@ -34,32 +34,21 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 
 ## What you can do with it
 
-- **Scrape at scale** — batch pagination + spider with auto-throttle and checkpoint/resume; `webrain_sitemap` / `webrain_scan` to map a site first.
-- **Structured data without hand-written selectors** — `webrain_autoschema` probes the DOM, then JSON / regex / table extractors read container-level structure.
-- **Stealth login** — real-Chrome profiles with an encrypted local credential vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
-- **Get past challenges** — reads the `challenge` field on every navigate; protected sites use real Chrome + a persistent profile + session (native login). Native CAPTCHA/vision v2 (drag, eval_in_frame, vision ask) — no Python sidecar.
-- **See the page** — a11y / semantic tree, snapshots, and vision tiles (screenshot → vector store) for tables and charts.
-- **Structured search** — `webrain_serp` returns typed JSON (`position`/`title`/`url`/`domain`/`snippet`) across duckduckgo · bing · google · brave, deduped, paginated, region-pinned, with proxy + 2captcha + serpapi fallbacks.
-- **Read anything** — PDFs (extract + render), JSON-LD, media, plus `fetch_http` for static pages 10–100× faster than a browser.
+- **Scrape at scale** — `webrain_batch` runs one op across many URLs in parallel tabs; `webrain_crawl` handles spider / sitemap / infinite-scroll / URL-validation, both with auto-throttle and checkpoint-resume.
+- **Structured data without hand-written selectors** — `webrain_extract` mode `autoschema` proposes the repeated container, then `schema` / `regex` / `table` / `jsonld` read it. All zero-LLM.
+- **Stealth login** — real-Chrome profiles with an encrypted local credential vault (AES-256-GCM + optional TOTP), plus cookie transfer across engines.
+- **Get past challenges** — every `webrain_navigate` reports a `challenge` field; protected sites clear with real Chrome + a persistent profile + native login. Native CAPTCHA/vision v2 (drag, `eval_in_frame`, vision ask) — no Python sidecar.
+- **See the page** — `webrain_observe` (state / a11y / semantic tree) plus vision tiles (screenshot → vector store) for tables and charts.
+- **Structured search** — `webrain_serp` returns typed JSON (`position`/`title`/`url`/`domain`/`snippet`), deduped and paginated, across provider tiers: free HTTP engines → Brave API key → browser render → serpapi.
+- **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus `webrain_scrape` for static pages over plain HTTP — 10–100× faster than a browser.
 
 ---
-
-## Tech Stack
-
-- **Language**: Rust (edition 2024, MSRV 1.85)
-- **Workspace**: `webrain-core` (CDP client, engines, vault, launch, install) · `webrain-mcp` (MCP server + tool schemas) · `webrain-cli` (single binary)
-- **Protocol**: Model Context Protocol (stdio + HTTP transports)
-- **Browser automation**: Chrome DevTools Protocol over `tokio-tungstenite` (raw WebSocket)
-- **Engines**: Chrome for Testing · Lightpanda (Zig) · Obscura (Rust, V8) · `fetch_http`
-- **Crypto**: AES-256-GCM vault, SHA-256/HMAC/SHA-1 (TOTP)
-- **PDF**: lopdf + pdf-inspector (pure Rust)
-- **Deployment**: Docker (multi-arch), GitHub Actions CI/CD
 
 ## Prerequisites
 
 - **OS**: Windows, macOS, or Linux (x86_64 / arm64).
 - **A browser engine** — run `webrain install` once (downloads Chrome for Testing). Obscura and Lightpanda are optional extra engines.
-- **Linux**: system libraries for Chrome (list below) before first run.
+- **Linux**: system libraries for Chrome — see [installation](docs/installation.mdx#linux-dependencies).
 - **Docker** — only to run the obscura / lightpanda engines in containers.
 - **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
 
@@ -83,94 +72,13 @@ curl -fsSL https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/inst
 irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex
 ```
 
-Then, in any terminal:
+Then download a browser engine once — `webrain install` — and follow [Run it](#run-it).
 
-```bash
-webrain install          # Download Chrome for Testing (first time only)
-webrain mcp --http 9223  # start the MCP server
-```
+### Other install paths
 
-> Prefer a manual download? The per-OS commands below do the same without a script.
-
-**Windows (PowerShell):**
-
-```powershell
-$dir = "$env:LOCALAPPDATA\Programs\webrain"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Invoke-WebRequest "https://github.com/prokopis3/webrain/releases/latest/download/webrain-windows.exe" -OutFile "$dir\webrain.exe"
-[Environment]::SetEnvironmentVariable("Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$dir", "User")
-# open a new terminal, then:
-webrain install          # Download Chrome for Testing (first time only)
-webrain mcp --http 9223  # start the MCP server
-```
-
-**Linux / macOS:**
-
-```bash
-curl -L -o ~/.local/bin/webrain https://github.com/prokopis3/webrain/releases/latest/download/webrain-linux
-chmod +x ~/.local/bin/webrain
-webrain install          # Download Chrome for Testing (first time only)
-webrain mcp --http 9223  # start the MCP server
-```
-
-> macOS: swap `webrain-linux` for `webrain-macos` in the curl line.
-
-### Project Installation
-
-Pin a version as a local dependency:
-
-```bash
-cargo add webrain --git https://github.com/prokopis3/webrain
-# or build from this repo (see From Source)
-```
-
-### Cargo (Rust)
-
-```bash
-cargo install --git https://github.com/prokopis3/webrain webrain-cli
-webrain install   # Download Chrome (first time only)
-```
-
-### Homebrew (macOS)
-
-```bash
-brew tap prokopis3/webrain
-brew install webrain
-webrain install   # Download Chrome (first time only)
-```
-
-### Scoop (Windows)
-
-From the official **extras** bucket (after [PR #18455](https://github.com/ScoopInstaller/Extras/pull/18455) merges):
-
-```powershell
-scoop install extras/webrain
-```
-
-Or from the project's own bucket:
-
-```powershell
-scoop bucket add webrain https://github.com/prokopis3/scoop-webrain
-scoop install webrain
-webrain install   # Download Chrome (first time only)
-```
-
-### Linux Dependencies
-
-On Linux, Chrome needs system libraries. Install them with your package manager before first run:
-
-```bash
-# Debian/Ubuntu
-sudo apt-get install -y libnss3 libnspr4 libxkbcommon0 libatk1.0-0 \
-  libatk-bridge2.0-0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 \
-  libxcursor1 libxi6 libxtst6 libxss1 libxext6 fonts-liberation
-
-# Fedora
-sudo dnf install -y nss nspr libxkbcommon atk at-spi2-atk at-spi2-core \
-  libXcomposite libXdamage libXrandr libXfixes libXcursor libXi libXtst \
-  libXScrnSaver libXext
-```
-
-If you see *"shared library"* errors when running Chrome, that's the missing-deps symptom — install the list above.
+Homebrew, Scoop, `cargo install`, a manual binary download, and a from-source
+build are all covered in [docs/installation.mdx](docs/installation.mdx),
+together with the Linux system libraries Chrome needs.
 
 ### From Source
 
@@ -209,7 +117,7 @@ webrain install --engine obscura
 
 ### OS Compatibility
 
-**Yes — the codebase targets all three desktop OSes.** Engines per OS:
+Every engine, per OS:
 
 | Engine | Windows | macOS | Linux |
 |---|---|---|---|
@@ -220,44 +128,33 @@ webrain install --engine obscura
 
 Binary discovery is automatic on every OS: env override → PATH → `~/.lightpanda`, `~/.obscura`, `~/.local/bin` → the webrain engine cache.
 
-## Quick Start
+## Run it
 
 ```bash
-# 1. Get a browser engine
-webrain install
-
-# 2. Start the MCP server (stdio for VS Code/Copilot, or HTTP)
-webrain mcp                        # stdio
-webrain mcp --http 9223            # HTTP transport on 127.0.0.1:9223
-
-# 3. Point an LLM at it. Register the MCP server in your client (see "Marketplace / IDE Plugins"):
-#    stdio:  {"servers": {"webrain": {"command": "webrain", "args": ["mcp"]}}}
-#    HTTP:   webrain mcp --http 9223  →  {"servers": {"webrain": {"type": "http", "url": "http://127.0.0.1:9223/mcp"}}}
-
-# 4. Ask the LLM to do something, e.g. "scrape all product titles + prices from URL X"
+webrain install          # 1. one browser engine (Chrome for Testing)
+webrain doctor           # 2. verify: engines, CDP ports, vault, MCP
+webrain mcp              # 3. MCP over stdio (VS Code, Claude, Cursor, …)
+webrain mcp --http 9223  #    …or HTTP on http://127.0.0.1:9223/mcp
 ```
 
-Prefer to drive it by hand? Every engine + tool has a CLI twin:
+Register that server in your client (see *Marketplace / IDE Plugins* below), then
+just ask: **“scrape every product title and price from <url>”**.
+
+Prefer the CLI? `webrain launch` gives you headed Chrome with a persistent profile,
+and every MCP tool has a command twin — see [Commands](#commands).
+
+### Selecting elements
+
+The MCP tools drive elements by **index**, not by CSS selector: `webrain_navigate` /
+`webrain_observe` return the interactive elements (`a, button, input, select, textarea,
+[role=button]`) and `webrain_interact` takes that index — `{"action": "click", "index": 3}`.
+The CLI uses the same 1-indexed refs:
 
 ```bash
-webrain launch scrapingcourse demo "https://example.com/login" --port 9222   # headed Chrome + login
-webrain doctor                 # full diagnosis: engines, MCP, CDP, vault
-webrain fetch <url>             # attach to CDP_URL and fetch
-webrain screenshot <url>
-webrain eval "document.title"
-```
-
-### Traditional Selectors (also supported)
-
-The MCP tools take plain CSS selectors directly (e.g. `webrain_click` with
-`selector: "#submit"`), and the CLI works on snapshot refs — the same elements
-`snapshot` reports, 1-indexed:
-
-```bash
-webrain launch https://example.com
-webrain snapshot          # prints interactive elements, 1-indexed
-webrain click 3           # click element #3
-webrain type 5 "text"     # type into element #5
+webrain launch                     # guest-mode Chrome (no profile state)
+webrain fetch https://example.com  # prints the page text + interactive elements
+webrain click 3                    # click element #3
+webrain type 5 "text"              # type into element #5
 webrain eval 'document.querySelector("#email").value'
 ```
 
@@ -273,7 +170,7 @@ webrain login <service> <profile> [url]            # interactive login into a pr
 webrain vault set|list|user|rm                     # encrypted credential vault (AES-256-GCM + TOTP)
 webrain cookies / setcookies <file>                # export / import cookies
 webrain fetch <url>                                # attach to CDP_URL and fetch
-webrain screenshot <url>                           # screenshot (single or full page)
+webrain screenshot <url>                           # full-page screenshot (always full page)
 webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
@@ -297,6 +194,7 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 **Key rules (see [Agent Decision Guide](#agent-decision-guide)):**
 
 - **Never** use obscura/lightpanda for Material/SPA interaction — they still lack the layout engine for complex Material UI widgets. Obscura v0.2.0+ **render builds** can screenshot and export PDFs (native Rust renderer). Lightpanda returns a *fake placeholder PNG*. Route interactive SPAs to real Chrome via `cdp_urls:["http://127.0.0.1:9222"]`.
+- **Parallelism differs per engine.** Chrome and obscura open N tabs on one connection, so `concurrency` is the lever. **lightpanda is single-target per *connection*** (its 2nd `Target.createTarget` errors `TargetAlreadyLoaded`), so one endpoint runs URLs serially and the reply says so (`single_target: true, effective_concurrency: 1`); its lever is *connections* — repeat the same endpoint in `cdp_urls` (each connection gets its own worker/page, capped by `--cdp-max-connections`, default 16). Measured on 8 URLs: 1 connection 6.15 s vs 4 connections 1.17 s. Hosted equivalents work the same way: a `wss://` endpoint (e.g. Lightpanda Cloud) is accepted directly.
 - Read the `challenge` field after every `webrain_navigate`. If it's non-null, the page is gated — use real Chrome + a persistent profile + session (`webrain launch` / `webrain login`).
 - Extract from container/card-level DOM, not bare `$` text nodes (Google Flights renders a spurious price grid).
 
@@ -314,12 +212,12 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
 | `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
 | `webrain_search` | Web search (duckduckgo · google · bing · brave) |
-| `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · google · brave · auto (dedupe · paginate · region-pin · proxy · 2captcha) |
+| `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · google · brave · auto (dedupe · paginate · region-pin · proxy · Brave API key · serpapi) |
 | `webrain_pdf` | PDF work: `op` = page · extract (→ markdown) · render (→ vision tiles) · images |
 | `webrain_download` | Files/media: `engine` = http (stream) · ytdlp (HLS/playlists) |
 | `webrain_watch` | Video → timestamped transcript + frames (no browser; `vision:true` → text captions) |
 | `webrain_session` | Browser/auth/session: `op` = open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch |
-| `webrain_vision` | Screenshot-tile vision index: `op` = index · retrieve |
+| `webrain_vision` | Screenshot-tile vision: `op` = index · retrieve · ask (local Qwen3-VL question answering over a viewport or clip region) |
 | `webrain_eval` | Arbitrary JS in the page (escape hatch) |
 | `webrain_eval_in_frame` | Run JS inside a cross-origin iframe (isolated world) |
 | `webrain_guide` | Agent decision guide (browser/challenge/extraction/delegation) |
@@ -348,40 +246,30 @@ Cloud keys (`GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY`) are optiona
 if you run the local stack. `webrain install watch` prints a `warnings` block if
 anything's missing.
 
-## CLI Reference
-
-| Command | Description |
-|---|---|
-| `webrain mcp [--http <port>]` | Start the MCP server (stdio, or HTTP on a port) |
-| `webrain install [--force] [--engine chrome\|obscura] [--stealth]` | Download a browser engine into the cache |
-| `webrain obscura [--port N]` | Spawn the Obscura CDP server (default 9224) |
-| `webrain lightpanda [--port N]` | Spawn the Lightpanda CDP server (default 9225) |
-| `webrain launch <service> <profile> [url] [--headless] [--port N]` | Spawn a stealth Chrome with a persistent per-account profile |
-| `webrain login <service> <profile> [url] [--port N]` | Launch + attach for interactive login |
-| `webrain cookies [--port N] [--out file]` / `webrain setcookies <file>` | Export / import cookies |
-| `webrain fetch <url>` · `webrain screenshot <url>` · `webrain spider <url>` · `webrain click <i>` · `webrain type <i> <text>` · `webrain eval <js>` | Drive the `CDP_URL` backend |
-| `webrain vault set\|list\|user\|rm` | Manage encrypted credentials (hidden prompts) |
-| `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend`. `--doctor` alias |
-
 ## Environment Variables
+
+The ones you are most likely to set. **Every variable is read once, at process
+start or at CDP attach** — change one and restart the MCP server; a *stealth*
+change also needs a fresh tab, because injected scripts live as long as the tab.
+The complete list, with defaults and the allow/deny rules, is in
+[docs/reference/environment.mdx](docs/reference/environment.mdx).
 
 | Variable | Description | Default |
 |---|---|---|
 | `CDP_URL` | CDP endpoint to attach to | `http://127.0.0.1:9222` |
-| `WEBRAIN_HTTP_TOKEN` | Shared secret for the HTTP transport — when set, every request must carry `Authorization: Bearer <value>` (compared in constant time). Unset means no auth, which is only permitted on a loopback bind (see `WEBRAIN_ALLOW_UNAUTHENTICATED`) | unset |
-| `WEBRAIN_HTTP_ADDR` | Bind address for `webrain mcp --http`. Defaults to loopback; set `0.0.0.0:9223` inside a container | `127.0.0.1:<port>` |
-| `WEBRAIN_ALLOW_UNAUTHENTICATED` | Truthy value permits a **non-loopback** HTTP bind with no token. Without it, webrain refuses to start in that combination rather than silently serving as an open engine | off |
-| `WEBRAIN_NO_STATE` | Truthy value disables every stateful/session tool (shared-instance mode) and caps tab fan-out at 6 | off |
-| `WEBRAIN_CHROME` | Explicit Chrome binary path | auto-discovered |
+| `WEBRAIN_HTTP_TOKEN` | Bearer token the HTTP transport requires, compared in constant time. Unset is only allowed on a loopback bind | unset |
+| `WEBRAIN_ALLOW_UNAUTHENTICATED` | Permit a **non-loopback** HTTP bind with no token — without it webrain refuses to start that way rather than serving as an open engine | off |
+| `WEBRAIN_NO_STATE` | Disable every stateful/session tool (shared-instance mode) and cap tab fan-out at 6 | off |
+| `WEBRAIN_STEALTH_NOISE` | Set `0` to drop the canvas/audio fingerprint-noise block. **This is the fix when a page renders but never mounts** — a Next.js/Angular SPA whose grid stays empty while a hand-opened tab of the same URL works | on |
+| `WEBRAIN_NO_STEALTH` | Set `1` to skip *all* injected stealth JS + the UA override. A diagnostic for "is our shim breaking this page?" — **not** a workaround for hostile sites | off |
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
-| `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
-| `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / `~/.config/webrain/profiles` |
-| `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
-| `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys; `GROQ`/`OPENAI` also power the vision chain | — |
-| `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
-| `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
-| `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
+| `WEBRAIN_CHROME` / `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit engine binary paths — `engine not found` means one of these is wrong or nothing is installed | auto-discovered |
+| `WEBRAIN_PROFILES_DIR` | Persistent browser-profile root. Profiles are what keeps a login or a solved challenge across calls; pointing this somewhere new looks exactly like being logged out | `%APPDATA%\webrain\profiles` / `~/.local/share/webrain/profiles` |
+| `WEBRAIN_PROXIES` | Proxy rotation pool (comma/newline list) for the HTTP engines and the google/brave guest Chrome; a per-call `proxy` overrides it | unset |
+| `WEBRAIN_SKILLS_DIR` | Directory of operator `*.md` skills the agent reads through `webrain_guide(topic="skill:<name>")` | unset (off) |
+| `BRAVE_API_KEY` | Enables the keyed Brave SERP provider — `--engine brave` then needs no browser | unset |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Optional cloud STT and vision; the bundled local stack needs no keys | unset |
+| `RUST_LOG` | Log verbosity, e.g. `webrain=info,tungstenite=warn` | — |
 
 ## Marketplace / IDE Plugins
 
@@ -475,6 +363,21 @@ LLM prompt → tool call (webrain_navigate/extract/batch/…) → CdpBackend →
 - **Extraction matrix** — autoschema → extract_json → batch → regex → table → spider; never guess selectors.
 - **a11y** — Google/Material widgets are `combobox`/`option`/`tab`, not `button`; `filter` matches name/value/css_path; if `role=<x>` returns `[]`, drop the role and filter by label.
 
+## Documentation
+
+| Page | What's in it |
+|---|---|
+| [Quickstart](docs/quickstart.mdx) | Engine → MCP server → a live scrape in minutes |
+| [Installation](docs/installation.mdx) | Every install path, Linux libraries, updating |
+| [Agent Decision Guide](docs/AGENT_DECISION_GUIDE.md) | Which engine, which tool, how to handle a challenge |
+| [Tools reference](docs/reference/tools.mdx) | The 17-tool surface, per tool and per selector |
+| [CLI reference](docs/reference/cli.mdx) | Every subcommand and flag |
+| [Environment variables](docs/reference/environment.mdx) | Every knob, with defaults |
+| [Architecture](docs/ARCHITECTURE.md) · [ADRs](docs/adr/) | How the layers fit, and why |
+| [Browser engines](docs/concepts/browsers.mdx) | Chrome vs Obscura vs Lightpanda |
+| [Comparisons](docs/comparisons/) | vs Playwright, Puppeteer, Firecrawl, crawl4ai, Browser Use |
+| [Changelog](CHANGELOG.md) | What shipped, per release |
+
 ## Testing
 
 ```bash
@@ -498,7 +401,7 @@ GitHub Actions (`.github/workflows/`):
 - **`ci.yml`** — `cargo fmt --check` + `clippy` + `test` on every push/PR to `main`.
 - **`release.yml`** — on a `v*` tag push: builds the binary natively on Linux/Windows/macOS, generates the CHANGELOG entry for that version (if missing), and creates the GitHub Release with the changelog section as the body.
 - **`pr-lint.yml`** — enforce conventional-commit PR titles (`<type>(<scope>): <description>`).
-- **`changelog-enforce.yml`** — require the changelog to be updated when source changes (PRs and pushes to `main`).
+- **`changelog-enforce.yml`** — require the changelog to be updated when source changes (PRs and pushes to `main`). Entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + [SemVer](https://semver.org/spec/v2.0.0.html), grouped under `[Unreleased]` with per-entry `**scope**:` prefixes that match the commit scopes.
 
 Commit convention: `<type>(<scope>): <description>` — types `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`, scopes `core|engines|mcp|tools|cli|install|launch|login|vault|vision|pdf|download|cookies|batch|extraction|navigation|stealth|antibot|session|media|docs|build|ci|style|perf|dist|deps|config|test|skill|script|release`.
 
@@ -535,10 +438,6 @@ docker buildx build --platform=linux/amd64,linux/arm64 -t ghcr.io/prokopis3/webr
 **`webrain doctor` shows MCP down** → start `webrain mcp --http 9223`; if CDP ports are down, `webrain install` then start an engine.
 
 **Cloudflare/Turnstile blocks the scrape** → read the `challenge` field and use real Chrome with a persistent profile + session: `webrain launch <service> <profile> <url>` then `webrain login <service> <profile>`, or re-attach an already-authenticated Chrome via `CDP_URL`.
-
-## Changelog
-
-See [`CHANGELOG.md`](CHANGELOG.md). The changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + [SemVer](https://semver.org/spec/v2.0.0.html): unreleased changes live under `## [Unreleased]`, grouped by `### Added / Changed / Fixed / …`, with per-entry `**scope**:` prefixes matching the commit scopes. CI enforces it (`changelog-enforce.yml`). Releases are cut by the release workflow, which versions from conventional commits and regenerates the changelog entry.
 
 ## Contributing
 

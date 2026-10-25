@@ -152,6 +152,8 @@ memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 | `docs/adr/` | Architecture Decision Records |
 | `docs/reference/tools.mdx` | The 17-tool MCP surface |
 | `skills/webrain/SKILL.md` | The agent-facing skill |
+| `.github/skills/web-research/SKILL.md` | Generic web→dataset research loop |
+| `.github/skills/product-market-research/SKILL.md` | Cross-shop product/price/spec comparison |
 | `/memories/repo/project-structure.md` | Repo memory with live codebase stats |
 
 ---

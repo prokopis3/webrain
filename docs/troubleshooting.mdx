@@ -45,6 +45,7 @@ ports (9222/9224/9225), and vault. Exit **0** healthy,
 | `webrain_eval` returns null on obscura | Obscura doesn't reliably await async JS — use `webrain_batch(op=interact)` for async work |
 | `webrain_batch` errors fast (5s) | No browser backend running — start one or pass `cdp_urls` |
 | LLM getting huge HTML blobs | Stop calling `webrain_observe` what=html — use what=state/clean/eval/extractors |
+| Page renders then "keeps loading": title right, `challenge: null`, submit stays `disabled`, body stuck at the SSR empty state | Hydration, not a block. Re-probe after ~1s (navigate returns pre-mount), test `Object.keys(el).filter(k=>k.startsWith('__react')).length`, and if a hand-opened tab works set `WEBRAIN_STEALTH_NOISE=0` for the process owning the CDP connection + open a **fresh tab** (init scripts are per-target) |
 
 ## Rules of thumb
 
