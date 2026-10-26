@@ -117,12 +117,21 @@ jobs:
             git fetch --no-tags origin "+refs/tags/v${VER}:refs/tags/v${VER}"
             git checkout --detach "refs/tags/v${VER}"
           fi
-          echo "### webrain ${VER} — building $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### webrain ${VER}"
+            echo
+            echo "Building \`$(git rev-parse --short HEAD)\`"
+            echo
+            echo '| Registry | Digest |'
+            echo '|---|---|'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # A half-configured registry is an error, not a skip. Checked before the
       # ~6-minute build so it fails in seconds.
       - name: Refuse half-configured registries
         shell: bash
+        env:
+          FLY_APP: ${{ vars.FLY_APP }}
         run: |
           set -euo pipefail
           fail=0
@@ -134,7 +143,7 @@ jobs:
             echo "::error::DOCKERHUB_TOKEN is set but DOCKERHUB_USERNAME is not" >&2
             fail=1
           fi
-          if [ -n "${{ vars.FLY_APP }}" ] && [ -z "${FLY_API_TOKEN:-}" ]; then
+          if [ -n "${FLY_APP:-}" ] && [ -z "${FLY_API_TOKEN:-}" ]; then
             echo "::error::FLY_APP is set but FLY_API_TOKEN is not" >&2
             fail=1
           fi
@@ -173,13 +182,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Each push records the digest the registry ITSELF returned. Reading it from
+      # `docker push` output rather than reconstructing a ref and inspecting it
+      # means the summary can only ever report what was actually uploaded — a
+      # reconstructed ref in this step is exactly the kind of thing that reports
+      # "not pushed" for a registry that did push.
       - name: Push to ghcr
         shell: bash
         run: |
           set -euo pipefail
           REF="ghcr.io/${{ github.repository_owner }}/$IMAGE:$TAG"
           docker tag "$IMAGE:$TAG" "$REF"
-          docker push "$REF"
+          OUT="$(docker push "$REF" 2>&1)"
+          printf '%s\n' "$OUT"
+          DIGEST="$(printf '%s\n' "$OUT" | sed -n 's/.*digest: \(sha256:[a-f0-9]*\).*/\1/p' | tail -n1)"
+          echo "| \`ghcr.io/${{ github.repository_owner }}\` | \`${DIGEST:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push to Docker Hub
         if: env.DOCKERHUB_TOKEN != ''
@@ -188,13 +205,18 @@ jobs:
           set -euo pipefail
           REF="${DOCKERHUB_USERNAME}/$IMAGE:$TAG"
           docker tag "$IMAGE:$TAG" "$REF"
-          docker push "$REF"
+          OUT="$(docker push "$REF" 2>&1)"
+          printf '%s\n' "$OUT"
+          DIGEST="$(printf '%s\n' "$OUT" | sed -n 's/.*digest: \(sha256:[a-f0-9]*\).*/\1/p' | tail -n1)"
+          echo "| \`${DOCKERHUB_USERNAME}\` | \`${DIGEST:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
 
       # Not a deploy. The deploy config and its image pin live outside this repo;
       # this only makes the ref exist so that pin resolves.
       - name: Push to Fly's registry
         if: vars.FLY_APP != ''
         shell: bash
+        env:
+          FLY_APP: ${{ vars.FLY_APP }}
         run: |
           set -euo pipefail
           if [ -z "${FLY_API_TOKEN:-}" ]; then
@@ -205,31 +227,9 @@ jobs:
           # credential that expires in minutes, and a 1.1 GB push outlives it —
           # that is exactly how the last manual push died mid-layer.
           printf '%s' "$FLY_API_TOKEN" | docker login registry.fly.io -u x --password-stdin
-          REF="registry.fly.io/${{ vars.FLY_APP }}:$TAG"
+          REF="registry.fly.io/${FLY_APP}:$TAG"
           docker tag "$IMAGE:$TAG" "$REF"
-          docker push "$REF"
-
-      # The digests are the evidence that the three registries hold one image
-      # rather than three builds of one version. A diff here means the base image
-      # or the cache moved, which is worth seeing in the run summary instead of
-      # discovering at deploy time.
-      - name: Summarize digests
-        if: always()
-        shell: bash
-        run: |
-          set -uo pipefail
-          {
-            echo "### webrain ${TAG}"
-            echo
-            echo '| Registry | Digest |'
-            echo '|---|---|'
-            for host in "ghcr.io/${{ github.repository_owner }}" \
-                        "${DOCKERHUB_USERNAME:-}" \
-                        "${FLY_APP_HOST:+registry.fly.io/$FLY_APP_HOST}"; do
-              [ -n "$host" ] || continue
-              d="$(docker inspect --format "{{range .RepoDigests}}{{println .}}{{end}}" "$host/$IMAGE:$TAG" 2>/dev/null | head -n1)"
-              echo "| \`$host\` | \`${d:-not pushed}\` |"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          FLY_APP_HOST: ${{ vars.FLY_APP }}
+          OUT="$(docker push "$REF" 2>&1)"
+          printf '%s\n' "$OUT"
+          DIGEST="$(printf '%s\n' "$OUT" | sed -n 's/.*digest: \(sha256:[a-f0-9]*\).*/\1/p' | tail -n1)"
+          echo "| \`registry.fly.io\` | \`${DIGEST:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
