@@ -105,9 +105,9 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "serp",
-        "webrain serp \"query\" [--engine duckduckgo|bing|google|brave|auto] [--limit N] [--page N]\n    [--safe] [--region R] [--http] [--no-fallback] [--json] [--proxy URL] [--headless]\n    [--fresh] [--pipe] [--hold]",
+        "webrain serp \"query\" [--engine duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto]\n    [--limit N] [--page N] [--safe] [--region R] [--http] [--no-fallback] [--json]\n    [--proxy URL] [--headless] [--fresh] [--pipe] [--hold]",
         "Structured SERP JSON: one query per call, pages fetched sequentially.",
-        "duckduckgo|auto need no browser. bing uses the HTTP path. brave uses its keyed API\n  when BRAVE_API_KEY is set, else the connected CDP engine. google auto-launches a\n  Chrome with a persistent profile unless --fresh. --fresh starts a new profile and\n  cookies every run; --pipe makes that launch use --remote-debugging-pipe (no open\n  debugging port); --hold keeps it open afterwards. --http never touches a browser at\n  all: no render, no guest launch, whatever is attached — duckduckgo/bing answer in\n  under a second each that way, and it is the only correct mode when you just want\n  those two. Measured ceilings without a browser: bing 10 (its RSS feed and its HTML\n  SERP both ignore paging), duckduckgo ~20 (it serves two distinct pages, then repeats\n  them) — so --limit 50 over HTTP returns ~27, and a larger request needs a browser or\n  BRAVE_API_KEY/SERPAPI_API_KEY. For many queries, issue several calls (or\n  webrain_batch over SERP URLs) — the CLI takes one query.",
+        "duckduckgo|bing|yahoo|baidu|yandex|auto need no browser. brave uses its keyed\n  API when BRAVE_API_KEY is set, else the connected CDP engine. google auto-launches\n  a Chrome with a persistent profile unless --fresh. --fresh starts a new profile and\n  cookies every run; --pipe makes that launch use --remote-debugging-pipe (no open\n  debugging port); --hold keeps it open afterwards. --http never touches a browser at\n  all: no render, no guest launch, whatever is attached — the plain-HTML engines answer\n  in under a second each that way. Measured ceilings without a browser: bing 10 (its\n  RSS feed and its HTML SERP both ignore paging), duckduckgo ~20 (two distinct pages,\n  then repeats), yahoo 25+ (pages on b=11,21,...  so a deep limit works), baidu 10\n  before its security check. baidu and yandex are the walled two: baidu serves ~7\n  organic rows and then 302s to wappass.baidu.com (百度安全验证 image captcha), and\n  yandex serves a SmartCaptcha page from a datacenter IP — both are reported as\n  challenges, never as \"0 results\". A real Chrome with a warm profile passes the\n  baidu check; a FRESH or headless profile does not (measured 2026-10-26: guest Chrome\n  7 baidu rows / 0 yandex, fresh + headless both walled). For many queries, issue\n  several calls (or webrain_batch over SERP URLs) — the CLI takes one query.",
     ),
     (
         "watch",
@@ -413,11 +413,14 @@ fn main() -> anyhow::Result<()> {
             eprintln!("watch done in {} ms", t0.elapsed().as_millis());
         }
         Some("serp") => {
-            // webrain serp "query" [--engine duckduckgo|bing|google|brave|auto]
+            // webrain serp "query"
+            //   [--engine duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto]
             //   [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json]
-            // Structured SERP JSON. duckduckgo/auto need no browser;
-            // bing/google/brave render in the connected CDP engine (CDP_URL /
-            // --remote-debugging-port=9222, google auto-launches guest Chrome).
+            // Structured SERP JSON. duckduckgo/bing/yahoo/baidu/yandex/auto work
+            // over plain HTTP (no browser); google/brave render in the connected
+            // CDP engine (CDP_URL / --remote-debugging-port=9222, google
+            // auto-launches guest Chrome). baidu/yandex fall back to a browser
+            // render only when their HTTP reply is a challenge page.
             let query = args.get(2).cloned().unwrap_or_default();
             if query.trim().is_empty() {
                 print!("{}", help_page("serp"));
@@ -612,7 +615,9 @@ fn main() -> anyhow::Result<()> {
                 // already attached (CDP_URL / 9222) google+brave join the merge.
                 // Fast probe — connection refused is instant, never launches.
                 if !json_out {
-                    println!("engine auto: HTTP (ddg+bing) — browser join if one is attached");
+                    println!(
+                        "engine auto: HTTP (ddg+bing, then baidu/yandex/yahoo top-up) — browser join if one is attached"
+                    );
                 }
                 rt.block_on(CdpBackend::connect_default()).ok()
             } else {

@@ -2254,9 +2254,16 @@ pub async fn batch_eval(
         let js = js.clone();
         async move {
             let v = b.eval_session(&sid, &js).await?;
-            let data = v
-                .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            // A returned STRING is parsed as JSON (the documented
+            // `JSON.stringify(...)` idiom), but a JS array/object arrives
+            // already structured — and the old `v.as_str()`-only branch dropped
+            // it, so `eval: [...links]` came back with data:null AND text:""
+            // (i.e. a successful call that looks empty). Keep the value.
+            let data = match &v {
+                Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+                Value::Array(_) | Value::Object(_) => Some(v.clone()),
+                _ => None,
+            };
             let text = if data.is_some() {
                 String::new()
             } else {

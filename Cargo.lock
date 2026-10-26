@@ -3243,6 +3243,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq-proto",
+ "url",
  "utf8-zero",
  "webpki-roots 1.0.9",
 ]
@@ -3460,7 +3461,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -3475,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3506,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-mcp"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
