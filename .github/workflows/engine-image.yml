@@ -82,14 +82,14 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
+      # No `ref:` on purpose. Checking out a SHA or branch taken from the
+      # triggering event inside a job that holds `packages: write` is the classic
+      # privileged-workflow / fork vector — CodeQL flags it as "checkout of
+      # untrusted code in a privileged context" (high), and it is right to. The
+      # version's actual commit is resolved below from a maintainer-created tag.
       - uses: actions/checkout@v7
-        with:
-          # The commit the release was built from, not whatever this workflow's
-          # ref happens to be, so a branch that moved since the release cannot
-          # be published under the release's version.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Derive and validate the version
+      - name: Derive, validate and pin the version
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
@@ -111,16 +111,16 @@ jobs:
           fi
           echo "TAG=$VER" >> "$GITHUB_ENV"
 
-          # A dispatch must build the tagged commit itself, not some later commit
-          # on main that drifted from the version being published.
-          if [ -n "${DISPATCH_TAG:-}" ]; then
-            git fetch --no-tags origin "+refs/tags/v${VER}:refs/tags/v${VER}"
-            git checkout --detach "refs/tags/v${VER}"
-          fi
+          # Build the TAG'S commit. The tag is a ref a maintainer created; the
+          # head SHA reported by the triggering run is not, which is why it is
+          # never used as a checkout target here. Semver-validated above, so this
+          # can only ever resolve a release tag.
+          git fetch --no-tags --depth=1 origin "+refs/tags/v${VER}:refs/tags/v${VER}"
+          git checkout --detach "refs/tags/v${VER}"
           {
             echo "### webrain ${VER}"
             echo
-            echo "Building \`$(git rev-parse --short HEAD)\`"
+            echo "Building \`$(git rev-parse --short HEAD)\` at tag \`v${VER}\`"
             echo
             echo '| Registry | Digest |'
             echo '|---|---|'
@@ -184,9 +184,7 @@ jobs:
 
       # Each push records the digest the registry ITSELF returned. Reading it from
       # `docker push` output rather than reconstructing a ref and inspecting it
-      # means the summary can only ever report what was actually uploaded — a
-      # reconstructed ref in this step is exactly the kind of thing that reports
-      # "not pushed" for a registry that did push.
+      # means the summary can only ever report what was actually uploaded.
       - name: Push to ghcr
         shell: bash
         run: |
