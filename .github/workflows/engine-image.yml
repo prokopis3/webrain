@@ -1,0 +1,116 @@
+# The container half of a release.
+#
+# `release.yml` publishes binaries and package manifests and says so in its own
+# header ("no registry publish"). This workflow is the other half, deliberately
+# separate: a broken image build must not hold a binary release hostage, and a
+# binary matrix failure must not leave an untagged image behind.
+#
+# One build, three registries, each independent:
+#   ghcr.io/<owner>/webrain              public, the portable artifact
+#   <dockerhub-user>/webrain            public mirror (skipped until configured)
+#   registry.fly.io/<FLY_APP>           the ref deepscrape's fly.toml pins
+#
+# The Fly push is what makes a release deployable; the other two are mirrors.
+# Guarded steps mean a repository without those secrets still goes green, and
+# starts pushing the day the secret appears — no workflow edit.
+#
+# Secrets / variables this expects (all optional except the ghcr ones, which use
+# the built-in GITHUB_TOKEN):
+#   DOCKERHUB_USERNAME + DOCKERHUB_TOKEN   repo secrets
+#   FLY_API_TOKEN                          repo secret, `flyctl tokens create deploy -a <app>`
+#   FLY_APP                                repo *variable* (not a secret: it is an app name)
+#
+# The image tag is the version, with no name prefix: `webrain:0.10.0`. A pin
+# therefore reads `<registry>/webrain:0.10.0`, and the app name never appears in
+# the tag.
+
+name: Engine image
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # ghcr push with GITHUB_TOKEN — the reason this exists rather than a PAT that
+  # expires or carries the wrong scope.
+  packages: write
+
+env:
+  IMAGE: webrain
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive the tag from the release
+        run: echo "TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Built once and loaded into the daemon, so each registry below is a tag +
+      # push rather than a rebuild, and one registry failing cannot stop another.
+      # The GHA layer cache is the point: a cold cargo build is ~6 minutes, a
+      # re-release is ~1.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push to ghcr
+        run: |
+          set -eu
+          ref="ghcr.io/${{ github.repository_owner }}/$IMAGE:$TAG"
+          docker tag "$IMAGE:$TAG" "$ref"
+          docker push "$ref"
+
+      - name: Push to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -eu
+          ref="${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE:$TAG"
+          docker tag "$IMAGE:$TAG" "$ref"
+          docker push "$ref"
+
+      # Not `flyctl deploy`: the deploy config lives in the deepscrape repo and
+      # the pin there is reviewed data. This only makes the ref exist.
+      - name: Push to Fly's registry
+        if: vars.FLY_APP != ''
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${FLY_API_TOKEN:-}" ]; then
+            echo "FLY_APP is set but FLY_API_TOKEN is not — cannot push." >&2
+            exit 1
+          fi
+          # A durable token piped straight in: `flyctl auth docker` hands out a
+          # credential that expires in minutes, and a 1.1 GB push outlives it.
+          echo "$FLY_API_TOKEN" | docker login registry.fly.io -u x --password-stdin
+          ref="registry.fly.io/${{ vars.FLY_APP }}:$TAG"
+          docker tag "$IMAGE:$TAG" "$ref"
+          docker push "$ref"
