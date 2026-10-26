@@ -7,11 +7,12 @@
 // results, reachable from the webrain_serp MCP tool, the `webrain serp` CLI, and
 // any LLM over webrain's MCP transport (stdio or --http).
 //
-// duckduckgo/bing serve plain HTML → fetched over the pooled no-browser HTTP
-// agent (no browser at all). `google`/`brave` are JS-gated → rendered in
-// whatever CDP engine is attached (Chrome/obscura/lightpanda) via navigate +
-// get_html. `auto` fetches duckduckgo+bing concurrently (no browser) and merges;
-// google/brave join the merge when a browser is attached. Optional keyed
+// duckduckgo/bing/yahoo/baidu/yandex serve plain HTML → fetched over the pooled
+// no-browser HTTP agent (no browser at all; yahoo needs the agent's cookie jar,
+// yandex is captcha-walled on datacenter IPs). `google`/`brave` are JS-gated →
+// rendered in whatever CDP engine is attached (Chrome/obscura/lightpanda) via
+// navigate + get_html. `auto` fetches duckduckgo+bing concurrently (no browser)
+// and merges; google/brave join the merge when a browser is attached. Optional keyed
 // providers fill deep requests: `BRAVE_API_KEY` (Brave's own API, 20/page, no
 // browser) then `SERPAPI_API_KEY` (aggregator, num<=100) as the last resort.
 // Every result is relevance-filtered against the query (unrelated junk pages
@@ -132,12 +133,32 @@ impl Default for SerpOpts {
 /// browser, so http_search("brave") always parses to zero results (it would
 /// silently claim a browser engine contributed nothing). Brave runs via
 /// browser_search when a backend is attached.
-const HTTP_ENGINES: [&str; 3] = ["bing", "duckduckgo", "google"];
+///
+/// Order is the FALLBACK order, so the two most reliable plain-HTML engines
+/// (bing, duckduckgo) stay first. The newer three are appended by observed
+/// reliability, not by listing order in any top-10 article: yahoo serves a full
+/// server-rendered SERP once the cookie jar is warm; baidu serves a large
+/// server-rendered SERP but keeps its abstracts in a JSON island (see
+/// parse_baidu); yandex is the fragile one — from a datacenter IP it answers a
+/// SmartCaptcha wall instead of results (measured 2026-10-26: 14 KB challenge
+/// page, zero `serp-item` nodes), so it is tried last and reported skipped.
+const HTTP_ENGINES: [&str; 6] = ["bing", "duckduckgo", "google", "yahoo", "baidu", "yandex"];
 
 /// `auto`'s no-browser engines, in merge-preference order. duckduckgo is the
 /// most reliable plain-HTML SERP; bing is GeoIP-fragile and can serve unrelated
 /// junk on flagged IPs, so it merges second (after relevance filtering).
 const AUTO_HTTP_ENGINES: [&str; 2] = ["duckduckgo", "bing"];
+
+/// `auto`'s top-up order, used only while the reply is still SHORT of `limit`.
+///
+/// Order is deliberate: baidu first (a full 1.1 MB SERP, ~6 s, and it starts
+/// challenging after a handful of requests), then yandex (fast, and on a
+/// datacenter IP usually a SmartCaptcha — cheap to find out), and **yahoo
+/// LAST because it is the only one of the three that paginates reliably**
+/// (`b=11,21,…`), so it is the provider that can actually close a deep `limit`.
+/// Measured 2026-10-26 with `--limit 50 --http`: ddg+bing alone stopped at 25;
+/// with this fill the reply reaches 50.
+const AUTO_FILL_ENGINES: [&str; 3] = ["baidu", "yandex", "yahoo"];
 
 /// `auto`'s JS-gated engines — joined only when a CDP backend is attached.
 const AUTO_BROWSER_ENGINES: [&str; 2] = ["google", "brave"];
@@ -156,11 +177,17 @@ const SERP_BROWSER_CAP: Duration = Duration::from_secs(20);
 // per ~7 rows, bing per 10). `--engine google` stays the deep path.
 const SERP_AUTO_PAGE: usize = 7;
 
-/// Pages a browser render attempts for `limit` (bing paginates 10/page,
-/// google/brave ~7). Shared with the `auto` top-up so it can ask for one page.
+/// Pages a browser render attempts for `limit` (bing/yahoo/baidu/yandex
+/// paginate 10/page, google/brave ~7). Shared with the `auto` top-up so it can
+/// ask for one page.
+///
+/// CEILING division, not integer: `limit/10` gave 2 pages for a limit of 25, so
+/// the loop stopped at ~20 rows and a caller asking for 25 got 20 with no
+/// indication anything was left on the table. The `.clamp` ceiling is what
+/// still bounds a hostile/deep request.
 fn browser_pages(engine: &str, limit: usize) -> usize {
-    if engine == "bing" {
-        (limit / 10).clamp(1, 10)
+    if matches!(engine, "bing" | "yahoo" | "baidu" | "yandex") {
+        limit.div_ceil(10).clamp(1, 10)
     } else {
         limit.div_ceil(7).clamp(1, 15)
     }
@@ -263,8 +290,60 @@ fn engine_url(
             drop(p);
             Ok(u.to_string())
         }
+        "baidu" => {
+            let mut u = Url::parse("https://www.baidu.com/s")?;
+            let mut p = u.query_pairs_mut();
+            p.append_pair("ie", "utf-8");
+            p.append_pair("wd", q);
+            // `pn` is a RESULT offset, like ddg's `s` (10 per page), not a page
+            // index — verified: pn=10 is page 2 with a different result set.
+            p.append_pair("pn", &offset.to_string());
+            // Baidu has no safe-search query param that survives on the plain
+            // SERP (`gpc` is a per-account preference), and a bogus one 302s to
+            // the home page. `region` has no equivalent either — baidu's `ct`
+            // switches the whole corpus, not a locale — so both are ignored
+            // here rather than sent as noise.
+            drop(p);
+            Ok(u.to_string())
+        }
+        "yahoo" => {
+            let mut u = Url::parse("https://search.yahoo.com/search")?;
+            let mut p = u.query_pairs_mut();
+            p.append_pair("p", q);
+            p.append_pair("ei", "UTF-8");
+            // `b` is 1-BASED (b=1 → results 1-10, b=11 → 11-20). Omitting it on
+            // page 0 keeps the request identical to a browser's first search.
+            if offset > 0 {
+                p.append_pair("b", &(offset + 1).to_string());
+            }
+            // vm: r = strict (safe search), p = moderate, unset = off.
+            if safe {
+                p.append_pair("vm", "r");
+            }
+            p.append_pair("vl", &format!("lang_{lang}"));
+            drop(p);
+            Ok(u.to_string())
+        }
+        "yandex" => {
+            let mut u = Url::parse("https://yandex.com/search/")?;
+            let mut p = u.query_pairs_mut();
+            p.append_pair("text", q);
+            // `p` is a 0-based PAGE index (unlike ddg/baidu offsets).
+            if offset > 0 {
+                p.append_pair("p", &(offset / 10).to_string());
+            }
+            // family=1 turns on the family filter. `lr` (the locale) takes a
+            // numeric region id that varies per country/language pair, so a
+            // "<cc>-<lang>" string would silently narrow to the wrong corpus —
+            // omitted until there is a verified id table.
+            if safe {
+                p.append_pair("family", "1");
+            }
+            drop(p);
+            Ok(u.to_string())
+        }
         other => Err(anyhow::anyhow!(
-            "unknown engine '{other}' (duckduckgo|bing|google|brave|auto)"
+            "unknown engine '{other}' (duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto)"
         )),
     }
 }
@@ -277,6 +356,9 @@ fn parse_results(engine: &str, html: &str, limit: usize) -> Vec<SerpResult> {
         "bing" => parse_bing(html, limit),
         "google" => parse_google(html, limit),
         "brave" => parse_brave(html, limit),
+        "baidu" => parse_baidu(html, limit),
+        "yahoo" => parse_yahoo(html, limit),
+        "yandex" => parse_yandex(html, limit),
         _ => Vec::new(),
     }
 }
@@ -656,6 +738,198 @@ fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
     out
 }
 
+/// Baidu (`baidu.com/s`). Server-rendered, but the SERP is a card system:
+/// organic rows are `div.result.c-container` and carry the REAL target in the
+/// `mu` attribute — their `<a href>` is always a `www.baidu.com/link?url=…`
+/// redirect, so using it would report baidu.com as every result's domain (or
+/// cost one extra request per result to resolve). The abstract is not a text
+/// node either: the page ships it in a `<!--s-data:{…}-->` JSON island
+/// (`summaryData.generalLines[].data[].text`) that the browser renders
+/// client-side, so it is read from there, with `.c-abstract` text as the
+/// fallback for the older layout that still has it inline.
+fn parse_baidu(html: &str, limit: usize) -> Vec<SerpResult> {
+    let doc = scraper::Html::parse_document(html);
+    let Ok(cont_sel) = scraper::Selector::parse("#content_left div.result") else {
+        return Vec::new();
+    };
+    let Ok(h3_sel) = scraper::Selector::parse("h3") else {
+        return Vec::new();
+    };
+    let Ok(a_sel) = scraper::Selector::parse("h3 a[href]") else {
+        return Vec::new();
+    };
+    let Ok(abs_sel) = scraper::Selector::parse(".c-abstract") else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for el in doc.select(&cont_sel) {
+        if out.len() >= limit {
+            break;
+        }
+        let title = el
+            .select(&h3_sel)
+            .next()
+            .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
+            .unwrap_or_default();
+        // `mu` first (the real target); the anchor is only a fallback and is
+        // rejected when it still points at baidu.com/link.
+        let raw_url = el
+            .value()
+            .attr("mu")
+            .map(|s| s.to_string())
+            .filter(|s| s.starts_with("http"))
+            .or_else(|| {
+                el.select(&a_sel)
+                    .next()
+                    .and_then(|a| a.value().attr("href"))
+                    .map(|s| s.to_string())
+                    .filter(|h| !h.contains("baidu.com/link"))
+            })
+            .unwrap_or_default();
+        let url = normalize_url(&raw_url);
+        if title.is_empty() || url.is_empty() || domain(&url).contains("baidu.com") {
+            continue;
+        }
+        let snippet = el
+            .select(&abs_sel)
+            .next()
+            .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
+            .filter(|s| !s.is_empty())
+            .or_else(|| baidu_summary(&el.html()))
+            .unwrap_or_default();
+        out.push(SerpResult {
+            position: out.len() + 1,
+            title,
+            domain: domain(&url),
+            url,
+            snippet,
+        });
+    }
+    out
+}
+
+/// Pull the abstract out of Baidu's `<!--s-data:{…}-->` island. Best-effort:
+/// any shape change yields None, and the caller falls back to `.c-abstract`.
+fn baidu_summary(block_html: &str) -> Option<String> {
+    const MARK: &str = "s-data:";
+    let start = block_html.find(MARK)? + MARK.len();
+    let rest = &block_html[start..];
+    // The island ends with the comment terminator, not with the JSON's brace.
+    let end = rest.find("-->").unwrap_or(rest.len());
+    let value: serde_json::Value = serde_json::from_str(rest[..end].trim()).ok()?;
+    let mut text = String::new();
+    for line in value.get("summaryData")?.get("generalLines")?.as_array()? {
+        if let Some(items) = line.get("data").and_then(|d| d.as_array()) {
+            for item in items {
+                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    // The island stores highlighted fragments as `<em>` markup.
+                    text.push_str(&strip_tags(t));
+                }
+            }
+        }
+    }
+    let text = clean(&text);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Yahoo (`search.yahoo.com`). Plain server-rendered HTML — but ONLY once the
+/// client keeps cookies: a first request answers `307`, and replaying it
+/// without a jar gets `500 INKApi Error` (verified with curl: `-L` alone 500 /
+/// 0 bytes, `-L` with a cookie jar 200 / 58 KB). That is why ureq is built with
+/// its `cookies` feature. Organic rows are `div.dd.algo`; the href is Yahoo's
+/// own redirect (`/RU=<percent-encoded target>/RK=…`), decoded by
+/// `normalize_url`.
+fn parse_yahoo(html: &str, limit: usize) -> Vec<SerpResult> {
+    collect_results(
+        html,
+        limit,
+        "div.dd.algo",
+        "h3",
+        "div.compTitle a[href]",
+        "div.compText p, p span.u-trunc2, p",
+    )
+}
+
+/// Yandex (`yandex.com/search/`). Organic rows are `li.serp-item` with the
+/// target as a real href (no redirect wrapper) and the abstract in
+/// `.OrganicText`. UNVERIFIED against a live SERP: from a datacenter IP Yandex
+/// answers a SmartCaptcha wall instead of results (measured 2026-10-26 — 14 KB
+/// challenge page, zero `serp-item` nodes), so this path is exercised by the
+/// unit test below and by callers whose egress Yandex does not wall. A walled
+/// reply parses to zero, which the caller reports as `skipped`, not `empty`.
+fn parse_yandex(html: &str, limit: usize) -> Vec<SerpResult> {
+    collect_results(
+        html,
+        limit,
+        "li.serp-item, .serp-item",
+        ".OrganicTitle, .OrganicTitle-Link, h2",
+        "a.OrganicTitle-Link[href], .OrganicTitle a[href], h2 a[href]",
+        ".OrganicText, .OrganicTextContentSpan, .TextContainer",
+    )
+}
+
+/// Shared container → result walk for engines whose markup is a repeated block
+/// with a title element, a real anchor and a snippet element.
+fn collect_results(
+    html: &str,
+    limit: usize,
+    container_sel: &str,
+    title_sel: &str,
+    anchor_sel: &str,
+    snippet_sel: &str,
+) -> Vec<SerpResult> {
+    let doc = scraper::Html::parse_document(html);
+    let (Ok(cont_sel), Ok(title_sel), Ok(a_sel), Ok(snip_sel)) = (
+        scraper::Selector::parse(container_sel),
+        scraper::Selector::parse(title_sel),
+        scraper::Selector::parse(anchor_sel),
+        scraper::Selector::parse(snippet_sel),
+    ) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for el in doc.select(&cont_sel) {
+        if out.len() >= limit {
+            break;
+        }
+        let a = el.select(&a_sel).next();
+        let title = el
+            .select(&title_sel)
+            .next()
+            .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                a.map(|a| clean(&a.text().collect::<Vec<_>>().join(" ")))
+                    .filter(|t| !t.is_empty())
+            })
+            .unwrap_or_default();
+        let url = a
+            .and_then(|a| a.value().attr("href"))
+            .map(normalize_url)
+            .unwrap_or_default();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        let snippet = el
+            .select(&snip_sel)
+            .next()
+            .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
+            .unwrap_or_default();
+        out.push(SerpResult {
+            position: out.len() + 1,
+            title,
+            domain: domain(&url),
+            url,
+            snippet,
+        });
+    }
+    out
+}
+
 /// Collapse whitespace/newlines into single spaces (same as the reference app).
 fn clean(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -679,6 +953,26 @@ fn normalize_url(href: &str) -> String {
             && (decoded.starts_with("http://") || decoded.starts_with("https://"))
         {
             return decoded;
+        }
+    }
+    // Yahoo redirect wrapper: `<host>.search.yahoo.com/.../RU=<percent-encoded
+    // target>/RK=.../RS=...` — everything after RU= up to the next `/RK=` is the
+    // destination, so one decode gives the real URL with no extra request.
+    // The host is NOT constant: the HTTP SERP wraps with `r.search.yahoo.com`
+    // and the RENDERED page wraps with `rd.search.yahoo.com` (measured
+    // 2026-10-26 — matching only `r.search` reported every browser-path result
+    // as domain `rd.search.yahoo.com`).
+    if href.contains(".search.yahoo.com") || href.contains("//search.yahoo.com") {
+        if let Some(idx) = href.find("/RU=") {
+            let rest = &href[idx + 4..];
+            let end = rest
+                .find("/RK=")
+                .or_else(|| rest.find("/RS="))
+                .unwrap_or(rest.len());
+            let decoded = percent_decode(&rest[..end]);
+            if decoded.starts_with("http://") || decoded.starts_with("https://") {
+                return decoded;
+            }
         }
     }
     if let Some(rest) = href.strip_prefix("//") {
@@ -839,6 +1133,32 @@ fn request_id() -> String {
     format!("serp-{millis}-{seq}")
 }
 
+/// Detect an engine's challenge / verification wall from a 2xx body.
+///
+/// A walled reply is NOT an empty result set, and saying `empty` would tell an
+/// agent "this engine has nothing for your query" when the truth is "this IP is
+/// being challenged" — the caller would then quietly lose the engine. Measured
+/// 2026-10-26: baidu answers ~7 organic results and then 302s to
+/// `wappass.baidu.com/static/captcha/tuxing_v2.html` (百度安全验证) with a 1.5 KB
+/// body and zero `div.result`; yandex answers a 14 KB SmartCaptcha page on the
+/// very first request from a datacenter IP.
+fn challenge_wall(engine: &str, html: &str) -> Option<&'static str> {
+    match engine {
+        "baidu" => (html.contains("wappass.baidu.com") || html.contains("百度安全验证"))
+            .then_some("baidu security verification (image captcha)"),
+        "yandex" => (html.contains("showcaptcha")
+            || html.contains("SmartCaptcha")
+            || html.contains("smart-captcha"))
+        .then_some("yandex SmartCaptcha"),
+        "yahoo" => {
+            (html.contains("INKApi Error") || html.contains("captcha")).then_some("yahoo challenge")
+        }
+        "google" => (html.contains("/sorry/") || html.contains("unusual traffic"))
+            .then_some("google /sorry"),
+        _ => None,
+    }
+}
+
 /// Fetch + parse ONE engine results page with retry + exponential backoff.
 ///
 /// Proxy: an explicit `opts.proxy` wins and never rotates, so single-proxy
@@ -873,6 +1193,17 @@ async fn http_search_page(
         };
         match res {
             Ok((status, body)) if (200..300).contains(&status) => {
+                // A challenge page arrives AS a 200 (baidu's captcha html is
+                // served from wappass, yandex's SmartCaptcha renders inline), so
+                // it must be caught before the parse-empty retry loop burns the
+                // whole budget re-fetching the same wall. Reported as an ERROR:
+                // the caller's fallback chain can then try another engine, and
+                // `--no-fallback` surfaces "challenged", never "0 results".
+                if let Some(kind) = challenge_wall(engine, &body) {
+                    return Err(anyhow::anyhow!(
+                        "{engine} served a challenge page instead of results: {kind}"
+                    ));
+                }
                 // Page 0 for bing asks for RSS (see engine_url); everything else —
                 // including deeper bing offsets — is an HTML page.
                 let parsed = if url.contains("format=rss") {
@@ -1064,13 +1395,20 @@ async fn browser_search<B: BrowserBackend>(
     engine: &str,
     opts: &SerpOpts,
 ) -> anyhow::Result<Vec<SerpResult>> {
-    if engine == "google" || engine == "brave" || engine == "bing" {
+    if matches!(
+        engine,
+        "google" | "brave" | "bing" | "yahoo" | "baidu" | "yandex"
+    ) {
         // Direct search-URL + pagination (the guest-browser flow): navigate
         // straight to engine_url's search URL (google /search?q=..&start=..,
-        // brave /search?q=..&offset=..) instead of homepage→type→submit, and
-        // merge `start`/`offset` pages SEQUENTIALLY exactly like http_search
-        // does for HTTP engines so `--limit 30` / `--page 2` return more than
-        // one page. Sequential, not parallel tabs: Google walls simultaneous
+        // brave /search?q=..&offset=.., yahoo ..&b=.., baidu ..&pn=..,
+        // yandex ..&p=..) instead of homepage→type→submit, and merge those pages
+        // SEQUENTIALLY exactly like http_search does for HTTP engines so
+        // `--limit 30` / `--page 2` return more than one page. The new engines
+        // were left OUT of this gate at first and silently returned one page
+        // (~10 rows) however high the limit was — the per-engine offset maths
+        // lives in engine_url, so all this gate has to do is let them in.
+        // Sequential, not parallel tabs: Google walls simultaneous
         // /search requests from one browser, so parallel pagination returns
         // FEWER results (measured 12 vs 30) — pacing pages like a human wins.
         //
@@ -1198,6 +1536,9 @@ async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyho
         "duckduckgo" => ".result",
         "bing" => "li.b_algo",
         "brave" => ".snippet",
+        "baidu" => "#content_left div.result",
+        "yahoo" => "div.dd.algo",
+        "yandex" => "li.serp-item, .serp-item",
         _ => return Ok(()),
     };
     let js = format!(
@@ -1429,10 +1770,11 @@ fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
     out
 }
 
-/// Search one specific HTTP engine (duckduckgo/bing/google). Google is JS-gated
-/// over plain HTTP (consent/JS shell → zero results), so when a browser is
-/// attached it goes straight to the browser path — the only one that returns
-/// real Google results. Everything else uses HTTP with provider fallback.
+/// Search one specific engine. Google is JS-gated over plain HTTP
+/// (consent/JS shell → zero results), so when a browser is attached it goes
+/// straight to the browser path — the only one that returns real Google
+/// results. Bing/brave behave the same way. Everything else uses HTTP first and
+/// only renders the engine in a browser when the engine served a wall.
 /// Returns (results, skipped, source) — `source` names the engine that actually
 /// supplied the results (differs from `engine` only after a provider fallback).
 async fn specific_engine<B: BrowserBackend>(
@@ -1522,6 +1864,39 @@ async fn specific_engine<B: BrowserBackend>(
                 return Ok((rs, Vec::new(), "google".to_string()));
             }
         }
+    }
+    // Engines that answer over plain HTTP but are NOT browser-first (yahoo,
+    // baidu, yandex) still need a browser for exactly one case: the engine
+    // served a WALL instead of results — yandex answers a SmartCaptcha page
+    // from a datacenter IP, baidu can answer a JS shell. Order matters: try the
+    // engine's own HTTP path, then render the SAME engine in a browser, and
+    // only then borrow another engine's results. Going straight to
+    // `fallback_chain` (which walks bing/ddg/google) would answer a request for
+    // yandex with bing's results while reporting `source: bing` — a silently
+    // different search, which is exactly what `--no-fallback` exists to prevent.
+    if matches!(engine, "yahoo" | "baidu" | "yandex") {
+        let http = http_search(engine, opts).await;
+        if let Ok(rs) = &http {
+            if !rs.is_empty() {
+                return Ok((rs.clone(), Vec::new(), engine.to_string()));
+            }
+        }
+        if let Some(b) = backend.filter(|_| !opts.http_only) {
+            if let Ok(rs) = browser_search(b, engine, opts).await {
+                if !rs.is_empty() {
+                    return Ok((rs, Vec::new(), engine.to_string()));
+                }
+            }
+        }
+        if opts.fallback {
+            return Ok(fallback_chain(engine, opts, backend).await);
+        }
+        // Nothing could answer. If the engine WALLED, say so — an empty result
+        // list here would read as "this engine has nothing for your query".
+        return match http {
+            Err(err) => Err(err),
+            _ => Ok((Vec::new(), Vec::new(), String::new())),
+        };
     }
     match http_search(engine, opts).await {
         Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new(), engine.to_string())),
@@ -1640,6 +2015,55 @@ pub async fn serp_search<B: BrowserBackend>(
                         status: "ok".to_string(),
                         count,
                     });
+                }
+            }
+            // Top up from the other plain-HTTP engines before paying ~20 s for a
+            // browser render. Without this, `auto` could only ever return what
+            // ddg + bing deliver (~25 rows), however deep the request was — the
+            // browser join is capped at one page per engine and serpapi needs a
+            // key, so a 50-result ask silently came back at 25.
+            for e in AUTO_FILL_ENGINES {
+                if merged.len() >= opts.limit {
+                    break;
+                }
+                let need = opts.limit - merged.len();
+                // baidu and yandex get ONE page (10): baidu's SERP is 1.1 MB per
+                // page and starts challenging after a few requests, and yandex is
+                // walled outright on datacenter IPs — paging either is wasted
+                // time. yahoo gets the FULL limit, not just the shortfall: the
+                // merge dedupes across engines afterwards, so asking it for a
+                // mere `need` rows lands under the target once ddg/bing overlaps
+                // are removed (measured: need=26 → 26 returned → 43 unique of a
+                // 50 ask). Over-fetching here is what actually reaches the limit.
+                let want = if e == "yahoo" {
+                    opts.limit
+                } else {
+                    need.min(10)
+                };
+                let sub = SerpOpts {
+                    limit: want,
+                    ..opts.clone()
+                };
+                match http_search(e, &sub).await {
+                    Ok(rs) => {
+                        let count = rs.len();
+                        merged.extend(rs);
+                        per_engine.push(SerpEngineReport {
+                            engine: e.to_string(),
+                            status: if count > 0 { "ok" } else { "empty" }.to_string(),
+                            count,
+                        });
+                    }
+                    Err(err) => {
+                        // A wall, not an empty engine — keep the reason visible.
+                        tracing::debug!(engine = e, %err, "auto fill skipped");
+                        skipped.push(format!("{e} (challenged)"));
+                        per_engine.push(SerpEngineReport {
+                            engine: e.to_string(),
+                            status: "skipped".to_string(),
+                            count: 0,
+                        });
+                    }
                 }
             }
             // Browser renders cost ~20s each and are only worth paying for while
@@ -1803,7 +2227,7 @@ pub async fn serp_search<B: BrowserBackend>(
         }
         other => {
             return Err(anyhow::anyhow!(
-                "unknown engine '{other}' (duckduckgo|bing|google|brave|auto)"
+                "unknown engine '{other}' (duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto)"
             ));
         }
     };
@@ -2325,5 +2749,234 @@ mod tests {
         assert!(query_tokens("c++").is_empty());
         // deduped + case-insensitive
         assert_eq!(query_tokens("Rust rust"), vec!["rust".to_string()]);
+    }
+
+    // --- baidu / yahoo / yandex -------------------------------------------
+    // These three parsers are pinned to real markup captured on 2026-10-26
+    // (output/serp_probe/*.html), trimmed to the smallest shape that still
+    // proves the contract: the ORGANIC target is reported, not the engine's own
+    // redirect, and a card with no real target is skipped.
+
+    #[test]
+    fn baidu_uses_mu_attribute_not_the_link_redirect() {
+        let html = r#"
+        <div id="content_left">
+          <div class="result c-container xpath-log new-pmd" tpl="www_index"
+               mu="https://www.rust-lang.org/" srcid="1599">
+            <h3 class="cosc-title cos-link t"><a href="http://www.baidu.com/link?url=UfjDm9bo">Rust <em>Programming</em> Language</a></h3>
+            <div class="cos-row" data-sanssr-cmpt="card/www-summary"><!--s-data:{"summaryData":{"generalLines":[{"data":[{"text":"A <em>language</em> empowering everyone to build reliable software."}]}]},"isPc":true}--></div>
+          </div>
+          <div class="result-op c-container new-pmd" tpl="recommend_list_san" mu="http://28616.recommend_list.baidu.com">
+            <div class="cosc-card">recommendation card, no h3</div>
+          </div>
+          <div class="result c-container" tpl="www_index" mu="https://doc.rust-lang.org/book/">
+            <h3><a href="http://www.baidu.com/link?url=abc">The Rust Book</a></h3>
+            <div class="c-abstract">The book, inline abstract.</div>
+          </div>
+        </div>"#;
+        let rs = parse_results("baidu", html, 10);
+        assert_eq!(
+            rs.len(),
+            2,
+            "the AI/recommend card must not become a result"
+        );
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+        assert_eq!(rs[0].domain, "rust-lang.org");
+        assert_eq!(rs[0].title, "Rust Programming Language");
+        // abstract came from the s-data island, tags stripped
+        assert_eq!(
+            rs[0].snippet,
+            "A language empowering everyone to build reliable software."
+        );
+        // inline .c-abstract still works for the older layout
+        assert_eq!(rs[1].snippet, "The book, inline abstract.");
+        assert_eq!(rs[1].url, "https://doc.rust-lang.org/book/");
+    }
+
+    #[test]
+    fn yahoo_decodes_ru_redirect_and_reads_snippet() {
+        let html = r#"
+        <div id="web">
+          <li><div class="dd algo algo-sr relsrch Sr">
+            <div class="compTitle options-toggle">
+              <a class="d-ib" href="https://r.search.yahoo.com/_ylt=A2RSQGy3/_ylu=Y29sbw/RV=2/RE=1794177975/RO=10/RU=https%3a%2f%2frust-lang.org%2flearn%2f/RK=2/RS=Y2naVlQ6SfYdCs6tpxllOcnefc8-">
+                <h3 class="title"><span>Getting started - Rust Programming Language</span></h3>
+              </a>
+            </div>
+            <div class="compText aAbs"><p><span class="u-trunc2 fz-14">Install Rust with rustup and write your first program.</span></p></div>
+          </div></li>
+          <li><div class="dd algo algo-sr relsrch Sr">
+            <div class="compTitle"><a href="/preferences"><h3>Settings</h3></a></div>
+          </div></li>
+        </div>"#;
+        let rs = parse_results("yahoo", html, 10);
+        assert_eq!(rs.len(), 1, "a relative chrome link is not a result");
+        assert_eq!(rs[0].url, "https://rust-lang.org/learn/");
+        assert_eq!(rs[0].domain, "rust-lang.org");
+        assert!(rs[0].title.starts_with("Getting started"));
+        assert_eq!(
+            rs[0].snippet,
+            "Install Rust with rustup and write your first program."
+        );
+    }
+
+    /// The rendered page wraps links with `rd.search.yahoo.com` instead of
+    /// `r.search.yahoo.com` — both must decode to the real target.
+    #[test]
+    fn yahoo_decodes_the_rd_redirect_host_too() {
+        let html = r#"
+        <div class="dd algo algo-sr">
+          <div class="compTitle">
+            <a href="https://rd.search.yahoo.com/_ylt=AwrE1;/RV=2/RE=1794/RO=10/RU=https%3a%2f%2fwww.rust-lang.org%2ftools%2finstall/RK=2/RS=Xy-">
+              <h3><span>Install Rust</span></h3>
+            </a>
+          </div>
+          <div class="compText"><p>Install Rust via rustup.</p></div>
+        </div>"#;
+        let rs = parse_results("yahoo", html, 5);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/tools/install");
+        // domain() strips the `www.` prefix by design.
+        assert_eq!(rs[0].domain, "rust-lang.org");
+    }
+
+    #[test]
+    fn yandex_reads_serp_items() {
+        let html = r#"
+        <ul class="serp-list">
+          <li class="serp-item" data-cid="1">
+            <div class="organic">
+              <h2><a class="OrganicTitle-Link" href="https://www.rust-lang.org/">Rust Programming Language</a></h2>
+              <div class="OrganicText"><span class="OrganicTextContentSpan">A language empowering everyone.</span></div>
+            </div>
+          </li>
+          <li class="serp-item" data-cid="2">
+            <div class="organic"><a class="OrganicTitle-Link" href="https://doc.rust-lang.org/">Docs</a>
+            <div class="OrganicText">Official documentation.</div></div>
+          </li>
+        </ul>"#;
+        let rs = parse_results("yandex", html, 10);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+        assert_eq!(rs[0].title, "Rust Programming Language");
+        assert_eq!(rs[0].snippet, "A language empowering everyone.");
+        assert_eq!(rs[1].domain, "doc.rust-lang.org");
+    }
+
+    #[test]
+    fn new_engines_build_the_expected_urls() {
+        let baidu = engine_url("baidu", "rust", 10, false, None, 10).unwrap();
+        assert!(baidu.starts_with("https://www.baidu.com/s?"));
+        assert!(baidu.contains("wd=rust") && baidu.contains("pn=10"));
+        assert!(baidu.contains("ie=utf-8"));
+
+        let yahoo = engine_url("yahoo", "rust", 10, true, None, 10).unwrap();
+        assert!(yahoo.contains("p=rust"));
+        // Yahoo's `b` is 1-based: offset 10 is the second page → b=11
+        assert!(yahoo.contains("b=11"), "got {yahoo}");
+        assert!(yahoo.contains("vm=r") && yahoo.contains("vl=lang_en"));
+        // page 0 stays a browser-identical first search (no `b`)
+        let yahoo0 = engine_url("yahoo", "rust", 0, false, None, 10).unwrap();
+        assert!(!yahoo0.contains("b="), "got {yahoo0}");
+
+        let yandex = engine_url("yandex", "rust", 20, true, Some("de-de"), 10).unwrap();
+        assert!(yandex.contains("text=rust"));
+        // Yandex `p` is a PAGE index: offset 20 → p=2
+        assert!(yandex.contains("p=2"), "got {yandex}");
+        assert!(yandex.contains("family=1"));
+    }
+
+    #[test]
+    fn new_engines_are_reachable_and_auto_keeps_its_pair() {
+        for e in ["baidu", "yahoo", "yandex"] {
+            assert!(HTTP_ENGINES.contains(&e), "{e} missing from HTTP_ENGINES");
+            assert!(engine_url(e, "q", 0, false, None, 10).is_ok());
+        }
+        // `auto` merges ddg+bing concurrently and keeps that pair as its base;
+        // the new engines are TOP-UPS in a separate ordered list, and yahoo must
+        // stay LAST because it is the only one that pages to a deep limit.
+        assert_eq!(AUTO_HTTP_ENGINES, ["duckduckgo", "bing"]);
+        assert_eq!(AUTO_FILL_ENGINES, ["baidu", "yandex", "yahoo"]);
+        assert_eq!(browser_pages("yahoo", 30), 3);
+        assert_eq!(browser_pages("baidu", 30), 3);
+    }
+
+    /// The browser loop walks `page in opts.page..opts.page + max_pages` and
+    /// calls `engine_url(off)` with `off = page * 10` (page index only for
+    /// brave). This pins the URL SEQUENCE that produces for the new engines —
+    /// the maths is the only thing the browser path needs from them, since the
+    /// loop body is the shared google/bing/brave code.
+    #[test]
+    fn new_engines_paginate_on_the_engine_grid() {
+        let pages = browser_pages("yahoo", 25);
+        assert_eq!(pages, 3, "25 results at 10/page needs 3 pages");
+
+        for (url, expect) in [
+            (
+                engine_url("yahoo", "q", 0, false, None, 25).unwrap(),
+                "no b",
+            ),
+            (
+                engine_url("yahoo", "q", 10, false, None, 25).unwrap(),
+                "b=11",
+            ),
+            (
+                engine_url("yahoo", "q", 20, false, None, 25).unwrap(),
+                "b=21",
+            ),
+        ] {
+            if expect == "no b" {
+                assert!(!url.contains("b="), "page 0 must not send b: {url}");
+            } else {
+                assert!(url.contains(expect), "{expect} missing: {url}");
+            }
+        }
+
+        assert!(
+            engine_url("baidu", "q", 0, false, None, 25)
+                .unwrap()
+                .contains("pn=0")
+        );
+        assert!(
+            engine_url("baidu", "q", 10, false, None, 25)
+                .unwrap()
+                .contains("pn=10")
+        );
+
+        // yandex `p` is a page index: offset 10 → p=1, offset 20 → p=2
+        assert!(
+            !engine_url("yandex", "q", 0, false, None, 25)
+                .unwrap()
+                .contains("p="),
+            "page 0 must not send p"
+        );
+        assert!(
+            engine_url("yandex", "q", 10, false, None, 25)
+                .unwrap()
+                .contains("p=1")
+        );
+        assert!(
+            engine_url("yandex", "q", 20, false, None, 25)
+                .unwrap()
+                .contains("p=2")
+        );
+    }
+
+    #[test]
+    fn challenge_pages_are_not_reported_as_empty_results() {
+        // Real wall bodies (measured 2026-10-26).
+        assert!(challenge_wall("yandex", "<html>showcaptcha</html>").is_some());
+        assert!(challenge_wall("baidu", "<title>百度安全验证</title>").is_some());
+        assert!(
+            challenge_wall(
+                "baidu",
+                "<a href=\"https://wappass.baidu.com/static/captcha/tuxing_v2.html\">"
+            )
+            .is_some()
+        );
+        // A genuine SERP is not a wall.
+        assert!(challenge_wall("baidu", "<div class=\"result c-container\">").is_none());
+        assert!(challenge_wall("yahoo", "<div class=\"dd algo\">").is_none());
+        assert!(challenge_wall("bing", "<li class=\"b_algo\">").is_none());
     }
 }

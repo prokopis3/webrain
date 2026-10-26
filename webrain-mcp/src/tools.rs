@@ -28,8 +28,8 @@ pub fn close_launched(key: &str) -> bool {
 use serde_json::{Value, json};
 use webrain_core::engines::{
     BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_eval, batch_extract, batch_fetch,
-    batch_interact, batch_screenshot, bm25_filter, build_adaptive_extract_js, build_clean_js,
-    build_extract_js, download_files, regex_extract, sitemap_urls, validate_urls,
+    batch_interact, batch_markdown, batch_screenshot, bm25_filter, build_adaptive_extract_js,
+    build_clean_js, build_extract_js, download_files, regex_extract, sitemap_urls, validate_urls,
 };
 use webrain_core::vision::{ask_viewport, index_current_page, retrieve as vision_retrieve};
 
@@ -159,7 +159,13 @@ EXTRACTION MATRIX
 - infinite scroll / load-more      -> crawl(mode=scan) then extract; or interact(scroll)
 - search                           -> webrain_search (navigate to results page)
 - typed SERP results                -> webrain_serp (structured JSON; engine:
-                                      duckduckgo|bing|google|brave|auto)
+                                      duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto.
+                                      duckduckgo/bing/yahoo/baidu/yandex answer over plain
+                                      HTTP with no browser; yahoo needs the client cookie
+                                      jar, and baidu/yandex report a challenge page as
+                                      `skipped`, never as an empty result set. auto merges
+                                      ddg+bing then tops up from baidu/yandex/yahoo —
+                                      yahoo last, it is the one that pages deep)
 - relevance filter                 -> extract(mode=bm25)
 - watch a video (URL or local file)-> webrain_watch(url) — timestamped transcript
                                       (yt-dlp captions -> local whisper-cli -> Whisper
@@ -624,10 +630,12 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","extract","interact","eval","screenshot"]},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot"]},
                 "urls": {"type": "array", "items": {"type": "string"}},
+                "query": {"type": "string", "description": "markdown: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM)"},
+                "top_k": {"type": "integer", "description": "markdown: keep this many query-relevant chunks (requires query; 0 = whole document)"},
                 "cdp_urls": {"type": "array", "items": {"type": "string"}, "description": "Round-robin URLs across these CDP backends (per-proxy isolation)"},
                 "js": {"type": "string", "description": "eval: JS extractor to run in each tab (required when op=eval)"},
                 "interaction": {"type": "string", "description": "interact: async JS to run in each tab"},
@@ -691,10 +699,10 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_serp",
-            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | auto. duckduckgo|bing|auto are pure HTTP (no browser). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently (google/brave join via the browser when one is attached, sequential), relevance-filters junk pages, merges + dedupes, limit 1..=100. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown + source (actual provider after a fallback) in the reply, retry with backoff. Returns {status, query, engine, source, results[], per_engine[], request_id, ms, skipped[]}.",
+            "description": "STRUCTURED search results as typed JSON (position/title/url/domain/snippet) — a SERP API for any LLM. engine: duckduckgo (default) | bing | google | brave | yahoo | baidu | yandex | auto. duckduckgo|bing|yahoo|baidu|yandex|auto are pure HTTP (no browser; yahoo needs the client cookie jar, baidu/yandex report a challenge page as skipped rather than empty). google|brave are JS-gated and auto-launch a guest Chrome (or attach to the connected CDP engine), then paginate the results page for more than 10. auto fetches duckduckgo+bing concurrently, then tops up from baidu, yandex and yahoo (yahoo last — it is the one that pages to a deep limit) until `limit` is met; google/brave join via the browser when one is attached, sequential. Relevance-filters junk pages, merges + dedupes, limit 1..=100. Features: provider fallback (fallback, default true), pagination (page), safe search (safe), region/locale (region, e.g. us-en/gb-en/gr-el), request_id + ms + per_engine breakdown + source (actual provider after a fallback) in the reply, retry with backoff. Returns {status, query, engine, source, results[], per_engine[], request_id, ms, skipped[]}.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
-                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|auto = HTTP (no browser); brave = keyed API when BRAVE_API_KEY is set, else guest-browser flow; google = guest-browser flow"},
+                "engine": {"type": "string", "enum": ["duckduckgo","bing","google","brave","yahoo","baidu","yandex","auto"], "default": "duckduckgo", "description": "duckduckgo|bing|yahoo|baidu|yandex|auto = HTTP (no browser); yahoo pages on b=11,21,...; baidu serves ~7 organic rows then a security check; yandex serves SmartCaptcha from datacenter IPs. brave = keyed API when BRAVE_API_KEY is set, else guest-browser flow; google = guest-browser flow"},
                 "limit": {"type": "integer", "default": 10, "description": "max results, 1..=100"},
                 "page": {"type": "integer", "default": 0, "description": "0-based results page"},
                 "safe": {"type": "boolean", "default": false},
@@ -2084,6 +2092,19 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         }
                         batch_eval(b, urls, &js, concurrency, opts).await
                     }
+                    // `batch_markdown` existed in core but was UNREACHABLE from
+                    // this tool: the op enum stopped at screenshot and every
+                    // unknown op fell through to batch_fetch (3000-char innerText
+                    // cap), so "op=markdown" silently returned plain text.
+                    "markdown" => {
+                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                        let top_k = args
+                            .get("top_k")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as usize;
+                        batch_markdown(b, urls, query, top_k, concurrency, opts).await
+                    }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
             }
@@ -2913,7 +2934,7 @@ pub async fn serp_from_args(args: &Value, backend: Option<&CdpBackend>) -> Value
     // browser-optional once its keyed API is configured.
     let brave_needs_browser = opts.engine == "brave" && !webrain_core::serp::brave_api_ready();
     if (brave_needs_browser || opts.engine == "google") && backend.is_none() {
-        return json!({"status": "error", "message": "engine 'google' (and 'brave' without BRAVE_API_KEY) requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|auto work without one"});
+        return json!({"status": "error", "message": "engine 'google' (and 'brave' without BRAVE_API_KEY) requires a connected browser (set CDP_URL or start Chrome with --remote-debugging-port=9222; webrain_serp auto-launches a guest browser when none is attached); duckduckgo|bing|yahoo|baidu|yandex|auto work without one"});
     }
     match webrain_core::serp::serp_search(&opts, backend).await {
         Ok(r) => json!({

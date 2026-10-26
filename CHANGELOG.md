@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-26
+
+### Added
+
+- **serp**: three more engines — `yahoo`, `baidu`, `yandex` — on **both** paths
+  (plain HTTP and browser render), plus their parsers, `--safe`/`--region`
+  mapping and pagination. Each was derived from a real captured SERP
+  (`output/serp_probe/*.html`), not from an assumed layout:
+  - **yahoo** — server-rendered HTML, but only once the client keeps cookies: a
+    first request answers `307`, and replaying it without a jar gets
+    `500 INKApi Error` (verified: `curl -L` alone 500 / 0 bytes, `curl -L` with a
+    jar 200 / 58 KB). ureq is now built with its `cookies` feature, so the
+    shared agent keeps a jar. The href is Yahoo's own redirect and the host is
+    NOT constant — the HTTP SERP wraps with `r.search.yahoo.com` and the RENDERED
+    page with `rd.search.yahoo.com`; both are decoded to the real target (this
+    was a real bug: matching only `r.search` reported every browser-path result
+    as domain `rd.search.yahoo.com`). 25 results over HTTP in 3.1 s, 25 through
+    the browser in 2.8 s.
+  - **baidu** — the real target lives in the container's `mu` attribute (the
+    `<a href>` is always a `baidu.com/link?url=…` redirect, so using it would
+    make baidu.com every result's domain), and the abstract is not a text node:
+    it ships in a `<!--s-data:{…}-->` JSON island that the browser renders
+    client-side. 7 organic rows in 5.8 s on a fresh IP.
+  - **yandex** — `li.serp-item` with a real href and `.OrganicText` abstracts;
+    parser pinned by unit test because a live SERP is unavailable from here.
+- **serp**: `engine=auto` now **fills to the requested limit** instead of
+  stopping at what duckduckgo + bing happened to deliver. After the ddg+bing
+  merge it tops up from baidu, yandex and then yahoo, in that order — yahoo
+  LAST because it is the only one of the three that pages reliably
+  (`b=11,21,…`), and it is asked for the FULL limit rather than the shortfall,
+  because the merge dedupes across engines afterwards. Measured on
+  `"rust github proxies system scaler"` with `--http`: before 25 results, after
+  **50** (ddg 17 + bing 9 + yahoo 50 fetched → 50 unique), 15 s; a default
+  `--limit 10` still answers in 1.8 s and never pays for the top-up. baidu and
+  yandex are reported as `skipped (challenged)` when their IP wall
+  (always zero-cost when they answer).
+- **serp**: a **challenge page is now reported as a challenge, never as an empty
+  result set**. Measured 2026-10-26: baidu answers ~7 organic rows and then 302s
+  to `wappass.baidu.com/static/captcha/tuxing_v2.html` (百度安全验证) with a 1.5 KB
+  body and zero `div.result`; yandex answers a 14 KB SmartCaptcha page on the
+  first request from a datacenter IP. Both used to parse to 0 and be reported as
+  `empty` ("this engine has nothing for your query"); they now return
+  `baidu served a challenge page instead of results: … image captcha` and the
+  caller's fallback chain reports the engine as `skipped` with that reason.
+
+### Fixed
+
+- **mcp**: `webrain_batch` now exposes **`op=markdown`**. `batch_markdown` has
+existed in core (htmd HTML→Markdown, full page, optional `query`+`top_k` bm25
+prune) but the tool's `op` enum stopped at `screenshot` and the dispatcher's
+catch-all sent every unknown op to `batch_fetch` — so `op=markdown` silently
+returned the 3000-char innerText text instead of Markdown, and no agent could
+reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
+14 s wall, 1.4 MB of Markdown (median 18 KB, max 292 KB per page).
+- **docs**: `--guest` Chrome cannot create tabs over CDP
+  (`Target.createTarget` → `Failed to open a new tab`, measured 2026-10-26), so
+  `webrain_batch` / any multi-tab flow fails there with "batch worker exited
+  without a result (no tab available)" while `navigate`/`eval` on the existing
+  tab keep working. Use a normal profile for batch work; guest mode is for the
+  single-tab google flow.
+- **serp**: `--limit` above ten returned one page in the browser path for the
+  new engines. The paged loop was gated to `google | brave | bing`, so
+  yahoo/baidu/yandex silently fell through to the single-page tail (~10 rows)
+  however high the limit was.
+- **serp**: `browser_pages` used integer division, so `--limit 25` budgeted TWO
+  pages (2×10 = 20) and stalled ~5 rows short. Ceiling division now budgets the
+  pages the limit actually needs (this also corrected the same arithmetic on the
+  pre-existing bing branch).
+- **serp**: an engine that WALLED and had no fallback available returned an
+  empty result list, which reads as "no results" — the wall error is now
+  propagated, so `--no-fallback` surfaces the challenge instead of a silent 0.
+
 ## [0.10.0] - 2026-10-26
 
 ### Added

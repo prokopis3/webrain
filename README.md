@@ -209,10 +209,10 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_interact` | Drive the page: `action` = click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script |
 | `webrain_extract` | Structured data: `mode` = schema (CSS) · regex · jsonld · table · autoschema · bm25 |
 | `webrain_scrape` | No-browser HTTP fetch of one URL (10–100× faster, static only) |
-| `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
+| `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · markdown · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
 | `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
 | `webrain_search` | Web search (duckduckgo · google · bing · brave) |
-| `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · google · brave · auto (dedupe · paginate · region-pin · proxy · Brave API key · serpapi) |
+| `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto (dedupe · paginate · region-pin · proxy · Brave API key · serpapi) |
 | `webrain_pdf` | PDF work: `op` = page · extract (→ markdown) · render (→ vision tiles) · images |
 | `webrain_download` | Files/media: `engine` = http (stream) · ytdlp (HLS/playlists) |
 | `webrain_watch` | Video → timestamped transcript + frames (no browser; `vision:true` → text captions) |
