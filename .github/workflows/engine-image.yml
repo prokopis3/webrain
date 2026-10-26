@@ -10,12 +10,6 @@
 # image for a version that was never released. Ordering is the whole point:
 # green release first, then the image.
 #
-# Consequence worth knowing: `workflow_run` only fires for a workflow that exists
-# on the DEFAULT branch, so this file publishes nothing until it is merged to
-# main. That is a GitHub rule, not a defect — a tag pushed while this file lives
-# only on a side branch will not publish. Use the dispatch trigger to publish a
-# version deliberately.
-#
 # One build, three registries, each independent:
 #   ghcr.io/<owner>/webrain        public, the portable artifact
 #   <dockerhub-user>/webrain       public mirror (guarded until configured)
@@ -88,6 +82,12 @@ jobs:
       # untrusted code in a privileged context" (high), and it is right to. The
       # version's actual commit is resolved below from a maintainer-created tag.
       - uses: actions/checkout@v7
+
+      # A `docker-container` builder, not the runner's default `docker` driver:
+      # that driver cannot EXPORT a cache, so `cache-to` aborts the whole build
+      # ("Cache export is not supported for the docker driver" — this workflow's
+      # first dispatched run died on exactly that, in 4 seconds).
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Derive, validate and pin the version
         shell: bash
