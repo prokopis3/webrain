@@ -1,40 +1,62 @@
 # The container half of a release.
 #
 # `release.yml` publishes binaries and package manifests and says so in its own
-# header ("no registry publish"). This workflow is the other half, deliberately
-# separate: a broken image build must not hold a binary release hostage, and a
-# binary matrix failure must not leave an untagged image behind.
+# header ("no registry publish"). This workflow is that missing half, kept
+# separate on purpose: a broken image build must not hold a binary release
+# hostage, and a failed binary matrix must not leave a tagged image behind.
+#
+# TRIGGER: the Release workflow COMPLETING SUCCESSFULLY, not the tag push.
+# A tag-push trigger would race a release that can still fail, publishing an
+# image for a version that was never released. Ordering is the whole point:
+# green release first, then the image.
+#
+# Consequence worth knowing: `workflow_run` only fires for a workflow that exists
+# on the DEFAULT branch, so this file publishes nothing until it is merged to
+# main. That is a GitHub rule, not a defect — a tag pushed while this file lives
+# only on a side branch will not publish. Use the dispatch trigger to publish a
+# version deliberately.
 #
 # One build, three registries, each independent:
-#   ghcr.io/<owner>/webrain              public, the portable artifact
-#   <dockerhub-user>/webrain            public mirror (skipped until configured)
-#   registry.fly.io/<FLY_APP>           the ref deepscrape's fly.toml pins
+#   ghcr.io/<owner>/webrain        public, the portable artifact
+#   <dockerhub-user>/webrain       public mirror (guarded until configured)
+#   registry.fly.io/<FLY_APP>      the ref the deployer pins
 #
-# The Fly push is what makes a release deployable; the other two are mirrors.
-# Guarded steps mean a repository without those secrets still goes green, and
-# starts pushing the day the secret appears — no workflow edit.
+# Only ghcr is required: it authenticates with the built-in GITHUB_TOKEN and the
+# `packages: write` permission below. The other two stay green-when-absent and
+# start pushing the day their secret appears, with no workflow edit.
 #
-# Secrets / variables this expects (all optional except the ghcr ones, which use
-# the built-in GITHUB_TOKEN):
+# Secrets / variables:
 #   DOCKERHUB_USERNAME + DOCKERHUB_TOKEN   repo secrets
 #   FLY_API_TOKEN                          repo secret, `flyctl tokens create deploy -a <app>`
-#   FLY_APP                                repo *variable* (not a secret: it is an app name)
+#   FLY_APP                                repo *variable* (an app name, not a secret)
 #
-# The image tag is the version, with no name prefix: `webrain:0.10.0`. A pin
-# therefore reads `<registry>/webrain:0.10.0`, and the app name never appears in
-# the tag.
+# The tag is the bare version, no name prefix: `webrain:0.10.0`. A pin therefore
+# reads `<registry>/webrain:0.10.0`, and the app name never leaks into the tag.
 
 name: Engine image
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to publish, without the leading v (e.g. 0.10.0)"
+        required: true
+        type: string
+
+# Two runs for one version must not race, and a cancelled registry push is how a
+# manifest ends up pointing at layers that were never uploaded — so no
+# cancel-in-progress, ever.
+concurrency:
+  group: engine-image-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  # ghcr push with GITHUB_TOKEN — the reason this exists rather than a PAT that
-  # expires or carries the wrong scope.
+  # The ghcr push, with the short-lived per-run token instead of a PAT that
+  # expires or silently carries the wrong scope.
   packages: write
 
 env:
@@ -43,14 +65,83 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A cold cargo build is ~6 min and three ~1.1 GB pushes add several more. The
+    # failure this replaces was a push that HUNG instead of erroring, so the
+    # runner gets a bound rather than the 360-minute default.
+    timeout-minutes: 45
+    # A skipped or failed release must never reach a registry.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    env:
+      # Job level, not step level: the `if:` guards below read these, and a
+      # step-level env read inside that same step's `if:` is not a documented
+      # guarantee. If such a guard evaluates empty the step is SKIPPED while the
+      # run stays green — a silent missing image.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The commit the release was built from, not whatever this workflow's
+          # ref happens to be, so a branch that moved since the release cannot
+          # be published under the release's version.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Derive the tag from the release
-        run: echo "TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Derive and validate the version
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_TAG:-}" ]; then
+            VER="${DISPATCH_TAG#v}"
+          else
+            # For a Release run started by a tag push, head_branch is the tag.
+            VER="${RELEASE_REF#v}"
+          fi
+          # A branch name here would become `webrain:main`, which docker accepts
+          # as a tag but no pin could ever reference — and on a name containing
+          # `/` it is an invalid reference that fails deep in the build.
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::expected vX.Y.Z, got '${VER}' — refusing to tag an image with a branch name" >&2
+            exit 1
+          fi
+          echo "TAG=$VER" >> "$GITHUB_ENV"
+
+          # A dispatch must build the tagged commit itself, not some later commit
+          # on main that drifted from the version being published.
+          if [ -n "${DISPATCH_TAG:-}" ]; then
+            git fetch --no-tags origin "+refs/tags/v${VER}:refs/tags/v${VER}"
+            git checkout --detach "refs/tags/v${VER}"
+          fi
+          echo "### webrain ${VER} — building $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      # A half-configured registry is an error, not a skip. Checked before the
+      # ~6-minute build so it fails in seconds.
+      - name: Refuse half-configured registries
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::error::DOCKERHUB_USERNAME is set but DOCKERHUB_TOKEN is not" >&2
+            fail=1
+          fi
+          if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -z "${DOCKERHUB_USERNAME:-}" ]; then
+            echo "::error::DOCKERHUB_TOKEN is set but DOCKERHUB_USERNAME is not" >&2
+            fail=1
+          fi
+          if [ -n "${{ vars.FLY_APP }}" ] && [ -z "${FLY_API_TOKEN:-}" ]; then
+            echo "::error::FLY_APP is set but FLY_API_TOKEN is not" >&2
+            fail=1
+          fi
+          exit "$fail"
 
       - name: Log in to ghcr
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -58,59 +149,87 @@ jobs:
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_TOKEN != ''
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
-      # Built once and loaded into the daemon, so each registry below is a tag +
-      # push rather than a rebuild, and one registry failing cannot stop another.
-      # The GHA layer cache is the point: a cold cargo build is ~6 minutes, a
-      # re-release is ~1.
+      # Built once and loaded into the daemon, so each registry below is a tag and
+      # a push rather than a rebuild, and one registry failing cannot stop
+      # another. The GHA layer cache is the point: a cold cargo build is ~6
+      # minutes, a re-release about 1.
+      #
+      # linux/amd64 is explicit rather than implied by the runner: this image has
+      # to exec a glibc-only browser build, so an arm64 runner must not silently
+      # produce an image nothing can run.
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/Dockerfile
+          platforms: linux/amd64
           load: true
           tags: ${{ env.IMAGE }}:${{ env.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Push to ghcr
+        shell: bash
         run: |
-          set -eu
-          ref="ghcr.io/${{ github.repository_owner }}/$IMAGE:$TAG"
-          docker tag "$IMAGE:$TAG" "$ref"
-          docker push "$ref"
+          set -euo pipefail
+          REF="ghcr.io/${{ github.repository_owner }}/$IMAGE:$TAG"
+          docker tag "$IMAGE:$TAG" "$REF"
+          docker push "$REF"
 
       - name: Push to Docker Hub
         if: env.DOCKERHUB_TOKEN != ''
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
         run: |
-          set -eu
-          ref="${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE:$TAG"
-          docker tag "$IMAGE:$TAG" "$ref"
-          docker push "$ref"
+          set -euo pipefail
+          REF="${DOCKERHUB_USERNAME}/$IMAGE:$TAG"
+          docker tag "$IMAGE:$TAG" "$REF"
+          docker push "$REF"
 
-      # Not `flyctl deploy`: the deploy config lives in the deepscrape repo and
-      # the pin there is reviewed data. This only makes the ref exist.
+      # Not a deploy. The deploy config and its image pin live outside this repo;
+      # this only makes the ref exist so that pin resolves.
       - name: Push to Fly's registry
         if: vars.FLY_APP != ''
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           if [ -z "${FLY_API_TOKEN:-}" ]; then
-            echo "FLY_APP is set but FLY_API_TOKEN is not — cannot push." >&2
+            echo "::error::FLY_APP is set but FLY_API_TOKEN is not — cannot push." >&2
             exit 1
           fi
-          # A durable token piped straight in: `flyctl auth docker` hands out a
-          # credential that expires in minutes, and a 1.1 GB push outlives it.
-          echo "$FLY_API_TOKEN" | docker login registry.fly.io -u x --password-stdin
-          ref="registry.fly.io/${{ vars.FLY_APP }}:$TAG"
-          docker tag "$IMAGE:$TAG" "$ref"
-          docker push "$ref"
+          # A durable token piped straight in. `flyctl auth docker` hands out a
+          # credential that expires in minutes, and a 1.1 GB push outlives it —
+          # that is exactly how the last manual push died mid-layer.
+          printf '%s' "$FLY_API_TOKEN" | docker login registry.fly.io -u x --password-stdin
+          REF="registry.fly.io/${{ vars.FLY_APP }}:$TAG"
+          docker tag "$IMAGE:$TAG" "$REF"
+          docker push "$REF"
+
+      # The digests are the evidence that the three registries hold one image
+      # rather than three builds of one version. A diff here means the base image
+      # or the cache moved, which is worth seeing in the run summary instead of
+      # discovering at deploy time.
+      - name: Summarize digests
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "### webrain ${TAG}"
+            echo
+            echo '| Registry | Digest |'
+            echo '|---|---|'
+            for host in "ghcr.io/${{ github.repository_owner }}" \
+                        "${DOCKERHUB_USERNAME:-}" \
+                        "${FLY_APP_HOST:+registry.fly.io/$FLY_APP_HOST}"; do
+              [ -n "$host" ] || continue
+              d="$(docker inspect --format "{{range .RepoDigests}}{{println .}}{{end}}" "$host/$IMAGE:$TAG" 2>/dev/null | head -n1)"
+              echo "| \`$host\` | \`${d:-not pushed}\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          FLY_APP_HOST: ${{ vars.FLY_APP }}
