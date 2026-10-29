@@ -1285,7 +1285,10 @@ pub fn install_vision(model_id: &str, update: bool) -> Result<Value> {
     };
     let model = match install_one_vision_model(m) {
         Ok(_) => format!("ok: {}", m.id),
-        Err(e) => format!("skip: {e}"),
+        // A failed model download is NOT a skip. Reporting it as one printed
+        // `"model": "skip: probe https://…404"` and exited 0, so a wrong
+        // filename looked like a deliberate no-op instead of a broken install.
+        Err(e) => anyhow::bail!("vision model `{}` not installed: {e:#}", m.id),
     };
     Ok(json!({"llama-server": server, "model": model}))
 }

@@ -100,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **install vision**: a failed model download was reported as
+  `"model": "skip: probe https://…"` and the command still exited 0, so a 404 or
+  an offline link looked like a deliberate no-op instead of a broken install. The
+  model step is now fatal (`vision model \`<id>\` not installed: …`) — that is what
+  makes a wrong or renamed upstream filename visible.
 - **vision ask**: `op=ask` clipped the **wrong band** on any scrolled page. CDP's
   `clip` rect is DOCUMENT-space while every caller speaks VIEWPORT-space
   (`click_coords`, `getBoundingClientRect`, the tool's own "clip region" schema),
