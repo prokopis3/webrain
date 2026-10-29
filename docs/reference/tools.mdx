@@ -30,7 +30,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 |---|---|---|
 | `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
 | `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
-| `webrain_interact` (`action=…`) | click · click_coords · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
+| `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
 | `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
@@ -107,7 +107,31 @@ Return captured page errors/warnings (uncaught errors + unhandled rejections) si
 </Accordion>
 
 <Accordion title="webrain_screenshot">
-Take a screenshot of the current page. Returns base64-encoded PNG. `full_page` captures the full scrollable page.
+Take a screenshot of the current page. `full_page` captures the full scrollable page.
+
+`format`: `png` (default) | `jpeg` | `webp` | `avif`, plus `quality` (1-100,
+default 80) for the lossy ones. png/jpeg/webp are encoded by the browser itself
+(`Page.captureScreenshot`), so those cost no extra pass. `avif` has no CDP
+encoder: it is captured as png and converted in-process by `ravif`/rav1e, which
+costs a CPU re-encode.
+
+Measured, same viewport, two very different pages:
+
+| page | webp q80 | jpeg q80 | avif q80 | png |
+|---|---|---|---|---|
+| flat text (example.com) | **34,618** | 53,458 | — | 45,900 |
+| text + photos (Wikipedia) | **137,930** | 185,196 | 198,206 | 256,716 |
+
+Two lessons in that table: **jpeg can be larger than png** on a flat page (JPEG
+pays a per-8x8-block cost even for solid white, while deflate sees runs of
+identical pixels), and **avif at speed 6 is not smaller than webp** — its
+advantage needs a much slower encode. Use `webp` unless a client needs a
+specific type. The reply reports `format` (what was actually produced) and
+`requested_format`, so a silent fallback is visible.
+
+The reply also lands the image as an MCP `image` content block next to the JSON,
+so a client that renders images shows it directly instead of handing the model a
+base64 string. The same bytes are written to `dir` and the `path` is returned.
 
 <Note>
   Requires a paint engine — real Chrome, or Obscura v0.2.0+ **render builds**
@@ -140,14 +164,38 @@ Type text into an input element by its index.
 ```json
 { "index": 5, "text": "hello" }
 ```
+
+Add `ms` to type through real per-key `Input.dispatchKeyEvent` events at that
+cadence instead of one `Input.insertText` paste. `insertText` fires **no**
+keydown/keyup, which text captchas and the reCAPTCHA/hCaptcha audio challenge
+flag as non-human — `{"index": 5, "text": "hello", "ms": 60}` produces 5
+keydowns.
 </Accordion>
 
 <Accordion title="webrain_press">
-Press a key in the focused element (Enter, Tab, Escape, Backspace, ArrowDown...). Use after `webrain_type` to submit forms.
+Press a key in the focused element. Use after `webrain_type` to submit forms.
+
+Keys: `Enter` `Tab` `Escape` `Backspace` `Delete` `Space` `ArrowUp/Down/Left/Right`
+`Home` `End` `PageUp` `PageDown` `Insert`.
+
+`key` also accepts a **shortcut** — `ctrl+a`, `shift+Tab`, `meta+v`,
+`alt+ArrowLeft`. The modifier bitmask rides on both keyDown and keyUp and the
+base key carries a real `code` (`KeyA`), which is what makes an accelerator bind
+and what clears a prefilled captcha field or tabs through an audio challenge.
+`Enter` keeps the JS path that dispatches `form.submit()`; a modified Enter does
+not submit.
 </Accordion>
 
 <Accordion title="webrain_scroll">
 Scroll the page up or down. `direction`: `up` | `down`.
+
+With `x`, `y` and an optional `delta` it wheels **the element under that point**
+instead of the window — the only way to move a captcha modal, an inner list or a
+scrollable side panel. `delta` is signed (negative scrolls up); default ±500.
+
+```json
+{ "x": 400, "y": 300, "delta": 300 }
+```
 </Accordion>
 
 <Accordion title="webrain_nav">
@@ -191,7 +239,25 @@ Trusted click at raw viewport coordinates. For cross-origin iframe content and r
 </Accordion>
 
 <Accordion title="webrain_drag">
-Trusted drag across viewport coordinates (`x1,y1` → `x2,y2`): press → move with the button held → release, via CDP Input events. Built for slider/drag CAPTCHAs ("slide to unlock") and works across cross-origin iframes where synthetic JS events are ignored. Get coords from a screenshot (`webrain_observe what=screenshot`) or `webrain_page_info`.
+Trusted drag across viewport coordinates (`x1,y1` → `x2,y2`): approach the handle,
+press, dwell, trace an eased path with the button held, settle on the target,
+release — all via CDP Input events. Built for slider/drag CAPTCHAs ("slide to
+unlock", GeeTest, DataDome, AWS WAF) and it works across cross-origin iframes
+where synthetic JS events are ignored. Get coords from a screenshot
+(`webrain_observe what=screenshot`) or `webrain_page_info`.
+
+`ms` sets how long the handle is held **before** the movement starts (default
+150). A zero-length drag (`x1==x2`, `y1==y2`) with `ms` is therefore a
+press-and-hold in place.
+</Accordion>
+
+<Accordion title="webrain_hold">
+Trusted press-and-hold at `(x, y)` for `ms`, then release — for "Press & Hold to
+confirm you are a human" widgets (PerimeterX/HUMAN). Those only fire after a
+multi-second mousedown, so a click or a short drag never registers. Default 6 s.
+
+`action=hold`, or the equivalent zero-length
+`drag` (`x1==x2`, `y1==y2`, `ms`).
 </Accordion>
 
 <Accordion title="webrain_add_init_script">
