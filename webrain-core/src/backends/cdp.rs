@@ -2604,13 +2604,7 @@ impl BrowserBackend for CdpBackend {
         self.scroll_at(direction, 640, 400, delta).await
     }
 
-    async fn scroll_at(
-        &self,
-        direction: &str,
-        x: i64,
-        y: i64,
-        delta: f64,
-    ) -> anyhow::Result<()> {
+    async fn scroll_at(&self, direction: &str, x: i64, y: i64, delta: f64) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         // TRUSTED wheel scroll — Input.dispatchMouseEvent mouseWheel is a real
         // mouse-wheel event (isTrusted=true); window.scrollBy (JS) is a
@@ -2626,7 +2620,8 @@ impl BrowserBackend for CdpBackend {
             return Ok(());
         }
         let _ = direction;
-        self.eval_js(&format!("window.scrollBy(0, {delta})")).await?;
+        self.eval_js(&format!("window.scrollBy(0, {delta})"))
+            .await?;
         Ok(())
     }
 

@@ -1424,10 +1424,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .unwrap_or("png")
                 .to_string();
-            let quality = args
-                .get("quality")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(80) as u8;
+            let quality = args.get("quality").and_then(|v| v.as_u64()).unwrap_or(80) as u8;
             match backend.screenshot_fmt(full, &format, quality).await {
                 Ok(img) => {
                     use base64::Engine;

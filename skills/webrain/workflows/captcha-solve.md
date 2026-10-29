@@ -43,7 +43,12 @@ hCaptcha / Turnstile). Claim it first:
 
 ## Step 2 — Interpret the challenge with vision (ONE scaled shot)
 `webrain_vision op=ask` on the puzzle frame rect (clip x,y,w,h) **with
-`scale: 2`** (see Step 3 for why 2, not 3). Ask for the ACTION + NUMBERS:
+`scale: 2`** (see Step 3 for why 2, not 3). Ask for the ACTION + NUMBERS:Clip coords are **viewport** coords — the same space as
+`webrain_interact click_coords` and `getBoundingClientRect()`. Webrain adds the
+scroll offset itself, so a scrolled page needs no manual `+scrollY` (passing
+document coords instead lands the clip `scrollY` too high and the model answers
+confidently about nav text).
+
 > How to solve this CAPTCHA? Reply: TYPE + the exact instruction + the action.
 > TYPE: CHECKBOX (tick a box) | GRID (select squares with X) | TEXT/ASSEMBLE
 > (type a code / assemble 2 tiles to match a reference) | DRAG (drag a

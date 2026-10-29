@@ -303,7 +303,14 @@ pub trait BrowserBackend: Send + Sync {
     /// Trusted drag (press at x1,y1 → move with the button held → release at
     /// x2,y2) for drag-and-drop / slider CAPTCHAs. Crosses cross-origin iframes.
     /// `hold_ms` = how long to sit on the handle after pressing, before moving.
-    async fn drag(&self, _x1: i64, _y1: i64, _x2: i64, _y2: i64, _hold_ms: u64) -> anyhow::Result<()> {
+    async fn drag(
+        &self,
+        _x1: i64,
+        _y1: i64,
+        _x2: i64,
+        _y2: i64,
+        _hold_ms: u64,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("drag not supported by this backend")
     }
     /// Trusted press-and-hold at (x,y) for `ms`, then release. For "Press & Hold

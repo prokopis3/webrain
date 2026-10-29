@@ -7,8 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-29
+
 ### Added
 
+- **vision**: `install vision --model <id>` is now an allowlist, not a free-form
+  name — `qwen3-vl-2b` (legacy default), `qwen3-vl-2b-q6k`, and the four
+  `qwen35-9b-q{4km,5km,6k,q8}` quants of
+  `Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF`. Each entry carries its own
+  mmproj (`mmproj-F16.gguf` / `mmproj.gguf` — the 922 MB vision file), and an
+  unknown id prints the choices with download size + RAM/VRAM instead of
+  fetching an arbitrary repo. Models live in `vision/<id>/`; `vision_local()`
+  resolves `WEBRAIN_VISION_MODEL` → default id → any installed → the legacy flat
+  layout, so an existing single-model install keeps working untouched.
+  `--model-update` re-checks the files against Hugging Face (`download_to_file`
+  now re-downloads when the upstream size changed, instead of trusting a stale
+  `.ok`). New `webrain uninstall vision --model <id>` / `--all`.
+- **vision**: GPU offload for the local Qwen3-VL. `llama-server` was spawned with
+  no `-ngl`, so it ran CPU-only even on a machine with a GPU. It now passes
+  `-ngl 99` when a GPU backend library (`ggml-cuda` / `-vulkan` / `-hip` /
+  `-sycl` / `-metal`) sits **beside the llama-server binary** — a capability
+  check on the build, not a probe of the machine, because `-ngl` on a CPU-only
+  build is silently ignored and a machine probe would promise an offload that
+  never happens. `WEBRAIN_VISION_GPU=0` forces CPU, `=1` forces the flag;
+  `WEBRAIN_LLAMA_SERVER` points at a different binary (e.g. a CUDA build).
+  GPU buys speed on the 2B, not accuracy.
 - **observe/screenshot**: the capture now comes back as a real MCP **`image`
   content block** beside the JSON, not a base64 string inside a text block. An
   MCP client can only *display* a picture that arrives as `{type:"image"}`; the
@@ -68,6 +91,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **vision ask**: `op=ask` clipped the **wrong band** on any scrolled page. CDP's
+  `clip` rect is DOCUMENT-space while every caller speaks VIEWPORT-space
+  (`click_coords`, `getBoundingClientRect`, the tool's own "clip region" schema),
+  so with `scrollY=307` a clip at viewport y=440 captured document y=440 —
+  `scrollY` too high — and the model answered confidently about nav text. The
+  offset (`scrollX`/`scrollY`, read once) is now added to the clip *and* to every
+  `tiles[]` entry, and the no-clip default (`0,0,innerWidth,innerHeight`) follows
+  the same path, so it means "what is on screen" instead of "the top of the
+  document". Proven A/B on a scrolled GeeTest demo: fixed crop → `9` monsters;
+  the old band → the "Demo Here - Geetest" heading and "2 … cut off".
 - **cdp**: input is no longer silently dropped on a background or occluded tab.
   Measured on a PerimeterX challenge: 12 `mouseMoved` landed but **0**
   `mousePressed`, with `document.visibilityState === "hidden"` — the page looked

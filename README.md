@@ -175,7 +175,9 @@ webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
 webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
-webrain install watch|whisper|vision [--model]     # local AI stack (whisper + Qwen3-VL-2B)
+webrain install watch|whisper [--model NAME]       # ffmpeg + yt-dlp + whisper (STT)
+webrain install vision [--model ID] [--model-update]  # llama-server + a local vision model
+webrain uninstall vision --model ID | --all        # remove installed vision models
 webrain serp "<query>" [--engine …] [--limit N]   # structured JSON search (5 engines + auto)
 ```
 

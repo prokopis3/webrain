@@ -21,8 +21,14 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "install",
-        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper|vision [--model NAME]",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install vision [--model ID] [--model-update]",
         "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL).",
+        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.",
+    ),
+    (
+        "uninstall",
+        "webrain uninstall vision [--model ID | --all]",
+        "Remove an installed local vision model, or all of them.",
         "",
     ),
     (
@@ -752,11 +758,24 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
                 "vision" => {
-                    // webrain install vision [--force]
+                    // webrain install vision [--model ID] [--model-update]
                     // Local "hero" vision backend, the whisper analog: bundles
-                    // llama-server + Qwen3-VL-2B (GGUF + mmproj) into the cache
+                    // llama-server + one catalog model (GGUF + its own mmproj)
                     // so `watch --vision` works with NO cloud key, offline.
-                    let status = webrain_core::install::install_vision(force)?;
+                    // Only the catalog ids are accepted — anything else prints
+                    // the choices instead of fetching an arbitrary repo.
+                    let model = args
+                        .iter()
+                        .position(|a| a == "--model")
+                        .and_then(|i| args.get(i + 1))
+                        .cloned()
+                        // `install vision qwen3-vl-2b-q6k` — positional id, the way
+                        // `--engine` accepts one. Without this a bare id silently
+                        // installed the DEFAULT model.
+                        .or_else(|| args.get(3).filter(|a| !a.starts_with("--")).cloned())
+                        .unwrap_or_else(|| webrain_core::install::DEFAULT_VISION_ID.to_string());
+                    let update = args.contains(&"--model-update".to_string());
+                    let status = webrain_core::install::install_vision(&model, update)?;
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
                 other => {
@@ -765,6 +784,30 @@ fn main() -> anyhow::Result<()> {
                     )
                 }
             }
+        }
+        Some("uninstall") => {
+            // webrain uninstall vision [--model ID | --all]
+            let target = args.get(2).cloned().unwrap_or_default();
+            if target != "vision" {
+                anyhow::bail!(
+                    "unknown uninstall target `{target}` — try: webrain uninstall vision [--model ID | --all]"
+                );
+            }
+            let model = args
+                .iter()
+                .position(|a| a == "--model")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            let all = args.contains(&"--all".to_string());
+            if model.is_none() && !all {
+                anyhow::bail!(
+                    "pick what to remove: --model <id> or --all\n{}",
+                    webrain_core::install::vision_model_choices()
+                );
+            }
+            let status =
+                webrain_core::install::uninstall_vision(if all { None } else { model.as_deref() })?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
         Some("obscura") => {
             // webrain obscura [--port N] — spawn the Obscura CDP server

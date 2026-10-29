@@ -15,9 +15,82 @@ use std::path::{Path, PathBuf};
 
 const CFG_JSON_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 const LLAMA_RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
-const VISION_HF: &str = "https://huggingface.co/unsloth/Qwen3-VL-2B-Instruct-GGUF/resolve/main";
+/// Legacy flat install (single-model layout, `vision/*.gguf`).
 const VISION_MODEL: &str = "Qwen3-VL-2B-Instruct-Q4_K_M.gguf";
 const VISION_MMPROJ: &str = "mmproj-F16.gguf";
+
+/// One installable local vision model. `webrain install vision --model <id>`
+/// accepts ONLY these — a free-form repo name would let a typo pull arbitrary
+/// files into the cache. Each entry carries its own mmproj; a model without one
+/// loads but cannot see.
+pub struct VisionModel {
+    pub id: &'static str,
+    pub repo: &'static str,
+    pub file: &'static str,
+    pub mmproj: &'static str,
+    /// Download + RAM/VRAM hint, printed with the choices.
+    pub about: &'static str,
+}
+
+pub const VISION_MODELS: &[VisionModel] = &[
+    VisionModel {
+        id: "qwen3-vl-2b",
+        repo: "unsloth/Qwen3-VL-2B-Instruct-GGUF",
+        file: "Qwen3-VL-2B-Instruct-Q4_K_M.gguf",
+        mmproj: "mmproj-F16.gguf",
+        about: "1.1 GB + 819 MB | 8-16 GB RAM | 2-4 GB VRAM (legacy default)",
+    },
+    VisionModel {
+        id: "qwen3-vl-2b-q6k",
+        repo: "unsloth/Qwen3-VL-2B-Instruct-GGUF",
+        file: "Qwen3-VL-2B-Instruct-Q6_K.gguf",
+        mmproj: "mmproj-F16.gguf",
+        about: "1.4 GB + 819 MB | 8-16 GB RAM | 2-4 GB VRAM (recommended)",
+    },
+    VisionModel {
+        id: "qwen35-9b-q4km",
+        repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
+        file: "Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf",
+        mmproj: "mmproj.gguf",
+        about: "5.63 GB + 922 MB | 16-32 GB RAM | 8-12 GB VRAM",
+    },
+    VisionModel {
+        id: "qwen35-9b-q5km",
+        repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
+        file: "Qwen3.5-9B-DeepSeek-V4-Flash-Q5_K_M.gguf",
+        mmproj: "mmproj.gguf",
+        about: "6.47 GB + 922 MB | 16-32 GB RAM | 10-12 GB VRAM",
+    },
+    VisionModel {
+        id: "qwen35-9b-q6k",
+        repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
+        file: "Qwen3.5-9B-DeepSeek-V4-Flash-Q6_K.gguf",
+        mmproj: "mmproj.gguf",
+        about: "7.36 GB + 922 MB | 24-32 GB RAM | 12-16 GB VRAM",
+    },
+    VisionModel {
+        id: "qwen35-9b-q8",
+        repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
+        file: "Qwen3.5-9B-DeepSeek-V4-Flash-Q8_0.gguf",
+        mmproj: "mmproj.gguf",
+        about: "9.53 GB + 922 MB | 32-64 GB RAM | 16 GB+ VRAM",
+    },
+];
+
+pub const DEFAULT_VISION_ID: &str = "qwen3-vl-2b";
+
+pub fn vision_model(id: &str) -> Option<&'static VisionModel> {
+    VISION_MODELS.iter().find(|m| m.id == id)
+}
+
+/// The choices list for `--help`, a bad `--model`, and `uninstall`.
+pub fn vision_model_choices() -> String {
+    let mut out = String::new();
+    for m in VISION_MODELS {
+        out.push_str(&format!("  {:<15} {}\n", m.id, m.about));
+    }
+    out
+}
 
 /// Engine cache root. Override with WEBRAIN_BROWSERS_DIR.
 pub fn browsers_dir() -> PathBuf {
@@ -868,10 +941,21 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     };
 
     // Genuinely complete (has the .ok marker AND the destination file — a stale
-    // marker left behind after the dest was deleted must not fake success).
+    // marker left behind after the dest was deleted must not fake success) and
+    // still the size the server reports, so an upstream bump re-downloads and
+    // `--model-update` needs no separate path.
     if ok.exists() && dest.exists() {
-        println!("  ✓ {name}: {} (already complete)", human_bytes(total));
-        return Ok(());
+        let have = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        if have == total {
+            println!("  ✓ {name}: {} (already complete)", human_bytes(total));
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&ok);
+        println!(
+            "  ↑ {name}: upstream changed ({} → {})",
+            human_bytes(have),
+            human_bytes(total)
+        );
     }
 
     let workers = 8usize.min(total.div_ceil(16 * 1024 * 1024) as usize).max(1);
@@ -1155,49 +1239,118 @@ fn install_llama_server(force: bool) -> Result<PathBuf> {
     Ok(exe)
 }
 
-/// Install the Qwen3-VL-2B vision model + mmproj into vision/. Local "hero"
-/// vision backend — the whisper GGUF model analog (webrain install vision).
-fn install_vision_model(_force: bool) -> Result<(PathBuf, PathBuf)> {
-    let dir = browsers_dir().join("vision");
+/// Download one catalog model + its mmproj into `vision/<id>/`. No exists()
+/// short-circuit: a truncated file must be re-validated, never trusted.
+fn install_one_vision_model(m: &VisionModel) -> Result<(PathBuf, PathBuf)> {
+    let dir = browsers_dir().join("vision").join(m.id);
     std::fs::create_dir_all(&dir)?;
-    let model = dir.join(VISION_MODEL);
-    let mmproj = dir.join(VISION_MMPROJ);
-    // No exists() short-circuit here: a truncated file from a dropped download
-    // must be re-validated (probe total size) and restarted, not trusted.
-    for (file, dest) in [(VISION_MODEL, &model), (VISION_MMPROJ, &mmproj)] {
-        let url = format!("{VISION_HF}/{file}");
-        println!("[{}/2] {file}", if file == VISION_MODEL { 1 } else { 2 });
-        // download_to_file self-validates against the server every run: probes
-        // total size, skips only a genuinely-complete file, renames a complete
-        // .part, else re-downloads fresh. Never trusts `dest.exists()`.
+    let model = dir.join(m.file);
+    let mmproj = dir.join(m.mmproj);
+    for (n, (file, dest)) in [(m.file, &model), (m.mmproj, &mmproj)]
+        .into_iter()
+        .enumerate()
+    {
+        let url = format!("https://huggingface.co/{}/resolve/main/{file}", m.repo);
+        println!("[{}/2] {} / {file}", n + 1, m.id);
+        // download_to_file re-validates against the server every run: probes the
+        // total size, skips a genuinely-complete file, resumes a .part, and
+        // re-downloads when the upstream size changed (that IS `--model-update`).
         download_to_file(&url, dest)?;
     }
-    println!("Qwen3-VL-2B ready: {}", dir.display());
     Ok((model, mmproj))
 }
 
-/// Install the whole local vision stack (llama-server + Qwen3-VL-2B model +
-/// mmproj) — `webrain install vision`. Cache-contained, like the whisper model.
-pub fn install_vision(force: bool) -> Result<Value> {
-    let server = match install_llama_server(force) {
+/// `webrain install vision [--model ID] [--model-update]` — llama-server plus
+/// one catalog model. `update` re-checks only the model files against Hugging
+/// Face, leaving the server alone.
+pub fn install_vision(model_id: &str, update: bool) -> Result<Value> {
+    let Some(m) = vision_model(model_id) else {
+        anyhow::bail!(
+            "unknown vision model `{model_id}` — choose one of:\n{}",
+            vision_model_choices()
+        );
+    };
+    if update {
+        let (model, mmproj) = install_one_vision_model(m)?;
+        return Ok(json!({
+            "model": m.id,
+            "model_file": model.display().to_string(),
+            "mmproj": mmproj.display().to_string(),
+            "checked": "hugging face",
+        }));
+    }
+    let server = match install_llama_server(false) {
         Ok(p) => format!("ok: {}", p.display()),
         Err(e) => format!("skip: {e}"),
     };
-    let model = match install_vision_model(force) {
-        Ok(_) => "ok".to_string(),
+    let model = match install_one_vision_model(m) {
+        Ok(_) => format!("ok: {}", m.id),
         Err(e) => format!("skip: {e}"),
     };
-    Ok(json!({"llama-server": server, "qwen3-vl-2b": model}))
+    Ok(json!({"llama-server": server, "model": model}))
+}
+
+/// `webrain uninstall vision [--model ID | --all]`. Also clears the legacy flat
+/// files that an older single-model install left in `vision/`.
+pub fn uninstall_vision(model_id: Option<&str>) -> Result<Value> {
+    let root = browsers_dir().join("vision");
+    let Some(id) = model_id else {
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        return Ok(json!({"removed": root.display().to_string(), "all": true}));
+    };
+    if vision_model(id).is_none() {
+        anyhow::bail!(
+            "unknown vision model `{id}` — choose one of:\n{}",
+            vision_model_choices()
+        );
+    }
+    let dir = root.join(id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    if id == DEFAULT_VISION_ID {
+        for f in [VISION_MODEL, VISION_MMPROJ] {
+            let p = root.join(f);
+            let _ = std::fs::remove_file(p.with_extension("ok"));
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    Ok(json!({"removed": dir.display().to_string()}))
 }
 
 /// Bundled local vision stack, if installed — `webrain install vision` (the
-/// whisper analog): returns (llama-server, Qwen3-VL-2B model, mmproj).
+/// whisper analog): returns (llama-server, model, mmproj).
+/// `WEBRAIN_LLAMA_SERVER` points at a different llama-server binary (e.g. a
+/// CUDA/Vulkan build, which then gets `-ngl 99` automatically);
+/// `WEBRAIN_VISION_MODEL` picks which installed model to load — default is the
+/// legacy 2B, else whatever is installed.
 pub fn vision_local() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    let server = find_tool("llama-server")?;
-    let dir = browsers_dir().join("vision");
-    let model = dir.join(VISION_MODEL);
-    let mmproj = dir.join(VISION_MMPROJ);
-    (model.is_file() && mmproj.is_file()).then_some((server, model, mmproj))
+    let server = std::env::var("WEBRAIN_LLAMA_SERVER")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| find_tool("llama-server"))?;
+    let root = browsers_dir().join("vision");
+    let want = std::env::var("WEBRAIN_VISION_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_VISION_ID.to_string());
+    let installed = |id: &str| {
+        let m = vision_model(id)?;
+        let d = root.join(m.id);
+        let (model, mmproj) = (d.join(m.file), d.join(m.mmproj));
+        (model.is_file() && mmproj.is_file()).then_some((model, mmproj))
+    };
+    let (model, mmproj) = installed(&want)
+        .or_else(|| VISION_MODELS.iter().find_map(|m| installed(m.id)))
+        // legacy flat layout left by the single-model install
+        .or_else(|| {
+            let (m, p) = (root.join(VISION_MODEL), root.join(VISION_MMPROJ));
+            (m.is_file() && p.is_file()).then_some((m, p))
+        })?;
+    Some((server, model, mmproj))
 }
 
 pub fn install_watch(force: bool, model: &str) -> Result<Value> {
@@ -1218,7 +1371,7 @@ pub fn install_watch(force: bool, model: &str) -> Result<Value> {
         Ok(_) => "ok".to_string(),
         Err(e) => format!("skip: {e}"),
     };
-    let vision = match install_vision_model(force) {
+    let vision = match install_one_vision_model(&VISION_MODELS[0]) {
         Ok(_) => "ok".to_string(),
         Err(e) => format!("skip: {e}"),
     };
@@ -1253,8 +1406,7 @@ pub fn install_watch(force: bool, model: &str) -> Result<Value> {
                 .to_string(),
         );
     }
-    let local_vision = find_tool("llama-server").is_some()
-        && browsers_dir().join("vision").join(VISION_MODEL).exists();
+    let local_vision = vision_local().is_some();
     if !any_key(&vision_keys) && !local_vision {
         warnings.push(
             "no vision key and no local Qwen3-VL-2B — `watch --vision` will return vision_error; set GROQ_API_KEY | OPENAI_API_KEY or run `webrain install vision` (bundles llama-server + Qwen3-VL-2B locally, like whisper)"
