@@ -88,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interact drag**: replaced the 10-step straight-line teleport with an
   eased-in-out, slightly-arced path (28 steps) plus a settle on the handle and
   on the drop target — even steps read as synthetic to slider captchas.
+- **cli help**: `webrain --help` printed 12 of the ~40 environment variables the
+  binary reads, so anything documented only in
+  `docs/reference/environment.mdx` — including the new `WEBRAIN_VISION_MODEL`,
+  `WEBRAIN_LLAMA_SERVER` and `WEBRAIN_VISION_GPU` — could not be discovered from
+  the terminal. The env block is now a grouped table built from one `ENV`
+  constant covering every variable the code reads (attach/engines, stealth,
+  network, MCP transport, vault, SERP tiers, agent, local AI, logging), and
+  `webrain help env` prints just that section. `WEBRAIN_MAX_TABS` was missing
+  from the docs table as well and is now listed there.
 
 ### Fixed
 

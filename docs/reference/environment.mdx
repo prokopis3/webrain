@@ -17,6 +17,7 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / XDG data dir, i.e. `~/.local/share/webrain/profiles` |
+| `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory | engine default |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys, tried GROQ → OPENAI → FIREWORKS. The vision `ask` chain is separate: OPENROUTER → OPENAI → FIREWORKS → GROQ → bundled local Qwen3-VL-2B | — |
