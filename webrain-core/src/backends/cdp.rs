@@ -897,6 +897,22 @@ impl CdpBackend {
         let _ = self
             .send_cmd_with(Some(&sid), "Network.enable", json!({}))
             .await;
+        // Input routing: a background or occluded tab silently DROPS
+        // Input.dispatchMouseEvent mousePressed while mouseMoved still lands —
+        // so a click on a live widget looks like a dead handler (measured: 12
+        // moves, 0 mousedowns, document.visibilityState === "hidden").
+        // bringToFront makes this the active tab; focus emulation keeps input
+        // flowing when the OS window is behind another application.
+        let _ = self
+            .send_cmd_with(Some(&sid), "Page.bringToFront", json!({}))
+            .await;
+        let _ = self
+            .send_cmd_with(
+                Some(&sid),
+                "Emulation.setFocusEmulationEnabled",
+                json!({"enabled": true}),
+            )
+            .await;
         // ponytail: NO Emulation.setAutomationOverride — patchright's driver
         // patch list has zero calls to it, and it's a detectable CDP automation
         // signal (real Chrome never sets it). navigator.webdriver is already
@@ -1697,6 +1713,49 @@ async fn focus_clear(b: &CdpBackend, index: usize) -> anyhow::Result<()> {
     }
 }
 
+/// One `Page.captureScreenshot`. `quality` is only meaningful for the lossy
+/// encodings — Chrome rejects it on png.
+async fn capture_image(
+    b: &CdpBackend,
+    full_page: bool,
+    fmt: &str,
+    quality: u8,
+) -> anyhow::Result<Vec<u8>> {
+    b.ensure_page_attached().await?;
+    let mut params = json!({"format": fmt, "captureBeyondViewport": full_page});
+    if fmt != "png" {
+        params["quality"] = json!(quality.clamp(1, 100));
+    }
+    let result = b.send_cmd("Page.captureScreenshot", params).await?;
+    let b64 = result["data"].as_str().context("No screenshot data")?;
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("Failed to decode screenshot base64")
+}
+
+/// PNG → AVIF via rav1e. The only screenshot format that pays a second pass,
+/// because CDP has no AVIF encoder.
+fn encode_avif(png: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
+    let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .context("avif: decode png")?
+        .to_rgba8();
+    let (w, h) = rgba.dimensions();
+    // ravif wants &[rgb::RGBA8], not &[u8] — one copy of the frame.
+    let px: Vec<ravif::RGBA8> = rgba
+        .pixels()
+        .map(|p| ravif::RGBA8::new(p[0], p[1], p[2], p[3]))
+        .collect();
+    // speed 6 is the middle of 0..=10: AVIF at higher effort costs seconds per
+    // frame for a few KB on a screen capture.
+    let encoded = ravif::Encoder::new()
+        .with_quality(quality.clamp(1, 100) as f32)
+        .with_speed(6)
+        .encode_rgba(ravif::Img::new(&px, w as usize, h as usize))
+        .map_err(|e| anyhow::anyhow!("avif encode: {e}"))?;
+    Ok(encoded.avif_file)
+}
+
 /// Trusted click at viewport coords via CDP Input.dispatchMouseEvent
 /// (mousePressed + mouseReleased). Goes through the real browser input
 /// pipeline → isTrusted=true, crosses shadow-DOM + cross-origin iframe
@@ -2076,18 +2135,31 @@ impl BrowserBackend for CdpBackend {
     }
 
     async fn screenshot(&self, full_page: bool) -> anyhow::Result<Vec<u8>> {
-        self.ensure_page_attached().await?;
-        let result = self
-            .send_cmd(
-                "Page.captureScreenshot",
-                json!({"format": "png", "captureBeyondViewport": full_page}),
-            )
-            .await?;
-        let b64 = result["data"].as_str().context("No screenshot data")?;
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .context("Failed to decode screenshot base64")
+        self.screenshot_fmt(full_page, "png", 90).await
+    }
+
+    async fn screenshot_fmt(
+        &self,
+        full_page: bool,
+        format: &str,
+        quality: u8,
+    ) -> anyhow::Result<Vec<u8>> {
+        // CDP encodes png|jpeg|webp itself — the browser's own encoder, no image
+        // crate and no second pass over the pixels. avif is the exception: no
+        // DevTools encoder exists, so it is captured as png and converted below.
+        let want_avif = format.eq_ignore_ascii_case("avif");
+        let fmt = match format.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" => "jpeg",
+            "webp" => "webp",
+            _ => "png",
+        };
+        let bytes = capture_image(self, full_page, fmt, quality).await?;
+        if !want_avif {
+            return Ok(bytes);
+        }
+        // Encoding is CPU-bound and can take hundreds of ms — keep it off the
+        // async worker so one screenshot cannot stall other tool calls.
+        tokio::task::spawn_blocking(move || encode_avif(&bytes, quality)).await?
     }
 
     async fn evaluate(&self, js: &str) -> anyhow::Result<Value> {
@@ -2276,25 +2348,56 @@ impl BrowserBackend for CdpBackend {
 
     async fn press(&self, key: &str) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
+        // Shortcut support: "ctrl+a", "shift+Tab", "meta+v", "alt+ArrowLeft".
+        // The modifier bitmask (Alt 1, Ctrl 2, Meta 4, Shift 8) must ride on
+        // BOTH keyDown and keyUp, and the accelerator only fires when the base
+        // key is a real `code` (KeyA), not just a `key` — which is exactly what
+        // clearing a captcha field or tabbing through an audio challenge needs.
+        let mut mods = 0;
+        let mut base = key;
+        if key.len() > 1 && key.contains('+') {
+            for part in key.split('+') {
+                match part.to_ascii_lowercase().as_str() {
+                    "ctrl" | "control" => mods |= 2,
+                    "shift" => mods |= 8,
+                    "alt" | "option" => mods |= 1,
+                    "meta" | "cmd" | "command" | "win" => mods |= 4,
+                    "" => {}
+                    _ => base = part,
+                }
+            }
+        }
         // Trusted CDP path (browsemind cdp_session_press). NOTE: CDP
         // dispatchKeyEvent does NOT trigger native form submission for Enter —
         // Enter keeps the JS path which dispatches form.submit().
-        if key != "Enter" {
-            let (k, code) = match key {
-                "Tab" => ("Tab", "Tab"),
-                "Escape" => ("Escape", "Escape"),
-                "Backspace" => ("Backspace", "Backspace"),
-                "ArrowDown" => ("ArrowDown", "ArrowDown"),
-                "ArrowUp" => ("ArrowUp", "ArrowUp"),
-                "Space" => (" ", "Space"),
-                _ => (key, key),
+        let enter = base == "Enter" || base == "Return";
+        if !enter {
+            let (k, code): (&str, String) = match base {
+                "Tab" => ("Tab", "Tab".to_string()),
+                "Escape" | "Esc" => ("Escape", "Escape".to_string()),
+                "Backspace" => ("Backspace", "Backspace".to_string()),
+                "Delete" | "Del" => ("Delete", "Delete".to_string()),
+                "Space" => (" ", "Space".to_string()),
+                // Sliders/audio players are keyboard-operable by ARIA; these are
+                // the keys an accessibility slider actually listens for.
+                "Home" => ("Home", "Home".to_string()),
+                "End" => ("End", "End".to_string()),
+                "PageUp" => ("PageUp", "PageUp".to_string()),
+                "PageDown" => ("PageDown", "PageDown".to_string()),
+                "Insert" => ("Insert", "Insert".to_string()),
+                // "a" alone must still carry code KeyA, or alt+a / ctrl+a
+                // shortcuts never bind
+                k if k.len() == 1 && k.as_bytes()[0].is_ascii_alphabetic() => {
+                    (base, format!("Key{}", base.to_ascii_uppercase()))
+                }
+                _ => (base, base.to_string()),
             };
-            let p = json!({"type": "keyDown", "key": k, "code": code});
+            let p = json!({"type": "keyDown", "key": k, "code": code, "modifiers": mods});
             if self.send_cmd("Input.dispatchKeyEvent", p).await.is_ok()
                 && self
                     .send_cmd(
                         "Input.dispatchKeyEvent",
-                        json!({"type": "keyUp", "key": k, "code": code}),
+                        json!({"type": "keyUp", "key": k, "code": code, "modifiers": mods}),
                     )
                     .await
                     .is_ok()
@@ -2305,14 +2408,15 @@ impl BrowserBackend for CdpBackend {
         // JS fallback (Enter here — dispatches form.submit; lightpanda too)
         let js = format!(
             r#"(function() {{
-                const k = '{key}';
-                const map = {{'Enter':'Enter','Tab':'Tab','Escape':'Escape','Backspace':'Backspace','ArrowDown':'ArrowDown','ArrowUp':'ArrowUp','Space':' '}};
+                const k = {base:?};
+                const map = {{'Enter':'Enter','Tab':'Tab','Escape':'Escape','Backspace':'Backspace','ArrowDown':'ArrowDown','ArrowUp':'ArrowUp','ArrowLeft':'ArrowLeft','ArrowRight':'ArrowRight','Space':' '}};
                 const key = map[k] || k;
                 const el = document.activeElement || document.body;
-                const opts = {{ key, code: key, bubbles: true, cancelable: true }};
+                const opts = {{ key, code: key, bubbles: true, cancelable: true,
+                    ctrlKey: {ctrl}, shiftKey: {shift}, altKey: {alt}, metaKey: {meta} }};
                 el.dispatchEvent(new KeyboardEvent('keydown', opts));
                 el.dispatchEvent(new KeyboardEvent('keyup', opts));
-                if (el.form && k === 'Enter') {{
+                if (el.form && k === 'Enter' && !{ctrl} && !{meta} && !{alt}) {{
                     const ev = new Event('submit', {{ bubbles: true, cancelable: true }});
                     // Dispatch first so React/Vue onSubmit (validation, XHR,
                     // preventDefault) runs; only native-submit if not canceled.
@@ -2322,7 +2426,12 @@ impl BrowserBackend for CdpBackend {
                     return 'form-submitted';
                 }}
                 return 'pressed ' + k;
-            }})()"#
+            }})()"#,
+            base = base,
+            ctrl = mods & 2 != 0,
+            shift = mods & 8 != 0,
+            alt = mods & 1 != 0,
+            meta = mods & 4 != 0,
         );
         self.eval_js(&js).await?;
         Ok(())
@@ -2377,32 +2486,74 @@ impl BrowserBackend for CdpBackend {
         Ok(())
     }
 
-    async fn drag(&self, x1: i64, y1: i64, x2: i64, y2: i64) -> anyhow::Result<()> {
+    async fn drag(&self, x1: i64, y1: i64, x2: i64, y2: i64, hold_ms: u64) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
-        // Trusted drag (drag-and-drop / slider CAPTCHAs): mouseMoved to the
-        // handle, press (button held), a few move steps so the widget tracks
-        // the pointer, release. Crosses cross-origin iframes like clicks.
-        self.send_cmd(
-            "Input.dispatchMouseEvent",
-            json!({"type": "mouseMoved", "x": x1, "y": y1, "button": "left", "buttons": 0}),
-        )
-        .await?;
+        // Trusted drag (drag-and-drop / slider CAPTCHAs): approach the handle,
+        // press, SETTLE so the widget registers the grab, trace an eased
+        // jittered path to the target, settle again so the drop registers,
+        // release. 10 even steps teleporting to the end reads as synthetic to
+        // sliders; a real pointer accelerates, curves slightly and slows in.
+        // Crosses cross-origin iframes like clicks.
+        for _ in 0..2 {
+            self.send_cmd(
+                "Input.dispatchMouseEvent",
+                json!({"type": "mouseMoved", "x": x1, "y": y1, "buttons": 0}),
+            )
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
         self.send_cmd(
             "Input.dispatchMouseEvent",
             json!({"type": "mousePressed", "x": x1, "y": y1, "button": "left", "buttons": 1, "clickCount": 1}),
         )
         .await?;
-        let steps = 10;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Caller-set dwell on the handle before the movement starts (`ms`).
+        // PerimeterX press-and-hold needs seconds; a slider needs a beat.
+        let extra = hold_ms.saturating_sub(150);
+        if extra > 0 {
+            let ticks = extra / 250;
+            for _ in 0..ticks {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                self.send_cmd(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseMoved", "x": x1, "y": y1, "button": "left", "buttons": 1}),
+                )
+                .await?;
+            }
+        }
+
+        let steps = 28;
         for i in 1..=steps {
-            let x = x1 + (x2 - x1) * i / steps;
-            let y = y1 + (y2 - y1) * i / steps;
+            let t = i as f64 / steps as f64;
+            // ease-in-out: slow off the handle, fast through the middle, slow in
+            let ease = if t < 0.5 {
+                2.0 * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+            };
+            // slight arc so the path is not a dead-straight line
+            let bow = (t * std::f64::consts::PI).sin() * 3.0;
+            let jx = ((i * 7) % 5) as i64 - 2;
+            let jy = ((i * 13) % 7) as i64 - 3;
+            let x = x1 + ((x2 - x1) as f64 * ease) as i64 + jx;
+            let y = y1 + ((y2 - y1) as f64 * ease) as i64 + bow as i64 + jy;
+            let x = if x2 >= x1 { x.min(x2) } else { x.max(x2) };
             self.send_cmd(
                 "Input.dispatchMouseEvent",
                 json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}),
             )
             .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(10 + (i % 5) as u64)).await;
         }
+        // land exactly on the target and pause before letting go
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseMoved", "x": x2, "y": y2, "button": "left", "buttons": 1}),
+        )
+        .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
         self.send_cmd(
             "Input.dispatchMouseEvent",
             json!({"type": "mouseReleased", "x": x2, "y": y2, "button": "left", "buttons": 0}),
@@ -2411,22 +2562,71 @@ impl BrowserBackend for CdpBackend {
         Ok(())
     }
 
+    async fn hold_at(&self, x: i64, y: i64, ms: u64) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        // Trusted press-and-hold (PerimeterX/HUMAN "Press & Hold to confirm you
+        // are a human"). Two moves first: those widgets ignore a press with no
+        // prior pointer position. Then press and keep the button down — with a
+        // live pointer — for the whole hold window, and only then release.
+        for _ in 0..2 {
+            self.send_cmd(
+                "Input.dispatchMouseEvent",
+                json!({"type": "mouseMoved", "x": x, "y": y, "buttons": 0}),
+            )
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+        }
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1}),
+        )
+        .await?;
+        let step = std::time::Duration::from_millis(250);
+        let ticks = (ms / 250).max(1);
+        for _ in 0..ticks {
+            tokio::time::sleep(step).await;
+            self.send_cmd(
+                "Input.dispatchMouseEvent",
+                json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}),
+            )
+            .await?;
+        }
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1}),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn scroll(&self, direction: &str) -> anyhow::Result<()> {
+        let delta = if direction == "down" { 500.0 } else { -500.0 };
+        self.scroll_at(direction, 640, 400, delta).await
+    }
+
+    async fn scroll_at(
+        &self,
+        direction: &str,
+        x: i64,
+        y: i64,
+        delta: f64,
+    ) -> anyhow::Result<()> {
         self.ensure_page_attached().await?;
         // TRUSTED wheel scroll — Input.dispatchMouseEvent mouseWheel is a real
         // mouse-wheel event (isTrusted=true); window.scrollBy (JS) is a
-        // detectable non-human signal. JS fallback only for engines without
-        // Input.* (lightpanda).
-        let delta_y = if direction == "down" { 500.0 } else { -500.0 };
+        // detectable non-human signal. The point matters: a wheel at (x,y)
+        // scrolls the element UNDER it, which is how a captcha modal or a
+        // scrollable side panel moves at all (the window does not). JS fallback
+        // only for engines without Input.* (lightpanda).
         let p = json!({
-            "type": "mouseWheel", "x": 640, "y": 400,
-            "deltaX": 0, "deltaY": delta_y
+            "type": "mouseWheel", "x": x, "y": y,
+            "deltaX": 0, "deltaY": delta
         });
         if self.send_cmd("Input.dispatchMouseEvent", p).await.is_ok() {
             return Ok(());
         }
-        self.eval_js(&format!("window.scrollBy(0, {delta_y})"))
-            .await?;
+        let _ = direction;
+        self.eval_js(&format!("window.scrollBy(0, {delta})")).await?;
         Ok(())
     }
 

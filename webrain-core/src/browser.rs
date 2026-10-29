@@ -239,6 +239,19 @@ pub const LINKS_JS: &str = r#"
 pub trait BrowserBackend: Send + Sync {
     async fn navigate(&self, url: &str) -> anyhow::Result<PageState>;
     async fn screenshot(&self, full_page: bool) -> anyhow::Result<Vec<u8>>;
+
+    /// Screenshot with an explicit image format. Chrome/Chromium encode
+    /// `png` | `jpeg` | `webp` inside `Page.captureScreenshot`, so choosing a
+    /// format costs no dependency and no re-encode pass; engines that cannot
+    /// honour it return their default encoding instead of failing.
+    async fn screenshot_fmt(
+        &self,
+        full_page: bool,
+        _format: &str,
+        _quality: u8,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.screenshot(full_page).await
+    }
     async fn evaluate(&self, js: &str) -> anyhow::Result<serde_json::Value>;
     async fn click(&self, index: usize) -> anyhow::Result<()>;
     async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()>;
@@ -254,6 +267,19 @@ pub trait BrowserBackend: Send + Sync {
         self.type_text(index, text).await
     }
     async fn scroll(&self, direction: &str) -> anyhow::Result<()>;
+
+    /// Trusted wheel at (x,y) with an explicit signed delta — scrolls whatever
+    /// sits under that point (captcha modal, side panel, inner list) instead of
+    /// the window. Backends without wheel input fall back to the window scroll.
+    async fn scroll_at(
+        &self,
+        direction: &str,
+        _x: i64,
+        _y: i64,
+        _delta: f64,
+    ) -> anyhow::Result<()> {
+        self.scroll(direction).await
+    }
     /// Press a key (Enter, Tab, ArrowDown...) in the focused element. Trusted
     /// CDP Input when supported, JS fallback (Enter -> form.submit) otherwise.
     async fn press(&self, key: &str) -> anyhow::Result<()>;
@@ -276,8 +302,15 @@ pub trait BrowserBackend: Send + Sync {
 
     /// Trusted drag (press at x1,y1 → move with the button held → release at
     /// x2,y2) for drag-and-drop / slider CAPTCHAs. Crosses cross-origin iframes.
-    async fn drag(&self, _x1: i64, _y1: i64, _x2: i64, _y2: i64) -> anyhow::Result<()> {
+    /// `hold_ms` = how long to sit on the handle after pressing, before moving.
+    async fn drag(&self, _x1: i64, _y1: i64, _x2: i64, _y2: i64, _hold_ms: u64) -> anyhow::Result<()> {
         anyhow::bail!("drag not supported by this backend")
+    }
+    /// Trusted press-and-hold at (x,y) for `ms`, then release. For "Press & Hold
+    /// to confirm you are a human" widgets (PerimeterX/HUMAN), which only fire
+    /// after a long mousedown — a click or a 150 ms drag never registers.
+    async fn hold_at(&self, _x: i64, _y: i64, _ms: u64) -> anyhow::Result<()> {
+        anyhow::bail!("hold_at not supported by this backend")
     }
     async fn get_html(&self) -> anyhow::Result<String>;
 
