@@ -511,6 +511,116 @@ pub fn guide_from_args(args: &Value) -> Value {
 /// with a `what`/`action`/`op`/`mode` selector + when-to-use guidance so the
 /// LLM picks the right boundary. `call_tool` routes each call to the legacy
 /// per-primitive executor via `map_surface()` (legacy names still dispatch).
+/// The three load averages from `/proc/loadavg`.
+fn parse_loadavg(text: &str) -> Option<(f64, f64, f64)> {
+    let mut fields = text.split_whitespace();
+    let one = fields.next()?.parse().ok()?;
+    let five = fields.next()?.parse().ok()?;
+    let fifteen = fields.next()?.parse().ok()?;
+    Some((one, five, fifteen))
+}
+
+/// `(total_kb, available_kb)` from `/proc/meminfo`.
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let pick = |key: &str| -> Option<u64> {
+        text.lines()
+            .find(|line| line.starts_with(key))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    };
+    Some((pick("MemTotal:")?, pick("MemAvailable:")?))
+}
+
+/// Host stats for the machine this process runs in.
+///
+/// Read from `/proc` directly: this answers "is this machine loaded, and is a
+/// browser actually running inside it" without a sandbox sidecar, an FFI
+/// dependency or a shell. `available: false` means the platform has no `/proc`
+/// (macOS, Windows) — a fact to report rather than a number to guess.
+///
+/// `browser_processes` counts processes whose `comm` is a known engine, so one
+/// Chrome shows up as many (zygote, gpu, renderers). It is a liveness signal, not
+/// a tab count.
+///
+/// shortcut: linux `/proc` only — the session image is debian:12. Disk usage is
+/// deliberately absent: every way to obtain it costs either a dependency
+/// (`sysinfo`) or a process (a shell), and the second is the thing this exists to
+/// avoid.
+pub fn host_stats() -> Value {
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|text| parse_loadavg(&text));
+    let memory = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| parse_meminfo(&text));
+
+    let mut total = 0_u32;
+    let mut browsers = 0_u32;
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            total += 1;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+            if matches!(
+                comm.trim(),
+                "chrome"
+                    | "chromium"
+                    | "headless_shell"
+                    | "obscura"
+                    | "obscura-worker"
+                    | "lightpanda"
+            ) {
+                browsers += 1;
+            }
+        }
+    }
+
+    let uptime_s = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|text| {
+            text.split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+        .map(|value| value as u64);
+
+    json!({
+        "available": load.is_some() && memory.is_some(),
+        "load": load.map(|(m1, m5, m15)| json!({"m1": m1, "m5": m5, "m15": m15})),
+        "memory": memory.map(|(total_kb, available_kb)| json!({
+            "total_mb": total_kb / 1024,
+            "available_mb": available_kb / 1024,
+        })),
+        "processes": {"total": total, "browser_processes": browsers},
+        "uptime_s": uptime_s,
+    })
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_two_proc_files() {
+        assert_eq!(
+            parse_loadavg("0.52 0.41 0.30 1/234 5678\n"),
+            Some((0.52, 0.41, 0.30))
+        );
+        assert_eq!(parse_loadavg("garbage"), None);
+
+        let meminfo = "MemTotal:        2048000 kB\nMemFree:   100 kB\nMemAvailable:   512000 kB\n";
+        assert_eq!(parse_meminfo(meminfo), Some((2_048_000, 512_000)));
+        // MemAvailable is what a container can actually still use; without it the
+        // number would be `MemFree`, which counts page cache as gone.
+        assert_eq!(parse_meminfo("MemTotal: 1024 kB\n"), None);
+    }
+}
+
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
@@ -519,6 +629,11 @@ pub fn list_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {
                 "topic": {"type": "string", "description": "One section by name — `tools`, `browser`, `extraction`, `delegation`, `rules`, `env`, … (case-insensitive substring) — or `all` for the whole guide, or `skills` / `skill:<name>` to read an operator skill from WEBRAIN_SKILLS_DIR"}
             }}
+        }),
+        json!({
+            "name": "webrain_stats",
+            "description": "Host stats for the machine webrain runs in: load average, memory total/available, process counts (including how many browser processes are alive), and uptime. Read-only, takes no arguments. `available: false` means this platform has no /proc. Use it to tell 'the page is slow' from 'the machine is out of memory'.",
+            "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
             "name": "webrain_eval",
@@ -757,7 +872,9 @@ pub fn list_tools() -> Vec<Value> {
                 "service": {"type": "string", "description": "save/restore_state, login, close_launch: service"},
                 "profile": {"type": "string", "description": "save/restore_state, login, close_launch: profile"},
                 "port": {"type": "integer", "default": 9222, "description": "state/login: CDP port"},
-                "url": {"type": "string", "description": "login: login page to navigate first"}
+                "url": {"type": "string", "description": "login: login page to navigate first"},
+                "inline": {"type": "boolean", "description": "save_state: return the state payload instead of writing state.json — for a caller that keeps the durable copy itself, so no credential is left on this worker"},
+                "payload": {"type": "object", "description": "restore_state: the state object to apply (what `save_state inline` returned); used INSTEAD of state.json, which may not exist on a machine that never logged in"}
             }, "required": ["op"]}
         }),
         json!({
