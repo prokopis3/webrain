@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **observe/screenshot**: the capture now comes back as a real MCP **`image`
+  content block** beside the JSON, not a base64 string inside a text block. An
+  MCP client can only *display* a picture that arrives as `{type:"image"}`; the
+  old reply made the caller decode a megabyte of base64, write a file and view
+  it, and billed all of it as text tokens. `webrain_screenshot` keeps
+  `screenshot_b64` for clients that want the raw bytes, but it is lifted out of
+  the text at the serialization choke point (`hoist_screenshot`), so the JSON
+  half stays readable and the token count stops counting pixels.
+- **observe/screenshot**: `format` (`png` | `jpeg` | `webp` | `avif`) and
+  `quality` (1-100). Chrome's `Page.captureScreenshot` encodes png/jpeg/webp
+  itself — a parameter, not a dependency or a second pass — and each file's
+  magic bytes confirm the container (`89 50 4E 47`, `FF D8 FF E0 …JFIF`,
+  `RIFF….WEBP`). **avif** is the exception: CDP has no AVIF encoder, so it is
+  captured as png and converted in-process by `ravif`/rav1e (pure Rust, no
+  system libavif; `default-features = false` drops `asm`, which would otherwise
+  require NASM on the build machine). Verified end-to-end:
+  `00 00 00 18 66 74 79 70 61 76 69 66` = `ftypavif`.
+  Measured, same viewport, two very different pages:
+
+  | page | webp q80 | jpeg q80 | avif q80 | png |
+  |---|---|---|---|---|
+  | example.com (flat text) | **34,618** | 53,458 | — | 45,900 |
+  | Wikipedia Dog (text + photos) | **137,930** | 185,196 | 198,206 | 256,716 |
+
+  Two things that table teaches: **jpeg is bigger than png on a flat page**
+  (DCT pays a per-8x8-block floor even for solid white, while deflate sees runs
+  of identical pixels), and **avif at speed 6 is not smaller than webp** — its
+  advantage needs speed 2-4, i.e. seconds per frame. The extension, `mime` and
+  written path follow the bytes actually returned, and `requested_format`
+  exposes an ignored request.
+- **interact**: `hold` action — a trusted press-and-hold at `(x, y)` for `ms`
+  milliseconds, then release, for "Press & Hold to confirm you are a human"
+  widgets (PerimeterX/HUMAN, `captcha.px-cdn.net`). A click or a drag never
+  registered: those widgets only fire after a multi-second mousedown. Default
+  hold is 6 s; the caller sets any duration (`ms`).
+- **interact drag**: `ms` sets how long the handle is held **before** the
+  movement starts, so a slider can be grabbed and a press-and-hold can be
+  satisfied by a zero-length drag (`x1==x2`, `y1==y2`).
+- **interact press**: keyboard shortcuts. `key` accepts a combo
+  (`ctrl+a`, `shift+Tab`, `meta+v`, `alt+ArrowLeft`) and the modifier bitmask is
+  sent on both keyDown and keyUp, with a real `code` (`KeyA`) so accelerators
+  bind. More keys: ArrowLeft/Right, Delete, Home, End, PageUp/PageDown, Insert.
+  Verified live: `ctrl+a` arrives as `keydown key=a ctrlKey=true`.
+- **interact type**: `ms` types through real per-key `Input.dispatchKeyEvent`
+  (`type_text_delayed` already existed in the backend but was unreachable from
+  the tool). Verified: 6 chars → 6 keydowns, where `Input.insertText` produced 0.
+- **interact scroll**: optional `x`, `y`, `delta` wheel the element **under that
+  point** instead of the window — the only way to move a captcha modal or an
+  inner panel. Verified: wheel at (100,100) scrolled the div there to 300 and
+  left `window.scrollY` at 0.
+
+### Changed
+
+- **interact drag**: replaced the 10-step straight-line teleport with an
+  eased-in-out, slightly-arced path (28 steps) plus a settle on the handle and
+  on the drop target — even steps read as synthetic to slider captchas.
+
+### Fixed
+
+- **cdp**: input is no longer silently dropped on a background or occluded tab.
+  Measured on a PerimeterX challenge: 12 `mouseMoved` landed but **0**
+  `mousePressed`, with `document.visibilityState === "hidden"` — the page looked
+  like it had a dead click handler. `Page.bringToFront` +
+  `Emulation.setFocusEmulationEnabled` are now sent at attach.
+
 ## [0.11.0] - 2026-10-26
 
 ### Added
