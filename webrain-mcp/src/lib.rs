@@ -1160,6 +1160,49 @@ fn is_connection_error(result: &Value) -> bool {
             .unwrap_or(false)
 }
 
+/// An MCP client can only *display* a picture if the reply carries an `image`
+/// content block. A `screenshot_b64` inside a text block is just a megabyte of
+/// base64 the model has to decode by hand (write a file, then view it), and it
+/// bills as text tokens. Move it into a real image block and drop it from the
+/// JSON, so the text half stays readable.
+fn hoist_screenshot(result: &mut Value) {
+    let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return;
+    };
+    let mut image: Option<Value> = None;
+    for block in content.iter_mut() {
+        if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+            continue;
+        }
+        let Some(text) = block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Ok(mut payload) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(obj) = payload.as_object_mut() else {
+            continue;
+        };
+        let Some(b64) = obj.remove("screenshot_b64") else {
+            continue;
+        };
+        let mime = obj
+            .remove("mime")
+            .and_then(|m| m.as_str().map(str::to_string))
+            .unwrap_or_else(|| "image/png".to_string());
+        block["text"] = json!(serde_json::to_string(&payload).unwrap_or_default());
+        image = Some(json!({"type": "image", "data": b64, "mimeType": mime}));
+        break;
+    }
+    if let Some(img) = image {
+        content.push(img);
+    }
+}
+
 /// Estimate output token cost at the serialization choke point — one place covers
 /// every tool (browser-harness tracks usage; here it's computed, no daemon state).
 /// Also stamps wall-clock `ms` so the LLM sees per-tool-run cost + latency.
@@ -1170,6 +1213,7 @@ fn with_token_cost(mut resp: Value, start: std::time::Instant) -> Value {
     // re-parse per call). encode_with_special_tokens handles <|...|> literally.
     static BPE: std::sync::OnceLock<tiktoken_rs::CoreBPE> = std::sync::OnceLock::new();
     if let Some(result) = resp.get_mut("result") {
+        hoist_screenshot(result);
         let mut text = String::new();
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
             for block in content {
