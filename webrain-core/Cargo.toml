@@ -46,6 +46,12 @@ htmd = "0.5"
 # Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
 pdfium-render = { version = "0.9", optional = true }
 image = "0.25"
+# AVIF screenshots. Chrome's Page.captureScreenshot encodes png/jpeg/webp only,
+# so avif is the one format needing a second pass: pure-Rust rav1e (no system
+# libavif, no C toolchain). default-features off = no `asm`, which would demand
+# NASM on the build machine (rav1e's own build.rs message); the encoder just
+# runs slower, which an opt-in format can afford.
+ravif = { version = "0.11", default-features = false }
 # Used directly for image XObject extraction from PDFs. Pinned to 0.41 to
 # MATCH pdf-inspector's transitive lopdf (0.44 compiled a second, duplicate PDF
 # stack). The extraction code already targets 0.41's API. Removed when
