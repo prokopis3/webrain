@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-29
+
+### Added
+
+- **vision**: `install vision --model <id>` is now an allowlist, not a free-form
+  name — `qwen3-vl-2b` (legacy default), `qwen3-vl-2b-q6k`, and the four
+  `qwen35-9b-q{4km,5km,6k,q8}` quants of
+  `Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF`. Each entry carries its own
+  mmproj (`mmproj-F16.gguf` / `mmproj.gguf` — the 922 MB vision file), and an
+  unknown id prints the choices with download size + RAM/VRAM instead of
+  fetching an arbitrary repo. Models live in `vision/<id>/`; `vision_local()`
+  resolves `WEBRAIN_VISION_MODEL` → default id → any installed → the legacy flat
+  layout, so an existing single-model install keeps working untouched.
+  `--model-update` re-checks the files against Hugging Face (`download_to_file`
+  now re-downloads when the upstream size changed, instead of trusting a stale
+  `.ok`). New `webrain uninstall vision --model <id>` / `--all`.
+- **vision**: GPU offload for the local Qwen3-VL. `llama-server` was spawned with
+  no `-ngl`, so it ran CPU-only even on a machine with a GPU. It now passes
+  `-ngl 99` when a GPU backend library (`ggml-cuda` / `-vulkan` / `-hip` /
+  `-sycl` / `-metal`) sits **beside the llama-server binary** — a capability
+  check on the build, not a probe of the machine, because `-ngl` on a CPU-only
+  build is silently ignored and a machine probe would promise an offload that
+  never happens. `WEBRAIN_VISION_GPU=0` forces CPU, `=1` forces the flag;
+  `WEBRAIN_LLAMA_SERVER` points at a different binary (e.g. a CUDA build).
+  GPU buys speed on the 2B, not accuracy.
+- **observe/screenshot**: the capture now comes back as a real MCP **`image`
+  content block** beside the JSON, not a base64 string inside a text block. An
+  MCP client can only *display* a picture that arrives as `{type:"image"}`; the
+  old reply made the caller decode a megabyte of base64, write a file and view
+  it, and billed all of it as text tokens. `webrain_screenshot` keeps
+  `screenshot_b64` for clients that want the raw bytes, but it is lifted out of
+  the text at the serialization choke point (`hoist_screenshot`), so the JSON
+  half stays readable and the token count stops counting pixels.
+- **observe/screenshot**: `format` (`png` | `jpeg` | `webp` | `avif`) and
+  `quality` (1-100). Chrome's `Page.captureScreenshot` encodes png/jpeg/webp
+  itself — a parameter, not a dependency or a second pass — and each file's
+  magic bytes confirm the container (`89 50 4E 47`, `FF D8 FF E0 …JFIF`,
+  `RIFF….WEBP`). **avif** is the exception: CDP has no AVIF encoder, so it is
+  captured as png and converted in-process by `ravif`/rav1e (pure Rust, no
+  system libavif; `default-features = false` drops `asm`, which would otherwise
+  require NASM on the build machine). Verified end-to-end:
+  `00 00 00 18 66 74 79 70 61 76 69 66` = `ftypavif`.
+  Measured, same viewport, two very different pages:
+
+  | page | webp q80 | jpeg q80 | avif q80 | png |
+  |---|---|---|---|---|
+  | example.com (flat text) | **34,618** | 53,458 | — | 45,900 |
+  | Wikipedia Dog (text + photos) | **137,930** | 185,196 | 198,206 | 256,716 |
+
+  Two things that table teaches: **jpeg is bigger than png on a flat page**
+  (DCT pays a per-8x8-block floor even for solid white, while deflate sees runs
+  of identical pixels), and **avif at speed 6 is not smaller than webp** — its
+  advantage needs speed 2-4, i.e. seconds per frame. The extension, `mime` and
+  written path follow the bytes actually returned, and `requested_format`
+  exposes an ignored request.
+- **interact**: `hold` action — a trusted press-and-hold at `(x, y)` for `ms`
+  milliseconds, then release, for "Press & Hold to confirm you are a human"
+  widgets (PerimeterX/HUMAN, `captcha.px-cdn.net`). A click or a drag never
+  registered: those widgets only fire after a multi-second mousedown. Default
+  hold is 6 s; the caller sets any duration (`ms`).
+- **interact drag**: `ms` sets how long the handle is held **before** the
+  movement starts, so a slider can be grabbed and a press-and-hold can be
+  satisfied by a zero-length drag (`x1==x2`, `y1==y2`).
+- **interact press**: keyboard shortcuts. `key` accepts a combo
+  (`ctrl+a`, `shift+Tab`, `meta+v`, `alt+ArrowLeft`) and the modifier bitmask is
+  sent on both keyDown and keyUp, with a real `code` (`KeyA`) so accelerators
+  bind. More keys: ArrowLeft/Right, Delete, Home, End, PageUp/PageDown, Insert.
+  Verified live: `ctrl+a` arrives as `keydown key=a ctrlKey=true`.
+- **interact type**: `ms` types through real per-key `Input.dispatchKeyEvent`
+  (`type_text_delayed` already existed in the backend but was unreachable from
+  the tool). Verified: 6 chars → 6 keydowns, where `Input.insertText` produced 0.
+- **interact scroll**: optional `x`, `y`, `delta` wheel the element **under that
+  point** instead of the window — the only way to move a captcha modal or an
+  inner panel. Verified: wheel at (100,100) scrolled the div there to 300 and
+  left `window.scrollY` at 0.
+
+### Changed
+
+- **interact drag**: replaced the 10-step straight-line teleport with an
+  eased-in-out, slightly-arced path (28 steps) plus a settle on the handle and
+  on the drop target — even steps read as synthetic to slider captchas.
+- **cli help**: `webrain --help` printed 12 of the ~40 environment variables the
+  binary reads, so anything documented only in
+  `docs/reference/environment.mdx` — including the new `WEBRAIN_VISION_MODEL`,
+  `WEBRAIN_LLAMA_SERVER` and `WEBRAIN_VISION_GPU` — could not be discovered from
+  the terminal. The env block is now a grouped table built from one `ENV`
+  constant covering every variable the code reads (attach/engines, stealth,
+  network, MCP transport, vault, SERP tiers, agent, local AI, logging), and
+  `webrain help env` prints just that section. `WEBRAIN_MAX_TABS` was missing
+  from the docs table as well and is now listed there.
+
+### Fixed
+
+- **install vision**: a failed model download was reported as
+  `"model": "skip: probe https://…"` and the command still exited 0, so a 404 or
+  an offline link looked like a deliberate no-op instead of a broken install. The
+  model step is now fatal (`vision model \`<id>\` not installed: …`) — that is what
+  makes a wrong or renamed upstream filename visible.
+- **vision ask**: `op=ask` clipped the **wrong band** on any scrolled page. CDP's
+  `clip` rect is DOCUMENT-space while every caller speaks VIEWPORT-space
+  (`click_coords`, `getBoundingClientRect`, the tool's own "clip region" schema),
+  so with `scrollY=307` a clip at viewport y=440 captured document y=440 —
+  `scrollY` too high — and the model answered confidently about nav text. The
+  offset (`scrollX`/`scrollY`, read once) is now added to the clip *and* to every
+  `tiles[]` entry, and the no-clip default (`0,0,innerWidth,innerHeight`) follows
+  the same path, so it means "what is on screen" instead of "the top of the
+  document". Proven A/B on a scrolled GeeTest demo: fixed crop → `9` monsters;
+  the old band → the "Demo Here - Geetest" heading and "2 … cut off".
+- **cdp**: input is no longer silently dropped on a background or occluded tab.
+  Measured on a PerimeterX challenge: 12 `mouseMoved` landed but **0**
+  `mousePressed`, with `document.visibilityState === "hidden"` — the page looked
+  like it had a dead click handler. `Page.bringToFront` +
+  `Emulation.setFocusEmulationEnabled` are now sent at attach.
+
 ## [0.11.0] - 2026-10-26
 
 ### Added

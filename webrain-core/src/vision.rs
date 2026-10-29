@@ -356,10 +356,22 @@ pub async fn ask_viewport(
     // numbering (1..N). 1 call instead of N sequential per-tile calls.
     // Capture the pixels ONCE — provider-independent. Only the model name in
     // the body differs per target, so a failed provider retries on the next.
+    // CDP's clip rect is DOCUMENT-space, but every caller speaks VIEWPORT-space
+    // (`click_coords`, `getBoundingClientRect`, this tool's own "clip region"
+    // schema). Without the scroll offset a scrolled page silently captures a
+    // band that is `scrollY` too high — and the model answers confidently about
+    // the wrong pixels.
+    let off: Value = backend.evaluate("[window.scrollX, window.scrollY]").await?;
+    let (sx, sy) = (
+        off[0].as_f64().unwrap_or(0.0),
+        off[1].as_f64().unwrap_or(0.0),
+    );
     let content: Value = if !tiles.is_empty() {
         let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
         for (x, y, w, h) in tiles {
-            let png = backend.screenshot_clip(*x, *y, *w, *h, scale).await?;
+            let png = backend
+                .screenshot_clip(*x + sx, *y + sy, *w, *h, scale)
+                .await?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
             c.push(json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}));
         }
@@ -379,7 +391,7 @@ pub async fn ask_viewport(
                 )
             }
         };
-        let png = backend.screenshot_clip(x, y, w, h, scale).await?;
+        let png = backend.screenshot_clip(x + sx, y + sy, w, h, scale).await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         json!([{"type":"text","text": prompt}, {"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}])
     };
@@ -413,10 +425,17 @@ pub async fn ask_viewport(
                     (e, None, n)
                 }
             };
+            // The local 2B narrates ~600 tokens before it emits its answer, so a
+            // 512 cap truncated it mid-thought and returned NO label at all.
+            // Local inference is free — give it room; a cloud call stays capped.
+            let budget = match t {
+                crate::video::VisionTarget::Local { .. } => 2048,
+                _ => 512,
+            };
             let body = json!({
                 "model": model_name,
                 "messages": [{"role":"user","content": content.clone()}],
-                "max_tokens": 512
+                "max_tokens": budget
             });
             match crate::video::post_vision(&agent, &endpoint, auth.as_deref(), &body) {
                 Ok(ans) => return Ok(ans),

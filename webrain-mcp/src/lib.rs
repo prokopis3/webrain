@@ -1,13 +1,13 @@
 // webrain-mcp: Model Context Protocol server for AI model browser automation.
 //
-// 25 tools: webrain_navigate, webrain_eval (JS→JSON), webrain_screenshot,
+// 17 tools: webrain_navigate, webrain_eval (JS→JSON), webrain_screenshot,
 // webrain_click/type/scroll (index-based), webrain_get_html, webrain_spider
 // (BFS/DFS), webrain_snapshot (D1 skip), webrain_pixel (PixelRAG tiles),
 // webrain_extract_json (CSS/XPath schema), webrain_extract_regex, webrain_pdf,
 // webrain_tab (multi-tab), webrain_a11y (accessibility tree),
 // webrain_semantic_tree (text snapshot), webrain_batch
 // (fetch/extract/screenshot over URLs), webrain_download (http+ytdlp),
-// webrain_search (4 engines), webrain_nav, webrain_press, webrain_get_images,
+// webrain_search (4 engines + plus), webrain_nav, webrain_press, webrain_get_images,
 // webrain_media (CDP network capture), webrain_console, webrain_dismiss_overlays,
 // webrain_vision_index / webrain_vision_retrieve (PixelRAG cosine).
 // webrain_navigate returns {url,title,text,elements}; elements are index-only.
@@ -228,6 +228,30 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 // One implementation, both transports: the topic/skills logic lives
                 // in tools::guide_from_args, so stdio and HTTP can never diverge.
                 let out = tools::guide_from_args(&arguments);
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
+                        "isError": false
+                    }
+                });
+            }
+            // No-browser, no-page tool: the machine's own /proc. Registered beside
+            // `webrain_guide` because both answer before a CDP backend exists — which
+            // is exactly when "why is this box unresponsive" gets asked.
+            if tool_name == "webrain_stats" {
+                // On a pooled worker these numbers describe a box other tenants run in,
+                // so the platform already refuses this tool there. The engine has to
+                // agree: a direct MCP client holding the pool token would otherwise read
+                // the host's /proc regardless of what TypeScript allows.
+                if no_state() {
+                    return tool_error(
+                        id,
+                        "webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set",
+                    );
+                }
+                let out = tools::host_stats();
                 return json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -856,26 +880,59 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 let result = if tool_name == "webrain_save_state" {
                     match CdpBackend::connect_with_url(&cdp).await {
                         Ok(b) => {
-                            let cookies = b.cookies().await.unwrap_or_default();
-                            let ls = b.evaluate(SAVE_LS_JS).await.unwrap_or_default();
+                            // A dead page still answers `connect`, so both reads can fail
+                            // after a successful attach. Swallowing that reported
+                            // `{status: ok, cookies: 0}`, and in file mode it overwrote a
+                            // good state.json with an empty one -- a silent logout that
+                            // the restore side alone could not detect.
+                            let cookies = match b.cookies().await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    return tool_error(id, &format!("cannot read cookies: {e}"));
+                                }
+                            };
+                            let ls = match b.evaluate(SAVE_LS_JS).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return tool_error(
+                                        id,
+                                        &format!("cannot read localStorage: {e}"),
+                                    );
+                                }
+                            };
+                            let cookie_count = cookies.len();
+                            let key_count = ls.as_object().map(|o| o.len()).unwrap_or(0);
                             let payload = json!({"cookies": cookies, "localStorage": ls});
-                            match (
-                                std::fs::create_dir_all(&dir),
-                                std::fs::write(
-                                    &path,
-                                    serde_json::to_vec(&payload).unwrap_or_default(),
-                                ),
-                            ) {
-                                (Ok(_), Ok(_)) => json!({
+                            // `inline` returns the state to the CALLER and writes no
+                            // file. The platform's vault is the durable copy, and a
+                            // file here would leave a credential on a worker the
+                            // caller does not necessarily own.
+                            if inline_state_requested(&arguments) {
+                                json!({
                                     "status": "ok",
-                                    "state": path.display().to_string(),
-                                    "cookies": cookies.len(),
-                                    "localStorage_keys": ls.as_object().map(|o| o.len()).unwrap_or(0)
-                                }),
-                                (Err(e), _) | (_, Err(e)) => json!({
-                                    "status": "error",
-                                    "message": format!("write failed: {e}")
-                                }),
+                                    "cookies": cookie_count,
+                                    "localStorage_keys": key_count,
+                                    "payload": payload
+                                })
+                            } else {
+                                match (
+                                    std::fs::create_dir_all(&dir),
+                                    std::fs::write(
+                                        &path,
+                                        serde_json::to_vec(&payload).unwrap_or_default(),
+                                    ),
+                                ) {
+                                    (Ok(_), Ok(_)) => json!({
+                                        "status": "ok",
+                                        "state": path.display().to_string(),
+                                        "cookies": cookie_count,
+                                        "localStorage_keys": key_count
+                                    }),
+                                    (Err(e), _) | (_, Err(e)) => json!({
+                                        "status": "error",
+                                        "message": format!("write failed: {e}")
+                                    }),
+                                }
                             }
                         }
                         Err(e) => json!({
@@ -884,14 +941,21 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         }),
                     }
                 } else {
-                    let payload: Value = match std::fs::read(&path) {
-                        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
-                        Err(e) => {
-                            return tool_error(
-                                id,
-                                &format!("no state.json at {} ({e})", path.display()),
-                            );
-                        }
+                    // The platform's vault hands the state back inline; the file is
+                    // only the fallback for a worker that captured it itself. A
+                    // machine that never logged in has no `state.json` at all, so
+                    // requiring one would make a vault restore impossible there.
+                    let payload: Value = match inline_state(&arguments) {
+                        Some(state) => state,
+                        None => match std::fs::read(&path) {
+                            Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+                            Err(e) => {
+                                return tool_error(
+                                    id,
+                                    &format!("no state.json at {} ({e})", path.display()),
+                                );
+                            }
+                        },
                     };
                     match CdpBackend::connect_with_url(&cdp).await {
                         Ok(b) => {
@@ -1035,6 +1099,25 @@ pub(crate) fn caller_cdp(arguments: &Value) -> Option<String> {
 /// deployment serving BYO callers has to point `WEBRAIN_PROFILES_DIR` at a
 /// per-tenant path, or keep these ops refused through the gateway
 /// (`WEBRAIN_NO_STATE` covers the shared-instance case).
+/// Whether `save_state` should RETURN the state instead of writing it.
+///
+/// The `state.json` file is process-global (`profiles_dir()`), so a caller that
+/// keeps the durable copy itself asks for the payload and leaves nothing here.
+fn inline_state_requested(arguments: &Value) -> bool {
+    arguments
+        .get("inline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// The state payload a caller supplied inline, when it is an object.
+///
+/// Only an object is accepted: `restore_state` reads `cookies` and `localStorage`
+/// off it, so any other JSON would restore nothing and still answer `ok`.
+fn inline_state(arguments: &Value) -> Option<Value> {
+    arguments.get("payload").filter(|v| v.is_object()).cloned()
+}
+
 fn vault_cdp_target(arguments: &Value, port: u16) -> String {
     caller_cdp(arguments).unwrap_or_else(|| format!("http://127.0.0.1:{port}"))
 }
@@ -1077,6 +1160,49 @@ fn is_connection_error(result: &Value) -> bool {
             .unwrap_or(false)
 }
 
+/// An MCP client can only *display* a picture if the reply carries an `image`
+/// content block. A `screenshot_b64` inside a text block is just a megabyte of
+/// base64 the model has to decode by hand (write a file, then view it), and it
+/// bills as text tokens. Move it into a real image block and drop it from the
+/// JSON, so the text half stays readable.
+fn hoist_screenshot(result: &mut Value) {
+    let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return;
+    };
+    let mut image: Option<Value> = None;
+    for block in content.iter_mut() {
+        if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+            continue;
+        }
+        let Some(text) = block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Ok(mut payload) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(obj) = payload.as_object_mut() else {
+            continue;
+        };
+        let Some(b64) = obj.remove("screenshot_b64") else {
+            continue;
+        };
+        let mime = obj
+            .remove("mime")
+            .and_then(|m| m.as_str().map(str::to_string))
+            .unwrap_or_else(|| "image/png".to_string());
+        block["text"] = json!(serde_json::to_string(&payload).unwrap_or_default());
+        image = Some(json!({"type": "image", "data": b64, "mimeType": mime}));
+        break;
+    }
+    if let Some(img) = image {
+        content.push(img);
+    }
+}
+
 /// Estimate output token cost at the serialization choke point — one place covers
 /// every tool (browser-harness tracks usage; here it's computed, no daemon state).
 /// Also stamps wall-clock `ms` so the LLM sees per-tool-run cost + latency.
@@ -1087,6 +1213,7 @@ fn with_token_cost(mut resp: Value, start: std::time::Instant) -> Value {
     // re-parse per call). encode_with_special_tokens handles <|...|> literally.
     static BPE: std::sync::OnceLock<tiktoken_rs::CoreBPE> = std::sync::OnceLock::new();
     if let Some(result) = resp.get_mut("result") {
+        hoist_screenshot(result);
         let mut text = String::new();
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
             for block in content {
@@ -1617,6 +1744,31 @@ mod tests {
     // `http://127.0.0.1:{port}` unconditionally, so a caller who brought their
     // own browser got "cannot connect to http://127.0.0.1:9222" -- the ops could
     // not address the endpoint they were handed.
+
+    // ── inline state (phase 4: the whole profile, not just the jar) ──────────
+
+    #[test]
+    fn inline_state_requested_is_opt_in_and_boolean() {
+        // Opt-in: absent or any non-boolean keeps the historical file write, so
+        // an existing caller is unchanged.
+        assert!(!inline_state_requested(&json!({})));
+        assert!(!inline_state_requested(&json!({"inline": "true"})));
+        assert!(!inline_state_requested(&json!({"inline": false})));
+        assert!(inline_state_requested(&json!({"inline": true})));
+    }
+
+    #[test]
+    fn inline_state_accepts_only_an_object() {
+        // `restore_state` reads `cookies` and `localStorage` off this value, so a
+        // scalar or array would restore nothing and still answer `ok`.
+        assert_eq!(
+            inline_state(&json!({"payload": {"cookies": [], "localStorage": {}}})),
+            Some(json!({"cookies": [], "localStorage": {}}))
+        );
+        assert_eq!(inline_state(&json!({"payload": "junk"})), None);
+        assert_eq!(inline_state(&json!({"payload": [1, 2]})), None);
+        assert_eq!(inline_state(&json!({})), None);
+    }
 
     #[test]
     fn vault_cdp_target_prefers_the_callers_endpoint() {

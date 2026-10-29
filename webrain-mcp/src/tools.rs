@@ -511,6 +511,116 @@ pub fn guide_from_args(args: &Value) -> Value {
 /// with a `what`/`action`/`op`/`mode` selector + when-to-use guidance so the
 /// LLM picks the right boundary. `call_tool` routes each call to the legacy
 /// per-primitive executor via `map_surface()` (legacy names still dispatch).
+/// The three load averages from `/proc/loadavg`.
+fn parse_loadavg(text: &str) -> Option<(f64, f64, f64)> {
+    let mut fields = text.split_whitespace();
+    let one = fields.next()?.parse().ok()?;
+    let five = fields.next()?.parse().ok()?;
+    let fifteen = fields.next()?.parse().ok()?;
+    Some((one, five, fifteen))
+}
+
+/// `(total_kb, available_kb)` from `/proc/meminfo`.
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let pick = |key: &str| -> Option<u64> {
+        text.lines()
+            .find(|line| line.starts_with(key))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    };
+    Some((pick("MemTotal:")?, pick("MemAvailable:")?))
+}
+
+/// Host stats for the machine this process runs in.
+///
+/// Read from `/proc` directly: this answers "is this machine loaded, and is a
+/// browser actually running inside it" without a sandbox sidecar, an FFI
+/// dependency or a shell. `available: false` means the platform has no `/proc`
+/// (macOS, Windows) — a fact to report rather than a number to guess.
+///
+/// `browser_processes` counts processes whose `comm` is a known engine, so one
+/// Chrome shows up as many (zygote, gpu, renderers). It is a liveness signal, not
+/// a tab count.
+///
+/// shortcut: linux `/proc` only — the session image is debian:12. Disk usage is
+/// deliberately absent: every way to obtain it costs either a dependency
+/// (`sysinfo`) or a process (a shell), and the second is the thing this exists to
+/// avoid.
+pub fn host_stats() -> Value {
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|text| parse_loadavg(&text));
+    let memory = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| parse_meminfo(&text));
+
+    let mut total = 0_u32;
+    let mut browsers = 0_u32;
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            total += 1;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+            if matches!(
+                comm.trim(),
+                "chrome"
+                    | "chromium"
+                    | "headless_shell"
+                    | "obscura"
+                    | "obscura-worker"
+                    | "lightpanda"
+            ) {
+                browsers += 1;
+            }
+        }
+    }
+
+    let uptime_s = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|text| {
+            text.split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+        .map(|value| value as u64);
+
+    json!({
+        "available": load.is_some() && memory.is_some(),
+        "load": load.map(|(m1, m5, m15)| json!({"m1": m1, "m5": m5, "m15": m15})),
+        "memory": memory.map(|(total_kb, available_kb)| json!({
+            "total_mb": total_kb / 1024,
+            "available_mb": available_kb / 1024,
+        })),
+        "processes": {"total": total, "browser_processes": browsers},
+        "uptime_s": uptime_s,
+    })
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_two_proc_files() {
+        assert_eq!(
+            parse_loadavg("0.52 0.41 0.30 1/234 5678\n"),
+            Some((0.52, 0.41, 0.30))
+        );
+        assert_eq!(parse_loadavg("garbage"), None);
+
+        let meminfo = "MemTotal:        2048000 kB\nMemFree:   100 kB\nMemAvailable:   512000 kB\n";
+        assert_eq!(parse_meminfo(meminfo), Some((2_048_000, 512_000)));
+        // MemAvailable is what a container can actually still use; without it the
+        // number would be `MemFree`, which counts page cache as gone.
+        assert_eq!(parse_meminfo("MemTotal: 1024 kB\n"), None);
+    }
+}
+
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
@@ -519,6 +629,11 @@ pub fn list_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {
                 "topic": {"type": "string", "description": "One section by name — `tools`, `browser`, `extraction`, `delegation`, `rules`, `env`, … (case-insensitive substring) — or `all` for the whole guide, or `skills` / `skill:<name>` to read an operator skill from WEBRAIN_SKILLS_DIR"}
             }}
+        }),
+        json!({
+            "name": "webrain_stats",
+            "description": "Host stats for the machine webrain runs in: load average, memory total/available, process counts (including how many browser processes are alive), and uptime. Read-only, takes no arguments. `available: false` means this platform has no /proc. Use it to tell 'the page is slow' from 'the machine is out of memory'.",
+            "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
             "name": "webrain_eval",
@@ -564,6 +679,8 @@ pub fn list_tools() -> Vec<Value> {
                 "tile_height": {"type": "number", "default": 800, "description": "pixel: tile height px"},
                 "max_tiles": {"type": "integer", "default": 16, "description": "pixel: max tiles"},
                 "word_threshold": {"type": "integer", "default": 2, "description": "clean: min word length"},
+                "format": {"type": "string", "enum": ["png", "jpeg", "webp", "avif"], "default": "png", "description": "screenshot: image encoding — webp/jpeg are ~10x smaller than png; avif is smallest but needs a CPU re-encode (CDP has no avif encoder)"},
+                "quality": {"type": "integer", "default": 80, "description": "screenshot: jpeg/webp quality 1-100 (ignored for png)"},
                 "exclude_social": {"type": "boolean", "default": true, "description": "clean: drop social links"},
                 "url": {"type": "string", "description": "media: URL to load and capture network requests"},
                 "wait_ms": {"type": "integer", "default": 0, "description": "media: keep capturing after load"}
@@ -571,15 +688,16 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_interact",
-            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), drag (x1,y1 → x2,y2: trusted slider/drag CAPTCHAs, crosses cross-origin iframes), type (index,text), press (key), scroll (direction), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
+            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), hold (x,y,ms: trusted press-and-hold for \"Press & Hold to confirm you are human\" / PerimeterX widgets, crosses cross-origin iframes), drag (x1,y1 → x2,y2 + optional ms hold: trusted slider/drag CAPTCHAs, eased smooth path, crosses cross-origin iframes), type (index,text + optional ms for real per-key typing), press (key or a shortcut like ctrl+a / shift+Tab), scroll (direction, or x,y,delta to wheel the element under a point), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
             "inputSchema": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["click","click_coords","drag","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
+                "action": {"type": "string", "enum": ["click","click_coords","hold","drag","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
                 "index": {"type": "integer", "description": "Element index from navigate/observe"},
                 "text": {"type": "string", "description": "type: text to type; wait: text substring to wait for"},
-                "key": {"type": "string", "description": "press: Enter|Tab|Escape|Backspace|ArrowDown|..."},
+                "key": {"type": "string", "description": "press: a key or a shortcut — Enter|Tab|Escape|Backspace|Delete|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Space, or a combo like ctrl+a / shift+Tab / meta+v"},
                 "direction": {"type": "string", "enum": ["up","down"], "default": "down", "description": "scroll"},
-                "x": {"type": "number", "description": "click_coords: viewport x"},
-                "y": {"type": "number", "description": "click_coords: viewport y"},
+                "x": {"type": "number", "description": "click_coords/hold: viewport x; scroll: wheel point x"},
+                "y": {"type": "number", "description": "click_coords/hold: viewport y; scroll: wheel point y"},
+                "delta": {"type": "number", "description": "scroll: signed wheel delta at (x,y) — negative scrolls up, default ±500"},
                 "x1": {"type": "number", "description": "drag: start x"},
                 "y1": {"type": "number", "description": "drag: start y"},
                 "x2": {"type": "number", "description": "drag: end x"},
@@ -592,7 +710,7 @@ pub fn list_tools() -> Vec<Value> {
                 "checked": {"type": "boolean", "default": true, "description": "check: desired state"},
                 "dialog": {"type": "string", "enum": ["accept","dismiss"], "default": "accept"},
                 "prompt_text": {"type": "string", "description": "dialog prompt(): text to type"},
-                "ms": {"type": "integer", "description": "wait: fixed delay ms"},
+                "ms": {"type": "integer", "description": "wait: fixed delay ms; type: per-key delay ms (real keydown/keyup typing); hold: how long to keep the button down (default 6000); drag: how long to hold the handle before moving (default 150)"},
                 "selector": {"type": "string", "description": "wait: CSS selector to poll for"},
                 "timeout_ms": {"type": "integer", "default": 15000, "description": "wait: max ms"},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "upload: absolute paths"},
@@ -757,7 +875,9 @@ pub fn list_tools() -> Vec<Value> {
                 "service": {"type": "string", "description": "save/restore_state, login, close_launch: service"},
                 "profile": {"type": "string", "description": "save/restore_state, login, close_launch: profile"},
                 "port": {"type": "integer", "default": 9222, "description": "state/login: CDP port"},
-                "url": {"type": "string", "description": "login: login page to navigate first"}
+                "url": {"type": "string", "description": "login: login page to navigate first"},
+                "inline": {"type": "boolean", "description": "save_state: return the state payload instead of writing state.json — for a caller that keeps the durable copy itself, so no credential is left on this worker"},
+                "payload": {"type": "object", "description": "restore_state: the state object to apply (what `save_state inline` returned); used INSTEAD of state.json, which may not exist on a machine that never logged in"}
             }, "required": ["op"]}
         }),
         json!({
@@ -1058,6 +1178,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
             let legacy = match action {
                 "click" => "webrain_click",
                 "click_coords" => "webrain_click_coords",
+                "hold" => "webrain_hold",
                 "drag" => "webrain_drag",
                 "type" => "webrain_type",
                 "press" => "webrain_press",
@@ -1298,12 +1419,31 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .unwrap_or("screenshots");
-            match backend.screenshot(full).await {
-                Ok(png) => {
+            let format = args
+                .get("format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("png")
+                .to_string();
+            let quality = args.get("quality").and_then(|v| v.as_u64()).unwrap_or(80) as u8;
+            match backend.screenshot_fmt(full, &format, quality).await {
+                Ok(img) => {
                     use base64::Engine;
+                    // Extension must follow the bytes actually returned, or a client
+                    // opening `shot.png` gets a jpeg. An unsupported request (avif)
+                    // lands on png — report the format that was really used.
+                    let (ext, mime) = match format.to_ascii_lowercase().as_str() {
+                        "jpg" | "jpeg" => ("jpg", "image/jpeg"),
+                        "webp" => ("webp", "image/webp"),
+                        "avif" => ("avif", "image/avif"),
+                        _ => ("png", "image/png"),
+                    };
                     let mut out = json!({
                         "status": "ok",
-                        "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(&png),
+                        "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(&img),
+                        "mime": mime,
+                        "format": if mime == "image/jpeg" { "jpeg" } else { ext },
+                        "requested_format": format,
+                        "bytes": img.len(),
                     });
                     // also write to disk so any client can VIEW the file, not just
                     // round-trip the base64 blob (chat sessions decode awkwardly)
@@ -1314,8 +1454,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
-                        let path = format!("{dir}/shot_{ts}.png");
-                        match std::fs::write(&path, &png) {
+                        let path = format!("{dir}/shot_{ts}.{ext}");
+                        match std::fs::write(&path, &img) {
                             Ok(()) => out["path"] = json!(path),
                             Err(e) => out["path_error"] = json!(e.to_string()),
                         }
@@ -1341,8 +1481,17 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if idx < 0 {
                 return json!({"status": "error", "message": "index required"});
             }
-            match backend.type_text(idx as usize, text).await {
-                Ok(_) => json!({"status": "ok", "typed": idx}),
+            // ms>0 → real per-key keydown/keyup at that cadence. Text captchas
+            // and the reCAPTCHA/hCaptcha audio challenge rate-limit or flag an
+            // instant paste (Input.insertText has no key events at all).
+            let delay = args.get("ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            let r = if delay > 0 {
+                backend.type_text_delayed(idx as usize, text, delay).await
+            } else {
+                backend.type_text(idx as usize, text).await
+            };
+            match r {
+                Ok(_) => json!({"status": "ok", "typed": idx, "delay_ms": delay}),
                 Err(e) => err(e),
             }
         }
@@ -1357,6 +1506,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        "webrain_hold" => {
+            let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if x < 0 || y < 0 {
+                return json!({"status": "error", "message": "x and y required"});
+            }
+            let ms = args.get("ms").and_then(|v| v.as_u64()).unwrap_or(6000);
+            match backend.hold_at(x, y, ms).await {
+                Ok(_) => json!({"status": "ok", "hold": [x, y, ms]}),
+                Err(e) => err(e),
+            }
+        }
         "webrain_drag" => {
             let x1 = args.get("x1").and_then(|v| v.as_i64()).unwrap_or(-1);
             let y1 = args.get("y1").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -1365,8 +1526,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0 {
                 return json!({"status": "error", "message": "x1,y1,x2,y2 required"});
             }
-            match backend.drag(x1, y1, x2, y2).await {
-                Ok(_) => json!({"status": "ok", "drag": [x1, y1, x2, y2]}),
+            let ms = args.get("ms").and_then(|v| v.as_u64()).unwrap_or(150);
+            match backend.drag(x1, y1, x2, y2, ms).await {
+                Ok(_) => json!({"status": "ok", "drag": [x1, y1, x2, y2], "hold_ms": ms}),
                 Err(e) => err(e),
             }
         }
@@ -1394,8 +1556,25 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .get("direction")
                 .and_then(|v| v.as_str())
                 .unwrap_or("down");
-            match backend.scroll(dir).await {
-                Ok(_) => json!({"status": "ok", "direction": dir}),
+            let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let delta = args.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            // A point scrolls the element UNDER it — the only way to move a
+            // captcha modal or an inner panel. No point → window scroll.
+            let r = if x >= 0 && y >= 0 {
+                let d = if delta != 0.0 {
+                    delta
+                } else if dir == "up" {
+                    -500.0
+                } else {
+                    500.0
+                };
+                backend.scroll_at(dir, x, y, d).await
+            } else {
+                backend.scroll(dir).await
+            };
+            match r {
+                Ok(_) => json!({"status": "ok", "direction": dir, "x": x, "y": y, "delta": delta}),
                 Err(e) => err(e),
             }
         }

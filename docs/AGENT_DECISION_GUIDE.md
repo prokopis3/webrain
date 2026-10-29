@@ -141,6 +141,36 @@ After `webrain_navigate(url)`, check `challenge` in the response:
   - **Non-interactive** Turnstile / basic bot detection → obscura `--stealth`
     may pass (still verify via the `challenge` field).
 
+### 2c. Interactive challenge → which input primitive
+
+Every widget below needs **trusted CDP input**; a JS `.click()` or a synthetic
+`MouseEvent` has `isTrusted=false` and is discarded. Coordinates come from
+`webrain_observe what=screenshot` (pixels == viewport CSS px at DPR 1).
+
+| Widget | Primitive |
+|---|---|
+| reCAPTCHA v2 / hCaptcha / Turnstile checkbox | `interact click_coords` at the checkbox (~top-left of the widget, **not** its centre) |
+| Image grid ("select all bicycles") | repeated `click_coords` on tile centres, then the Verify button |
+| **"Press & Hold to confirm you are a human"** (PerimeterX/HUMAN) | `interact hold x,y,ms` — a click or a short drag never fires; hold **≥ 6 s** |
+| Slider / puzzle drag (GeeTest, DataDome, AWS WAF) | `interact drag x1,y1,x2,y2` — eased path; `ms` = dwell on the handle before moving |
+| Text or audio challenge | `interact type` with `ms` (real per-key), then `press Enter` |
+| Prefilled field blocking submit | `press ctrl+a`, then `press Backspace` |
+| Challenge inside a scrolling modal | `scroll x,y,delta` — wheels the element **under** that point |
+
+Two traps that look like a broken widget:
+
+- **Input is dropped on a background/occluded tab.** Measured on a PerimeterX
+  page: 12 `mouseMoved` landed, **0** `mousePressed`, with
+  `document.visibilityState === "hidden"`. webrain now sends
+  `Page.bringToFront` + `Emulation.setFocusEmulationEnabled` at attach; if you
+  drive CDP yourself, do the same.
+- **A challenge is not a page.** A solved widget issues a token
+  (`#g-recaptcha-response`, `_px3`/`_px2` cookie, `cf_clearance`) — read that,
+  not the green checkmark.
+
+No interaction exists for **Akamai, Cloudflare managed, DataDome passive**: they
+grade the whole session. The fix is profile + session (§2b), never more clicks.
+
 ---
 
 ## 2b. "It renders but never loads" — hydration check

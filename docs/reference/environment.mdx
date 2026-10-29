@@ -17,6 +17,7 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / XDG data dir, i.e. `~/.local/share/webrain/profiles` |
+| `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory | engine default |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys, tried GROQ → OPENAI → FIREWORKS. The vision `ask` chain is separate: OPENROUTER → OPENAI → FIREWORKS → GROQ → bundled local Qwen3-VL-2B | — |
@@ -28,6 +29,9 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_STEALTH_NOISE` | Set `0` to disable the canvas/audio/`Object.defineProperty` fingerprint-noise block. **This is the fix when a page renders but never mounts.** Verified on `ab.gr/storelocator` (real Chrome): the NOISE block made Next.js abort with `Cannot read properties of undefined (reading 'getInitialProps')`, and the same browser mounted cleanly with it off. Read at attach — restart the server, then open a **fresh tab**; injected scripts live for the tab's lifetime, so re-navigating the same tab keeps the old one and the change looks ignored | on |
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
 | `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
+| `WEBRAIN_VISION_MODEL` | Which installed local vision model to load (`qwen3-vl-2b`, `qwen3-vl-2b-q6k`, `qwen35-9b-q4km`/`q5km`/`q6k`/`q8`). Unset resolves to the default id, then to whatever is installed, so a single-model cache keeps working | `qwen3-vl-2b` |
+| `WEBRAIN_LLAMA_SERVER` | Path to a different `llama-server` binary — drop in a CUDA/Vulkan build and GPU offload engages on its own | bundled CPU build |
+| `WEBRAIN_VISION_GPU` | `1` forces `-ngl 99` layer offload, `0` forces CPU. Otherwise offload is enabled only when a GPU backend library (`ggml-cuda`, `ggml-vulkan`, `ggml-metal`, `ggml-hip`, `ggml-sycl`) sits beside the binary — `-ngl` on a CPU-only build is silently ignored, so the machine's GPU is never trusted over the build's | auto |
 | `EMBED_URL` / `EMBED_MODEL` / `EMBED_API_KEY` | OpenAI-compatible `/v1/embeddings` endpoint + model + Bearer token for `webrain_vision` `op=index` / `retrieve` (any compatible server: OpenAI, Ollama, TEI, local vLLM) | `api.openai.com/v1/embeddings` + `text-embedding-3-small` |
 | `EMBED_FALLBACK_URL` / `EMBED_FALLBACK_MODEL` / `EMBED_FALLBACK_API_KEY` | Secondary embeddings endpoint tried automatically when the primary `EMBED_*` call fails | `http://127.0.0.1:8000/v1/embeddings` + `Qwen/Qwen3-VL-Embedding-2B` |
 | `WEBRAIN_HTTP_ADDR` | Bind address for `webrain mcp --http` | `127.0.0.1:<port>` (loopback only) |
@@ -46,7 +50,12 @@ llama-server, `webrain install vision`) when no cloud key is set.
 |---|---|
 | `webrain install watch` | ffmpeg+ffprobe, yt-dlp, whisper-cli + a GGUF model |
 | `webrain install whisper` | a whisper GGUF model (`--model small.en`) |
-| `webrain install vision` | llama-server (latest CPU build) + Qwen3-VL-2B (GGUF + mmproj) |
+| `webrain install vision` | llama-server (latest CPU build) + one vision model from the catalog — default `qwen3-vl-2b`, or `--model <id>` |
+| `webrain install vision --model <id> --model-update` | re-checks that model's files against Hugging Face (a changed upstream size re-downloads) |
+| `webrain uninstall vision --model <id>` / `--all` | removes one model dir, or the whole `vision/` cache |
+
+Models live in `vision/<id>/` with their own mmproj; the ids, sizes and RAM/VRAM
+needs are listed in the [installation guide](/installation#optional-bundles).
 
 ## Discovery order
 

@@ -1016,6 +1016,54 @@ pub(crate) fn llama_vision_endpoint(exe: &Path, model: &Path, mmproj: &Path) -> 
     Ok(endpoint)
 }
 
+/// Does THIS llama-server build have a GPU backend? The library sitting next to
+/// the executable is the only honest signal: `-ngl` on a CPU-only build is
+/// silently ignored, so probing the MACHINE for a GPU would promise an offload
+/// that never happens. `webrain install vision` ships llama.cpp's CPU build
+/// (`llama_cpp_release` → `win-cpu-x64.zip`), so this is false until a
+/// CUDA/Vulkan/Metal/HIP/SYCL build is dropped in its place — then it turns
+/// true on its own, no config.
+/// GPU buys speed on the local 2B (sub-second answers vs ~10s on CPU), not
+/// accuracy — a bigger model or a cloud key is still the fix for wrong reads.
+/// `WEBRAIN_VISION_GPU=0` forces CPU, `=1` forces the flag regardless.
+fn gpu_offload_wanted(exe: &Path) -> bool {
+    match std::env::var("WEBRAIN_VISION_GPU").ok().as_deref() {
+        Some("0") | Some("false") => return false,
+        Some("1") | Some("true") => return true,
+        _ => {}
+    }
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+        n.contains("ggml")
+            && ["cuda", "vulkan", "hip", "sycl", "metal"]
+                .iter()
+                .any(|b| n.contains(b))
+    })
+}
+
+#[cfg(test)]
+mod gpu_offload_tests {
+    #[test]
+    fn env_override_wins_over_probe() {
+        // The override is the escape hatch when a driver misbehaves, so it must
+        // be honoured before the backend scan.
+        let exe = std::path::Path::new("C:/nope/llama-server.exe");
+        unsafe { std::env::set_var("WEBRAIN_VISION_GPU", "0") };
+        assert!(!super::gpu_offload_wanted(exe));
+        unsafe { std::env::set_var("WEBRAIN_VISION_GPU", "1") };
+        assert!(super::gpu_offload_wanted(exe));
+        unsafe { std::env::remove_var("WEBRAIN_VISION_GPU") };
+        // No backend libs beside a non-existent binary -> CPU, no false promise.
+        assert!(!super::gpu_offload_wanted(exe));
+    }
+}
+
 /// Spawn llama-server, wait for /health. Returns (child, endpoint). Caller owns
 /// the child and must kill it. Internal — use llama_vision_endpoint instead.
 fn spawn_llama_server_impl(
@@ -1029,8 +1077,8 @@ fn spawn_llama_server_impl(
     let threads = std::thread::available_parallelism()
         .map(|n| n.get().to_string())
         .unwrap_or_else(|_| "4".to_string());
-    let mut child = std::process::Command::new(exe)
-        .arg("-m")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("-m")
         .arg(model)
         .arg("--mmproj")
         .arg(mmproj)
@@ -1049,7 +1097,13 @@ fn spawn_llama_server_impl(
         // ponytail: Qwen-VL coordinates are unreliable for grounding without
         // this (llama.cpp warns); required for the captcha click loop.
         .arg("--image-min-tokens")
-        .arg("1024")
+        .arg("1024");
+    if gpu_offload_wanted(exe) {
+        // Offload every layer; llama.cpp keeps on the CPU whatever does not fit
+        // in VRAM.
+        cmd.arg("-ngl").arg("99");
+    }
+    let mut child = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

@@ -21,8 +21,14 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "install",
-        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper|vision [--model NAME]",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install vision [--model ID] [--model-update]",
         "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL).",
+        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.",
+    ),
+    (
+        "uninstall",
+        "webrain uninstall vision [--model ID | --all]",
+        "Remove an installed local vision model, or all of them.",
         "",
     ),
     (
@@ -129,6 +135,169 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Every env var the binary reads, grouped like `docs/reference/environment.mdx`.
+///
+/// `webrain --help` is the offline copy of that page, so a variable that only
+/// exists in the docs is a variable nobody can discover from the terminal.
+/// Keep the two lists equal — the defaults and the long explanations stay in
+/// the docs, the NAME and a one-phrase hint live here.
+const ENV: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Attach & engines",
+        &[
+            ("CDP_URL", "CDP endpoint to attach (default 127.0.0.1:9222)"),
+            ("WEBRAIN_CHROME", "explicit Chrome binary path"),
+            ("WEBRAIN_LIGHTPANDA", "explicit lightpanda binary path"),
+            ("WEBRAIN_OBSCURA", "explicit obscura binary path"),
+            (
+                "WEBRAIN_BROWSERS_DIR",
+                "engine cache (Chrome for Testing, obscura)",
+            ),
+            (
+                "WEBRAIN_PROFILES_DIR",
+                "persistent profile root (keeps auth/challenges)",
+            ),
+            ("WEBRAIN_MAX_TABS", "cap on concurrent tabs per engine"),
+        ],
+    ),
+    (
+        "Stealth",
+        &[
+            (
+                "WEBRAIN_NO_STEALTH=1",
+                "drop all injected stealth JS (diagnostic only)",
+            ),
+            (
+                "WEBRAIN_STEALTH_NOISE=0",
+                "drop fingerprint noise — the fix when a page renders but never mounts",
+            ),
+        ],
+    ),
+    (
+        "Network & fetch",
+        &[
+            (
+                "WEBRAIN_PROXIES",
+                "proxy rotation pool for the HTTP engines",
+            ),
+            (
+                "WEBRAIN_HTTP_CACHE=0",
+                "disable the HTTP revalidation cache",
+            ),
+            (
+                "WEBRAIN_HTTP_CACHE_DIR",
+                "dir holding the HTTP cache metadata",
+            ),
+            (
+                "WEBRAIN_FETCH_TIMEOUT_SECS",
+                "per-attempt HTTP timeout for installs (300)",
+            ),
+            (
+                "WEBRAIN_DOWNLOAD_MAX_BYTES",
+                "per-file cap for `webrain_download` http (512 MiB)",
+            ),
+        ],
+    ),
+    (
+        "MCP HTTP transport",
+        &[
+            ("WEBRAIN_HTTP_ADDR", "bind address for `mcp --http`"),
+            ("WEBRAIN_HTTP_TOKEN", "bearer token for `mcp --http`"),
+            (
+                "WEBRAIN_ALLOW_UNAUTHENTICATED=1",
+                "allow a non-loopback bind with no token",
+            ),
+            (
+                "WEBRAIN_NO_STATE=1",
+                "shared-instance mode (no vault/session tools)",
+            ),
+        ],
+    ),
+    (
+        "Vault & credentials",
+        &[
+            ("WEBRAIN_VAULT_DIR", "encrypted credential vault dir"),
+            (
+                "WEBRAIN_USER / WEBRAIN_PASS",
+                "login fallback credentials (env channel)",
+            ),
+        ],
+    ),
+    (
+        "SERP tiers",
+        &[
+            ("BRAVE_API_KEY", "Brave Search API — brave with no browser"),
+            ("SERPAPI_API_KEY", "serpapi.com paid Google tier"),
+        ],
+    ),
+    (
+        "Agent",
+        &[(
+            "WEBRAIN_SKILLS_DIR",
+            "operator .md skills read by webrain_guide",
+        )],
+    ),
+    (
+        "Local AI (watch & vision)",
+        &[
+            (
+                "WEBRAIN_LLAMA_SERVER",
+                "another llama-server binary (a CUDA/Vulkan build enables GPU offload)",
+            ),
+            (
+                "WEBRAIN_VISION_MODEL",
+                "which installed vision model to load (default qwen3-vl-2b)",
+            ),
+            (
+                "WEBRAIN_VISION_GPU",
+                "1 forces -ngl 99, 0 forces CPU, unset detects the build",
+            ),
+            ("WEBRAIN_WHISPER_BIN", "local whisper-cli binary path"),
+            ("WEBRAIN_WHISPER_MODEL", "local whisper GGUF model path"),
+            (
+                "WEBRAIN_STT_MODEL",
+                "cloud STT model override (e.g. whisper-large-v3)",
+            ),
+            (
+                "GROQ_API_KEY",
+                "cloud STT key — tried first (vision ask falls back to it too)",
+            ),
+            (
+                "OPENAI_API_KEY / FIREWORKS_API_KEY",
+                "cloud STT keys — second and third",
+            ),
+            (
+                "OPENROUTER_API_KEY",
+                "vision ask chain only — the first provider tried",
+            ),
+            (
+                "EMBED_URL / EMBED_MODEL / EMBED_API_KEY",
+                "embeddings endpoint/model/token for vision index+retrieve",
+            ),
+            (
+                "EMBED_FALLBACK_URL / _MODEL / _API_KEY",
+                "secondary embeddings endpoint",
+            ),
+        ],
+    ),
+    (
+        "Logging",
+        &[("RUST_LOG", "log verbosity (webrain=info,tungstenite=warn)")],
+    ),
+];
+
+/// Render the grouped environment listing (overview tail and `help env`).
+fn env_section() -> String {
+    let mut s = String::new();
+    for (group, vars) in ENV {
+        s.push_str(&format!("\n{group}\n"));
+        for (name, hint) in *vars {
+            s.push_str(&format!("  {name:<40} {hint}\n"));
+        }
+    }
+    s
+}
+
 /// Render the overview (no command) or one command's page.
 fn help_page(cmd: &str) -> String {
     let cmd = cmd.trim_start_matches('-');
@@ -140,10 +309,15 @@ fn help_page(cmd: &str) -> String {
         for (name, _, about, _) in HELP {
             s.push_str(&format!("  {name:<12} {about}\n"));
         }
-        s.push_str(
-            "\nRun `webrain <command> --help` for one command's flags.\n\nENVIRONMENT (read at process start, restart to apply; full table with\nplatform defaults in docs/reference/environment.mdx):\n  CDP_URL                     CDP endpoint to attach (default 127.0.0.1:9222)\n  WEBRAIN_STEALTH_NOISE=0     drop the fingerprint-noise block (hydration fix)\n  WEBRAIN_NO_STEALTH=1        drop all injected stealth JS (diagnostic only)\n  WEBRAIN_PROFILES_DIR        persistent profile root (keeps auth/challenges)\n  WEBRAIN_VAULT_DIR           encrypted credential vault dir\n  WEBRAIN_BROWSERS_DIR        engine cache (Chrome for Testing, obscura)\n  WEBRAIN_CHROME / WEBRAIN_LIGHTPANDA / WEBRAIN_OBSCURA\n                              explicit engine binary paths\n  WEBRAIN_PROXIES             proxy rotation pool for the HTTP engines\n  WEBRAIN_SKILLS_DIR          operator .md skills read by webrain_guide\n  WEBRAIN_HTTP_TOKEN          bearer token for `mcp --http`\n  WEBRAIN_NO_STATE=1          shared-instance mode (no vault/session tools)\n",
-        );
+        s.push_str("\nRun `webrain <command> --help` for one command's flags.\n");
+        s.push_str("\nENVIRONMENT — every variable the binary reads.\n");
+        s.push_str("Read at process start, restart to apply; defaults per platform are\n");
+        s.push_str("in docs/reference/environment.mdx (`webrain help env` shows this list).\n");
+        s.push_str(&env_section());
         return s;
+    }
+    if cmd == "env" {
+        return env_section();
     }
     match HELP.iter().find(|(name, _, _, _)| *name == cmd) {
         Some((name, usage, about, notes)) => {
@@ -752,11 +926,24 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
                 "vision" => {
-                    // webrain install vision [--force]
+                    // webrain install vision [--model ID] [--model-update]
                     // Local "hero" vision backend, the whisper analog: bundles
-                    // llama-server + Qwen3-VL-2B (GGUF + mmproj) into the cache
+                    // llama-server + one catalog model (GGUF + its own mmproj)
                     // so `watch --vision` works with NO cloud key, offline.
-                    let status = webrain_core::install::install_vision(force)?;
+                    // Only the catalog ids are accepted — anything else prints
+                    // the choices instead of fetching an arbitrary repo.
+                    let model = args
+                        .iter()
+                        .position(|a| a == "--model")
+                        .and_then(|i| args.get(i + 1))
+                        .cloned()
+                        // `install vision qwen3-vl-2b-q6k` — positional id, the way
+                        // `--engine` accepts one. Without this a bare id silently
+                        // installed the DEFAULT model.
+                        .or_else(|| args.get(3).filter(|a| !a.starts_with("--")).cloned())
+                        .unwrap_or_else(|| webrain_core::install::DEFAULT_VISION_ID.to_string());
+                    let update = args.contains(&"--model-update".to_string());
+                    let status = webrain_core::install::install_vision(&model, update)?;
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
                 other => {
@@ -765,6 +952,30 @@ fn main() -> anyhow::Result<()> {
                     )
                 }
             }
+        }
+        Some("uninstall") => {
+            // webrain uninstall vision [--model ID | --all]
+            let target = args.get(2).cloned().unwrap_or_default();
+            if target != "vision" {
+                anyhow::bail!(
+                    "unknown uninstall target `{target}` — try: webrain uninstall vision [--model ID | --all]"
+                );
+            }
+            let model = args
+                .iter()
+                .position(|a| a == "--model")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            let all = args.contains(&"--all".to_string());
+            if model.is_none() && !all {
+                anyhow::bail!(
+                    "pick what to remove: --model <id> or --all\n{}",
+                    webrain_core::install::vision_model_choices()
+                );
+            }
+            let status =
+                webrain_core::install::uninstall_vision(if all { None } else { model.as_deref() })?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
         Some("obscura") => {
             // webrain obscura [--port N] — spawn the Obscura CDP server

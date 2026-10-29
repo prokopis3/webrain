@@ -7,12 +7,22 @@ description: Every webrain subcommand and flag.
 
 Drive webrain by hand — every engine and tool has a CLI twin.
 
+## Help
+
+`webrain --help` lists every command plus **every environment variable the
+binary reads**, grouped (attach/engines, stealth, network, MCP transport, vault,
+SERP tiers, agent, local AI, logging). The defaults and the long explanations
+live in [Environment Variables](/reference/environment); `webrain help env`
+prints just that section and `webrain <command> --help` prints one command's
+flags.
+
 ## Commands
 
 | Command | Description |
 |---|---|
 | `webrain mcp [--http <port>]` | Start the MCP server (stdio, or HTTP on a port) |
-| `webrain install [--force] [--engine chrome\|obscura\|lightpanda\|whisper\|vision\|watch] [--stealth] [--model small.en]` | Download a browser engine, or the local AI stack: `watch` = ffmpeg+yt-dlp+whisper-cli+model, `whisper` = STT GGUF model, `vision` = llama-server + Qwen3-VL-2B |
+| `webrain install [--force] [--engine chrome\|obscura\|lightpanda\|whisper\|vision\|watch] [--stealth] [--model NAME\|ID] [--model-update]` | Download a browser engine, or the local AI stack: `watch` = ffmpeg+yt-dlp+whisper-cli+model, `whisper` = STT GGUF model, `vision` = llama-server + one local vision model (ids in the [installation guide](/installation#optional-bundles)) |
+| `webrain uninstall vision [--model ID \| --all]` | Remove one installed local vision model, or all of them (also clears a legacy single-model install) |
 | `webrain upgrade` | Update to the latest release |
 | `webrain obscura [--port N]` | Spawn the Obscura CDP server (default 9224) |
 | `webrain lightpanda [--port N]` | Spawn the Lightpanda CDP server (default 9225) |
