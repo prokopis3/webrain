@@ -1671,15 +1671,40 @@ fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Release asset for an (os, arch, musl) triple, e.g. `webrain-linux-x86_64`.
+/// One binary is published per target, so this must name exactly what
+/// `scripts/install.sh` / `install.ps1` download and what `release.yml` builds
+/// — three places, one name.
+fn release_asset(os: &str, arch: &str, musl: bool) -> anyhow::Result<String> {
+    let asset = match (os, arch) {
+        ("linux", "x86_64") => "webrain-linux-x86_64".to_string(),
+        ("linux", "aarch64") => "webrain-linux-aarch64".to_string(),
+        ("macos", "x86_64" | "aarch64") => format!("webrain-macos-{arch}"),
+        ("windows", "x86_64" | "aarch64") => format!("webrain-windows-{arch}.exe"),
+        _ => anyhow::bail!(
+            "no published binary for {os}/{arch} — build from source: cargo build --release"
+        ),
+    };
+    // The static musl build is published for x86_64 only.
+    match (musl, os, arch) {
+        (false, ..) => Ok(asset),
+        (true, "linux", "x86_64") => Ok(format!("{asset}-musl")),
+        (true, ..) => {
+            anyhow::bail!(
+                "no musl build for {os}/{arch} — build from source: cargo build --release"
+            )
+        }
+    }
+}
+
 fn self_update() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let asset = if cfg!(target_os = "linux") {
-        "webrain-linux"
-    } else if cfg!(target_os = "macos") {
-        "webrain-macos"
-    } else {
-        "webrain-windows.exe"
-    };
+    let asset = release_asset(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "musl"),
+    )?;
+    let asset = asset.as_str();
     let url = format!("https://github.com/prokopis3/webrain/releases/latest/download/{asset}");
     let sums_url =
         "https://github.com/prokopis3/webrain/releases/latest/download/checksums.txt".to_string();
@@ -1890,4 +1915,31 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
     };
     println!("  recommend        {rec}");
     if any_cdp { 0 } else { 2 }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::release_asset;
+
+    /// Pins the published asset names. If a name changes in `release.yml`, the
+    /// installers and this test must change together — a self-update that names
+    /// a nonexistent asset fails closed (checksum), but the message is opaque.
+    #[test]
+    fn release_asset_matches_published_names() {
+        let ok = |os, arch, musl| release_asset(os, arch, musl).unwrap();
+        assert_eq!(ok("linux", "x86_64", false), "webrain-linux-x86_64");
+        assert_eq!(ok("linux", "x86_64", true), "webrain-linux-x86_64-musl");
+        assert_eq!(ok("linux", "aarch64", false), "webrain-linux-aarch64");
+        assert_eq!(ok("macos", "aarch64", false), "webrain-macos-aarch64");
+        assert_eq!(ok("macos", "x86_64", false), "webrain-macos-x86_64");
+        assert_eq!(ok("windows", "x86_64", false), "webrain-windows-x86_64.exe");
+        assert_eq!(
+            ok("windows", "aarch64", false),
+            "webrain-windows-aarch64.exe"
+        );
+        // Unpublished combinations must fail rather than resolve to the wrong
+        // binary for the architecture they are run on.
+        assert!(release_asset("linux", "aarch64", true).is_err());
+        assert!(release_asset("freebsd", "x86_64", false).is_err());
+    }
 }

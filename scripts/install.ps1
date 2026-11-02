@@ -21,7 +21,17 @@ $InstallDir = Join-Path $local 'Programs\webrain'
 $exe = Join-Path $InstallDir 'webrain.exe'
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$url = "https://github.com/$Repo/releases/latest/download/webrain-windows.exe"
+# One binary per arch: resolve the asset instead of handing an ARM64 user the
+# x64 build. ARCHITEW6432 is the real OS arch when this runs under 32-bit
+# PowerShell on a 64-bit Windows.
+$procArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$arch = switch ($procArch) {
+    'AMD64' { 'x86_64' }
+    'ARM64' { 'aarch64' }
+    default { throw "webrain: unsupported architecture '$procArch' (published: x86_64, aarch64)." }
+}
+$asset = "webrain-windows-$arch.exe"
+$url = "https://github.com/$Repo/releases/latest/download/$asset"
 Write-Host "webrain: downloading $url"
 # Download to a temp file, sanity-check it, then atomically move into place so
 # an interrupted download (or a running webrain.exe lock) can't leave a
@@ -46,7 +56,7 @@ if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
 $sumUrl = "https://github.com/$Repo/releases/latest/download/checksums.txt"
 try {
     $sum = Invoke-WebRequest -Uri $sumUrl -UseBasicParsing -TimeoutSec 30
-    $expected = (($sum.Content -split "`r?`n" | Where-Object { $_ -match 'webrain-windows\.exe' } | Select-Object -First 1) -split '\s+') | Select-Object -First 1
+    $expected = (($sum.Content -split "`r?`n" | Where-Object { ($_ -split '\s+')[1] -eq $asset } | Select-Object -First 1) -split '\s+')[0]
     if ($expected) {
         $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLowerInvariant()
         if ($actual -ne $expected.ToLowerInvariant()) {
@@ -55,7 +65,7 @@ try {
         }
         Write-Host "webrain: SHA-256 verified."
     } else {
-        Write-Host "webrain: checksums.txt has no entry for webrain-windows.exe — skipping verification." -ForegroundColor Yellow
+        Write-Host "webrain: checksums.txt has no entry for $asset — skipping verification." -ForegroundColor Yellow
     }
 } catch {
     Write-Host "webrain: could not fetch checksums.txt — skipping verification." -ForegroundColor Yellow
