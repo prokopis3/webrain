@@ -22,9 +22,11 @@ On Windows/macOS, run engines via Docker Desktop.
 
 ## Releases & versioning
 
-- Semantic versioning with GitHub Releases; each release ships prebuilt
-  binaries for Linux, macOS, and Windows (`webrain-linux`, `webrain-macos`,
-  `webrain-windows.exe`).
+- Semantic versioning with GitHub Releases; each release ships one prebuilt
+  binary per platform **and architecture** — `webrain-{linux,macos}-{x86_64,aarch64}`,
+  `webrain-linux-x86_64-musl` (static) and
+  `webrain-windows-{x86_64,aarch64}.exe`. The install scripts pick the one that
+  matches the machine; there is no `webrain-linux`/`webrain-macos` catch-all.
 - `webrain upgrade` detects the install method (Homebrew, Scoop, manual) and
   updates automatically.
 - `CHANGELOG.md` tracks changes under `[Unreleased]`.
