@@ -344,8 +344,7 @@ fn help_page(cmd: &str) -> String {
 fn check_skill_tools(dir: &std::path::Path) {
     // Crate names, not tools — `webrain_core` is code, not something an agent calls.
     const NOT_TOOLS: &[&str] = &["webrain_core", "webrain_cli", "webrain_mcp"];
-    let known: std::collections::HashSet<String> =
-        webrain_mcp::tool_names().into_iter().collect();
+    let known: std::collections::HashSet<String> = webrain_mcp::tool_names().into_iter().collect();
     let mut stale: std::collections::BTreeSet<String> = Default::default();
     for (_, path) in webrain_core::skills::list(dir) {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -994,8 +993,7 @@ fn main() -> anyhow::Result<()> {
                     // Offline by design: the bundle is compiled in, so this needs
                     // no network and cannot drift from the binary that serves it.
                     let dir = webrain_core::skills::dir();
-                    let (written, skipped) =
-                        webrain_core::skills::install_bundled(&dir, force)?;
+                    let (written, skipped) = webrain_core::skills::install_bundled(&dir, force)?;
                     println!(
                         "skills ready: {written} written, {skipped} kept in {}",
                         dir.display()
@@ -1113,7 +1111,13 @@ fn main() -> anyhow::Result<()> {
             } else {
                 &profile
             };
-            let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless, proxy.as_deref())?;
+            let launched = webrain_core::launch::launch_chrome(
+                service,
+                profile,
+                port,
+                !headless,
+                proxy.as_deref(),
+            )?;
             println!("profile: {}", launched.profile_dir.display());
             println!("CDP_URL={}", launched.cdp_url);
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.

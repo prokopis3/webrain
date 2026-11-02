@@ -313,7 +313,10 @@ mod tests {
         // No frontmatter at all -> a reference chapter, not a skill.
         assert_eq!(frontmatter_name("# Heading\nname: no\n"), None);
         // BOM must not hide the opening fence.
-        assert_eq!(frontmatter_name("\u{feff}---\nname: bom\n---\n").as_deref(), Some("bom"));
+        assert_eq!(
+            frontmatter_name("\u{feff}---\nname: bom\n---\n").as_deref(),
+            Some("bom")
+        );
     }
 
     #[test]

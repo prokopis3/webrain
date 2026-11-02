@@ -385,7 +385,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         .and_then(|v| v.as_str())
                         .map(String::from)
                         .or_else(webrain_core::proxy::next_proxy);
-                    let results = webrain_core::engines::download_files(&urls, &dir, proxy.as_deref());
+                    let results =
+                        webrain_core::engines::download_files(&urls, &dir, proxy.as_deref());
                     json!({"status": "ok", "count": results.len(), "results": results})
                 };
                 let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
@@ -817,7 +818,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let result = match webrain_core::launch::launch_chrome(
-                    service, profile, port, !headless, proxy.as_deref(),
+                    service,
+                    profile,
+                    port,
+                    !headless,
+                    proxy.as_deref(),
                 ) {
                     Ok(l) => {
                         let cdp_url = l.cdp_url.clone();
@@ -1175,7 +1180,10 @@ fn parse_loopback_port(u: &str) -> Option<u16> {
 fn loopback_port_only_for_local_endpoints() {
     assert_eq!(parse_loopback_port("http://127.0.0.1:9226"), Some(9226));
     assert_eq!(parse_loopback_port("http://localhost:9300/"), Some(9300));
-    assert_eq!(parse_loopback_port("wss://chrome.browserless.io?token=x"), None);
+    assert_eq!(
+        parse_loopback_port("wss://chrome.browserless.io?token=x"),
+        None
+    );
 }
 
 /// The caller's own CDP endpoint, when the call supplied one.
@@ -1757,10 +1765,7 @@ async fn handle_http_conn(
                             .get("cdp_url")
                             .and_then(|v| v.as_str())
                             .map(String::from);
-                        let proxy = args
-                            .get("proxy")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
+                        let proxy = args.get("proxy").and_then(|v| v.as_str()).map(String::from);
                         let meta = Arc::new(SessionMeta {
                             backend: tokio::sync::Mutex::new(None),
                             cdp_url: cdp.clone(),
@@ -1802,8 +1807,9 @@ async fn handle_http_conn(
                                         *meta.backend.lock().await = Some(b);
                                     }
                                     Err(e) => {
-                                        open_err =
-                                            Some(format!("session {sid}: proxied context failed: {e}"))
+                                        open_err = Some(format!(
+                                            "session {sid}: proxied context failed: {e}"
+                                        ))
                                     }
                                 },
                                 Err(e) => {
@@ -1816,19 +1822,19 @@ async fn handle_http_conn(
                             // reply, so an early `return` here would send nothing.
                             json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"status":"error","message":message})).unwrap_or_default()}],"isError":true}})
                         } else {
-                        let existed = old.is_some();
-                        state.sessions.lock().await.insert(sid.clone(), meta);
-                        // Dispose the replaced session's context AFTER the insert, so
-                        // a failure here cannot leave the map without an entry. This is
-                        // the live switch: same session_id + a new proxy = new context.
-                        if let Some(prev) = old {
-                            let prev_ctx = prev.browser_context.lock().await.clone();
-                            let prev_backend = prev.backend.lock().await.take();
-                            if let (Some(c), Some(b)) = (prev_ctx, prev_backend) {
-                                let _ = b.dispose_browser_context(&c).await;
+                            let existed = old.is_some();
+                            state.sessions.lock().await.insert(sid.clone(), meta);
+                            // Dispose the replaced session's context AFTER the insert, so
+                            // a failure here cannot leave the map without an entry. This is
+                            // the live switch: same session_id + a new proxy = new context.
+                            if let Some(prev) = old {
+                                let prev_ctx = prev.browser_context.lock().await.clone();
+                                let prev_backend = prev.backend.lock().await.take();
+                                if let (Some(c), Some(b)) = (prev_ctx, prev_backend) {
+                                    let _ = b.dispose_browser_context(&c).await;
+                                }
                             }
-                        }
-                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"proxied":proxy.is_some(),"identity":keep_identity,"created":!existed})).unwrap_or_default()}],"isError":false}})
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"proxied":proxy.is_some(),"identity":keep_identity,"created":!existed})).unwrap_or_default()}],"isError":false}})
                         }
                     }
                     "webrain_close_session" => {

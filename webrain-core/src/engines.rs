@@ -2637,7 +2637,11 @@ pub fn http_fetch_capped(url: &str, max_chars: usize) -> anyhow::Result<Value> {
 }
 
 /// `http_fetch_capped` through one proxy exit, or the shared pool when `None`.
-pub fn http_fetch_capped_proxied(url: &str, max_chars: usize, proxy: Option<&str>) -> anyhow::Result<Value> {
+pub fn http_fetch_capped_proxied(
+    url: &str,
+    max_chars: usize,
+    proxy: Option<&str>,
+) -> anyhow::Result<Value> {
     let resp = browser_req(http_agent(proxy)?.get(url)).call()?;
     let status = resp.status().as_u16();
     let content_type = resp

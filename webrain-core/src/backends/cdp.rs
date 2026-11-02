@@ -883,11 +883,7 @@ impl CdpBackend {
             .send_cmd_with(None, "Browser.getVersion", json!({}))
             .await
             .ok()
-            .and_then(|v| {
-                v.get("product")
-                    .and_then(|p| p.as_str())
-                    .map(String::from)
-            })
+            .and_then(|v| v.get("product").and_then(|p| p.as_str()).map(String::from))
             .unwrap_or_default();
         if !product.contains("Chrome") {
             anyhow::bail!(
