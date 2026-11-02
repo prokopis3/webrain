@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **dist**: a release binary per platform **and architecture**, and installers that
+  pick it. The matrix was three native builds named `webrain-linux` /
+  `webrain-macos` / `webrain-windows.exe`, so `webrain-macos` was whatever
+  `macos-latest` happened to be — arm64 — while `install.sh` **refused arm64 and
+  accepted x86_64**, i.e. it took the one architecture that binary cannot run on
+  and rejected the one it can. Assets are now
+  `webrain-{linux,macos}-{x86_64,aarch64}`, `webrain-linux-x86_64-musl` (static:
+  Alpine and any glibc older than the runner's) and
+  `webrain-windows-{x86_64,aarch64}.exe`, built from a target-triple matrix
+  (aarch64-linux and musl x86_64 are cross-linked on the x86_64 runner with
+  `gcc-aarch64-linux-gnu` / `musl-tools`; the Intel macOS build is cross-built
+  from the arm64 runner, which Apple's linker supports and which stops depending
+  on the retiring Intel runner image). `install.sh` maps `uname -s`/`uname -m`
+  (with `getconf GNU_LIBC_VERSION` deciding musl), `install.ps1` maps
+  `PROCESSOR_ARCHITECTURE` (falling back to `PROCESSOR_ARCHITEW6432` under 32-bit
+  PowerShell), and `webrain self-update` uses the same names via a new
+  `release_asset(os, arch, musl)` with a unit test pinning all seven. An
+  unpublished combination now fails with "build from source" instead of
+  downloading a binary for a different architecture.
+- **dist**: `checksums.txt` is generated with `sha256sum *` instead of three
+  hardcoded filenames, so adding a target to the matrix cannot ship a binary with
+  no checksum — which every installer treats as "skip verification".
+- **dist**: the Scoop manifest bump now also writes the `arm64` architecture entry
+  (it only had `64bit`), pointing at `webrain-windows-aarch64.exe`.
+
+### Fixed
+
+- **dist**: `install.sh` sent Windows users to a `scoop bucket add` command that
+  needs a manual step; it now points at `install.ps1`.
+
 ## [0.13.0] - 2026-11-02
 
 ### Added
