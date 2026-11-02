@@ -241,13 +241,21 @@ jobs:
           gh api "repos/prokopis3/scoop-webrain/contents/bucket/webrain.json" --jq .content | base64 -d > bucket.json
           gh api "repos/prokopis3/homebrew-webrain/contents/Formula/webrain.rb" --jq .content | base64 -d > formula.rb
 
-          # scoop: jq-edit in place (keeps description/bin/checkver/autoupdate)
+          # scoop: jq-edit in place (keeps description/checkver). bin is per-arch:
+          # the asset name carries the arch, so one top-level bin naming a single
+          # filename shimmed nothing on either arch ("Can't shim
+          # 'webrain-windows.exe': File doesn't exist").
           jq --arg v "$VER" --arg h "$WIN_SHA" --arg ha "$WIN_ARM_SHA" \
             '.version = $v
              | .architecture."64bit".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows-x86_64.exe")
              | .architecture."64bit".hash = $h
+             | .architecture."64bit".bin = [["webrain-windows-x86_64.exe", "webrain"]]
              | .architecture."arm64".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows-aarch64.exe")
-             | .architecture."arm64".hash = $ha' \
+             | .architecture."arm64".hash = $ha
+             | .architecture."arm64".bin = [["webrain-windows-aarch64.exe", "webrain"]]
+             | del(.bin)
+             | .autoupdate.architecture."64bit".url = "https://github.com/prokopis3/webrain/releases/download/v$version/webrain-windows-x86_64.exe"
+             | .autoupdate.architecture."arm64".url = "https://github.com/prokopis3/webrain/releases/download/v$version/webrain-windows-aarch64.exe"' \
             bucket.json > /tmp/bucket.json && mv /tmp/bucket.json bucket.json
 
           # homebrew: sed the version/url/sha256 (arm64 bottle; Intel Macs need an

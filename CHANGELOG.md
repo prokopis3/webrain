@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path as a behavioural fingerprint in its own right. The final move now lands
   exactly on the target, so the following `mousePressed` has no 2–3px jump.
 
+### Fixed
+
+- **ci**: the Scoop manifest bumped by the release workflow now declares `bin`
+  per architecture (`webrain-windows-x86_64.exe` / `-aarch64.exe`). One
+  top-level entry naming `webrain-windows.exe` shimmed nothing on either arch —
+  `scoop install` ended with *Can't shim 'webrain-windows.exe': File doesn't
+  exist*, and `autoupdate` pointed at the same non-existent name.
+
 ## [0.14.0] - 2026-11-02
 
 ### Security
