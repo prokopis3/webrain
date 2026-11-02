@@ -97,22 +97,24 @@ session backend. Recipe that works (Google Flights ATH→NYC):
    ~1/s and long `await` promises can resolve as null. Prefer sync DOM work +
    one awaited `fetch`; avoid long polling loops.
 
-### a11y (webrain_a11y)
+### a11y (`webrain_observe` with `what=a11y`)
 Material/Google widgets are often NOT `button`: dropdowns are `combobox`,
 menu items `option`, segmented controls `radio`/`tab`. If `role=X` returns [],
 drop the role filter and `filter` on the label text instead (`filter` matches
 name, value, and css_path).
 
 ### Extraction
-Prefer `webrain_extract_json` (schema discovered via `webrain_autoschema` +
-`webrain_eval`), `webrain_batch` for pagination 1..N, `webrain_spider` for
-whole sites. Never guess selectors from memory — discover them.
+Prefer `webrain_extract` (`mode=json` with a schema discovered by
+`mode=autoschema` plus `webrain_eval`), `webrain_batch` for pagination 1..N,
+`webrain_crawl` (`mode=spider`) for whole sites. Never guess selectors from
+memory — discover them.
 
 ### Auth-gated pages: cross-browser cookie transfer
 Log in in **real Chrome** (Turnstile/Cloudflare auto-solve), export cookies
-(`webrain_cookies` / `webrain cookies --port 9222 --out`), point the MCP at the
-batch browser (`CDP_URL=...9224` obscura), `webrain_setcookies` on the session
-connection, then `webrain_batch` **without** `cdp_urls` — obscura isolates
+(`webrain_session` with `op=cookies`, or the CLI `webrain cookies --port 9222 --out`),
+point the MCP at the batch browser (`CDP_URL=...9224` obscura), then
+`webrain_session` with `op=setcookies` on the session connection, then
+`webrain_batch` **without** `cdp_urls` — obscura isolates
 cookie jars per CDP connection, so set + batch must share one connection.
 Session cookies die on Chrome restart — export on the live authenticated
 browser. Full procedure: `skills/webrain/SKILL.md` → "Auth-gated pages".

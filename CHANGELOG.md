@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.14.0] - 2026-11-02
+
 ### Security
 
 - **deps**: `zip` 7.2.0 → **9.2.2**, closing five advisories against the engine
@@ -60,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only place a product skill is edited, because it is what `include_str!` compiles
   and `webrain install skills` ships; `.github/skills/` is for skills that serve
   this repository.
+
+- **docs**: `AGENTS.md` and `ARCHITECTURE.md` named `map_surface` routing targets as
+  if they were MCP tools — `webrain_a11y`, `webrain_spider`, `webrain_extract_json`,
+  `webrain_autoschema`, `webrain_cookies`, `webrain_setcookies`. None of them is in
+  `list_tools()`, so an agent following the file asks for a tool that does not exist.
+  Both now name the real entry points and selectors (`observe(what=a11y)`,
+  `crawl(mode=spider)`, `extract(mode=json|autoschema)`, `session(op=cookies|setcookies)`).
 
 ### Added
 
