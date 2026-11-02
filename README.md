@@ -268,7 +268,7 @@ The complete list, with defaults and the allow/deny rules, is in
 | `WEBRAIN_CHROME` / `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit engine binary paths — `engine not found` means one of these is wrong or nothing is installed | auto-discovered |
 | `WEBRAIN_PROFILES_DIR` | Persistent browser-profile root. Profiles are what keeps a login or a solved challenge across calls; pointing this somewhere new looks exactly like being logged out | `%APPDATA%\webrain\profiles` / `~/.local/share/webrain/profiles` |
 | `WEBRAIN_PROXIES` | Proxy rotation pool (comma/newline list) for the HTTP engines and the google/brave guest Chrome; a per-call `proxy` overrides it | unset |
-| `WEBRAIN_SKILLS_DIR` | Directory of operator `*.md` skills the agent reads through `webrain_guide(topic="skill:<name>")` | unset (off) |
+| `WEBRAIN_SKILLS_DIR` | Directory of operator `*.md` skills the agent reads through `webrain_guide(topic="skill:<name>")` | `<engine cache>/skills` (filled by `webrain install skills`) |
 | `BRAVE_API_KEY` | Enables the keyed Brave SERP provider — `--engine brave` then needs no browser | unset |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Optional cloud STT and vision; the bundled local stack needs no keys | unset |
 | `RUST_LOG` | Log verbosity, e.g. `webrain=info,tungstenite=warn` | — |
@@ -319,10 +319,54 @@ Add to your user `settings.json` under `"mcp"`:
 }
 ```
 
-**Agent skills (optional)** — this repo ships agent guidance so the LLM drives it well:
+## Skills
 
-- `skills/webrain/SKILL.md` — browser/challenge/extraction decision guide + auth-cookie transfer procedures.
-- `.github/skills/` — repo-local skills (`credentials`, `update-changelog`, `git-cleanup`).
+A **skill** is a Markdown file the agent loads on demand: domain knowledge, a
+procedure, a warning list. webrain serves skills over MCP so the instructions live
+next to the tools they describe instead of in the prompt.
+
+```bash
+webrain install skills          # write the bundled set (offline — compiled into the binary)
+webrain install skills --force  # overwrite files you edited
+webrain skills                  # list what is installed
+webrain skills add https://example.com/x/SKILL.md   # or a local path
+webrain skills rm <name>
+```
+
+`add` reads the skill's frontmatter `name:` (that is its identity, not the
+filename) and refuses files over 64 KiB.
+
+**Where they land** — `WEBRAIN_SKILLS_DIR`, defaulting to `<engine cache>/skills`
+(`%LOCALAPPDATA%\webrain\browsers\skills` on Windows). Set it explicitly when the
+MCP server and the CLI run as different users or in a container.
+
+**How the agent reads one** — two topics on the guide tool:
+
+```
+webrain_guide(topic="skills")          # index of installed skills
+webrain_guide(topic="skill:<name>")    # that skill's full text
+```
+
+`webrain install skills` also prints a warning when an installed skill names a
+`webrain_*` tool this build does not have.
+
+**Bundled and repo skills**
+
+- `skills/webrain/SKILL.md` — browser/challenge/extraction decision guide + auth-cookie transfer.
+- `.github/skills/` — repo-local (`credentials`, `update-changelog`, `git-cleanup`, `web-research`, `product-market-research`).
+
+**Third-party skills** — `npx skills add <owner/repo>` installs into the client's
+own directory (`.agents/skills/<name>/SKILL.md` + a `skills-lock.json`), which
+webrain does not read. Point it there, or copy the file in:
+
+```bash
+WEBRAIN_SKILLS_DIR=.agents/skills webrain skills
+webrain skills add .agents/skills/agent-browser/SKILL.md
+```
+
+Read a third-party skill before trusting it: some (e.g. `vercel-labs/agent-browser`)
+instruct the agent to prefer their own CLI over any built-in browser tool, which
+contradicts the routing in `AGENTS.md`.
 
 ## Architecture
 
