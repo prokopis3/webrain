@@ -19,6 +19,16 @@
 
 mod tools;
 
+/// Names of every tool this build exposes. `webrain skills` uses it to warn when
+/// an installed skill names a tool that no longer exists — a skill naming a
+/// removed tool reads correct and sends every agent to a 404.
+pub fn tool_names() -> Vec<String> {
+    tools::list_tools()
+        .iter()
+        .filter_map(|t| t.get("name")?.as_str().map(str::to_string))
+        .collect()
+}
+
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -331,15 +341,52 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let proxy = arguments
+                        .get("proxy")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(webrain_core::proxy::next_proxy);
                     webrain_core::engines::download_ytdlp(
                         &urls,
                         &dir,
                         audio_only,
                         format.as_deref(),
                         &extra,
+                        proxy.as_deref(),
                     )
                 } else {
-                    let results = webrain_core::engines::download_files(&urls, &dir);
+                    // `filter_extension` narrows the list BEFORE any request. This
+                    // short-circuit returns first, so without it here the caller's
+                    // exclusion was silently ignored while the dispatcher honoured
+                    // it -- the same "advertised but dead" shape as engine:ytdlp had.
+                    let mut urls = urls;
+                    if let Some(ext) = arguments
+                        .get("filter_extension")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_start_matches('.').to_lowercase())
+                        .filter(|e| !e.is_empty())
+                    {
+                        urls.retain(|u| {
+                            let path = u.split('?').next().unwrap_or(u);
+                            path.to_lowercase().ends_with(&format!(".{ext}"))
+                        });
+                        if urls.is_empty() {
+                            return json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {
+                                    "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": format!("no URLs match extension '.{ext}'")})).unwrap_or_else(|_| "{}".into())}],
+                                    "isError": true
+                                }
+                            });
+                        }
+                    }
+                    let proxy = arguments
+                        .get("proxy")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(webrain_core::proxy::next_proxy);
+                    let results =
+                        webrain_core::engines::download_files(&urls, &dir, proxy.as_deref());
                     json!({"status": "ok", "count": results.len(), "results": results})
                 };
                 let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
@@ -395,8 +442,17 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     _ => format!("https://html.duckduckgo.com/html/?q={encoded}"),
                 };
                 let engine = engine.to_string();
+                // Explicit `proxy` wins and never rotates; otherwise the
+                // WEBRAIN_PROXIES pool -- the same rule serp follows. A launched
+                // browser's exit is separate: that one is baked into
+                // `--proxy-server` at launch and covers every browser-path tool.
+                let proxy = arguments
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(webrain_core::proxy::next_proxy);
                 let result = tokio::task::spawn_blocking(move || {
-                    match webrain_core::engines::http_fetch(&url) {
+                    match webrain_core::engines::http_fetch_proxied(&url, proxy.as_deref()) {
                         Ok(v) => {
                             json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()})
                         }
@@ -482,12 +538,41 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     match res {
                         Ok(b) => *backend = Some(b),
                         Err(_) => {
-                            let prof = if engine == "google" {
+                            // Guest-launch on the port the CALLER's endpoint is on.
+                            // Hardcoding 9222 made every routed session that points
+                            // anywhere else die with "port 9222 already has a CDP
+                            // endpoint" — a Chrome the caller never asked for,
+                            // squatting a port they never named.
+                            let port = match cdp_url.map(parse_loopback_port) {
+                                Some(Some(p)) => p,
+                                Some(None) => {
+                                    return tool_error(
+                                        id,
+                                        &format!(
+                                            "cannot connect to {}; not guest-launching for a non-loopback endpoint",
+                                            cdp_url.unwrap_or_default()
+                                        ),
+                                    );
+                                }
+                                None => 9222,
+                            };
+                            let base = if engine == "google" {
                                 "google"
                             } else if engine == "bing" {
                                 "bing"
                             } else {
                                 "brave"
+                            };
+                            // Chrome hands a second launch off to whichever
+                            // instance already owns the user-data-dir and exits 0,
+                            // so a non-default endpoint reusing the default
+                            // profile would get a Chrome that never opens CDP on
+                            // `port`. One profile per endpoint; 9222 keeps the
+                            // existing dir so warm sessions stay warm.
+                            let prof = if port == 9222 {
+                                base.to_string()
+                            } else {
+                                format!("{base}-{port}")
                             };
                             let proxy = arguments
                                 .get("proxy")
@@ -495,8 +580,8 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                                 .map(String::from);
                             match webrain_core::launch::launch_chrome_guest(
                                 "serp",
-                                prof,
-                                9222,
+                                &prof,
+                                port,
                                 true,
                                 proxy.as_deref(),
                             ) {
@@ -725,8 +810,19 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     // (e.g. 70000 → 4464) to an unintended local port.
                     .and_then(|n| u16::try_from(n).ok())
                     .unwrap_or(9222);
+                // A launch-time exit: baked into `--proxy-server`, so every
+                // browser tool on this CDP endpoint inherits it. This is the
+                // only place a browser-path proxy can take effect.
+                let proxy = arguments
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let result = match webrain_core::launch::launch_chrome(
-                    service, profile, port, !headless,
+                    service,
+                    profile,
+                    port,
+                    !headless,
+                    proxy.as_deref(),
                 ) {
                     Ok(l) => {
                         let cdp_url = l.cdp_url.clone();
@@ -1068,6 +1164,28 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
     }
 }
 
+/// Port of a LOOPBACK http CDP URL (`http://127.0.0.1:9226` -> Some(9226)).
+///
+/// `None` means "not an endpoint on this machine" (hosted/remote CDP), and the
+/// serp guest-launch must then not fire at all rather than start a Chrome the
+/// caller's endpoint will never use.
+fn parse_loopback_port(u: &str) -> Option<u16> {
+    if !(u.contains("127.0.0.1:") || u.contains("localhost:")) {
+        return None;
+    }
+    u.rsplit(':').next()?.trim_end_matches('/').parse().ok()
+}
+
+#[test]
+fn loopback_port_only_for_local_endpoints() {
+    assert_eq!(parse_loopback_port("http://127.0.0.1:9226"), Some(9226));
+    assert_eq!(parse_loopback_port("http://localhost:9300/"), Some(9300));
+    assert_eq!(
+        parse_loopback_port("wss://chrome.browserless.io?token=x"),
+        None
+    );
+}
+
 /// The caller's own CDP endpoint, when the call supplied one.
 ///
 /// One predicate for the vault ops AND the cookie pair, so the two cannot drift
@@ -1282,6 +1400,11 @@ struct SessionMeta {
     backend: tokio::sync::Mutex<Option<CdpBackend>>,
     /// CDP_URL this session was opened with (None = inherited from env).
     cdp_url: Option<String>,
+    /// Proxy this session was opened with. `Some` means its browser context
+    /// carries `proxyServer`; re-opening with a different value is the live switch.
+    proxy: Option<String>,
+    /// The browser context created for `proxy`, so a replacement can dispose it.
+    browser_context: tokio::sync::Mutex<Option<String>>,
     /// Last time this session served a request — drives LRU eviction at the cap.
     used: std::sync::Mutex<std::time::Instant>,
 }
@@ -1291,6 +1414,8 @@ impl Default for SessionMeta {
         Self {
             backend: tokio::sync::Mutex::new(None),
             cdp_url: None,
+            proxy: None,
+            browser_context: tokio::sync::Mutex::new(None),
             used: std::sync::Mutex::new(std::time::Instant::now()),
         }
     }
@@ -1640,15 +1765,77 @@ async fn handle_http_conn(
                             .get("cdp_url")
                             .and_then(|v| v.as_str())
                             .map(String::from);
+                        let proxy = args.get("proxy").and_then(|v| v.as_str()).map(String::from);
                         let meta = Arc::new(SessionMeta {
                             backend: tokio::sync::Mutex::new(None),
                             cdp_url: cdp.clone(),
+                            proxy: proxy.clone(),
+                            browser_context: tokio::sync::Mutex::new(None),
                             used: std::sync::Mutex::new(std::time::Instant::now()),
                         });
-                        let mut map = state.sessions.lock().await;
-                        let exists = map.contains_key(&sid);
-                        map.insert(sid.clone(), meta);
-                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"created":!exists})).unwrap_or_default()}],"isError":false}})
+                        // A proxy is a CONTEXT, not a flag: `--proxy-server` is fixed
+                        // for the Chrome process, so changing egress means a new
+                        // context and a new tab. Built here so a failure surfaces at
+                        // open rather than on the first page call.
+                        let keep_identity = args
+                            .get("keep_identity")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        // Read the session we may be replacing BEFORE building the
+                        // context: its cookie jar is the identity that has to survive
+                        // the switch.
+                        let old = state.sessions.lock().await.get(&sid).cloned();
+                        let mut open_err: Option<String> = None;
+                        if let Some(p) = proxy.as_deref() {
+                            let conn = match cdp.as_deref() {
+                                Some(u) => CdpBackend::connect_with_url(u).await,
+                                None => CdpBackend::connect_default().await,
+                            };
+                            match conn {
+                                Ok(b) => match b.create_proxied_context(p).await {
+                                    Ok(ctx) => {
+                                        if keep_identity {
+                                            if let Some(prev) = old.as_ref() {
+                                                let from =
+                                                    prev.browser_context.lock().await.clone();
+                                                let _ = b
+                                                    .copy_context_cookies(from.as_deref(), &ctx)
+                                                    .await;
+                                            }
+                                        }
+                                        *meta.browser_context.lock().await = Some(ctx);
+                                        *meta.backend.lock().await = Some(b);
+                                    }
+                                    Err(e) => {
+                                        open_err = Some(format!(
+                                            "session {sid}: proxied context failed: {e}"
+                                        ))
+                                    }
+                                },
+                                Err(e) => {
+                                    open_err = Some(format!("session {sid}: cannot reach CDP: {e}"))
+                                }
+                            }
+                        }
+                        if let Some(message) = open_err {
+                            // Answered, not dropped: this function's tail writes the
+                            // reply, so an early `return` here would send nothing.
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"status":"error","message":message})).unwrap_or_default()}],"isError":true}})
+                        } else {
+                            let existed = old.is_some();
+                            state.sessions.lock().await.insert(sid.clone(), meta);
+                            // Dispose the replaced session's context AFTER the insert, so
+                            // a failure here cannot leave the map without an entry. This is
+                            // the live switch: same session_id + a new proxy = new context.
+                            if let Some(prev) = old {
+                                let prev_ctx = prev.browser_context.lock().await.clone();
+                                let prev_backend = prev.backend.lock().await.take();
+                                if let (Some(c), Some(b)) = (prev_ctx, prev_backend) {
+                                    let _ = b.dispose_browser_context(&c).await;
+                                }
+                            }
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"session_id":sid,"cdp_url":cdp,"proxied":proxy.is_some(),"identity":keep_identity,"created":!existed})).unwrap_or_default()}],"isError":false}})
+                        }
                     }
                     "webrain_close_session" => {
                         let sid = args
@@ -1666,7 +1853,7 @@ async fn handle_http_conn(
                         let map = state.sessions.lock().await;
                         let list: Vec<Value> = map
                             .iter()
-                            .map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url}))
+                            .map(|(k, v)| json!({"session_id":k,"cdp_url":v.cdp_url,"proxied":v.proxy.is_some()}))
                             .collect();
                         json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&json!({"sessions":list})).unwrap_or_default()}],"isError":false}})
                     }

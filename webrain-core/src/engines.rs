@@ -2025,6 +2025,10 @@ where
     let done: std::sync::Arc<tokio::sync::Mutex<Vec<(usize, BatchResult)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(urls.len())));
     let mut handles = Vec::with_capacity(workers);
+    // Why the workers retired — the reason matters: a guest-mode Chrome accepts
+    // an attach and then REFUSES Target.createTarget (single tab by design), so
+    // "no tab available" alone reads like a dead browser when it is a live one.
+    let no_tab: std::sync::Arc<tokio::sync::Mutex<Option<String>>> = Default::default();
     for _ in 0..workers {
         let b = browser.clone();
         let next = next.clone();
@@ -2032,11 +2036,16 @@ where
         let urls = urls.to_vec();
         let opts = opts.clone();
         let per_url = per_url.clone();
+        let no_tab = no_tab.clone();
         handles.push(tokio::spawn(async move {
             // No tab → this worker retires; `next` was never touched, so the
             // remaining workers still claim every URL.
-            let Ok(mut id) = b.open_tab("about:blank").await else {
-                return;
+            let mut id = match b.open_tab("about:blank").await {
+                Ok(id) => id,
+                Err(e) => {
+                    *no_tab.lock().await = Some(e.to_string());
+                    return;
+                }
             };
             loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2088,9 +2097,14 @@ where
             _ => None,
         };
         out.push(taken.unwrap_or_else(|| {
+            let why = no_tab
+                .try_lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| "no tab available".to_string());
             batch_err(
                 url,
-                anyhow::anyhow!("batch worker exited without a result (no tab available)"),
+                anyhow::anyhow!("batch worker could not get a tab: {why}"),
             )
         }));
     }
@@ -2602,6 +2616,14 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
     http_fetch_capped(url, 3000)
 }
 
+/// `http_fetch` through one proxy exit.
+///
+/// `None` reuses the shared unproxied pool, which is what keeps a caller that
+/// names no proxy byte-identical to the pre-proxy behaviour.
+pub fn http_fetch_proxied(url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {
+    http_fetch_capped_proxied(url, 3000, proxy)
+}
+
 /// `http_fetch` with a caller-chosen text cap.
 ///
 /// 3000 chars is the right default for a *probe* (cheap, and 3 KB is enough to
@@ -2611,7 +2633,16 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
 /// browserless call return the whole body, which is 10-100x cheaper than
 /// upgrading to a browser just to read past a truncation.
 pub fn http_fetch_capped(url: &str, max_chars: usize) -> anyhow::Result<Value> {
-    let resp = browser_req(browser_agent().get(url)).call()?;
+    http_fetch_capped_proxied(url, max_chars, None)
+}
+
+/// `http_fetch_capped` through one proxy exit, or the shared pool when `None`.
+pub fn http_fetch_capped_proxied(
+    url: &str,
+    max_chars: usize,
+    proxy: Option<&str>,
+) -> anyhow::Result<Value> {
+    let resp = browser_req(http_agent(proxy)?.get(url)).call()?;
     let status = resp.status().as_u16();
     let content_type = resp
         .headers()
@@ -2656,8 +2687,10 @@ pub fn http_fetch_capped(url: &str, max_chars: usize) -> anyhow::Result<Value> {
 /// document. A schema parsed from a 3000-char prefix would return zero rows on
 /// nearly every real page -- silently, since an empty result is a valid answer
 /// and nothing would look broken.
-fn http_get_full(url: &str) -> anyhow::Result<(u16, String, String)> {
-    let resp = browser_req(browser_agent().get(url)).call()?;
+fn http_get_full(url: &str, proxy: Option<&str>) -> anyhow::Result<(u16, String, String)> {
+    // Same rule as every other HTTP path: an explicit exit wins, and the agent
+    // pool keeps one keep-alive connection per proxy instead of one per call.
+    let resp = browser_req(http_agent(proxy)?.get(url)).call()?;
     let status = resp.status().as_u16();
     let content_type = resp
         .headers()
@@ -2678,8 +2711,9 @@ pub fn http_fetch_extract(
     url: &str,
     base_selector: &str,
     fields: &[Value],
+    proxy: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let (status, content_type, html) = http_get_full(url)?;
+    let (status, content_type, html) = http_get_full(url, proxy)?;
     let rows = extract_fields(&html, base_selector, fields);
     Ok(json!({
         "url": url,
@@ -2770,8 +2804,12 @@ fn sample_html(html: &str, sel: &str, max: usize) -> Option<String> {
 /// `sample` is the top candidate's markup -- see `sample_html`. It is what
 /// turns "where are the rows" into "here is what a row looks like", the input
 /// the schema compiler needs.
-pub fn http_fetch_autoschema(url: &str, min_occurrences: usize) -> anyhow::Result<Value> {
-    let (status, content_type, html) = http_get_full(url)?;
+pub fn http_fetch_autoschema(
+    url: &str,
+    min_occurrences: usize,
+    proxy: Option<&str>,
+) -> anyhow::Result<Value> {
+    let (status, content_type, html) = http_get_full(url, proxy)?;
     let candidates = autoschema_candidates(&html, min_occurrences);
     let sample = candidates
         .first()
@@ -2873,7 +2911,7 @@ mod autoschema_tests {
         // books.toscrape.com is a static catalogue published for scraping
         // practice: a fair target, and stable enough to assert on.
         let (status, _, html) =
-            http_get_full("https://books.toscrape.com/").expect("live fetch should succeed");
+            http_get_full("https://books.toscrape.com/", None).expect("live fetch should succeed");
         println!("status = {status}, bytes = {}", html.len());
         assert_eq!(status, 200);
         // The core risk this whole feature exists around: `http_fetch` would have
@@ -2928,16 +2966,18 @@ mod autoschema_tests {
 /// sitemap format; if a server serves a nonstandard sitemap, it yields fewer
 /// URLs, the agent falls back to crawl.
 /// Returns a JSON object: {urls: [...], sources: [fetched sitemap urls], error?}.
-pub fn sitemap_urls(start_url: &str) -> anyhow::Result<Value> {
-    fn get_text(url: &str) -> anyhow::Result<String> {
-        let resp = browser_req(browser_agent().get(url)).call()?;
+pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {
+    // A closure, not a nested fn: it needs the exit, and `http_agent` pools one
+    // agent per proxy URL so the whole sitemap walk reuses one connection.
+    let get_text = |url: &str| -> anyhow::Result<String> {
+        let resp = browser_req(http_agent(proxy)?.get(url)).call()?;
         let status = resp.status().as_u16();
         let text = resp.into_body().read_to_string()?;
         if !(200..300).contains(&status) {
             return Err(anyhow::anyhow!("GET {url} -> {status}"));
         }
         Ok(text)
-    }
+    };
     fn locs(xml: &str) -> Vec<String> {
         // sitemap `<loc>` is CDATA-free; capture the URL inside the tags.
         xml.split("<loc>")
@@ -3077,8 +3117,17 @@ pub fn bm25_filter(items: &[String], query: &str, top_k: usize) -> Vec<Value> {
 /// Validate a list of URLs — which are alive vs dead (404/5xx/errors).
 /// browsemind `seed(from_links, validate=True)`. ponytail: HEAD first, GET
 /// fallback for HEAD-blocking servers, status < 400 = alive, short timeouts.
-pub fn validate_urls(urls: &[String]) -> Vec<Value> {
-    let agent = browser_agent();
+pub fn validate_urls(urls: &[String], proxy: Option<&str>) -> Vec<Value> {
+    let agent = match http_agent(proxy) {
+        Ok(a) => a,
+        // A malformed proxy is NOT "every URL is dead" -- say which it was.
+        Err(e) => {
+            return urls
+                .iter()
+                .map(|u| json!({"url": u, "alive": false, "error": format!("bad proxy: {e}")}))
+                .collect();
+        }
+    };
     urls.iter()
         .map(|u| {
             let alive = match browser_req(agent.head(u)).call() {
@@ -3110,6 +3159,7 @@ pub fn download_ytdlp(
     audio_only: bool,
     format: Option<&str>,
     extra: &[String],
+    proxy: Option<&str>,
 ) -> Value {
     std::fs::create_dir_all(dir).ok();
     // ponytail: reuse install::find_tool so the bundled yt-dlp (`webrain install
@@ -3123,6 +3173,10 @@ pub fn download_ytdlp(
         cmd.arg("-f").arg(f);
     } else {
         cmd.arg("-f").arg("bestvideo*+bestaudio/best");
+    }
+    // Ours first, so a caller's explicit `args: ["--proxy", ...]` still wins.
+    if let Some(p) = proxy.filter(|p| !p.is_empty()) {
+        cmd.arg("--proxy").arg(p);
     }
     for a in extra {
         cmd.arg(a);
@@ -3168,12 +3222,15 @@ fn download_max_bytes() -> u64 {
         .unwrap_or(512 * 1024 * 1024)
 }
 
-pub fn download_files(urls: &[String], dir: &str) -> Vec<BatchResult> {
+pub fn download_files(urls: &[String], dir: &str, proxy: Option<&str>) -> Vec<BatchResult> {
     std::fs::create_dir_all(dir).ok();
-    let agent = browser_agent();
     let mut out = Vec::with_capacity(urls.len());
     for (i, url) in urls.iter().enumerate() {
         let res = (|| -> anyhow::Result<BatchResult> {
+            // Per file, but `http_agent` pools one agent per proxy URL, so this is
+            // a lock + clone. A malformed proxy therefore fails THIS file instead
+            // of silently downloading direct from an exit we never advertised.
+            let agent = http_agent(proxy)?;
             let resp = browser_req(agent.get(url)).call()?;
             // ponytail: CDN URLs carry ?sig&params — drop query/fragment or the
             // derived filename is invalid on Windows (os error 123).

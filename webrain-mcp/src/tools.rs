@@ -112,13 +112,39 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
       cdp_url=...) at its port, then re-navigate — the session is shared.
     * Interactive Turnstile/hCaptcha the native path can't claim need a human in
       the headed browser (2FA/approval gates return waiting_for_human:true).
-    * Non-interactive Turnstile / basic bot detection may pass with obscura --stealth.
-      VERIFIED (2026-08-07): `obscura fetch <url> --stealth --wait-until load --wait 30`
-      passes scrapingcourse's `/login/cf-turnstile` — the Turnstile widget loads,
-      solves (token populates `[name="cf-turnstile-response"]`), and the form is ready.
-      From webrain: `webrain_navigate(url, disable_resources=true, block_trackers=true,
-      network_idle=true, wait_selector="[name='cf-turnstile-response']", wait_timeout_secs=30)`
-      achieves the same (Turnstile typically solves in 5-15s).
+    * Turnstile on an ordinary site: the old "obscura solves it" note is STALE.
+      It claimed `scrapingcourse.com/login/cf-turnstile` solved (2026-08-07).
+      RE-MEASURED 2026-11-01 — it does not: the page and the turnstile api.js
+      load, `turnstile.render()` returns a widget id, but the placeholder div
+      stays EMPTY (no iframe is ever created), the token stays "" at 9.8s / 19s /
+      75s, `getResponse()` is undefined and observe(console) logs nothing — a
+      silent no-op, not a slow solver. Real Chrome, same URL and same flags,
+      returns a 730+ char token. Do not wait longer; see the obscura bullet below.
+- COOKIE TRANSFER MOVES LOGIN STATE, NOT BOT CLEARANCE. cf_clearance / DataDome /
+  _abck are bound to the minting browser's TLS fingerprint, so importing them into
+  another engine fails even with a byte-identical UA. VERIFIED 2026-11-01
+  (skroutz.gr): lightpanda (--cookie preloaded, --user-agent = Chrome's) and
+  obscura (--user-agent, 4/4 cookies, 46s wait) both stayed on "Just a moment...",
+  while the Chrome that minted the cookie returned 200. Batch gated pages on THAT
+  Chrome (batch with cdp_urls=["http://127.0.0.1:9222"]); do not call it a cookie bug.
+- ENGINE IDENTITY (profiles exist beyond Chrome):
+    obscura     serve --host 127.0.0.1 --port 9224 --stealth [--user-agent UA]
+                [--storage-dir DIR]     # DIR is a real profile: persists cookies
+                                        # across server restarts, and lifts per-conn
+                                        # jar isolation
+    lightpanda  serve [--user-agent UA] [--cookie in.json] [--cookie-jar out.json]
+  `webrain obscura` passes ONLY --stealth (no --storage-dir/--user-agent) — launch
+  the binary directly from WEBRAIN_BROWSERS_DIR for those. obscura refuses a
+  0.0.0.0 bind without OBSCURA_CDP_TOKEN (>=32 bytes). Its /json/version keeps
+  advertising the built-in UA — check navigator.userAgent after navigate instead.
+- obscura will NEVER pass a Turnstile/Cloudflare challenge — upstream lists
+  "Cloudflare interactive challenges" under "what stealth does not handle". Its
+  stealth TLS is a fixed wreq Profile::Chrome145 while navigator reports Chrome/143,
+  so do NOT point --user-agent at another version (Chrome/156 to match a Chrome
+  clearance only widens the TLS-vs-JS mismatch that is checked as a bot signal);
+  canvas.getContext('webgl') is null; and Turnstile's own JS hangs there (issue #389).
+  `--storage-dir` persists cookies, it does not make the browser convincingly Chrome.
+  Batch gated pages in real Chrome; use obscura for unchallenged pages only.
 - Never report success on a challenge/login/consent page — verify the target
   content before returning results.
 - Need screenshots/rendering? Real Chrome. Fast no-challenge scraping? obscura.
@@ -366,48 +392,28 @@ fn guide_sections() -> (Option<&'static str>, Vec<(&'static str, &'static str)>)
     (Some(intro), sections)
 }
 
-/// Directory of operator-supplied skill files. Opt-in on purpose: unset means the
-/// feature is off, so a shared instance never serves files unless its operator
-/// asked for it.
-fn skills_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("WEBRAIN_SKILLS_DIR").map(std::path::PathBuf::from)
+/// Directory of operator-supplied skill files: `WEBRAIN_SKILLS_DIR` when set,
+/// otherwise the directory `webrain install skills` populates. An empty
+/// directory serves nothing, so a shared instance stays silent until its
+/// operator installs something.
+fn skills_dir() -> std::path::PathBuf {
+    std::env::var_os("WEBRAIN_SKILLS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(webrain_core::skills::dir)
 }
 
-/// Resolve `skill:<name>` to `<dir>/<name>.md`, or None.
-///
-/// The name is validated rather than trusted: this reads a file on behalf of a
-/// remote model, so a path in the argument would be an arbitrary file read. The
-/// charset check blocks `../`, and canonicalizing both sides also catches a
-/// symlink inside the directory pointing outside it.
+/// Resolve `skill:<name>` to a file under `dir`. Naming, recursion and the
+/// containment check all live in `webrain_core::skills`, shared with the
+/// installer so what it writes is exactly what this can find.
 fn skill_path(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !valid {
-        return None;
-    }
-    let real = dir.join(format!("{name}.md")).canonicalize().ok()?;
-    let base = dir.canonicalize().ok()?;
-    real.starts_with(&base).then_some(real)
+    webrain_core::skills::resolve(dir, name)
 }
 
 fn list_skills(dir: &std::path::Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = Vec::new();
-    for entry in rd.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|x| x.to_str()) == Some("md") {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                out.push(stem.to_string());
-            }
-        }
-    }
-    out.sort();
-    out
+    webrain_core::skills::list(dir)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Read a skill file, capped. shortcut: 64 KiB, raise it if a real skill outgrows it.
@@ -468,30 +474,32 @@ pub fn guide_from_args(args: &Value) -> Value {
         return json!({"status": "ok", "topic": "all", "guide": AGENT_GUIDE});
     }
     if topic == "skills" {
-        let Some(dir) = skills_dir() else {
-            return json!({
-                "status": "ok",
-                "guide": "no skills configured — set WEBRAIN_SKILLS_DIR to a directory of .md files to add your own",
-                "skills": []
-            });
+        let dir = skills_dir();
+        let skills = list_skills(&dir);
+        let guide = if skills.is_empty() {
+            format!(
+                "no skills installed in {} — run `webrain install skills` for the bundled set, \
+                 or `webrain skills add <url|file.md>` for one skill",
+                dir.display()
+            )
+        } else {
+            format!(
+                "skills in {}: read one with webrain_guide(topic=\"skill:<name>\")",
+                dir.display()
+            )
         };
-        return json!({
-            "status": "ok",
-            "guide": format!("skills in {}: read one with webrain_guide(topic=\"skill:<name>\")", dir.display()),
-            "skills": list_skills(&dir)
-        });
+        return json!({"status": "ok", "guide": guide, "skills": skills});
     }
     if let Some(name) = topic.strip_prefix("skill:") {
         let name = name.trim();
-        let text = skills_dir()
-            .and_then(|d| skill_path(&d, name))
-            .and_then(|p| read_skill(&p));
+        let dir = skills_dir();
+        let text = skill_path(&dir, name).and_then(|p| read_skill(&p));
         return match text {
             Some(t) => json!({"status": "ok", "skill": name, "guide": t}),
             None => json!({
                 "status": "error",
                 "message": format!("no skill named {name:?} (names are a-z A-Z 0-9 _ -, max 64; see topic=\"skills\")"),
-                "skills": skills_dir().map(|d| list_skills(&d)).unwrap_or_default()
+                "skills": list_skills(&dir)
             }),
         };
     }
@@ -621,8 +629,27 @@ mod stats_tests {
     }
 }
 
+/// Tools that act on the attached page/browser and so honour the router's
+/// per-call `session_id` (see `route_key` in lib.rs). Declared on every one of
+/// them: the router has always accepted it, but an UNDECLARED parameter is one
+/// no client will ever send, which made `webrain_session{op:open, cdp_url}`
+/// write-only for everything except batch and session itself.
+const SESSION_ROUTED_TOOLS: [&str; 11] = [
+    "webrain_navigate",
+    "webrain_observe",
+    "webrain_interact",
+    "webrain_eval",
+    "webrain_eval_in_frame",
+    "webrain_extract",
+    "webrain_vision",
+    "webrain_pdf",
+    "webrain_crawl",
+    "webrain_search",
+    "webrain_serp",
+];
+
 pub fn list_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "webrain_guide",
             "description": "Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs webrain_scrape), challenge bypass, hydration failures, extraction matrix, delegation doctrine, and the environment variables that change all of it. Call FIRST when unsure which webrain tool to use. Returns an index (plus the tool list) by default; pass `topic` to read one section.",
@@ -743,14 +770,16 @@ pub fn list_tools() -> Vec<Value> {
                 "autoschema": {"type": "boolean", "default": false, "description": "propose candidate CSS base selectors for this page instead of returning its text -- the browserless form of webrain_autoschema, so it runs on the shared pool. Answers [{selector, count}] to build a schema from."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
                 "max_chars": {"type": "integer", "description": "text cap in characters (default 3000). Raise it to PARSE the page rather than probe it; the reply reports truncated:true when the body was cut."},
-                "full": {"type": "boolean", "default": false, "description": "return the whole body (no 3000-char cap). Use instead of upgrading to a browser when the page is static."}
+                "full": {"type": "boolean", "default": false, "description": "return the whole body (no 3000-char cap). Use instead of upgrading to a browser when the page is static."},
+                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL for this fetch, including the base_selector and autoschema forms (they fetch the full body over the same agent). Omit to use the WEBRAIN_PROXIES rotation pool."}
             }, "required": ["url"]}
         }),
         json!({
             "name": "webrain_batch",
             "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot"]},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema"]},
+                "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "query": {"type": "string", "description": "markdown: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM)"},
                 "top_k": {"type": "integer", "description": "markdown: keep this many query-relevant chunks (requires query; 0 = whole document)"},
@@ -777,6 +806,7 @@ pub fn list_tools() -> Vec<Value> {
             "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]).",
             "inputSchema": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": ["spider","sitemap","scan","validate"]},
+                "proxy": {"type": "string", "description": "sitemap/validate ONLY (they are pure HTTP): proxy URL for the fetch. Omit to use the WEBRAIN_PROXIES rotation pool. spider/scan drive a browser, so their exit is set at launch or by the session context instead."},
                 "seed_url": {"type": "string", "description": "spider: starting URL"},
                 "max_depth": {"type": "integer", "default": 2},
                 "max_pages": {"type": "integer", "default": 20},
@@ -812,7 +842,8 @@ pub fn list_tools() -> Vec<Value> {
             "description": "Search the web and navigate to the results page. engine: duckduckgo (default, scrape-friendly) | google | bing | brave (needs a browser — SPA). Returns the results page state.",
             "inputSchema": {"type": "object", "properties": {
                 "q": {"type": "string"},
-                "engine": {"type": "string", "enum": ["duckduckgo","google","bing","brave"], "default": "duckduckgo"}
+                "engine": {"type": "string", "enum": ["duckduckgo","google","bing","brave"], "default": "duckduckgo"},
+                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL for the fetch. Omit to use the WEBRAIN_PROXIES rotation pool. This tool fetches over HTTP with no browser, so the exit applies per call -- a launched browser's exit is set at launch (`--proxy-server`) instead."}
             }, "required": ["q"]}
         }),
         json!({
@@ -849,6 +880,7 @@ pub fn list_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "dir": {"type": "string", "default": "downloads"},
+                "proxy": {"type": "string", "description": "HTTP(S)/SOCKS proxy URL for BOTH engines (http via the pooled agent, ytdlp via --proxy). Omit to use the WEBRAIN_PROXIES rotation pool."},
                 "engine": {"type": "string", "enum": ["http","ytdlp"], "default": "http"},
                 "filter_extension": {"type": "string", "description": "http: only download URLs ending in this extension"},
                 "audio_only": {"type": "boolean", "default": false, "description": "ytdlp: extract mp3"},
@@ -866,10 +898,12 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_session",
-            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile, plus port or cdp_url), profiles (vault names), login (auto-login from vault: service+profile+url, plus port or cdp_url), close_launch (stop a launched Chrome: service+profile).",
+            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url; add `proxy` to route it through a browser context -- re-open the same session_id with a different proxy to switch a LIVE Chrome's egress -- and `keep_identity` to carry the previous session's cookies across that switch), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile, plus port or cdp_url), profiles (vault names), login (auto-login from vault: service+profile+url, plus port or cdp_url), close_launch (stop a launched Chrome: service+profile).",
             "inputSchema": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": ["open","close","list","cookies","setcookies","save_state","restore_state","profiles","login","close_launch"]},
                 "session_id": {"type": "string", "description": "open/close: session name"},
+                "proxy": {"type": "string", "description": "open: route THIS session through this proxy by creating a browser context with `proxyServer` (live switch -- re-open the same session_id with a different proxy to move it). Needs Chrome; lightpanda/obscura have no per-context proxy."},
+                "keep_identity": {"type": "boolean", "description": "open (with proxy): copy the previous session's COOKIES into the new context so the login survives the switch. Cookies only -- localStorage/IndexedDB/service workers stay behind. Best-effort: for sites that treat an IP change as fraud, pin one exit per profile instead of switching."},
                 "cdp_url": {"type": "string", "description": "open: CDP URL for this session; save_state/restore_state/login: the caller's own browser, used INSTEAD of `port`"},
                 "cookies": {"type": "array", "items": {"type": "object"}, "description": "setcookies: cookie objects (name, value, domain, path, ...)"},
                 "service": {"type": "string", "description": "save/restore_state, login, close_launch: service"},
@@ -900,7 +934,46 @@ pub fn list_tools() -> Vec<Value> {
                 "h": {"type": "number", "description": "ask: clip region height"}
             }, "required": ["op"]}
         }),
-    ]
+    ];
+    for t in tools.iter_mut() {
+        if SESSION_ROUTED_TOOLS.contains(&t["name"].as_str().unwrap_or_default()) {
+            t["inputSchema"]["properties"]["session_id"] = json!({
+                "type": "string",
+                "description": "Route this call to a browser opened with webrain_session{op:'open', session_id, cdp_url}. Omit to use the connection's browser (CDP_URL, default 9222)."
+            });
+        }
+    }
+    tools
+}
+
+#[cfg(test)]
+mod session_arg_tests {
+    use super::*;
+
+    /// Every page tool advertises `session_id`, and the HTTP-only tools do not:
+    /// the router keys on the argument, so a tool missing from this list would
+    /// silently ignore a caller who sent one.
+    #[test]
+    fn page_tools_declare_session_id() {
+        let tools = list_tools();
+        for name in SESSION_ROUTED_TOOLS {
+            let t = tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from list_tools"));
+            assert!(
+                t["inputSchema"]["properties"]["session_id"].is_object(),
+                "{name} does not declare session_id"
+            );
+        }
+        for name in ["webrain_scrape", "webrain_guide", "webrain_stats"] {
+            let t = tools.iter().find(|t| t["name"] == name).unwrap();
+            assert!(
+                t["inputSchema"]["properties"]["session_id"].is_null(),
+                "{name} has no browser and must not advertise session_id"
+            );
+        }
+    }
 }
 
 /// Page-agent style page info + scroll hints (borrowed from alibaba/page-agent
@@ -926,6 +999,15 @@ const PAGE_INFO_JS: &str = r#"(() => {
 /// meat of the page for the LLM, instead of raw innerText full of chrome.
 /// ponytail: block tags + score thresholds are a heuristic; tune if a page type
 /// over/under-prunes.
+/// The in-page selector-discovery expression, shared by `webrain_autoschema`
+/// and `webrain_batch{op:"autoschema"}`. One copy on purpose: two copies of a
+/// heuristic drift, and then the batch answer disagrees with the single-page one.
+fn autoschema_js(min_occurrences: usize) -> String {
+    format!(
+        r#"(()=>{{ const c={{}}; document.querySelectorAll('div[class],li,tr,article,section').forEach(el=>{{ const cls = el.className ? '.'+String(el.className).trim().split(/\s+/).slice(0,2).join('.') : ''; const key=el.tagName.toLowerCase()+cls; c[key]=(c[key]||0)+1; }}); return JSON.stringify(Object.entries(c).filter(([k,n])=>n>={min_occurrences}).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([sel,count])=>({{selector:sel, count}}))); }})()"#
+    )
+}
+
 const FIT_JS: &str = r#"(() => {
   // Only leaf blocks emit. MAIN/ARTICLE/SECTION are containers — they wrap the
   // whole page (e.g. Wikipedia <main class="mw-body">) and must always descend
@@ -1783,7 +1865,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if url.is_empty() {
                 return json!({"status": "error", "message": "url required"});
             }
-            match sitemap_urls(url) {
+            let proxy = args
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(webrain_core::proxy::next_proxy);
+            match sitemap_urls(url, proxy.as_deref()) {
                 Ok(v) => json!({"status": "ok", "result": v}),
                 Err(e) => json!({"status": "error", "message": e.to_string()}),
             }
@@ -1902,9 +1989,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .get("min_occurrences")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(3) as usize;
-            let js = format!(
-                r#"(()=>{{ const c={{}}; document.querySelectorAll('div[class],li,tr,article,section').forEach(el=>{{ const cls = el.className ? '.'+String(el.className).trim().split(/\s+/).slice(0,2).join('.') : ''; const key=el.tagName.toLowerCase()+cls; c[key]=(c[key]||0)+1; }}); return JSON.stringify(Object.entries(c).filter(([k,n])=>n>={min_occurrences}).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([sel,count])=>({{selector:sel, count}}))); }})()"#
-            );
+            let js = autoschema_js(min_occurrences);
             match backend.evaluate(&js).await {
                 Ok(v) => {
                     let arr = parse_json_str(&v);
@@ -2085,7 +2170,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             if urls.is_empty() {
                 return json!({"status": "error", "message": "urls required"});
             }
-            let results = validate_urls(&urls);
+            let proxy = args
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(webrain_core::proxy::next_proxy);
+            let results = validate_urls(&urls, proxy.as_deref());
             let alive = results
                 .iter()
                 .filter(|r| r.get("alive").and_then(|a| a.as_bool()).unwrap_or(false))
@@ -2283,6 +2373,17 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             .unwrap_or(0)
                             .max(0) as usize;
                         batch_markdown(b, urls, query, top_k, concurrency, opts).await
+                    }
+                    // Selector discovery ACROSS urls: `op=extract` needs a
+                    // base_selector, so this is the step that produces one. Same
+                    // in-page heuristic as webrain_autoschema, one call per tab.
+                    "autoschema" => {
+                        let min = args
+                            .get("min_occurrences")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(3)
+                            .max(1) as usize;
+                        batch_eval(b, urls, &autoschema_js(min), concurrency, opts).await
                     }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
@@ -2585,12 +2686,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     .get("format")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let proxy = args
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(webrain_core::proxy::next_proxy);
                 return webrain_core::engines::download_ytdlp(
                     &urls,
                     &dir,
                     audio_only,
                     format.as_deref(),
                     &extra,
+                    proxy.as_deref(),
                 );
             }
             // browsemind download_many: narrow to one file type (.mp4/.pdf/.js...).
@@ -2608,7 +2715,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     return json!({"status": "error", "message": format!("no URLs match extension '.{ext}'")});
                 }
             }
-            let results = download_files(&urls, &dir);
+            let proxy = args
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(webrain_core::proxy::next_proxy);
+            let results = download_files(&urls, &dir, proxy.as_deref());
             json!({"status": "ok", "count": results.len(), "results": results})
         }
         // Watch any video (URL or local file) — no browser needed, so it lives
@@ -2943,7 +3055,12 @@ pub fn fetch_http_from_args(args: &Value) -> Value {
             .get("min_occurrences")
             .and_then(|v| v.as_i64())
             .unwrap_or(3) as usize;
-        return match webrain_core::engines::http_fetch_autoschema(url, min) {
+        let proxy = args
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(webrain_core::proxy::next_proxy);
+        return match webrain_core::engines::http_fetch_autoschema(url, min, proxy.as_deref()) {
             Ok(v) => json!({"status": "ok", "result": v}),
             Err(e) => err(e),
         };
@@ -2960,12 +3077,31 @@ pub fn fetch_http_from_args(args: &Value) -> Value {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        return match webrain_core::engines::http_fetch_extract(url, base_selector, &fields) {
+        let proxy = args
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(webrain_core::proxy::next_proxy);
+        return match webrain_core::engines::http_fetch_extract(
+            url,
+            base_selector,
+            &fields,
+            proxy.as_deref(),
+        ) {
             Ok(v) => json!({"status": "ok", "result": v}),
             Err(e) => err(e),
         };
     }
-    match webrain_core::engines::http_fetch_capped(url, scrape_max_chars(args)) {
+    let proxy = args
+        .get("proxy")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(webrain_core::proxy::next_proxy);
+    match webrain_core::engines::http_fetch_capped_proxied(
+        url,
+        scrape_max_chars(args),
+        proxy.as_deref(),
+    ) {
         Ok(mut v) => {
             // spider-rs `smart` borrow: flag a JS shell so the caller upgrades to
             // the browser instead of scraping an empty page.

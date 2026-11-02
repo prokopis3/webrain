@@ -56,18 +56,19 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 
 - The user asks to scrape, crawl, or extract structured data from a website.
 - The user asks to navigate/interact with a browser, log into a site, or get past an anti-bot challenge.
-- A page needs a real browser (SPA, Material UI, JS-rendered) and `webrain_fetch_http` is not enough.
+- A page needs a real browser (SPA, Material UI, JS-rendered) and `webrain_scrape` is not enough.
 - A batch/spider crawl over many URLs, or a whole-site sitemap.
 
 ## Recommended limits & token discipline
 
-- **Never dump raw HTML to the model.** `webrain_get_html` / `observe(what=html)` is the LAST
-  resort — use snapshot / clean / eval / the extractors for text/structure. Return summaries.
+- **Never dump raw HTML to the model.** `webrain_observe(what="html")` is the LAST
+  resort — use `what="clean"`, `eval`, or the extractors for text/structure. Return summaries.
 - **Batch before loop.** N pages in one `webrain_batch(op=extract, ...)`, not N sequential
   navigates. Concurrency 4-8.
 - **Zero-LLM extraction first.** `autoschema` → `extract(mode=schema)` is free and deterministic;
   fall back to `eval` (JS) only when a schema can't be expressed in CSS.
-- **Don't re-scrape what you have.** `webrain_snapshot` returns cached state when unchanged.
+- **Don't re-scrape what you have.** Persist the JSON once; `webrain_scrape` revalidates from
+  cache, and a re-extract from a saved payload costs nothing.
 - **Filter before summarizing.** `extract(mode=bm25)` keeps only the top-k relevant items.
 
 ## How to invoke (end-to-end)
@@ -114,6 +115,13 @@ Log in ONCE on a persistent profile, then reuse that profile/session across page
 never discard a working profile/session after a challenge. For cross-browser cookie
 transfer (real Chrome → obscura batch), follow `references/profiles.md`.
 
+Cookie transfer moves **login state, not bot clearance**: `cf_clearance` is bound to
+the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the Chrome
+that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
+For an obscura/lightpanda identity, start the binary with `--storage-dir`.
+Do not re-read the Rust source to learn any of this — it is documented here and in
+`webrain_guide`; read source only to change behavior.
+
 ## Anti-patterns (full: `references/anti-patterns.md`)
 
 DO NOT: start protected workflows statelessly · discard a working profile/session ·
@@ -158,6 +166,44 @@ Fix path: set `WEBRAIN_STEALTH_NOISE=0` for the process owning the CDP connectio
 registered per target for its lifetime, so re-navigating the same tab keeps the
 old shim and the change looks ignored. Then compare with a hand-opened tab of the
 same URL; if the human tab works, it is our injection, not the site.
+
+## Proxies (egress)
+
+Three places a proxy can be set. Picking the wrong one is the usual bug.
+
+| Where | How | Applies to | Use when |
+|---|---|---|---|
+| **Launch** (process-wide) | `webrain launch <svc> <profile> [url] --proxy URL` (CLI), `proxy` on a guest launch | every browser tool on that CDP endpoint | default, and the only guaranteed path on any engine |
+| **Session** (browser context) | `webrain_session{op:"open", session_id, proxy}` | every browser tool routed to that `session_id` | Chrome only; parallel exits without extra processes |
+| **Per call** (HTTP only) | `proxy` argument on `webrain_serp`, `webrain_search`, `webrain_scrape`, `webrain_download`, `webrain_crawl{mode:"sitemap"\|"validate"}` | that one request | no browser in the path |
+
+Rules:
+
+- An explicit `proxy` always wins over `WEBRAIN_PROXIES`; the pool is only the
+  fallback, and it is **process-global** — never share it between tenants.
+- A **browser** path cannot rotate per request: a tab's exit is fixed when its
+  browser or context is created. "Change proxy on a live browser" = re-open the
+  same `session_id` with a different `proxy` — new context, new tab, same Chrome
+  process (no relaunch).
+- Per-session proxy needs **real Chrome**. obscura and lightpanda have no
+  per-context proxy (lightpanda allows a single browser context), so `open` fails
+  with "engine has no per-context proxy" — relaunch with `--proxy` instead.
+- A new context is a **fresh profile**: cookies, localStorage and sessions do not
+  follow. `keep_identity:true` copies **cookies only**, so an SPA that keeps its
+  token in localStorage/IndexedDB still looks logged out.
+- Where an IP change is a fraud signal (banks, Google, Stripe), do not switch
+  mid-session: **pin one exit per profile** and relaunch deliberately. The profile
+  dir on disk carries the identity, so a relaunch with the same
+  `<service>/<profile>` and a new `--proxy` keeps you signed in — that is the
+  reproducible reproxy path.
+- Need it explicit? `webrain_session{op:"cookies"}` → `{op:"setcookies"}`.
+- CLI parity: `webrain launch <svc> <profile> --proxy URL` bakes
+  `--proxy-server`; `webrain serp "q" --proxy URL` sets it per request.
+- `webrain_watch` has **no** proxy argument. For a proxied video: fetch it with
+  `webrain_download{engine:"ytdlp", args:["--proxy","…"]}`, then
+  `webrain_watch{source:"<local file>"}` — the second call touches no network.
+- `webrain_batch` has no per-call proxy either: its exit is the browser's, so use
+  `cdp_urls` (one process per exit) or a session opened with a `proxy`.
 
 ## Environment knobs (read at process start)
 

@@ -704,12 +704,29 @@ fn tool_path(name: &str) -> String {
 }
 
 /// Default local model path (what `webrain install whisper` downloads).
+///
+/// `install whisper --model X` writes `ggml-X.bin`, so a hardcoded `small.en`
+/// silently missed every other choice and `watch` reported "no transcript".
+/// Fall back to whatever model is on disk, multilingual before English-only
+/// (`.en` can't transcribe non-English audio at all).
 fn default_whisper_model() -> String {
-    crate::install::browsers_dir()
-        .join("whisper")
-        .join("ggml-small.en.bin")
-        .to_string_lossy()
-        .to_string()
+    let dir = crate::install::browsers_dir().join("whisper");
+    let preferred = dir.join("ggml-small.en.bin");
+    if preferred.exists() {
+        return preferred.to_string_lossy().to_string();
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "bin"))
+        .collect();
+    found.sort_by_key(|p| p.to_string_lossy().ends_with(".en.bin"));
+    found
+        .first()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| preferred.to_string_lossy().to_string())
 }
 
 /// Transcribe via whisper.cpp's `whisper-cli` — fully local/offline/private,
