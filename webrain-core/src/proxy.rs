@@ -11,10 +11,16 @@
 // the caller names none, which keeps single-proxy deployments byte-identical
 // to the pre-pool behavior and makes this feature opt-in by env var alone.
 //
-// Scope: this rotates the NO-BROWSER HTTP path (SERP). The browser path cannot
-// rotate per request — a CDP engine's proxy is baked in at launch
-// (`launch.rs --proxy-server`), so per-proxy isolation there is a pool of
-// browsers handed to `webrain_batch` as `cdp_urls`, which already works.
+// Scope: this rotates the NO-BROWSER HTTP path — serp, search, scrape,
+// download, and crawl's sitemap/validate modes. Those all take an explicit
+// `proxy` argument; this env pool is only what they fall back to.
+//
+// The browser path is deliberately NOT here. A tab's exit is fixed when its
+// browser or context is created, so a browser gets its proxy one of three ways:
+// `--proxy-server` at launch (`launch.rs`), a per-session context
+// (`CdpBackend::create_proxied_context`, which is what makes a live switch
+// possible on real Chrome), or one process per exit handed to `webrain_batch`
+// as `cdp_urls`.
 //
 // ponytail: process-global in-memory pool, no persistence; a hosted
 // multi-tenant deployment wants per-tenant lanes and durable health state.

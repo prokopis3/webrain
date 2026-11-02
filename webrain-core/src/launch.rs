@@ -288,15 +288,18 @@ fn launch_chrome_opt(
 }
 
 /// Spawn real Chrome with a persistent per-account profile and stealth flags,
-/// wait for its CDP endpoint, and return a handle + CDP URL (no proxy).
+/// wait for its CDP endpoint, and return a handle + CDP URL.
+/// `proxy` is baked into `--proxy-server`, so it covers EVERY tool that uses
+/// this browser afterwards -- the only place a browser-path exit can be set.
 /// Chrome locks `user-data-dir` — one instance per profile/port.
 pub fn launch_chrome(
     service: &str,
     profile: &str,
     port: u16,
     headed: bool,
+    proxy: Option<&str>,
 ) -> anyhow::Result<Launched> {
-    launch_chrome_opt(service, profile, port, headed, None, false)
+    launch_chrome_opt(service, profile, port, headed, proxy, false)
 }
 
 /// Spawn Chrome in GUEST MODE (`--guest`) — a fresh ephemeral session, no

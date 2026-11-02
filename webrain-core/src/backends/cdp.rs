@@ -867,6 +867,128 @@ impl CdpBackend {
         Ok(())
     }
 
+    /// Route this backend through `proxy` by creating a browser context that
+    /// carries `proxyServer`, and make its first tab the only tab here.
+    ///
+    /// Why a context: `--proxy-server` is fixed for the life of the Chrome
+    /// process, so the only way to change a LIVE browser's egress is a new
+    /// context. Changing the proxy therefore replaces the tab, not the process -
+    /// which is what makes a session's exit switchable without a relaunch.
+    pub async fn create_proxied_context(&self, proxy: &str) -> anyhow::Result<String> {
+        // Engine gate: `proxyServer` is a Chrome/Chromium parameter. obscura and
+        // lightpanda accept createBrowserContext but do not route through it, so
+        // without this they would report egress they do not have — the one
+        // failure worth refusing rather than degrading.
+        let product = self
+            .send_cmd_with(None, "Browser.getVersion", json!({}))
+            .await
+            .ok()
+            .and_then(|v| {
+                v.get("product")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
+        if !product.contains("Chrome") {
+            anyhow::bail!(
+                "per-context proxy needs real Chrome/Chromium; this engine reports {product:?} — launch it with --proxy-server instead"
+            );
+        }
+        let ctx = self
+            .send_cmd_with(
+                None,
+                "Target.createBrowserContext",
+                // Loopback stays direct so a local health probe still answers.
+                json!({"proxyServer": proxy, "proxyBypassList": "<-loopback>"}),
+            )
+            .await?;
+        let ctx_id = ctx
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ctx_id.is_empty() {
+            anyhow::bail!(
+                "engine has no per-context proxy (Target.createBrowserContext returned no browserContextId)"
+            );
+        }
+        let t = self
+            .send_cmd_with(
+                None,
+                "Target.createTarget",
+                json!({"url": "about:blank", "browserContextId": ctx_id}),
+            )
+            .await?;
+        let target_id = t
+            .get("targetId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if target_id.is_empty() {
+            anyhow::bail!("Target.createTarget returned no targetId for the proxied context");
+        }
+        let session_id = self.attach_and_init(&target_id).await?;
+        self.tabs.lock().await.clear();
+        let id = self.next_tab_id().await;
+        self.register_tab(
+            id,
+            Tab {
+                target_id,
+                session_id: Some(session_id),
+                url: "about:blank".to_string(),
+            },
+        )
+        .await;
+        Ok(ctx_id)
+    }
+
+    /// Copy one context's cookie jar into another.
+    ///
+    /// Best-effort identity transfer across a proxy switch. Cookies ONLY:
+    /// localStorage, IndexedDB, service workers and cache stay behind, so a site
+    /// that keys auth on those will still ask to log in. `from` = None reads the
+    /// default (unproxied) context's jar.
+    pub async fn copy_context_cookies(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> anyhow::Result<usize> {
+        let params = match from {
+            Some(c) => json!({"browserContextId": c}),
+            None => json!({}),
+        };
+        let got = self
+            .send_cmd_with(None, "Storage.getCookies", params)
+            .await?;
+        let cookies = got
+            .get("cookies")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let n = cookies.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        self.send_cmd_with(
+            None,
+            "Storage.setCookies",
+            json!({"cookies": cookies, "browserContextId": to}),
+        )
+        .await?;
+        Ok(n)
+    }
+
+    /// Dispose a context created by `create_proxied_context`, closing its tabs.
+    pub async fn dispose_browser_context(&self, context_id: &str) -> anyhow::Result<()> {
+        self.send_cmd_with(
+            None,
+            "Target.disposeBrowserContext",
+            json!({"browserContextId": context_id}),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Attach to a page target (browser-level) and enable Runtime/Page + inject stealth.
     async fn attach_and_init(&self, target_id: &str) -> anyhow::Result<String> {
         let result = self
