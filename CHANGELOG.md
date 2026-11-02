@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **core**: `WEBRAIN_TZ` / `WEBRAIN_LOCALE` are applied as CDP
+  `Emulation.setTimezoneOverride` / `setLocaleOverride` on every attached tab,
+  before page scripts run. Chrome otherwise reports the **host's** timezone and
+  locale, so a foreign proxy exit had the page telling two conflicting stories —
+  the incoherence camoufox's `coherence.py` rejects (its `geoip=True` equivalent).
+  Geolocation stays unset: without coordinates it would be a third lie.
+- **core**: the trusted-pointer path is seeded per call instead of fixed —
+  randomised start offset, 12–22 steps, quadratic/cubic easing, ±3–6px jitter and
+  6–18ms cadence. The previous constant trace (start −180/−70, 16 steps, 10ms
+  cadence) was identical in every profile, and camoufox treats a repeating cursor
+  path as a behavioural fingerprint in its own right. The final move now lands
+  exactly on the target, so the following `mousePressed` has no 2–3px jump.
 
 ## [0.14.0] - 2026-11-02
 

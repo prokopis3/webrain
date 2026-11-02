@@ -64,6 +64,15 @@ already-authenticated Chrome by pointing `CDP_URL` at its port. obscura/
 lightpanda cannot pass interactive challenges. No Python sidecar — interactive
 CAPTCHAs need a human in the headed browser.
 
+### Identity coherence (proxy exit vs. what the page reads)
+Chrome reports the **host's** timezone and locale. Behind a foreign proxy that
+leaves the page telling two conflicting stories — the incoherence camoufox's
+`coherence.py` throws out. Set `WEBRAIN_TZ` (e.g. `America/Chicago`) and
+`WEBRAIN_LOCALE` (e.g. `en-US`) to the exit IP's values before starting the
+runtime; both are applied as CDP emulation (`Emulation.setTimezoneOverride` /
+`setLocaleOverride`) on every attached tab, before page scripts run. Geolocation
+is not set: without coordinates it would be a third lie, not a fourth truth.
+
 ### Interactive SPAs (Google Flights, Material UI, calendars, search UIs)
 Heavy JS apps with Material/segmented controls need **real Chrome**. Obscura's
 render build **does** paint (`obscura fetch <url> -s out.png` writes a real PNG),

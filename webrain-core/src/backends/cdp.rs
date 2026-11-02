@@ -195,6 +195,62 @@ fn stealth_js() -> String {
     }
 }
 
+/// Proxy↔identity coherence (camoufox `geoip=True`, camofox PROXY + GeoIP).
+/// Chrome reports the HOST's timezone and locale, so a foreign proxy exit leaves
+/// the page telling two conflicting stories — precisely the incoherence
+/// camoufox's `coherence.py` rejects. Set `WEBRAIN_TZ` / `WEBRAIN_LOCALE` to the
+/// exit IP's values; both are applied as CDP emulation before page scripts run.
+/// ponytail: explicit env only, no IP→geo lookup. Add one when a single process
+/// must rotate through proxies in different countries.
+fn geo_overrides() -> (Option<String>, Option<String>) {
+    let get = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (get("WEBRAIN_TZ"), get("WEBRAIN_LOCALE"))
+}
+
+/// Pointer path for `mouse_move_human`: eased, jittered, and drawn from `seed`
+/// so no two sessions trace the same curve. camoufox replays 2356 recorded human
+/// moves (cursory) for this; a FIXED path is itself a behavioural fingerprint,
+/// which the previous constant start (-180/-70), 16 steps and 10ms cadence
+/// handed to every profile.
+fn human_path(sx: i64, sy: i64, x: i64, y: i64, seed: u64) -> Vec<(i64, i64, u64)> {
+    let rnd = |i: u64| {
+        ((seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(i.wrapping_mul(1442695040888963407)))
+            >> 33) as i64
+    };
+    let steps = 12 + rnd(1) % 11; // 12..=22
+    let amp = 3 + rnd(2) % 4; // ±3..±6 px
+    let base = 6 + rnd(3) % 9; // 6..=14 ms
+    let cubic = rnd(4) % 2 == 0;
+    let mut out = Vec::with_capacity(steps as usize);
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let ease = if cubic {
+            1.0 - (1.0 - t).powi(3)
+        } else {
+            1.0 - (1.0 - t).powi(2)
+        };
+        let jx = rnd(i as u64 * 7) % (amp * 2 + 1) - amp;
+        let jy = rnd(i as u64 * 13) % (amp * 2 + 1) - amp;
+        let px = sx + ((x - sx) as f64 * ease) as i64 + jx;
+        let py = sy + ((y - sy) as f64 * ease) as i64 + jy;
+        out.push((px, py, (base + rnd(i as u64 * 17) % 5) as u64));
+    }
+    // Land exactly on the target: the click that follows dispatches at (x,y) and
+    // a 2-3px jump right before mousePressed is itself a tell.
+    if let Some(last) = out.last_mut() {
+        last.0 = x;
+        last.1 = y;
+    }
+    out
+}
+
 /// Trackers/analytics/fingerprinting hosts blocked at the network layer before
 /// they load (obscura/camofox-browser pattern). CDP `Network.setBlockedURLs`
 /// wildcard patterns; blocking these never breaks page function, only tracking.
@@ -1038,6 +1094,28 @@ impl CdpBackend {
         // masked by stealth_js(); the launch flag --disable-blink-features=
         // AutomationControlled clears the command-flag leak. Leave the emulation
         // domain untouched — that's what patchright does.
+        // Identity coherence: match the page's timezone/locale to the proxy exit
+        // (WEBRAIN_TZ / WEBRAIN_LOCALE). Best-effort — lightpanda/obscura may not
+        // implement Emulation.*, and that must not fail the attach.
+        let (geo_tz, geo_locale) = geo_overrides();
+        if let Some(tz) = geo_tz {
+            let _ = self
+                .send_cmd_with(
+                    Some(&sid),
+                    "Emulation.setTimezoneOverride",
+                    json!({"timezoneId": tz}),
+                )
+                .await;
+        }
+        if let Some(locale) = geo_locale {
+            let _ = self
+                .send_cmd_with(
+                    Some(&sid),
+                    "Emulation.setLocaleOverride",
+                    json!({"locale": locale}),
+                )
+                .await;
+        }
         // Block trackers/analytics/fingerprinting hosts before they load.
         // ponytail: adaptive shape — lightpanda wants urlPatterns, Chrome wants urls.
         self.set_blocked_urls(Some(&sid), BLOCKED_URLS).await?;
@@ -2576,21 +2654,25 @@ impl BrowserBackend for CdpBackend {
         // Trace an eased, slightly-jittered path from a plausible start toward
         // (x,y) — a real pointer travels, it doesn't teleport. Engines without
         // Input.* return Err and the caller's click_coords falls back on its own.
-        let (sx, sy) = ((x - 180).max(0), (y - 70).max(0));
-        let steps = 16;
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let ease = 1.0 - (1.0 - t) * (1.0 - t); // ease-out
-            let jx = ((i * 7) % 5) as i64 - 2; // tiny pseudo-jitter
-            let jy = ((i * 13) % 7) as i64 - 3;
-            let px = sx + ((x - sx) as f64 * ease) as i64 + jx;
-            let py = sy + ((y - sy) as f64 * ease) as i64 + jy;
+        // Seeded per call: the shape must not repeat across profiles.
+        let mut buf = [0u8; 8];
+        let seed = if getrandom::fill(&mut buf).is_ok() {
+            u64::from_le_bytes(buf)
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x5eed)
+        };
+        let sx = (x - 120 - (seed % 301) as i64).max(0);
+        let sy = (y - 40 - ((seed >> 9) % 181) as i64).max(0);
+        for (px, py, ms) in human_path(sx, sy, x, y, seed) {
             self.send_cmd(
                 "Input.dispatchMouseEvent",
                 json!({ "type": "mouseMoved", "x": px, "y": py }),
             )
             .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(10 + (i % 4))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
         Ok(())
     }
@@ -3239,5 +3321,25 @@ fn css_escape(id: &str) -> String {
         id.to_string()
     } else {
         format!("[id={id:?}]")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_path;
+
+    #[test]
+    fn human_path_lands_on_target_and_varies() {
+        let a = human_path(10, 10, 400, 300, 0x1111_2222_3333_4444);
+        let b = human_path(10, 10, 400, 300, 0x9999_8888_7777_6666);
+        // Paths must be reproducible per seed but differ between seeds — a
+        // constant trace is the behavioural fingerprint camoufox avoids.
+        assert_eq!(a, human_path(10, 10, 400, 300, 0x1111_2222_3333_4444));
+        assert_ne!(a, b);
+        // Bounded step count, and the final move sits exactly on the target so
+        // the click that follows has no 2-3px jump to explain.
+        assert!((12..=22).contains(&a.len()));
+        assert_eq!(a.last().map(|p| (p.0, p.1)), Some((400, 300)));
+        assert!(a.iter().all(|p| (6..=18).contains(&p.2)));
     }
 }
