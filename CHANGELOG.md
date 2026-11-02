@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves instead of returning "not found". One shared resolver replaced three
   copies of `getDocument(depth 0)` + `querySelector`.
 
+### Fixed
+
+- **cli**: `webrain mcp` no longer aborts with `thread 'main' has overflowed its
+  stack` on the first `navigate` / `tab new` on Windows. The server (stdio and
+  HTTP) now runs on a thread with a 16 MB stack instead of the 1 MB the OS gives
+  the main thread, which could not hold an attach + full DOM JSON round trip.
+
 ## [0.14.5] - 2026-11-02
 
 ### Added

@@ -453,11 +453,17 @@ fn main() -> anyhow::Result<()> {
                     let addr = std::env::var("WEBRAIN_HTTP_ADDR")
                         .unwrap_or_else(|_| format!("127.0.0.1:{port}"));
                     tracing::info!("Starting webrain MCP server over HTTP on {addr}...");
-                    rt.block_on(webrain_mcp::run_http(&addr))?;
+                    big_stack(move || {
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(webrain_mcp::run_http(&addr))
+                    })?;
                 }
                 None => {
                     tracing::info!("Starting webrain MCP server on stdio...");
-                    rt.block_on(webrain_mcp::run_stdio())?;
+                    big_stack(|| {
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(webrain_mcp::run_stdio())
+                    })?;
                 }
             }
         }
@@ -1836,6 +1842,21 @@ async fn cdp_info(port: u16) -> CdpInfo {
         }
     }
     info
+}
+
+/// Run `f` on a thread with room to breathe. Windows hands the main thread 1 MB,
+/// and attaching to a target + serializing its DOM JSON overflows it — the MCP
+/// server died on the first `navigate` there (issue #65). Worker threads get a
+/// stack we choose.
+fn big_stack<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(f)
+        .map_err(|e| anyhow::anyhow!("spawn MCP thread: {e}"))?
+        .join()
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("MCP thread panicked")))
 }
 
 /// `webrain doctor` — diagnose the install: version, MCP server, CDP ports,
