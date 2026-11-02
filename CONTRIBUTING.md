@@ -15,7 +15,7 @@ captures the behavior in the environment where it actually occurs.
 
 ## Development setup
 
-- **Rust 1.85+** (edition 2024). Install via [rustup](https://rustup.rs).
+- **Rust 1.88+** (edition 2024). Install via [rustup](https://rustup.rs).
 - Workspace: `webrain-core` (CDP client, engines, vault, launch, install) ·
   `webrain-mcp` (MCP server + tool schemas) · `webrain-cli` (single binary).
 - Build / check / test:

@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **deps**: `zip` 7.2.0 → **9.2.2**, closing five advisories against the engine
+  archive extractor in `install.rs` (Chrome for Testing, whisper, llama-server):
+  critical GHSA-m665-v7pm-7grj (parser differential / security-control bypass),
+  high GHSA-hjqx-j4rw-g7xv (**arbitrary file write outside the extraction
+  directory**), high GHSA-q7v9-x93c-xqv3 (unbounded symlink target), high
+  GHSA-9hj8-73fh-9963 (legacy Shrink/Reduce/Implode decoder DoS) and medium
+  GHSA-8hxf-qr8p-62x4 (AES-entry HMAC bypass). Only `by_index` / `name()` /
+  `is_dir()` / `unix_mode()` are used; `name()` now returns a `Result`, so the
+  zip-slip guard takes `?`. The guard itself — absolute paths, `..`, drive
+  prefixes — is unchanged and stays the last line of defence.
+- **deps**: `rustls` 0.23.43 → 0.23.46 (reached through `tokio-tungstenite`'s
+  `rustls-tls-webpki-roots`), closing GHSA-2mjx-qc3c-rqvc (TLS 1.3 handshake
+  messages incorrectly accepted), GHSA-h2v8-394m-p7vv (brotli certificate
+  decompression allocation), GHSA-c8m5-c952-6cm4 (session `Debug` formatting
+  exposes the TLS master secret) and GHSA-w44r-93j7-qv28 (an unauthenticated
+  `ServerHello` poisons the per-connection).
+
+### Changed
+
+- **build**: workspace `rust-version` 1.85 → **1.88**, forced by the fix above —
+  every `zip` release that closes the critical advisory declares 1.88. The
+  `clippy::collapsible_if` sites stay nested and are allowed once per crate
+  root: collapsing 65 of them into let-chains is a mechanical cleanup, not part
+  of a security fix. README badge, CONTRIBUTING and `docs/contributing.mdx`
+  follow.
+- **deps**: `tokio-tungstenite` 0.24 → **0.30** (the CDP WebSocket transport),
+  `scraper` 0.24 → **0.27**, `pdf-inspector` 1.14.1 → **1.25.2**, `ureq` 3.3.0 →
+  **3.4.2**, `aes-gcm` 0.11.0 → **0.11.1**. One line of code changed:
+  `tungstenite` ≥ 0.26 stores text frames as `Utf8Bytes`, so
+  `Message::Text(text)` became `Message::Text(text.into())`. The 114 workspace
+  lib tests are unchanged.
+- **ci**: `Swatinem/rust-cache` 2.9.3, `softprops/action-gh-release` 3.0.3 and
+  Docker's `build-push-action` 7.4.0 / `login-action` 4.7.0 /
+  `setup-buildx-action` 4.4.1 — the five outstanding Dependabot PRs, applied on
+  top of the release-workflow rewrite so they would not have to rebase over it.
+
+### Added
+
+- **dist**: a release binary per platform **and architecture**, and installers that
+  pick it. The matrix was three native builds named `webrain-linux` /
+  `webrain-macos` / `webrain-windows.exe`, so `webrain-macos` was whatever
+  `macos-latest` happened to be — arm64 — while `install.sh` **refused arm64 and
+  accepted x86_64**, i.e. it took the one architecture that binary cannot run on
+  and rejected the one it can. Assets are now
+  `webrain-{linux,macos}-{x86_64,aarch64}`, `webrain-linux-{x86_64,aarch64}-musl`
+  (static: Alpine and any glibc older than the runner's) and
+  `webrain-windows-{x86_64,aarch64}.exe`, built from a target-triple matrix.
+  arm64 Linux and arm64 musl run **natively on GitHub's arm64 runner** — the
+  cross build needed `libc6-dev-arm64-cross` on top of `gcc-aarch64-linux-gnu`
+  (ring compiles C and otherwise fell through to the host headers) and musl-gcc
+  has no aarch64 variant at all. musl x86_64 links with `musl-tools`, and the
+  Intel macOS build is cross-built from the arm64 runner, which Apple's linker
+  supports and which stops depending on the retiring Intel runner image.
+  `install.sh` maps `uname -s`/`uname -m`
+  (with `getconf GNU_LIBC_VERSION` deciding musl), `install.ps1` maps
+  `PROCESSOR_ARCHITECTURE` (falling back to `PROCESSOR_ARCHITEW6432` under 32-bit
+  PowerShell), and `webrain self-update` uses the same names via a new
+  `release_asset(os, arch, musl)` with a unit test pinning all eight. An
+  unpublished combination now fails with "build from source" instead of
+  downloading a binary for a different architecture.
+- **dist**: `checksums.txt` is generated with `sha256sum *` instead of three
+  hardcoded filenames, so adding a target to the matrix cannot ship a binary with
+  no checksum — which every installer treats as "skip verification".
+- **dist**: the Scoop manifest bump now also writes the `arm64` architecture entry
+  (it only had `64bit`), pointing at `webrain-windows-aarch64.exe`.
+- **docs**: a `Skills` section in the README: `webrain install skills` (offline
+  bundle), `skills` / `skills add` / `skills rm`, where files land
+  (`WEBRAIN_SKILLS_DIR`, default `<engine cache>/skills`), how the agent reads
+  them (`webrain_guide` topics `skills` and `skill:<name>`), and the third-party
+  route (`npx skills add` writes `.agents/skills/`, which webrain reads only when
+  pointed at it). The `WEBRAIN_SKILLS_DIR` env row said `unset (off)`, though the
+  directory has a default and is filled on install.
+
+### Fixed
+
+- **dist**: `install.sh` sent Windows users to a `scoop bucket add` command that
+  needs a manual step; it now points at `install.ps1`.
+
 ## [0.13.0] - 2026-11-02
 
 ### Added

@@ -2,6 +2,10 @@
 //
 // ponytail: one binary, subcommands via match, no clap dependency.
 
+// See webrain-core/src/lib.rs: nested ifs deliberate, let-chains available at
+// MSRV 1.88 but collapsing the sites is a separate cleanup.
+#![allow(clippy::collapsible_if)]
+
 use serde_json::json;
 use std::env;
 use webrain_core::CdpBackend;
@@ -1671,15 +1675,40 @@ fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Release asset for an (os, arch, musl) triple, e.g. `webrain-linux-x86_64`.
+/// One binary is published per target, so this must name exactly what
+/// `scripts/install.sh` / `install.ps1` download and what `release.yml` builds
+/// — three places, one name.
+fn release_asset(os: &str, arch: &str, musl: bool) -> anyhow::Result<String> {
+    let asset = match (os, arch) {
+        ("linux", "x86_64") => "webrain-linux-x86_64".to_string(),
+        ("linux", "aarch64") => "webrain-linux-aarch64".to_string(),
+        ("macos", "x86_64" | "aarch64") => format!("webrain-macos-{arch}"),
+        ("windows", "x86_64" | "aarch64") => format!("webrain-windows-{arch}.exe"),
+        _ => anyhow::bail!(
+            "no published binary for {os}/{arch} — build from source: cargo build --release"
+        ),
+    };
+    // The static musl build is published for both Linux arches.
+    match (musl, os, arch) {
+        (false, ..) => Ok(asset),
+        (true, "linux", "x86_64" | "aarch64") => Ok(format!("{asset}-musl")),
+        (true, ..) => {
+            anyhow::bail!(
+                "no musl build for {os}/{arch} — build from source: cargo build --release"
+            )
+        }
+    }
+}
+
 fn self_update() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let asset = if cfg!(target_os = "linux") {
-        "webrain-linux"
-    } else if cfg!(target_os = "macos") {
-        "webrain-macos"
-    } else {
-        "webrain-windows.exe"
-    };
+    let asset = release_asset(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "musl"),
+    )?;
+    let asset = asset.as_str();
     let url = format!("https://github.com/prokopis3/webrain/releases/latest/download/{asset}");
     let sums_url =
         "https://github.com/prokopis3/webrain/releases/latest/download/checksums.txt".to_string();
@@ -1783,9 +1812,8 @@ async fn cdp_info(port: u16) -> CdpInfo {
             let n = s.read(&mut buf).await.unwrap_or(0);
             let body = String::from_utf8_lossy(&buf[..n]);
             // find \r\n\r\n separator, take JSON after it. Kept as nested
-            // if-let, not a let-chain: let-chains need Rust 1.88 but the
-            // workspace MSRV is 1.85.
-            #[allow(clippy::collapsible_if)]
+            // if-let for the same reason as webrain-core: the house reads
+            // clearer nested than as a let-chain at this width.
             if let Some(pos) = body.find("\r\n\r\n") {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body[pos + 4..]) {
                     info.name = v
@@ -1890,4 +1918,32 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
     };
     println!("  recommend        {rec}");
     if any_cdp { 0 } else { 2 }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::release_asset;
+
+    /// Pins the published asset names. If a name changes in `release.yml`, the
+    /// installers and this test must change together — a self-update that names
+    /// a nonexistent asset fails closed (checksum), but the message is opaque.
+    #[test]
+    fn release_asset_matches_published_names() {
+        let ok = |os, arch, musl| release_asset(os, arch, musl).unwrap();
+        assert_eq!(ok("linux", "x86_64", false), "webrain-linux-x86_64");
+        assert_eq!(ok("linux", "x86_64", true), "webrain-linux-x86_64-musl");
+        assert_eq!(ok("linux", "aarch64", false), "webrain-linux-aarch64");
+        assert_eq!(ok("linux", "aarch64", true), "webrain-linux-aarch64-musl");
+        assert_eq!(ok("macos", "aarch64", false), "webrain-macos-aarch64");
+        assert_eq!(ok("macos", "x86_64", false), "webrain-macos-x86_64");
+        assert_eq!(ok("windows", "x86_64", false), "webrain-windows-x86_64.exe");
+        assert_eq!(
+            ok("windows", "aarch64", false),
+            "webrain-windows-aarch64.exe"
+        );
+        // Unpublished combinations must fail rather than resolve to the wrong
+        // binary for the architecture they are run on.
+        assert!(release_asset("macos", "x86_64", true).is_err());
+        assert!(release_asset("freebsd", "x86_64", false).is_err());
+    }
 }

@@ -13,20 +13,27 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
-  Linux)  ASSET="webrain-linux" ;;
-  Darwin) ASSET="webrain-macos" ;;
+  Linux)  os=linux ;;
+  Darwin) os=macos ;;
   *)
     echo "webrain installer: unsupported OS '$OS'." >&2
-    echo "On Windows use:  scoop bucket add webrain https://github.com/prokopis3/scoop-webrain && scoop install webrain" >&2
+    echo "On Windows use:  irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1 | iex" >&2
     exit 1
     ;;
 esac
 
 case "$ARCH" in
-  x86_64|amd64) : ;;
-  arm64|aarch64) echo "webrain installer: $ARCH builds are not published yet (x86_64 only)." >&2; exit 1 ;;
-  *) echo "webrain installer: unsupported architecture '$ARCH'." >&2; exit 1 ;;
+  x86_64|amd64) arch=x86_64 ;;
+  arm64|aarch64) arch=aarch64 ;;
+  *) echo "webrain installer: unsupported architecture '$ARCH' (published: x86_64, aarch64)." >&2; exit 1 ;;
 esac
+
+ASSET="webrain-$os-$arch"
+# Alpine and old distros have no glibc loader, so the gnu build cannot start;
+# the static musl build is published for both x86_64 and aarch64.
+if [ "$os" = linux ] && ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+  ASSET="$ASSET-musl"
+fi
 
 INSTALL_DIR="$(printf '%s' "$INSTALL_DIR" | sed 's:/*$::')"
 # sed stripped trailing slashes, so "/" (or an empty value) collapsed to "" —

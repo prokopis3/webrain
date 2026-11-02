@@ -5,6 +5,11 @@
 //
 // ponytail: one trait, one backend, no middleware framework.
 
+// Nested ifs stay nested: collapsing them needs let-chains (stable since the
+// 1.88 MSRV `zip` 9 forced), and 65 mechanical rewrites across the parsers are
+// churn, not clarity. Revisit as a standalone cleanup, not inside a security fix.
+#![allow(clippy::collapsible_if)]
+
 pub mod backends;
 pub mod browser;
 pub mod captcha;
