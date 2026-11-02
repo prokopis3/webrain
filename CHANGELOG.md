@@ -7,6 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-02
+
+### Added
+
+- **cli**: `webrain install skills` writes the bundled operator skills
+  (`skills/webrain/**`: the umbrella skill, `web-research`,
+  `product-market-research`, `auth-media-vision`, `credentials`, plus their
+  `references/` and `workflows/` chapters) into `<engine cache>/skills` — offline,
+  because the files are compiled into the binary with `include_str!`, so an
+  install cannot drift from the tool surface that serves it. No `--force` keeps
+  any skill you edited.
+- **cli**: `webrain skills add <https://…/SKILL.md | path/to/SKILL.md>` installs a
+  single skill from anywhere, and `webrain skills rm <name>` removes one. The
+  frontmatter `name:` is authoritative and required: it is the key
+  `webrain_guide(topic="skill:<name>")` looks up, so a file without one is
+  refused at install instead of sitting there looking installed, and anything
+  over 64 KiB is refused because the reader caps at 64 KiB and would truncate it.
+  `webrain skills` lists what is installed.
+- **cli**: install warns when a skill names a `webrain_*` tool this build does
+  not expose — a skill naming a removed tool reads correct and sends every agent
+  to a tool that is not there.
+
+- **mcp**: `webrain_session{op:"open", proxy}` routes a session through a proxy by
+  creating a Chrome **browser context** carrying `proxyServer`, then attaching its
+  first tab as the session's only tab. That is the only way to change a *live*
+  browser's egress: `--proxy-server` is fixed for the Chrome process, so
+  re-opening the same `session_id` with a different `proxy` disposes the old
+  context and builds a new one — the tab is replaced, the process is not. Every
+  browser tool routed to that session inherits the exit. Real Chrome only:
+  obscura and lightpanda have no per-context proxy (lightpanda allows a single
+  browser context), and `open` now fails with `engine has no per-context proxy`
+  instead of reporting egress it does not have. `keep_identity:true` copies the
+  previous session's **cookies** into the new context first (best-effort:
+  localStorage, IndexedDB and service workers do not follow, so an SPA that keeps
+  its token in storage still looks logged out). `webrain_session{op:"list"}` now
+  reports `proxied`.
+- **mcp**: `proxy` on `webrain_download`, for both engines — the HTTP path uses the
+  pooled per-proxy agent (a malformed proxy fails that file rather than falling
+  back to a direct download) and `yt-dlp` gets `--proxy`. Caller-supplied
+  `args:["--proxy",…]` still wins, because ours is pushed first.
+- **mcp**: `proxy` on `webrain_crawl{mode:"sitemap"|"validate"}` — both are pure
+  HTTP (`sitemap_urls`, `validate_urls`), so the exit applies per request and the
+  whole sitemap walk reuses one per-proxy agent. `spider` and `scan` drive a
+  browser and keep their exit at launch or on the session context; the schema
+  says so, so the argument is not offered where it cannot apply. A malformed
+  proxy on `validate` now reports `error` per URL instead of marking every URL
+  dead, which is the difference between "bad proxy" and "site is down".
+- **mcp**: `webrain_batch{op:"autoschema"}` — selector discovery **across** URLs.
+  `op=extract` needs a `base_selector`, so this is the step that produces one; it
+  was previously one call per URL (`webrain_extract{mode:"autoschema"}`). The
+  in-page expression is now one shared `autoschema_js(min)` used by both, so the
+  batch answer cannot drift from the single-page one. `min_occurrences` defaults
+  to 3 and the work runs through the existing `batch_eval` tab pool.
+- **mcp**: `proxy` on `webrain_scrape`, covering all three of its HTTP forms — the
+  plain fetch, the `base_selector` full-body extract, and `autoschema`. It is the
+  no-browser fetch path, so a per-request exit applies to every branch; the
+  shared-helpers `http_get_full` / `http_fetch_extract` / `http_fetch_autoschema`
+  now take the exit through the same per-proxy agent pool as serp.
+- **mcp**: `proxy` on `webrain_search`, which returns before any CDP connect and
+  fetches over HTTP, so a per-request exit genuinely applies. Unset falls back to
+  `WEBRAIN_PROXIES`, the same rule `webrain_serp` follows.
+- **core**: `launch_chrome` takes an optional proxy and forwards it to the flag
+  builder that already baked `--proxy-server`, and `download_files` /
+  `download_ytdlp` take one too. The launch-time exit covers **every** browser
+  tool on that endpoint, and — because the identity lives in the profile
+  directory on disk — relaunching with the same `<service>/<profile>` and a new
+  proxy keeps the session signed in. That is the recommended reproxy path.
+- **cli**: `webrain launch <service> <profile> [url] --proxy URL` exposes the same
+  launch-time exit without the MCP surface.
+
+### Changed
+
+- **mcp**: `webrain_guide` skill lookup now walks the skills directory
+  recursively and keys on the frontmatter `name:` (falling back to the parent
+  folder of a `SKILL.md`, then to the stem at the top level), so a nested bundle
+  is addressable. `WEBRAIN_SKILLS_DIR` still overrides; unset now means
+  `<engine cache>/skills` rather than "feature off", which serves nothing until
+  something is installed.
+
+### Fixed
+
+- **mcp**: `filter_extension` on `webrain_download` was **ignored on the MCP path**.
+  The `handle_rpc` no-browser short-circuit returns before the dispatcher, and only
+  the dispatcher narrowed the URL list, so a caller asking for `.pdf` got every type
+  downloaded. The short-circuit now filters first and errors with the same
+  "no URLs match extension" message the dispatcher uses — the same shape as the
+  earlier `engine:"ytdlp"` bug in that same block.
+- **mcp**: `session_id` is now declared on all eleven page/browser tools
+  (`navigate`, `observe`, `interact`, `eval`, `eval_in_frame`, `extract`,
+  `vision`, `pdf`, `crawl`, `search`, `serp`). The router always honoured it, but
+  an undeclared parameter is one no client ever sends, so
+  `webrain_session{op:"open", cdp_url}` was write-only for everything except
+  `batch` and `session` itself. HTTP-only tools still do not advertise it.
+- **mcp**: `webrain_serp` guest-launched its fallback Chrome on a hardcoded
+  `9222` no matter which endpoint the call named — so a session or `cdp_url`
+  pointing anywhere else failed with `port 9222 already has a CDP endpoint`. It
+  now launches on the caller's port, and refuses to guest-launch at all for a
+  non-loopback endpoint it cannot start.
+- **mcp**: consecutive `webrain_serp` calls on two different endpoints shared one
+  guest profile, and Chrome hands a second launch off to the running instance and
+  exits 0 without opening CDP. Non-default endpoints now get their own profile
+  (`serp/google-9227`); `9222` keeps `serp/google` so warm sessions stay warm.
+- **engines**: a batch worker that cannot get a tab reported "no tab available"
+  for every URL, which reads like a dead browser. The real error is now carried
+  into the per-URL message — a guest-mode Chrome attaches fine and then refuses
+  `Target.createTarget` (`-32000 Failed to open a new tab`), which is the
+  difference between "start a browser" and "point this at a browser that allows
+  tabs".
+- **media**: `webrain watch` reported `transcript_source: "none"` for every video
+  after a non-default `install whisper --model X`. `default_whisper_model()` was
+  hardcoded to `ggml-small.en.bin` while the installer writes `ggml-<model>.bin`,
+  so the lookup pointed at a file that did not exist and the failure was swallowed
+  as "no transcript". It now prefers `small.en` when present and otherwise uses
+  whichever `ggml-*.bin` is on disk, multilingual before English-only (`.en`
+  models cannot transcribe non-English audio at all).
+
+### Changed
+
+- **mcp**: the embedded `AGENT_GUIDE` (served by `webrain_guide`) and
+  `skills/webrain` now document the two facts an operator previously had to read
+  the Rust source to learn: (1) cookie transfer moves **login state, not bot
+  clearance** — `cf_clearance`/DataDome/`_abck` are TLS-fingerprint-bound, so
+  lightpanda and obscura stay on the challenge page even with a byte-identical UA
+  and the full jar (verified on skroutz.gr: 46 s wait, 12/12 pages only in the
+  Chrome that minted the cookie); (2) **engine identity** — obscura
+  `--storage-dir` is a real profile (persists cookies across restarts, lifts
+  per-connection jar isolation), obscura `--user-agent`, lightpanda
+  `--cookie`/`--cookie-jar`, and that `webrain obscura` passes only `--stealth`,
+  so the binary must be launched directly for those flags.
+
 ## [0.12.1] - 2026-10-29
 
 ### Added

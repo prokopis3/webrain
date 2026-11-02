@@ -611,7 +611,7 @@ on a machine with no repo checkout.
 | `WEBRAIN_NO_STEALTH=1` | Drops *all* injected stealth JS. A diagnostic for "is our shim breaking this page?" — never present it as the fix for a Cloudflare/CAPTCHA wall. ⚠️ `webrain serp` sets it **on itself** (`main.rs:207`) — see the relaunch recipe below. |
 | `WEBRAIN_NO_STATE=1` | Shared-instance mode: vault/launch/login/session answer "disabled on this instance". That is this variable, not a bug — report it. |
 | `WEBRAIN_HTTP_TOKEN`, `WEBRAIN_ALLOW_UNAUTHENTICATED` | Bearer auth for `mcp --http`. An auth rejection is a deployment fact, never a page problem. |
-| `WEBRAIN_PROXIES` | Rotation pool for the HTTP engines + the google/brave guest Chrome; a per-call `proxy` overrides it and never rotates. |
+| `WEBRAIN_PROXIES` | Rotation pool for the HTTP tools only (serp, search, scrape, download, crawl sitemap/validate); a per-call `proxy` overrides it and never rotates. Browser tools do **not** read it — their exit comes from `--proxy-server` at launch or from the session's browser context. |
 | `WEBRAIN_PROFILES_DIR`, `WEBRAIN_VAULT_DIR` | Where persistent profiles and the encrypted vault live. A moved profile root behaves exactly like "logged out". |
 | `WEBRAIN_BROWSERS_DIR`, `WEBRAIN_CHROME`, `WEBRAIN_LIGHTPANDA`, `WEBRAIN_OBSCURA` | Engine discovery. `engine not found` = wrong path or nothing installed (`webrain install --engine …`). |
 | `WEBRAIN_SKILLS_DIR` | Operator `.md` skills served through `webrain_guide(topic="skill:<name>")`. |

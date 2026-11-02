@@ -33,14 +33,14 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
-| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
+| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · autoschema · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
 | `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
-| `webrain_session` (`op=…`) | open · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
 | `webrain_vision` (`op=…`) | index · retrieve · ask | ✅ CDP (screenshot) |
 | `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_eval_in_frame` | Run JS inside a specific cross-origin iframe (isolated world, matched by `url_contains` src substring) — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile challenge frames | ✅ CDP |
@@ -63,7 +63,21 @@ Agent decision guide: browser selection (real Chrome vs obscura vs lightpanda vs
 
 It answers **progressively**: with no `topic` you get the tool list plus an index of every section; `topic="extraction"` (or any section name — case-insensitive substring) returns just that section; `topic="all"` returns the whole guide. That keeps the "I'm not sure what to do" call at ~800 tokens instead of ~2.7K.
 
-`topic="skills"` lists operator skill files from `WEBRAIN_SKILLS_DIR`, and `topic="skill:<name>"` returns one — a way to hand the agent house rules (a customer's conventions, a login procedure) without recompiling. Names are validated (`a-z A-Z 0-9 _ -`, max 64) so the argument can never carry a path.
+`topic="skills"` lists operator skill files from `WEBRAIN_SKILLS_DIR` (default `<engine cache>/skills`), and `topic="skill:<name>"` returns one — a way to hand the agent house rules (a customer's conventions, a login procedure) without recompiling. Names are validated (`a-z A-Z 0-9 _ -`, max 64) so the argument can never carry a path.
+
+Two ways to fill that directory:
+
+```bash
+webrain install skills                  # the bundled set: webrain, web-research,
+                                        # product-market-research, auth-media-vision,
+                                        # credentials (+ their references/workflows)
+webrain skills add https://example.com/SKILL.md   # any skill, from any URL or file
+webrain skills                          # list what is installed
+```
+
+`webrain skills add` requires a frontmatter `name:` and refuses files over 64 KiB
+— both are the reader's own restrictions, so a skill that installs is a skill that
+can be read.
 </Accordion>
 
 <Accordion title="webrain_navigate">
@@ -327,7 +341,7 @@ Full composed page text including Shadow DOM (crawl4ai flatten_shadow_dom). Web-
 <AccordionGroup>
 
 <Accordion title="webrain_batch">
-Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `extract` (CSS/XPath schema) | `interact` (async JS interaction, then optional extract) | `eval` (run JS in each tab) | `screenshot` (save PNGs to `dir`).
+Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdown` (full page as Markdown) | `extract` (CSS schema: base_selector+fields) | `autoschema` (propose base selectors per URL — the step that produces a `base_selector` for `extract`, same in-page heuristic as `webrain_extract{mode:"autoschema"}`, `min_occurrences` default 3) | `interact` (async JS interaction, then optional extract) | `eval` (run JS in each tab) | `screenshot` (save PNGs to `dir`).
 
 ```json
 {
@@ -394,6 +408,16 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 ```
 
 Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--safe] [--region R] [--no-fallback] [--json] [--headless] [--proxy URL] [--fresh] [--pipe] [--stealth] [--hold]`.
+
+### Proxy routing — three places
+
+| Where | How | Covers |
+|---|---|---|
+| **launch** (process-wide) | `webrain launch <svc> <profile> [url] --proxy URL` | every browser tool on that CDP endpoint |
+| **session** (browser context) | `webrain_session{op:"open", session_id, proxy}` | every browser tool routed to that `session_id` — **real Chrome only** |
+| **per call** (HTTP) | `proxy` on `webrain_serp` · `webrain_search` · `webrain_scrape` · `webrain_download` · `webrain_crawl{mode:"sitemap"|"validate"}` | that one request |
+
+An explicit `proxy` always wins over `WEBRAIN_PROXIES`; the pool is only the fallback, and it is **process-global** — never share it between tenants. A browser tab's exit is fixed when its browser or context is created, so "change proxy on a live browser" means re-opening the `session_id` with a different `proxy` (new context + tab, same Chrome process) — not mutating the existing one. A new context is a **fresh profile**: `keep_identity:true` copies cookies only, so an SPA that keeps its token in localStorage/IndexedDB still logs out. Where an IP change is a fraud signal (banks, Google, Stripe), pin one exit per profile and relaunch with the same `<service>/<profile>` — the on-disk profile keeps the identity, and `--proxy-server` is the guaranteed path on every engine.
 
 **Default (google) = warm persistent profile + session** — the real bypass path (see `skills/webrain/references/challenges.md`): the auto-launched Chrome stays alive on `9222` between runs, accumulating consent/session cookies until it becomes a *trusted* Google profile. `--fresh` opts OUT of the warm session: it always launches a **brand-new profile + cookies** on a free port, so the consent modal always renders and is always dismissed before the humanized flow — use it when you want deterministic consent (e.g. a suspect/stale profile). `--hold` keeps the launched Chrome open after the search so you can watch it (press Enter to close). `--pipe` (with `--fresh`) launches that Chrome via `--remote-debugging-pipe` (NO open debugging port — the open port is the automation fingerprint Google walls on `/sorry`; note Chrome's pipe CDP is broken on Windows, works on Linux/macOS). `--stealth` opts IN to the launch-flag stealth (`--disable-blink-features=AutomationControlled`); the default is a plain launch + CDP-level masking (patchright/browsemind's recommended combo). All google human-like actions are trusted CDP input (`Input.dispatchMouseEvent`/`Input.dispatchKeyEvent`), never JS-driven.
 </Accordion>
