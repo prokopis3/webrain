@@ -1,270 +1,129 @@
-# webrain — Next-Gen AI Browser Tool Architecture
+# webrain — Architecture
 
-> **Superseded.** The authoritative, researched next-gen architecture and project
-> structure live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). This file is kept
-> for history. (Formerly **Webrain**; renamed **webrain**.)
+> This is the map: what the pieces are, where they live, and how a call flows.
+> For the researched rationale, backend detail and the decision log, read
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); for *how to drive the tools*,
+> read [`AGENTS.md`](AGENTS.md) and [`docs/AGENT_DECISION_GUIDE.md`](docs/AGENT_DECISION_GUIDE.md).
 
-## Overview
+webrain is a **portable, LLM-agnostic browser-automation and scraping MCP server**
+in Rust. The model decides everything — search, crawl, scrape, navigate, interact —
+from the user's prompt. There is **no intent detection in the code**, and **no LLM
+in the extraction path**: extraction is JSON / regex / JSON-LD / table / autoschema /
+BM25, all zero-LLM, so replies are typed JSON rather than raw HTML.
 
-Webrain is a Rust-native CDP browser agent tool that gives Claude, Gemini, and all AI models the power to fetch web pages, interact with pages, scrape content, batch process URLs, take screenshots, and spider websites — all through a stealth, anti-bot browser layer that bypasses Cloudflare and bot detection.
-
-**Drop-in Puppeteer/Playwright replacement** — same patterns (Browser → Context → Page), different engine (Lightpanda + Obscura instead of Chromium).
-
-## Why Rust
-
-| Criterion | Rust | Python |
-|-----------|------|--------|
-| Browser engine integration | Obscura is Rust-native (V8 via deno_core) | Python FFI overhead |
-| Stealth TLS fingerprinting | `wreq` in obscura-net: real Chrome TLS | No native TLS control |
-| MCP server | obscura-mcp already exists | Reimplementation needed |
-| CDP server (WebSocket) | obscura-cdp with 12+ domains | Would need full rebuild |
-| Performance | Zero-copy, no GIL, sub-ms latency | GIL-bound |
-| Python consumers | Via MCP protocol (language agnostic) | Native |
-| Binary size | ~15MB single binary | 100MB+ with deps |
-
-## Crate Dependency Graph
+## Three crates, one binary
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                 AI Models (Claude, Gemini, etc.)      │
-│                       │  MCP stdio                   │
-├──────────────────────────────────────────────────────┤
-│                    webrain-cli                          │
-│  webrain mcp │ webrain fetch │ webrain screenshot          │
-│  webrain spider │ webrain batch-screenshot               │
-├──────────────────────┬───────────────────────────────┤
-│     webrain-mcp        │                               │
-│  11 MCP tools        │                               │
-│  stdio JSON-RPC      │                               │
-├──────────────────────┤                               │
-│     webrain-core       │     (future: webrain-python)    │
-│  UnifiedBrowser      │     (PyO3 bindings)           │
-│  BatchEngine         │                               │
-│  ScreenshotEngine    │                               │
-│  SpiderEngine        │                               │
-│  SessionPool         │                               │
-│  AntiBotConfig       │                               │
-├──────────┬───────────┤                               │
-│ Obscura  │ Lightpanda│                               │
-│ (Rust/V8)│ (Zig/V8)  │                               │
-│ native   │ CDP WS    │                               │
-└──────────┴───────────┘                               │
+webrain (bin)  ───────────────►  webrain-mcp  ──────────────►  webrain-core  ───────────►  CDP
+CLI subcommands                  stdio + HTTP JSON-RPC          BrowserBackend + engines    Chrome / Obscura / Lightpanda
+`webrain mcp|fetch|serp|…`       one dispatch, intent tools      vault, proxy, serp, vision  (all speak CDP)
 ```
 
-## Crate Details
+| Crate | Kind | Owns |
+|---|---|---|
+| `webrain-core` | lib, no binary | `BrowserBackend` trait, `CdpBackend`, engines (spider/tile/extract/batch), vault, proxy pool, SERP providers, local vision/whisper, install + launch, operator skills |
+| `webrain-mcp` | lib | stdio JSON-RPC and the HTTP transport; `tools.rs` holds the CDP connection and the entire tool surface behind one `call_tool` dispatcher |
+| `webrain-cli` | bin | `match`-based subcommands. Deliberately **no clap** — one binary, no dependency for a handful of subcommands |
 
-### webrain-core (`webrain-core/`)
+## `webrain-core/src`
 
-The core library. Zero binary — just types, traits, and engines.
+| File | Responsibility |
+|---|---|
+| `browser.rs` | `BrowserBackend` trait; `PageState`, `PageResult`, `InteractiveElement` |
+| `backends/cdp.rs` | `CdpBackend` — **the only backend**. Chrome, Obscura and Lightpanda all speak CDP, so one client drives all three over a shared WebSocket, with per-tab ops |
+| `engines.rs` | `SpiderEngine` (BFS/DFS/best-first + AutoThrottle), `TileEngine` (vision tiles), `BatchResult`, extraction, BM25 |
+| `install.rs` | engine and model download/discovery (Chrome for Testing, Obscura, whisper, vision) |
+| `launch.rs` | spawn an engine and wait for its CDP endpoint |
+| `vault.rs` | encrypted credentials + TOTP |
+| `login.rs` | fill a login form over CDP, status-only reply |
+| `proxy.rs` | rotation pool (`WEBRAIN_PROXIES`), per-call override |
+| `serp.rs` | SERP providers (duckduckgo, bing, google, brave, yahoo, baidu, yandex, auto) |
+| `httpcache.rs` | revalidation-only HTTP cache |
+| `captcha.rs` | image/grid captcha helpers |
+| `video.rs`, `vision.rs` | media frames + local vision model |
+| `skills.rs` | operator skills: `BUNDLED` (`include_str!`), `dir`, `list`, `resolve`, `install_bundled`, `install_one`, `remove` |
 
-| Module | Purpose | Key Types |
-|--------|---------|-----------|
-| `browser.rs` | `BrowserBackend` trait + `UnifiedBrowser` | `PageState`, `PageResult`, `InteractiveElement` |
-| `engines.rs` | Parallel batch operations + spider/crawler | `BatchEngine`, `ScreenshotEngine`, `SpiderEngine` |
-| `session.rs` | Browser session lifecycle | `SessionPool` |
-| `stealth.rs` | Anti-bot configuration | `AntiBotConfig` |
+## The tool surface
 
-#### BrowserBackend trait
+`list_tools()` in `webrain-mcp/src/tools.rs` is the source of truth for the surface:
+eighteen `webrain_*` entries today, described as 17 intents in the guide text because
+`eval` and `eval_in_frame` are one intent with two entry points. `call_tool` executes
+them and `map_surface` folds consolidated arguments onto the executor arms. The
+agent-facing contract is **intent**, not the ~66-method `CdpBackend` surface — see
+[`docs/adr/0002-intent-tool-surface-and-central-dispatch.md`](docs/adr/0002-intent-tool-surface-and-central-dispatch.md).
 
-```rust
-#[async_trait::async_trait]
-pub trait BrowserBackend: Send + Sync {
-    async fn navigate(&self, url: &str) -> anyhow::Result<PageState>;
-    async fn screenshot(&self, full_page: bool) -> anyhow::Result<Vec<u8>>;
-    async fn evaluate(&self, js: &str) -> anyhow::Result<serde_json::Value>;
-    async fn click(&self, index: usize) -> anyhow::Result<()>;
-    async fn type_text(&self, index: usize, text: &str) -> anyhow::Result<()>;
-    async fn scroll(&self, direction: &str) -> anyhow::Result<()>;
-    async fn extract_content(&self, query: &str) -> anyhow::Result<String>;
-    async fn get_html(&self) -> anyhow::Result<String>;
-    fn backend_name(&self) -> &'static str;
-}
-```
+| Group | Tools |
+|---|---|
+| Navigate & read | `webrain_navigate`, `webrain_eval`, `webrain_eval_in_frame`, `webrain_observe`, `webrain_a11y` |
+| Interact | `webrain_interact` |
+| Extract (zero-LLM) | `webrain_extract`, `webrain_scrape`, `webrain_pdf`, `webrain_download` |
+| Scale out | `webrain_batch`, `webrain_crawl`, `webrain_spider` |
+| Search | `webrain_search`, `webrain_serp` |
+| Media & vision | `webrain_vision`, `webrain_watch` |
+| State & guidance | `webrain_session`, `webrain_stats`, `webrain_guide` |
 
-Two planned implementations:
-1. **ObscuraBackend** — wraps `obscura::Browser` natively (Rust)
-2. **LightpandaBackend** — CDP WebSocket client to `lightpanda serve`
+`webrain_guide` is also how an operator skill reaches the model: `topic="skills"`
+lists what is installed, `topic="skill:<name>"` returns one.
 
-### webrain-mcp (`webrain-mcp/`)
-
-MCP stdio server. Registered as:
-
-```json
-{
-  "mcpServers": {
-    "webrain": {
-      "command": "webrain",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-#### MCP Tools
-
-| Tool | Input | Output |
-|------|-------|--------|
-| `webrain_navigate` | `url: string` | `PageState` (title, text, elements) |
-| `webrain_screenshot` | `full_page?: bool` | `{screenshot_b64: string}` |
-| `webrain_click` | `index: integer` | Element clicked confirmation |
-| `webrain_type` | `index: integer, text: string` | Text entered confirmation |
-| `webrain_scroll` | `direction: "up" \| "down"` | Scroll status |
-| `webrain_extract` | `query: string` | Structured extraction results |
-| `webrain_get_html` | `selector?: string` | HTML content |
-| `webrain_batch_fetch` | `urls: string[], concurrency?: int` | `PageResult[]` |
-| `webrain_batch_screenshot` | `urls: string[], full_page?: bool` | `{url, screenshot_b64}[]` |
-| `webrain_spider` | `seed_url: string, max_depth?, max_pages?` | `SpiderResult[]` with nested links |
-
-### webrain-cli (`webrain-cli/`)
-
-Single binary with subcommands:
+## Per-call flow
 
 ```
-webrain mcp                    # Start MCP server (default)
-webrain fetch <url>            # Fetch a page
-webrain screenshot <url>       # Screenshot a page
-webrain spider <seed_url>      # Crawl from a URL
+1. RESOLVE   args → intent (map_surface) → handler
+2. CONNECT   CdpBackend: attach to real Chrome / Obscura / Lightpanda (all CDP)
+3. ACT       navigate | eval | interact | extract | batch | crawl …
+4. REPORT    typed JSON back over MCP — never raw HTML
 ```
 
-### webrain-python (deferred)
+Browser identity is **state**: a profile, a session and a solved challenge are
+runtime state, so the answer to a protected page is real Chrome + a persistent
+profile + a session (`webrain launch` / `webrain login`) — never "retry anonymously
+with a fresh browser".
 
-Python bindings via PyO3. Deferred because:
-- MCP is the primary AI interface (Claude Desktop, Cursor, etc.)
-- Python 3.14 isn't supported by current PyO3
-- `uvx webrain` or `pip install webrain` when needed
+| Need | Engine |
+|---|---|
+| Material / interactive SPA (dropdowns, calendars, segmented controls) | **real Chrome** — never obscura/lightpanda |
+| Protected, authenticated, Cloudflare/CAPTCHA/Turnstile, real screenshots | **real Chrome + persistent profile + session** |
+| Fast scraping of non-challenged JS pages | obscura |
+| Minimal footprint, real accessibility tree, no rendering | lightpanda |
+| Static HTML, no JS/auth | `fetch_http` (no browser at all) |
 
-Planned API:
-```python
-from webrain import WebrainBrowser
+Read the `challenge` field on every navigate. A challenge, login or consent page is
+**not** successful navigation and must not be extracted as target content.
 
-async with WebrainBrowser(stealth=True) as browser:
-    page = await browser.new_page()
-    await page.goto("https://example.com")
-    print(await page.content())
-    screenshot = await page.screenshot()
-```
+## Skills
 
-## Anti-Bot Strategy
-
-Three layers, borrowed from obscura and camoufox research:
-
-1. **TLS Fingerprint** (obscura-net `StealthHttpClient`):
-   - Real Chrome TLS ClientHello, ALPN, cipher order
-   - Defeats JA3/JA4 bot management
-   - Consistent with User-Agent
-
-2. **Browser Fingerprint** (at JS level):
-   - `navigator.webdriver` → `false`
-   - Consistent `navigator.platform`, `screen`, `WebGL`
-   - Native function `.toString()` returns `[native code]`
-
-3. **Tracker Blocking** (obscura-net blocklist):
-   - 3,520 known tracker domains blocked
-   - Request-level blocklist, not DOM-level
-
-## Request Flow
+Two trees, one canonical — and they must not be copies of each other:
 
 ```
-1. AI Model calls webrain_navigate("https://example.com")
-2. webrain-mcp receives JSON-RPC message on stdin
-3. tools::call_tool() dispatches to webrain_navigate handler
-4. SessionPool.get_or_create() returns UnifiedBrowser
-5. UnifiedBrowser.navigate() calls BrowserBackend.navigate()
-6. ObscuraBackend (Rust) or LightpandaBackend (CDP WS)
-   a. Creates isolated BrowserContext
-   b. Navigates to URL
-   c. Waits for load event
-   d. Captures PageState (title, text, elements)
-7. Result serialized and sent back to AI model via stdout
+skills/webrain/                    ← the shipped bundle: compiled into the binary
+├── SKILL.md                       ←   umbrella: rules, browser choice, extraction matrix
+├── credentials/SKILL.md           ← 4 product skills, each with frontmatter `name:`
+├── auth-media-vision/SKILL.md
+├── web-research/SKILL.md
+├── product-market-research/SKILL.md
+├── references/*.md                ← chapters the umbrella links to (no `name:`)
+├── workflows/*.md                 ← end-to-end procedures (no `name:`)
+└── prompts/  evals/               ← supporting material, not skills
+
+.github/skills/                    ← repo-local only: contributor-facing skills
 ```
 
-## Session Isolation
+`webrain-core/src/skills.rs` compiles `skills/webrain/**` with `include_str!`, and
+`webrain install skills` writes that tree to `<engine cache>/skills`, so this is what
+users receive. Anything describing the **tool surface** belongs here and nowhere else:
+a second copy under `.github/skills/` starts drifting the moment a tool is renamed —
+which is exactly what had happened to the `credentials` copy. `.github/skills/` is for
+skills that serve *this repository* (changelog upkeep, git cleanup, design work), not
+for the product's operators.
 
-Following obscura's `BrowserContext::isolated_copy()` pattern:
-- Each MCP session gets its own browser context
-- Cookie jars are independent (one session cannot read another's cookies)
-- Proxy + fingerprint can differ per context
+## Where the depth lives
 
-## Integration with obscura (TODO)
-
-When the obscura crate is available as a git dependency:
-
-```rust
-// webrain-core/src/backends/obscura.rs
-pub struct ObscuraBackend {
-    browser: obscura::Browser,
-}
-
-impl BrowserBackend for ObscuraBackend {
-    async fn navigate(&self, url: &str) -> anyhow::Result<PageState> {
-        let page = self.browser.new_page().await?;
-        page.goto(url).await?;
-        // Capture state via CDP Runtime.evaluate
-        // ...
-    }
-}
-```
-
-## Integration with Lightpanda (TODO)
-
-Lightpanda communicates via CDP WebSocket (like Chrome):
-
-```rust
-// webrain-core/src/backends/lightpanda.rs
-pub struct LightpandaBackend {
-    ws_url: String,  // ws://127.0.0.1:9222/devtools/browser
-}
-
-impl BrowserBackend for LightpandaBackend {
-    // All methods -> CDP WebSocket messages
-    // Page.navigate, Runtime.evaluate, Page.captureScreenshot, etc.
-}
-```
-
-## Project Structure
-
-```
-webrain/
-├── Cargo.toml              # Workspace root
-├── ARCHITECTURE.md          # This file
-├── webrain-core/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs           # Re-exports
-│       ├── browser.rs       # BrowserBackend trait + UnifiedBrowser
-│       ├── engines.rs       # BatchEngine, ScreenshotEngine, SpiderEngine
-│       ├── session.rs       # SessionPool
-│       └── stealth.rs       # AntiBotConfig
-├── webrain-mcp/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs           # MCP stdio server (run_stdio)
-│       └── tools.rs         # Tool definitions + dispatch
-├── webrain-cli/
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs          # webrain binary entry point
-└── target/                  # Build artifacts
-```
-
-## Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **Rust over Python** | Obscura already has CDP+MCP+stealth in Rust; no rebuild needed |
-| **MCP as primary AI interface** | Claude/Gemini/Cursor all speak MCP natively; no custom protocol |
-| **Obscura as primary backend** | Native Rust integration, no subprocess. Lightpanda secondary via CDP |
-| **Deferred Python bindings** | MCP covers AI use case; PyO3 0.24 doesn't support Python 3.14 |
-| **No trait abstraction framework** | One trait, two backends — no middleware, no factories |
-| **BFS spider, no priority queue** | Simple visited set + queue; add BestFirst when needed |
-| **Single SessionPool** | HashMap-based; add TTL/eviction when multi-user needed |
-
-## References
-
-- [Obscura](https://github.com/h4ckf0r0day/obscura) — Rust headless browser with CDP + MCP + stealth
-- [Lightpanda](https://github.com/lightpanda-io/browser) — Zig headless browser with CDP + MCP
-- [Camoufox](https://github.com/daijro/camoufox) — Firefox fork, fingerprint injection at C++ level
-- [Crawl4AI](https://github.com/unclecode/crawl4ai) — Python crawling strategies (extraction patterns reference)
-- [Browser-Use](https://github.com/browser-use/browser-use) — MCP server tool pattern reference
-- [Browser-Harness](https://github.com/browser-use/browser-harness) — Thin CDP daemon pattern reference
-- [PixelRAG](https://github.com/StarTrail-org/PixelRAG) — RAG approach for browser content
+| Doc | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | researched rationale, backend detail, request flow, roadmap |
+| [`docs/adr/`](docs/adr/) | Architecture Decision Records (source of truth) |
+| [`AGENTS.md`](AGENTS.md) | hard rules for agents: identity is state, no Python, capability-driven claims |
+| [`docs/AGENT_DECISION_GUIDE.md`](docs/AGENT_DECISION_GUIDE.md) | browser / challenge / extraction decision tree |
+| [`docs/reference/tools.mdx`](docs/reference/tools.mdx) | the tool reference |
+| [`docs/FEATURE_GAPS.md`](docs/FEATURE_GAPS.md) | ranked gap plan and build order |
+| [`skills/webrain/SKILL.md`](skills/webrain/SKILL.md) | the shipped operator skill |

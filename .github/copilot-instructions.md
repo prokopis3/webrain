@@ -147,13 +147,14 @@ memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 |------|---------|
 | `AGENTS.md` | Agent rules — browser/engine selection, challenge handling |
 | `docs/AGENT_DECISION_GUIDE.md` | **LLM tool/browser/challenge decision guide** |
+| `ARCHITECTURE.md` | The map — crates, modules, tool groups, skills layout |
 | `docs/ARCHITECTURE.md` | Architecture overview |
 | `docs/FEATURE_GAPS.md` | Ranked steal-list and gap plan with build order |
 | `docs/adr/` | Architecture Decision Records |
-| `docs/reference/tools.mdx` | The 17-tool MCP surface |
-| `skills/webrain/SKILL.md` | The agent-facing skill |
-| `.github/skills/web-research/SKILL.md` | Generic web→dataset research loop |
-| `.github/skills/product-market-research/SKILL.md` | Cross-shop product/price/spec comparison |
+| `docs/reference/tools.mdx` | The MCP tool surface, tool by tool |
+| `skills/webrain/SKILL.md` | The agent-facing skill (shipped in the binary) |
+| `skills/webrain/web-research/SKILL.md` | Generic web→dataset research loop |
+| `skills/webrain/product-market-research/SKILL.md` | Cross-shop product/price/spec comparison |
 | `/memories/repo/project-structure.md` | Repo memory with live codebase stats |
 
 ---

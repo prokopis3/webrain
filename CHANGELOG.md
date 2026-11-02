@@ -44,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Docker's `build-push-action` 7.4.0 / `login-action` 4.7.0 /
   `setup-buildx-action` 4.4.1 — the five outstanding Dependabot PRs, applied on
   top of the release-workflow rewrite so they would not have to rebase over it.
+- **docs**: `ARCHITECTURE.md` was a scaffold from August kept as "superseded
+  history", so the file GitHub shows first described 11 MCP tools, two *planned*
+  backends, a `webrain-python` crate, and `session.rs` / `stealth.rs` modules that
+  do not exist — and claimed the tool "bypasses Cloudflare and bot detection",
+  which `AGENTS.md` forbids documenting. Replaced with the map: three crates and
+  what each owns, the real `webrain-core/src` file table, the tool groups with
+  `map_surface` in between, the per-call flow, engine selection and the skills
+  layout — delegating rationale to `docs/ARCHITECTURE.md`.
+- **skills**: `.github/skills/` carried copies of four product skills, so a rename
+  had to be made twice. One copy had already drifted: `credentials` still named
+  `webrain_profiles` and `webrain_login`, folded into `webrain_session` releases
+  ago, which sends an agent to tools that do not exist. Removed the four copies and
+  documented the split in `.github/skills/README.md`: `skills/webrain/**` is the
+  only place a product skill is edited, because it is what `include_str!` compiles
+  and `webrain install skills` ships; `.github/skills/` is for skills that serve
+  this repository.
 
 ### Added
 
