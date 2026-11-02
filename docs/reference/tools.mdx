@@ -471,7 +471,7 @@ Convert a PDF to Markdown (pure Rust on lopdf). Returns page count, `pdf_type` (
 </Accordion>
 
 <Accordion title="webrain_pdf_render">
-Render PDF pages as base64 PNG images — the vision-model alternative to text extraction (bypasses font encoding issues). Requires `--features pdfium`. Optional `tile_size` splits pages into square tiles.
+Render PDF pages as base64 PNGs — the vision-model alternative to text extraction (bypasses font encoding issues). Optional `tile_size` splits each page into square tiles; every entry carries `page`, `x`, `y`, `w`, `h`. **Requires a `--features pdfium` build** *and* `pdfium.dll` / `libpdfium.so` on `PATH`. Prebuilt binaries ship without pdfium, so `op=render` errors there — use `op=extract` for text and tables, `op=images` for embedded figures, or open the PDF in Chrome and `webrain_observe` `what=screenshot` for a raster.
 </Accordion>
 
 <Accordion title="webrain_pdf_images">
