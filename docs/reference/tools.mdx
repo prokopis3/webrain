@@ -415,7 +415,7 @@ Also on the CLI: `webrain serp "query" [--engine …] [--limit N] [--page N] [--
 |---|---|---|
 | **launch** (process-wide) | `webrain launch <svc> <profile> [url] --proxy URL` | every browser tool on that CDP endpoint |
 | **session** (browser context) | `webrain_session{op:"open", session_id, proxy}` | every browser tool routed to that `session_id` — **real Chrome only** |
-| **per call** (HTTP) | `proxy` on `webrain_serp` · `webrain_search` · `webrain_scrape` · `webrain_download` · `webrain_crawl{mode:"sitemap"|"validate"}` | that one request |
+| **per call** (HTTP) | `proxy` on `webrain_serp` · `webrain_search` · `webrain_scrape` · `webrain_download` · `webrain_crawl{mode:"sitemap"\|"validate"}` | that one request |
 
 An explicit `proxy` always wins over `WEBRAIN_PROXIES`; the pool is only the fallback, and it is **process-global** — never share it between tenants. A browser tab's exit is fixed when its browser or context is created, so "change proxy on a live browser" means re-opening the `session_id` with a different `proxy` (new context + tab, same Chrome process) — not mutating the existing one. A new context is a **fresh profile**: `keep_identity:true` copies cookies only, so an SPA that keeps its token in localStorage/IndexedDB still logs out. Where an IP change is a fraud signal (banks, Google, Stripe), pin one exit per profile and relaunch with the same `<service>/<profile>` — the on-disk profile keeps the identity, and `--proxy-server` is the guaranteed path on every engine.
 
