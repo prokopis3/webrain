@@ -3348,11 +3348,10 @@ pub fn pdf_render(
     dpi: Option<f32>,
     tile_size: Option<u32>,
 ) -> anyhow::Result<Value> {
-    use image::GenericImageView;
     use pdfium_render::prelude::*;
     let pdfium = Pdfium::default();
     let doc = pdfium.load_pdf_from_file(path, None)?;
-    let scale = (dpi.unwrap_or(150.0) / 72.0) as f32;
+    let scale = dpi.unwrap_or(150.0) / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
     let all_pages = doc.pages();
     let target: Vec<u32> = match pages {

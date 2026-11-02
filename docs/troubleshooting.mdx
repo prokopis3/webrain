@@ -45,6 +45,9 @@ ports (9222/9224/9225), and vault. Exit **0** healthy,
 | `webrain_eval` returns null on obscura | Obscura doesn't reliably await async JS — use `webrain_batch(op=interact)` for async work |
 | `webrain_batch` errors fast (5s) | No browser backend running — start one or pass `cdp_urls` |
 | LLM getting huge HTML blobs | Stop calling `webrain_observe` what=html — use what=state/clean/eval/extractors |
+| `scoop install webrain` → *Hash check failed!* | The download is fine; the bucket entry was mistyped (v0.14.0's x86_64 hash). `scoop update; scoop cache rm webrain; scoop install webrain --force`. From v0.14.5 the release workflow derives the hash with `sha256sum` from the artifact it just built |
+| `pdf_render requires --features pdfium` | Prebuilt binaries contain no pdfium. `webrain_pdf` `op=extract` still returns markdown and `op=images` returns embedded figures, or open the PDF in Chrome and `webrain_observe` `what=screenshot`. For page tiles build from source: `cargo build --release --features pdfium` with `pdfium.dll` / `libpdfium.so` on `PATH` |
+| `webrain: unknown command: serp` — newer subcommands missing | An older manual install shadows the package-managed one. `Get-Command webrain` (PowerShell) / `which -a webrain`, delete the stale copy, reopen the shell |
 | Page renders then "keeps loading": title right, `challenge: null`, submit stays `disabled`, body stuck at the SSR empty state | Hydration, not a block. Re-probe after ~1s (navigate returns pre-mount), test `Object.keys(el).filter(k=>k.startsWith('__react')).length`, and if a hand-opened tab works set `WEBRAIN_STEALTH_NOISE=0` for the process owning the CDP connection + open a **fresh tab** (init scripts are per-target) |
 
 ## Rules of thumb

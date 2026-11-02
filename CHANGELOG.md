@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-11-02
+
 ### Added
 
 - **core**: `WEBRAIN_TZ` / `WEBRAIN_LOCALE` are applied as CDP
@@ -29,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-level entry naming `webrain-windows.exe` shimmed nothing on either arch —
   `scoop install` ended with *Can't shim 'webrain-windows.exe': File doesn't
   exist*, and `autoupdate` pointed at the same non-existent name.
+- **mcp**: `webrain_pdf` no longer advertises `op=render` as always available —
+  the tool description caveats it as `--features pdfium`, and the default build's
+  error now names what a release-binary user *can* do (`op=extract`, or
+  `observe what=screenshot` in Chrome) instead of telling them to rebuild. One
+  pdfium download URL across the repo (the crate comment disagreed with the
+  error text).
+- **docs**: troubleshooting gains the three install-time symptoms that cost real
+  time — *Hash check failed* from a verified-good download, the pdfium-gated
+  `op=render` with its working alternatives, and an older manual binary
+  shadowing a package-managed one. Installation marks pdfium as source-build
+  only, the tool reference states it in the `op=render` entry, and the 0.14.0
+  bucket hash typo is corrected in place.
 
 ## [0.14.0] - 2026-11-02
 

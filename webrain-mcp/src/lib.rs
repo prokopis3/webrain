@@ -690,7 +690,7 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
                 }
                 #[cfg(not(feature = "pdfium"))]
-                let result = json!({"status":"error","message":"pdf_render requires --features pdfium AND pdfium.dll/libpdfium.so in PATH. Download from https://github.com/bblanchon/pdfium-binaries. Rebuild: cargo build --features pdfium"});
+                let result = json!({"status":"error","message":"pdf_render needs a build with --features pdfium and pdfium.dll/libpdfium.so in PATH (prebuilt: https://github.com/bblanchon/pdfium-binaries). Without that build use op=extract for text/tables, or open the PDF in Chrome and observe what=screenshot for a raster."});
                 #[cfg(not(feature = "pdfium"))]
                 return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
             }

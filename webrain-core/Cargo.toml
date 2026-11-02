@@ -43,7 +43,7 @@ scraper = "0.27"
 # HTML → Markdown (turndown.js-equivalent, pure Rust) for webrain_batch op=markdown.
 htmd = "0.5"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
-# Download pdfium from https://github.com/paulocoutinhox/pdfium-lib/releases
+# Download pdfium from https://github.com/bblanchon/pdfium-binaries/releases
 pdfium-render = { version = "0.9", optional = true }
 image = "0.25"
 # AVIF screenshots. Chrome's Page.captureScreenshot encodes png/jpeg/webp only,

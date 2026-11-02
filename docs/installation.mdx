@@ -94,6 +94,14 @@ webrain install
 
 </CodeGroup>
 
+<Note>
+  Prebuilt binaries — install script, Homebrew, Scoop, `cargo install` — ship
+  **without pdfium**, so `webrain_pdf` `op=render` (PDF pages → PNG tiles for
+  vision) is not available there. `op=extract` and `op=images` work in every
+  build. To render pages, build from source with `--features pdfium` and put
+  `pdfium.dll` / `libpdfium.so` on `PATH`.
+</Note>
+
 ## From source
 
 ```bash
@@ -103,6 +111,12 @@ cargo build --release --bin webrain
 ./target/release/webrain install   # Download Chrome (first time only)
 ./target/release/webrain mcp --http 9223
 ```
+
+Add `--features pdfium` to that `cargo build` if you need `webrain_pdf`
+`op=render`. Download a pdfium build from
+[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases)
+and drop the shared library next to the binary or on `PATH` — it is loaded at
+runtime, not linked in.
 
 ## Linux dependencies
 

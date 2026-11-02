@@ -864,7 +864,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_pdf",
-            "description": "PDF work. Pick `op` (required): page (save current page as PDF) | extract (PDF → markdown/JSON: path or paths[]) | render (PDF pages → PNG tiles for vision: path + optional pages/dpi/tile_size) | images (extract embedded images: path + optional pages).",
+            "description": "PDF work. Pick `op` (required): page (save current page as PDF) | extract (PDF → markdown/JSON: path or paths[]) | render (PDF pages → PNG tiles for vision: path + optional pages/dpi/tile_size) — needs a --features pdfium build | images (extract embedded images: path + optional pages).",
             "inputSchema": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": ["page","extract","render","images"]},
                 "path": {"type": "string", "description": "extract/render/images: PDF file path"},
