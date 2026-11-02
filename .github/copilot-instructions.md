@@ -88,12 +88,14 @@ CLI (webrain-cli)  ->  MCP (webrain-mcp)  ->  core engine (webrain-core)  ->  CD
 ```
 
 - **webrain-core** (lib, no binary): `BrowserBackend` trait, `CdpBackend` (one shared
-  WebSocket, `Clone`, per-tab ops), `SessionPool`, `vault` (+TOTP), `video`,
-  `SpiderEngine`, `TileEngine`, `VectorStore`, `proxy` (rotation pool), `httpcache`
-  (revalidation-only).
+  WebSocket, `Clone`, per-tab ops), `SpiderEngine` / `TileEngine` / batch in
+  `engines.rs`, `vault` (+TOTP), `login`, `proxy` (rotation pool), `serp`,
+  `httpcache` (revalidation-only), `vision`, `video`, `skills`. File-by-file table:
+  `ARCHITECTURE.md`.
 - **webrain-mcp** (lib): stdio JSON-RPC + HTTP transport; `tools.rs` owns the CDP
-  connection and exposes the **17 intent-based tools** through one `call_tool`
-  dispatcher, with `map_surface()` folding consolidated calls onto legacy executor arms.
+  connection and exposes the intent-based tool surface through one `call_tool`
+  dispatcher, with `map_surface()` folding consolidated calls onto legacy executor
+  arms. `list_tools()` is the source of truth for what exists in this build.
 - **webrain-cli** (bin): `match`-based subcommands, deliberately **no clap**.
 
 ### Core loop (per tool call)
@@ -156,6 +158,11 @@ memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 | `skills/webrain/web-research/SKILL.md` | Generic web→dataset research loop |
 | `skills/webrain/product-market-research/SKILL.md` | Cross-shop product/price/spec comparison |
 | `/memories/repo/project-structure.md` | Repo memory with live codebase stats |
+
+> Product skills live in `skills/webrain/**` and are compiled into the binary with
+> `include_str!` — edit them there and never copy one into `.github/skills/`, which is
+> repo-local only (`.github/skills/README.md`). `webrain install skills` warns when a
+> skill names a `webrain_*` tool this build does not expose; treat that warning as a bug.
 
 ---
 

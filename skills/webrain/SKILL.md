@@ -1,7 +1,7 @@
 ---
 name: webrain
-version: "0.6.1"
-description: Drive the webrain MCP scraping tools (mcp_webrain-*) like a pro — pick the right browser (real Chrome vs obscura vs lightpanda vs fetch_http), treat profile/session as execution state, handle anti-bot challenges natively (persistent profile + real Chrome + session via webrain_session, vault + TOTP — no Python sidecar), and choose the right extractor (autoschema → extract_json / regex / table / batch / spider). Use when scraping, browser automation, structured extraction, authenticated sites, or hitting anti-bot challenges.
+version: "0.13.0"
+description: Drive the webrain MCP scraping tools (mcp_webrain-*) like a pro — pick the right browser (real Chrome vs obscura vs lightpanda vs fetch_http), treat profile/session as execution state, handle anti-bot challenges natively (persistent profile + real Chrome + session via webrain_session, vault + TOTP — no Python sidecar), and choose the right extractor (webrain_extract{mode=autoschema|json|regex|table|jsonld|bm25}, webrain_pdf for PDFs, webrain_batch / webrain_crawl for many URLs). Use when scraping, browser automation, structured extraction, authenticated sites, or hitting anti-bot challenges.
 argument-hint: "<what to scrape> [from <url>] [auth?] [whole site?]"
 allowed-tools: Bash, Read
 homepage: https://github.com/prokopis3/webrain
@@ -16,6 +16,10 @@ user-invocable: true
 You are driving the `mcp_webrain-*` MCP tools (browser scraping). This skill is
 a **router** — read this page, then load only the reference or workflow your
 task needs. Detail lives in `references/` and `workflows/`.
+
+Tool names are shorthand here: `extract(...)` is `webrain_extract(...)`, `crawl(...)`
+is `webrain_crawl(...)`, `scrape` is `webrain_scrape`. If a name is not recognised,
+`webrain_guide` lists the real set for this build — never call a name from memory.
 
 ## Mandatory rules (full: `references/core-rules.md`)
 
@@ -104,6 +108,8 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 - URLs unknown → `eval`: pagination hrefs (current-path + `/<N>` + next/prev) → range → batch
 - whole site → `crawl(mode=spider)`; patterns (emails/prices) → `extract(mode=regex)`
 - JSON-LD → `extract(mode=jsonld)`; tables → `extract(mode=table)`
+- a PDF, by URL or local path → `webrain_pdf` — text + tables, no browser, no LLM
+  (use this before installing an OCR stack or sending the file to a model)
 - infinite scroll / load-more → `crawl(mode=scan)` then extract; or find the `/ajax/` offset endpoint
 - search → `webrain_search`; relevance → `extract(mode=bm25)`
 
@@ -137,6 +143,9 @@ consent pages as target content · write sequential loops when `webrain_batch` e
   don't loop.
 - `extract(mode=schema)` returns 0 items → verify the page isn't a block page
   (check `challenge`), re-run autoschema, or wait for JS/scroll then retry.
+- Everything is slow → `webrain_stats` before blaming the site: it reports load,
+  memory and the live browser-process count, which separates "this page is heavy"
+  from "the machine is out of memory".
 
 ### Rendered but never interactive (hydration check — do this first)
 
