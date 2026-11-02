@@ -56,15 +56,16 @@ Every release carries one binary per platform and architecture:
 
 | Platform | Assets |
 |---|---|
-| Linux | `webrain-linux-x86_64`, `webrain-linux-aarch64`, `webrain-linux-x86_64-musl` |
+| Linux | `webrain-linux-x86_64`, `webrain-linux-aarch64`, `webrain-linux-x86_64-musl`, `webrain-linux-aarch64-musl` |
 | macOS | `webrain-macos-aarch64` (Apple Silicon), `webrain-macos-x86_64` (Intel) |
 | Windows | `webrain-windows-x86_64.exe`, `webrain-windows-aarch64.exe` |
 
 <Note>
   The install scripts pick the right one from `uname -m` / `PROCESSOR_ARCHITECTURE`,
-  including the static musl build on Alpine and other non-glibc Linux. For a
-  manual download, swap the asset name above: `webrain-linux-aarch64` on an ARM
-  server, `webrain-macos-aarch64` on Apple Silicon, `webrain-windows-aarch64.exe`
+  including the static musl build on Alpine and other non-glibc Linux (both
+  architectures). For a manual download, swap the asset name above:
+  `webrain-linux-aarch64` on an ARM server, `webrain-linux-aarch64-musl` on ARM
+  Alpine, `webrain-macos-aarch64` on Apple Silicon, `webrain-windows-aarch64.exe`
   on Windows on ARM. Other targets (i686, RISC-V, FreeBSD) are build-from-source
   only — the code is portable Rust with no SIMD intrinsics, but no CI runner
   publishes them.

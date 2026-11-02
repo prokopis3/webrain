@@ -43,17 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `macos-latest` happened to be — arm64 — while `install.sh` **refused arm64 and
   accepted x86_64**, i.e. it took the one architecture that binary cannot run on
   and rejected the one it can. Assets are now
-  `webrain-{linux,macos}-{x86_64,aarch64}`, `webrain-linux-x86_64-musl` (static:
-  Alpine and any glibc older than the runner's) and
-  `webrain-windows-{x86_64,aarch64}.exe`, built from a target-triple matrix
-  (aarch64-linux and musl x86_64 are cross-linked on the x86_64 runner with
-  `gcc-aarch64-linux-gnu` / `musl-tools`; the Intel macOS build is cross-built
-  from the arm64 runner, which Apple's linker supports and which stops depending
-  on the retiring Intel runner image). `install.sh` maps `uname -s`/`uname -m`
+  `webrain-{linux,macos}-{x86_64,aarch64}`, `webrain-linux-{x86_64,aarch64}-musl`
+  (static: Alpine and any glibc older than the runner's) and
+  `webrain-windows-{x86_64,aarch64}.exe`, built from a target-triple matrix.
+  arm64 Linux and arm64 musl run **natively on GitHub's arm64 runner** — the
+  cross build needed `libc6-dev-arm64-cross` on top of `gcc-aarch64-linux-gnu`
+  (ring compiles C and otherwise fell through to the host headers) and musl-gcc
+  has no aarch64 variant at all. musl x86_64 links with `musl-tools`, and the
+  Intel macOS build is cross-built from the arm64 runner, which Apple's linker
+  supports and which stops depending on the retiring Intel runner image.
+  `install.sh` maps `uname -s`/`uname -m`
   (with `getconf GNU_LIBC_VERSION` deciding musl), `install.ps1` maps
   `PROCESSOR_ARCHITECTURE` (falling back to `PROCESSOR_ARCHITEW6432` under 32-bit
   PowerShell), and `webrain self-update` uses the same names via a new
-  `release_asset(os, arch, musl)` with a unit test pinning all seven. An
+  `release_asset(os, arch, musl)` with a unit test pinning all eight. An
   unpublished combination now fails with "build from source" instead of
   downloading a binary for a different architecture.
 - **dist**: `checksums.txt` is generated with `sha256sum *` instead of three
@@ -61,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no checksum — which every installer treats as "skip verification".
 - **dist**: the Scoop manifest bump now also writes the `arm64` architecture entry
   (it only had `64bit`), pointing at `webrain-windows-aarch64.exe`.
+- **docs**: a `Skills` section in the README: `webrain install skills` (offline
+  bundle), `skills` / `skills add` / `skills rm`, where files land
+  (`WEBRAIN_SKILLS_DIR`, default `<engine cache>/skills`), how the agent reads
+  them (`webrain_guide` topics `skills` and `skill:<name>`), and the third-party
+  route (`npx skills add` writes `.agents/skills/`, which webrain reads only when
+  pointed at it). The `WEBRAIN_SKILLS_DIR` env row said `unset (off)`, though the
+  directory has a default and is filled on install.
 
 ### Fixed
 

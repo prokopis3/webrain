@@ -30,12 +30,8 @@ esac
 
 ASSET="webrain-$os-$arch"
 # Alpine and old distros have no glibc loader, so the gnu build cannot start;
-# the static musl build is published for x86_64 only.
+# the static musl build is published for both x86_64 and aarch64.
 if [ "$os" = linux ] && ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-  if [ "$arch" != x86_64 ]; then
-    echo "webrain installer: no musl build for linux/$arch — build from source (cargo build --release)" >&2
-    exit 1
-  fi
   ASSET="$ASSET-musl"
 fi
 

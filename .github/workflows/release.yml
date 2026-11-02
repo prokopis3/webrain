@@ -31,12 +31,14 @@ jobs:
     name: Build ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    # Cross-linkers for the two Linux targets with no matching runner. Unused —
-    # and ignored — on the macOS and Windows jobs.
+    # A musl target must also LINK with musl-gcc: cargo's default linker is `cc`,
+    # which links glibc and yields a binary that cannot start on Alpine. Nothing
+    # else here is cross-compiled — the arm64 jobs run on an arm64 host.
     env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
     strategy:
       fail-fast: false
       matrix:
@@ -45,15 +47,20 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin: webrain
             asset: webrain-linux-x86_64
-          - os: ubuntu-22.04
+          # arm64 Linux is built NATIVELY on GitHub's arm runner. The cross
+          # build needed `libc6-dev-arm64-cross` on top of the cross gcc (ring
+          # compiles C and otherwise fell through to the host headers), and it
+          # still could not produce a static musl binary — musl-gcc is a host
+          # wrapper with no aarch64 variant.
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin: webrain
             asset: webrain-linux-aarch64
-            # ring (via rustls) compiles C, so the cross gcc alone is not
-            # enough: it does not depend on the arm64 libc headers, and without
-            # them gcc falls through to the HOST /usr/include/stdint.h and fails
-            # on a missing bits/libc-header-start.h.
-            apt: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bin: webrain
+            asset: webrain-linux-aarch64-musl
+            apt: musl-tools
           # Static, so it runs on Alpine (the Docker image) and on distros older
           # than the runner's glibc.
           - os: ubuntu-22.04

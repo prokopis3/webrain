@@ -1689,10 +1689,10 @@ fn release_asset(os: &str, arch: &str, musl: bool) -> anyhow::Result<String> {
             "no published binary for {os}/{arch} — build from source: cargo build --release"
         ),
     };
-    // The static musl build is published for x86_64 only.
+    // The static musl build is published for both Linux arches.
     match (musl, os, arch) {
         (false, ..) => Ok(asset),
-        (true, "linux", "x86_64") => Ok(format!("{asset}-musl")),
+        (true, "linux", "x86_64" | "aarch64") => Ok(format!("{asset}-musl")),
         (true, ..) => {
             anyhow::bail!(
                 "no musl build for {os}/{arch} — build from source: cargo build --release"
@@ -1933,6 +1933,7 @@ mod asset_tests {
         assert_eq!(ok("linux", "x86_64", false), "webrain-linux-x86_64");
         assert_eq!(ok("linux", "x86_64", true), "webrain-linux-x86_64-musl");
         assert_eq!(ok("linux", "aarch64", false), "webrain-linux-aarch64");
+        assert_eq!(ok("linux", "aarch64", true), "webrain-linux-aarch64-musl");
         assert_eq!(ok("macos", "aarch64", false), "webrain-macos-aarch64");
         assert_eq!(ok("macos", "x86_64", false), "webrain-macos-x86_64");
         assert_eq!(ok("windows", "x86_64", false), "webrain-windows-x86_64.exe");
@@ -1942,7 +1943,7 @@ mod asset_tests {
         );
         // Unpublished combinations must fail rather than resolve to the wrong
         // binary for the architecture they are run on.
-        assert!(release_asset("linux", "aarch64", true).is_err());
+        assert!(release_asset("macos", "x86_64", true).is_err());
         assert!(release_asset("freebsd", "x86_64", false).is_err());
     }
 }
