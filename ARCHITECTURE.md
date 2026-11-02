@@ -54,13 +54,19 @@ agent-facing contract is **intent**, not the ~66-method `CdpBackend` surface —
 
 | Group | Tools |
 |---|---|
-| Navigate & read | `webrain_navigate`, `webrain_eval`, `webrain_eval_in_frame`, `webrain_observe`, `webrain_a11y` |
+| Navigate & read | `webrain_navigate`, `webrain_eval`, `webrain_eval_in_frame`, `webrain_observe` (a11y tree via `what=a11y`) |
 | Interact | `webrain_interact` |
 | Extract (zero-LLM) | `webrain_extract`, `webrain_scrape`, `webrain_pdf`, `webrain_download` |
-| Scale out | `webrain_batch`, `webrain_crawl`, `webrain_spider` |
+| Scale out | `webrain_batch`, `webrain_crawl` (whole-site BFS/DFS/best-first via `mode=spider`) |
 | Search | `webrain_search`, `webrain_serp` |
 | Media & vision | `webrain_vision`, `webrain_watch` |
 | State & guidance | `webrain_session`, `webrain_stats`, `webrain_guide` |
+
+A capability folded into a selector is **not** a separate entry: `webrain_a11y`,
+`webrain_spider`, `webrain_extract_json`, `webrain_cookies` and `webrain_login` still
+exist as `map_surface` routing names, but an agent reaches them as
+`observe(what=a11y)`, `crawl(mode=spider)`, `extract(mode=json)`,
+`session(op=cookies)` and `session(op=login)`.
 
 `webrain_guide` is also how an operator skill reaches the model: `topic="skills"`
 lists what is installed, `topic="skill:<name>"` returns one.
