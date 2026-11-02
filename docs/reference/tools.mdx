@@ -37,7 +37,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
-| `webrain_pdf` (`op=…`) | page · extract · render · images | ❌ no browser |
+| `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
 | `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
