@@ -49,7 +49,11 @@ jobs:
             target: aarch64-unknown-linux-gnu
             bin: webrain
             asset: webrain-linux-aarch64
-            apt: gcc-aarch64-linux-gnu
+            # ring (via rustls) compiles C, so the cross gcc alone is not
+            # enough: it does not depend on the arm64 libc headers, and without
+            # them gcc falls through to the HOST /usr/include/stdint.h and fails
+            # on a missing bits/libc-header-start.h.
+            apt: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           # Static, so it runs on Alpine (the Docker image) and on distros older
           # than the runner's glibc.
           - os: ubuntu-22.04
