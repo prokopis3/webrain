@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back to the pierced tree, so a selector that only matches inside a shadow root
   resolves instead of returning "not found". One shared resolver replaced three
   copies of `getDocument(depth 0)` + `querySelector`.
+- **cli**: `serp` attaches the browser for the HTTP-first engines
+  (duckduckgo/yandex/yahoo/baidu) when `--http` is not set. Previously only
+  google/brave/bing ever built a backend, so `--engine yandex` printed "pure
+  HTTP — no browser launched" and the SmartCaptcha retry in `serp_search` could
+  never fire from the CLI — the call fell straight through to bing's results.
+  `--http` still means no browser at all, and no engine is guest-launched here.
 
 ### Fixed
 
