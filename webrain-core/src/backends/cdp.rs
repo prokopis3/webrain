@@ -2010,26 +2010,8 @@ async fn backend_click_center(b: &CdpBackend, index: usize) -> Option<(i64, i64)
     if selector.is_empty() {
         return None;
     }
-    // DOM.enable is idempotent; ignore failure — getDocument/querySelector
-    // below will also fail → None → caller falls back.
-    let _ = b.send_cmd("DOM.enable", json!({})).await;
-    let doc = b
-        .send_cmd("DOM.getDocument", json!({"depth": 0}))
-        .await
-        .ok()?;
-    let root = doc["root"]["nodeId"].as_i64()?;
     // Resolve the selector to a backend node (stable across DOM mutations).
-    let q = b
-        .send_cmd(
-            "DOM.querySelector",
-            json!({"nodeId": root, "selector": selector}),
-        )
-        .await
-        .ok()?;
-    let node_id = q["nodeId"].as_i64()?;
-    if node_id == 0 {
-        return None;
-    }
+    let node_id = resolve_css_node(b, selector).await?;
     // nodeId → layout quads.
     let quads = b
         .send_cmd("DOM.getContentQuads", json!({"nodeId": node_id}))
@@ -2061,33 +2043,15 @@ async fn try_click_at(b: &CdpBackend, x: i64, y: i64, index: usize) -> bool {
     click_landed(b, x, y, index).await.unwrap_or(false) && dispatch_click(b, x, y).await.is_ok()
 }
 
-/// Resolve element `index` (ELEMENTS_JS selector) to a CDP DOM nodeId. Same
-/// getDocument→querySelector path backend_click_center uses — needed by upload
-/// (DOM.setFileInputFiles wants a node). None when missing/unresolvable.
+/// Resolve element `index` (ELEMENTS_JS selector) to a CDP DOM nodeId. Needed by
+/// upload (`DOM.setFileInputFiles` wants a node). None when missing/unresolvable.
 async fn resolve_node_id(b: &CdpBackend, index: usize) -> Option<i64> {
     let elements: Value = b.eval_js(ELEMENTS_JS).await.ok()?;
     let selector = elements.as_array()?.get(index)?.get("selector")?.as_str()?;
     if selector.is_empty() {
         return None;
     }
-    let _ = b.send_cmd("DOM.enable", json!({})).await;
-    let doc = b
-        .send_cmd("DOM.getDocument", json!({"depth": 0}))
-        .await
-        .ok()?;
-    let root = doc["root"]["nodeId"].as_i64()?;
-    let q = b
-        .send_cmd(
-            "DOM.querySelector",
-            json!({"nodeId": root, "selector": selector}),
-        )
-        .await
-        .ok()?;
-    let node_id = q["nodeId"].as_i64()?;
-    if node_id == 0 {
-        return None;
-    }
-    Some(node_id)
+    resolve_css_node(b, selector).await
 }
 
 /// Real-keystroke helpers for type_text_delayed: map a char to its
@@ -2296,6 +2260,23 @@ impl CdpBackend {
         )
         .await?;
         Ok(())
+    }
+
+    /// Trusted click on a CSS selector, piercing shadow roots — the only path that
+    /// can act on a widget inside a **closed** root: page JS cannot see one, so the
+    /// index / `ELEMENTS_JS` surface never will. For such a node the selector is
+    /// the root-scoped path `observe what=a11y` prints.
+    pub async fn click_css(&self, css: &str) -> anyhow::Result<()> {
+        self.ensure_page_attached().await?;
+        let node_id = resolve_css_node(self, css).await.ok_or_else(|| {
+            anyhow::anyhow!("selector not found (light DOM and pierced shadow roots): {css}")
+        })?;
+        let quads = self
+            .send_cmd("DOM.getContentQuads", json!({"nodeId": node_id}))
+            .await?;
+        let (x, y) = quad_center(&quads)
+            .ok_or_else(|| anyhow::anyhow!("selector has no layout box: {css}"))?;
+        self.click_coords(x, y).await
     }
 
     /// Standalone wait (agent-browser `wait` borrow): poll JS `expr` until
@@ -3261,6 +3242,84 @@ fn quad_center(quads: &Value) -> Option<(i64, i64)> {
 
 /// Walk a DOM children slice, emitting a css_path (nth-of-type chain, id-shortcut)
 /// and an xpath (tag[n]) for every element, keyed by backendNodeId.
+/// Every shadow root in a `DOM.getDocument({pierce: true})` tree — **closed**
+/// ones included, which page JS cannot reach at all. Depth-first, document order.
+fn collect_shadow_root_ids(node: &Value, out: &mut Vec<i64>) {
+    if let Some(roots) = node.get("shadowRoots").and_then(|r| r.as_array()) {
+        for sr in roots {
+            if let Some(id) = sr
+                .get("nodeId")
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id > 0)
+            {
+                out.push(id);
+            }
+            collect_shadow_root_ids(sr, out);
+        }
+    }
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_shadow_root_ids(child, out);
+        }
+    }
+}
+
+/// Resolve a CSS selector to a CDP nodeId, piercing shadow roots.
+///
+/// `DOM.querySelector` from the document root only sees the light DOM, and page
+/// JS cannot see a *closed* root at all, so anything inside one is unreachable by
+/// the index paths. `DOM.getDocument({pierce: true})` does return closed shadow
+/// trees, so the fallback queries each shadow root with the selector as a
+/// root-scoped path — exactly the shape `build_dom_paths` prints for those nodes.
+///
+/// ponytail: root-scoped selectors are not deduplicated across shadow roots —
+/// first match in document order wins. Absolute paths stay light-DOM only.
+async fn resolve_css_node(b: &CdpBackend, selector: &str) -> Option<i64> {
+    // DOM.enable is idempotent; ignore failure — the queries below fail too.
+    let _ = b.send_cmd("DOM.enable", json!({})).await;
+    let doc = b
+        .send_cmd("DOM.getDocument", json!({"depth": 0}))
+        .await
+        .ok()?;
+    let root = doc["root"]["nodeId"].as_i64()?;
+    if let Ok(q) = b
+        .send_cmd(
+            "DOM.querySelector",
+            json!({"nodeId": root, "selector": selector}),
+        )
+        .await
+    {
+        if let Some(id) = q["nodeId"].as_i64().filter(|id| *id > 0) {
+            return Some(id);
+        }
+    }
+    let pierced = b
+        .send_cmd("DOM.getDocument", json!({"depth": -1, "pierce": true}))
+        .await
+        .ok()?;
+    let mut roots = Vec::new();
+    collect_shadow_root_ids(&pierced["root"], &mut roots);
+    for sr in roots {
+        if let Ok(q) = b
+            .send_cmd(
+                "DOM.querySelectorAll",
+                json!({"nodeId": sr, "selector": selector}),
+            )
+            .await
+        {
+            if let Some(id) = q["nodeIds"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id > 0)
+            {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 fn build_dom_paths(
     children: &[Value],
     css_prefix: &str,
@@ -3309,6 +3368,18 @@ fn build_dom_paths(
         if let Some(grand) = child.get("children").and_then(|c| c.as_array()) {
             build_dom_paths(grand, &css, &xp, out);
         }
+        // Shadow content (open AND closed — getDocument pierces both) is not
+        // reachable from this css path, so restart the css path inside the root.
+        // The local path is what `resolve_css_node` matches against the root, and
+        // printing it is what makes such a widget addressable at all: page JS
+        // cannot even see a closed one.
+        if let Some(roots) = child.get("shadowRoots").and_then(|r| r.as_array()) {
+            for sr in roots {
+                if let Some(sc) = sr.get("children").and_then(|c| c.as_array()) {
+                    build_dom_paths(sc, "", &xp, out);
+                }
+            }
+        }
     }
 }
 
@@ -3327,6 +3398,99 @@ fn css_escape(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::human_path;
+    use super::{build_dom_paths, collect_shadow_root_ids};
+    use serde_json::json;
+
+    /// A closed shadow root is reachable only through the pierced tree, and the
+    /// printed css path must be the root-scoped shape `resolve_css_node` queries
+    /// against that root — otherwise the handle a11y prints matches nothing.
+    #[test]
+    fn shadow_roots_are_collected_and_named_locally() {
+        let root = json!({
+            "nodeName": "#document", "nodeType": 9, "nodeId": 1,
+            "children": [{
+                "nodeName": "DIV", "nodeType": 1, "nodeId": 2, "backendNodeId": 20,
+                "shadowRoots": [{
+                    "nodeName": "#shadow-root", "nodeType": 11, "nodeId": 3,
+                    "shadowRootType": "closed",
+                    "children": [
+                        {"nodeName": "BUTTON", "nodeType": 1, "nodeId": 4, "backendNodeId": 40},
+                        {"nodeName": "SPAN", "nodeType": 1, "nodeId": 5, "backendNodeId": 50,
+                         "shadowRoots": [{"nodeName": "#shadow-root", "nodeType": 11, "nodeId": 6}]}
+                    ]
+                }]
+            }]
+        });
+
+        let mut ids = Vec::new();
+        collect_shadow_root_ids(&root, &mut ids);
+        assert_eq!(ids, vec![3, 6], "nested closed roots, document order");
+
+        let mut paths = std::collections::HashMap::new();
+        build_dom_paths(root["children"].as_array().unwrap(), "", "", &mut paths);
+        assert_eq!(paths[&20].0, "div:nth-of-type(1)");
+        assert_eq!(
+            paths[&40].0, "button:nth-of-type(1)",
+            "root-scoped, not absolute"
+        );
+    }
+
+    /// Live proof that a widget inside a **closed** shadow root is untouchable by
+    /// page JS yet still clickable. Run manually against a real Chrome:
+    ///   $env:CDP_URL="http://127.0.0.1:9333"; cargo test -p webrain-core --lib -- --ignored live_closed_shadow
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a real Chrome at CDP_URL"]
+    async fn live_closed_shadow_click() {
+        let html = "<!doctype html><body><div id=host></div><script>\
+const r = document.getElementById('host').attachShadow({mode:'closed'});\
+r.innerHTML = '<button id=inner>Pay now</button>';\
+r.querySelector('#inner').addEventListener('click', () => { document.title = 'CLICKED'; });\
+</script></body>";
+        let path = std::env::temp_dir().join("webrain-shadow-fixture.html");
+        std::fs::write(&path, html).unwrap();
+        let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+
+        let cdp = std::env::var("CDP_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".into());
+        let b = super::CdpBackend::connect_with_url(&cdp)
+            .await
+            .expect("connect to CDP_URL");
+        b.ensure_page_attached()
+            .await
+            .expect("attach a page target");
+        b.send_cmd("Page.navigate", json!({ "url": url }))
+            .await
+            .expect("navigate");
+        for _ in 0..50 {
+            let ready = b.eval_js("document.readyState").await.ok();
+            if ready.as_ref().and_then(|v| v.as_str()) == Some("complete") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // The whole reason this path exists: page JS sees nothing.
+        let seen = b
+            .eval_js("document.querySelectorAll('button').length")
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.as_i64(),
+            Some(0),
+            "a closed root must be invisible to page JS"
+        );
+        assert!(
+            super::resolve_css_node(&b, "#inner").await.is_some(),
+            "pierced resolve must reach the closed node"
+        );
+        b.click_css("#inner").await.expect("click_css");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let title = b.eval_js("document.title").await.unwrap();
+        assert_eq!(
+            title.as_str(),
+            Some("CLICKED"),
+            "trusted click must land inside the closed root"
+        );
+    }
 
     #[test]
     fn human_path_lands_on_target_and_varies() {

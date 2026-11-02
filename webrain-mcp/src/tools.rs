@@ -715,10 +715,11 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_interact",
-            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), hold (x,y,ms: trusted press-and-hold for \"Press & Hold to confirm you are human\" / PerimeterX widgets, crosses cross-origin iframes), drag (x1,y1 → x2,y2 + optional ms hold: trusted slider/drag CAPTCHAs, eased smooth path, crosses cross-origin iframes), type (index,text + optional ms for real per-key typing), press (key or a shortcut like ctrl+a / shift+Tab), scroll (direction, or x,y,delta to wheel the element under a point), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe.",
+            "description": "Drive the page. Pick `action` (required): click, click_coords (x,y), hold (x,y,ms: trusted press-and-hold for \"Press & Hold to confirm you are human\" / PerimeterX widgets, crosses cross-origin iframes), drag (x1,y1 → x2,y2 + optional ms hold: trusted slider/drag CAPTCHAs, eased smooth path, crosses cross-origin iframes), type (index,text + optional ms for real per-key typing), press (key or a shortcut like ctrl+a / shift+Tab), scroll (direction, or x,y,delta to wheel the element under a point), nav (back|forward|reload), tab (new|switch|close|list + url/id), select (index,value), hover (index), check (index,checked), dialog (accept|dismiss + prompt_text), wait (ms|selector|text + timeout_ms), upload (index,files[]), dismiss_overlays, add_init_script (js). Element indices map to the elements[] from navigate/observe. `click` also takes `selector` — the only path that reaches a widget inside a CLOSED shadow root (pass the root-scoped css_path that observe what=a11y prints).",
             "inputSchema": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["click","click_coords","hold","drag","type","press","scroll","nav","tab","select","hover","check","dialog","wait","upload","dismiss_overlays","add_init_script"]},
                 "index": {"type": "integer", "description": "Element index from navigate/observe"},
+                "selector": {"type": "string", "description": "click: CSS selector — the one path that reaches inside a CLOSED shadow root (use the root-scoped css_path from observe what=a11y); wait: CSS selector to poll for"},
                 "text": {"type": "string", "description": "type: text to type; wait: text substring to wait for"},
                 "key": {"type": "string", "description": "press: a key or a shortcut — Enter|Tab|Escape|Backspace|Delete|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Space, or a combo like ctrl+a / shift+Tab / meta+v"},
                 "direction": {"type": "string", "enum": ["up","down"], "default": "down", "description": "scroll"},
@@ -738,7 +739,6 @@ pub fn list_tools() -> Vec<Value> {
                 "dialog": {"type": "string", "enum": ["accept","dismiss"], "default": "accept"},
                 "prompt_text": {"type": "string", "description": "dialog prompt(): text to type"},
                 "ms": {"type": "integer", "description": "wait: fixed delay ms; type: per-key delay ms (real keydown/keyup typing); hold: how long to keep the button down (default 6000); drag: how long to hold the handle before moving (default 150)"},
-                "selector": {"type": "string", "description": "wait: CSS selector to poll for"},
                 "timeout_ms": {"type": "integer", "default": 15000, "description": "wait: max ms"},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "upload: absolute paths"},
                 "js": {"type": "string", "description": "add_init_script: JS to run on every new document"}
@@ -1548,6 +1548,19 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_click" => {
+            // A selector path exists because the index path cannot reach a widget
+            // inside a *closed* shadow root: ELEMENTS_JS is page JS and page JS
+            // cannot see one. `observe what=a11y` prints those nodes with a
+            // root-scoped css_path; clicking that path goes through the pierced
+            // CDP resolver + a trusted click at the element's centre.
+            if let Some(sel) = args.get("selector").and_then(|v| v.as_str()) {
+                if !sel.is_empty() {
+                    return match backend.click_css(sel).await {
+                        Ok(_) => json!({"status": "ok", "clicked_selector": sel}),
+                        Err(e) => err(e),
+                    };
+                }
+            }
             let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
             if idx < 0 {
                 return json!({"status": "error", "message": "index required"});

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **mcp**: `interact` `action=click` accepts a `selector`. It resolves through
+  CDP (`DOM.getDocument({pierce: true})` → per-shadow-root query) instead of page
+  JS, so it is the one path that can click a widget inside a **closed** shadow
+  root — a node page JS cannot even see, and therefore one no `index` can name.
+- **core**: `CdpBackend::click_css` — trusted click (pierced resolve →
+  `getContentQuads` → trusted click at the element centre).
+
+### Fixed
+
+- **core**: `observe what=a11y` now prints a css path for nodes inside shadow
+  roots (open and closed). Their path is root-scoped (`button:nth-of-type(2)`)
+  because an absolute path cannot cross a shadow boundary; light-DOM paths are
+  unchanged.
+- **core**: selector → nodeId resolution (`click`, upload, serp consent) falls
+  back to the pierced tree, so a selector that only matches inside a shadow root
+  resolves instead of returning "not found". One shared resolver replaced three
+  copies of `getDocument(depth 0)` + `querySelector`.
+
 ## [0.14.5] - 2026-11-02
 
 ### Added
