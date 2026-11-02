@@ -93,10 +93,21 @@ pub const BUNDLED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Default skills directory: `<engine cache>/skills`, so one env var
-/// (`WEBRAIN_BROWSERS_DIR`) moves engines and skills together.
+/// Where skills live: `WEBRAIN_SKILLS_DIR` when set, else `<engine cache>/skills`
+/// so one env var (`WEBRAIN_BROWSERS_DIR`) moves engines and skills together.
+///
+/// The override is not optional decoration: `webrain install skills` prints it as
+/// the way to pin the directory, and an agent that shares a skill tree with another
+/// tool (`.agents/skills`, a container mount) has nowhere else to point.
 pub fn dir() -> PathBuf {
-    crate::install::browsers_dir().join("skills")
+    dir_or(std::env::var_os("WEBRAIN_SKILLS_DIR"))
+}
+
+fn dir_or(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+    match override_dir.filter(|v| !v.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => crate::install::browsers_dir().join("skills"),
+    }
 }
 
 /// First `name:` inside the YAML frontmatter. `None` when the file has none —
@@ -305,6 +316,19 @@ pub fn install_one(target: &Path, src: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skills_dir_honours_the_override_and_ignores_an_empty_one() {
+        assert_eq!(
+            dir_or(Some(std::ffi::OsString::from("/tmp/pinned-skills"))),
+            PathBuf::from("/tmp/pinned-skills")
+        );
+        // An empty value is "unset", not "the current directory".
+        assert_eq!(
+            dir_or(Some(std::ffi::OsString::new())),
+            crate::install::browsers_dir().join("skills")
+        );
+    }
 
     #[test]
     fn frontmatter_name_reads_only_the_header() {

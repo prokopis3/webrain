@@ -97,9 +97,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route (`npx skills add` writes `.agents/skills/`, which webrain reads only when
   pointed at it). The `WEBRAIN_SKILLS_DIR` env row said `unset (off)`, though the
   directory has a default and is filled on install.
+- **skills**: the shipped umbrella skill named extractors that no longer exist
+  (`extract_json`, `table`, `spider`) in the frontmatter the agent reads first, and
+  two live tools — `webrain_pdf` (PDF → text + tables, no browser) and
+  `webrain_stats` (is the page heavy, or is the machine out of memory?) — were not
+  named by *any* file in the bundle. It also wrote `extract(...)` / `crawl(...)` as
+  if those were tool names; the shorthand is now declared once and the guide is the
+  stated fallback. `webrain install skills` still reports zero unknown `webrain_*`
+  names, and now there is a documented path for both tools.
 
 ### Fixed
 
+- **skills**: `WEBRAIN_SKILLS_DIR` was printed by `webrain install skills` as "pin the
+  dir" and listed in `--help`, but `skills::dir()` never read it — only
+  `WEBRAIN_BROWSERS_DIR` moved the tree, so following the printed instruction changed
+  nothing and a skill tree shared with another tool (`.agents/skills`, a container
+  mount) could not be pointed at. `dir()` now honours it (an empty value means unset),
+  with a unit test.
 - **dist**: `install.sh` sent Windows users to a `scoop bucket add` command that
   needs a manual step; it now points at `install.ps1`.
 
