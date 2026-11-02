@@ -37,10 +37,10 @@ One-time enroll, then the LLM logs in with zero user typing:
 ```bash
 webrain vault set <service> <profile> --username <user>   # hidden prompt, once
 ```
-- `webrain_profiles` → returns ids/usernames only — never secrets.
-- `webrain_login(profile=…, url=…, user_sel=…, pass_sel=…, submit_sel=…)`
-  → the server decrypts in-process and fills the browser via CDP; the reply is
-  status-only. The value never leaves the server process.
+- `webrain_session(op="profiles")` → returns ids/usernames only — never secrets.
+- `webrain_session(op="login", service=…, profile=…, url=…)`
+  → the server decrypts in-process and fills the browser via CDP (selector overrides
+  optional); the reply is status-only. The value never leaves the server process.
 - Storage: `~/.config/webrain/vault.json` (AES-256-GCM) + `vault.key` (0600).
   Two files — copy both to any Windows/macOS/Linux/Docker box, no OS daemon.
 

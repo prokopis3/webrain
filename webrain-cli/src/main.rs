@@ -21,9 +21,15 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "install",
-        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install vision [--model ID] [--model-update]",
-        "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL).",
-        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install vision [--model ID] [--model-update]\n    webrain install skills [--force]",
+        "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL) or the bundled operator skills.",
+        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  `install skills` is offline — the bundle is compiled into the binary — and\n  keeps any skill file you already edited unless --force is passed.",
+    ),
+    (
+        "skills",
+        "webrain skills [list]\n    webrain skills add <https://…/SKILL.md | path/to/SKILL.md>\n    webrain skills rm <name>",
+        "Operator skills `webrain_guide` serves as topic=\"skill:<name>\". Install one from any URL or file.",
+        "A skill is an .md whose frontmatter carries `name:` — that is what the\n  reader looks up, so a file without one is refused instead of installing\n  invisibly. Files over 64 KiB are refused for the same reason.",
     ),
     (
         "uninstall",
@@ -234,7 +240,7 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
         "Agent",
         &[(
             "WEBRAIN_SKILLS_DIR",
-            "operator .md skills read by webrain_guide",
+            "skills read by webrain_guide (default: <engine cache>/skills, filled by `webrain install skills`)",
         )],
     ),
     (
@@ -329,6 +335,43 @@ fn help_page(cmd: &str) -> String {
         }
         None => format!("unknown command: {cmd}\n\n{}", help_page("")),
     }
+}
+
+/// Warn — never block — when an installed skill names a `webrain_*` tool this
+/// build does not expose. A stale name is how a skill rots: it reads correct and
+/// every agent then calls a tool that is not there. Warnings only, because a
+/// skill may legitimately describe a tool from a newer build.
+fn check_skill_tools(dir: &std::path::Path) {
+    // Crate names, not tools — `webrain_core` is code, not something an agent calls.
+    const NOT_TOOLS: &[&str] = &["webrain_core", "webrain_cli", "webrain_mcp"];
+    let known: std::collections::HashSet<String> =
+        webrain_mcp::tool_names().into_iter().collect();
+    let mut stale: std::collections::BTreeSet<String> = Default::default();
+    for (_, path) in webrain_core::skills::list(dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            let Some(tail) = token.strip_prefix("webrain_") else {
+                continue;
+            };
+            if tail.is_empty() || NOT_TOOLS.contains(&token) || known.contains(token) {
+                continue;
+            }
+            stale.insert(token.to_string());
+        }
+    }
+    if stale.is_empty() {
+        return;
+    }
+    println!(
+        "\nwarning: {} `webrain_*` name(s) in these skills are not tools in this build:",
+        stale.len()
+    );
+    for name in stale {
+        println!("  {name}");
+    }
+    println!("  (a skill naming a removed tool sends every agent to a tool that is not there)");
 }
 
 fn main() -> anyhow::Result<()> {
@@ -946,9 +989,32 @@ fn main() -> anyhow::Result<()> {
                     let status = webrain_core::install::install_vision(&model, update)?;
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
+                "skills" => {
+                    // webrain install skills [--force]
+                    // Offline by design: the bundle is compiled in, so this needs
+                    // no network and cannot drift from the binary that serves it.
+                    let dir = webrain_core::skills::dir();
+                    let (written, skipped) =
+                        webrain_core::skills::install_bundled(&dir, force)?;
+                    println!(
+                        "skills ready: {written} written, {skipped} kept in {}",
+                        dir.display()
+                    );
+                    if skipped > 0 {
+                        println!("  (existing files kept — `--force` overwrites them)");
+                    }
+                    let names: Vec<String> = webrain_core::skills::list(&dir)
+                        .into_iter()
+                        .map(|(n, _)| n)
+                        .collect();
+                    println!("  skills: {}", names.join(", "));
+                    println!("\n  read one:  webrain_guide(topic=\"skill:<name>\")");
+                    println!("  pin the dir: WEBRAIN_SKILLS_DIR={}", dir.display());
+                    check_skill_tools(&dir);
+                }
                 other => {
                     anyhow::bail!(
-                        "unknown engine `{other}` — try chrome, obscura, lightpanda, whisper, vision, or watch"
+                        "unknown engine `{other}` — try chrome, obscura, lightpanda, whisper, vision, watch, or skills"
                     )
                 }
             }
@@ -1025,6 +1091,13 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let headless = args.contains(&"--headless".to_string());
+            // `--proxy URL` bakes `--proxy-server` into THIS browser, so every
+            // later tool call against its CDP endpoint inherits the exit.
+            let proxy = args
+                .iter()
+                .position(|a| a == "--proxy")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
             let explicit_port = args
                 .iter()
                 .position(|a| a == "--port")
@@ -1040,7 +1113,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 &profile
             };
-            let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless)?;
+            let launched = webrain_core::launch::launch_chrome(service, profile, port, !headless, proxy.as_deref())?;
             println!("profile: {}", launched.profile_dir.display());
             println!("CDP_URL={}", launched.cdp_url);
             // Attach + navigate: applies STEALTH_JS + UA override, opens the site.
@@ -1103,6 +1176,62 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "2fa: human must approve/enter the code in the browser, then re-run: webrain login {service} {profile}"
                 );
+            }
+        }
+        Some("skills") => {
+            // webrain skills                    list what is installed
+            // webrain skills add <url|file.md>  install ONE skill from anywhere
+            // webrain skills rm <name>          remove one
+            let dir = webrain_core::skills::dir();
+            match args.get(2).map(String::as_str) {
+                None | Some("list") => {
+                    let found = webrain_core::skills::list(&dir);
+                    if found.is_empty() {
+                        println!(
+                            "no skills in {} — `webrain install skills` adds the bundled set",
+                            dir.display()
+                        );
+                    } else {
+                        println!("{} skill(s) in {}:", found.len(), dir.display());
+                        for (name, path) in &found {
+                            println!("  {:<28} {}", name, path.display());
+                        }
+                    }
+                    println!("\n  read one: webrain_guide(topic=\"skill:<name>\")");
+                    println!("  MCP env:  WEBRAIN_SKILLS_DIR={}", dir.display());
+                }
+                Some("add") => {
+                    let Some(src) = args.get(3).filter(|s| !s.starts_with("--")) else {
+                        anyhow::bail!(
+                            "usage: webrain skills add <https://…/SKILL.md | path/to/SKILL.md>"
+                        );
+                    };
+                    let path = webrain_core::skills::install_one(&dir, src)?;
+                    // Address by the slug we wrote, not the declared spelling:
+                    // `House-Rules` installs as `house-rules` and must be read
+                    // back by that name.
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    println!("installed skill `{name}` -> {}", path.display());
+                    println!("  read it: webrain_guide(topic=\"skill:{name}\")");
+                    check_skill_tools(&dir);
+                }
+                Some("rm") | Some("remove") => {
+                    let Some(name) = args.get(3) else {
+                        anyhow::bail!("usage: webrain skills rm <name>");
+                    };
+                    // Every copy, not one of them — a leftover second copy would
+                    // silently become the skill again.
+                    for path in webrain_core::skills::remove(&dir, name)? {
+                        println!("removed skill `{name}` ({})", path.display());
+                    }
+                }
+                Some(other) => anyhow::bail!(
+                    "unknown skills action `{other}` — try list, add <url|file>, or rm <name>"
+                ),
             }
         }
         Some("cookies") => {
