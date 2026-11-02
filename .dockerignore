@@ -7,7 +7,8 @@ vision
 assets
 docs
 scripts
-skills
+# NOT `skills`: webrain-core include_str!s skills/webrain/** into the binary, so
+# excluding it turned every `docker build` into a 16-error compile failure.
 *.md
 .github
 # Secrets: keep keys/credentials out of the build context (COPY . . ships it
