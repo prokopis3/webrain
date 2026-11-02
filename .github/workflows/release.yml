@@ -2,9 +2,13 @@
 # Release Workflow
 # ============================================================================
 # Triggers on a pushed version tag (e.g. `git tag v0.1.0 && git push --tags`).
-# Builds the release binary natively on Linux, Windows, and macOS (arm64),
-# then attaches every binary to a GitHub Release with auto-generated notes.
-# No version auto-bump, no registry publish.
+# Builds one binary per (OS, arch) target and attaches every one to a GitHub
+# Release with auto-generated notes. No version auto-bump, no registry publish.
+#
+# Target matrix = what a user can actually run. Native runners where they exist;
+# the two Linux builds that have no arm64/musl runner are cross-linked from the
+# x86_64 runner with a distro cross-compiler (see `apt:` in the matrix), so a
+# cross build is reproducible from this file alone.
 # ============================================================================
 
 name: Release
@@ -24,43 +28,81 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}
+    name: Build ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # Cross-linkers for the two Linux targets with no matching runner. Unused —
+    # and ignored — on the macOS and Windows jobs.
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_x86_64_unknown_linux_musl: musl-gcc
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
             bin: webrain
-            out: webrain-linux
-          - os: windows-latest
-            bin: webrain.exe
-            out: webrain-windows.exe
+            asset: webrain-linux-x86_64
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            bin: webrain
+            asset: webrain-linux-aarch64
+            apt: gcc-aarch64-linux-gnu
+          # Static, so it runs on Alpine (the Docker image) and on distros older
+          # than the runner's glibc.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            bin: webrain
+            asset: webrain-linux-x86_64-musl
+            apt: musl-tools
+          # macos-latest is arm64; the Intel binary is cross-built (Apple's
+          # linker handles both arches, and the Intel runner image is retired).
           - os: macos-latest
+            target: aarch64-apple-darwin
             bin: webrain
-            out: webrain-macos
+            asset: webrain-macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: webrain
+            asset: webrain-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: webrain.exe
+            asset: webrain-windows-x86_64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bin: webrain.exe
+            asset: webrain-windows-aarch64.exe
     steps:
       - uses: actions/checkout@v7
+      - name: Install cross toolchain
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
       # Supply-chain hardening: third-party actions are pinned to the full commit
       # SHA of the tag they resolved at (mutable tags can be force-moved).
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Build release binary
-        run: cargo build --release --bin webrain
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
 
-      # linux and macos both emit target/release/webrain — rename so the release
-      # has one distinct asset per platform (otherwise merge-multiple overwrites).
+      - name: Build release binary
+        run: cargo build --release --bin webrain --target ${{ matrix.target }}
+
+      # Per-target output dirs, so every job emits the SAME asset name it
+      # uploads — merge-multiple then cannot overwrite one platform with another
+      # (the old scheme renamed three shared `target/release/webrain` outputs).
       - name: Rename for release
         shell: bash
-        run: mv target/release/${{ matrix.bin }} target/release/${{ matrix.out }}
+        run: mv "target/${{ matrix.target }}/release/${{ matrix.bin }}" "target/${{ matrix.target }}/release/${{ matrix.asset }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: webrain-${{ matrix.os }}
-          path: target/release/${{ matrix.out }}
+          name: ${{ matrix.asset }}
+          path: target/${{ matrix.target }}/release/${{ matrix.asset }}
           if-no-files-found: error
 
   release:
@@ -136,10 +178,11 @@ jobs:
 
       # Publish a checksums.txt alongside the binaries so installers and
       # `webrain self-update` can verify downloads (supply-chain integrity).
+      # `*` so adding a target to the matrix needs no change here.
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum webrain-linux webrain-windows.exe webrain-macos > checksums.txt
+          sha256sum * > checksums.txt
           cat checksums.txt
 
       - name: Create GitHub Release
@@ -179,22 +222,26 @@ jobs:
             echo "::error::expected a version tag (vX.Y.Z), got '${GITHUB_REF_NAME}'" >&2
             exit 1
           fi
-          WIN_SHA="$(sha256sum dist/webrain-windows.exe | awk '{print toupper($1)}')"
-          MAC_SHA="$(sha256sum dist/webrain-macos | awk '{print $1}')"
+          WIN_SHA="$(sha256sum dist/webrain-windows-x86_64.exe | awk '{print toupper($1)}')"
+          WIN_ARM_SHA="$(sha256sum dist/webrain-windows-aarch64.exe | awk '{print toupper($1)}')"
+          MAC_SHA="$(sha256sum dist/webrain-macos-aarch64 | awk '{print $1}')"
 
           # fetch current manifests (they live in OTHER repos, not this checkout)
           gh api "repos/prokopis3/scoop-webrain/contents/bucket/webrain.json" --jq .content | base64 -d > bucket.json
           gh api "repos/prokopis3/homebrew-webrain/contents/Formula/webrain.rb" --jq .content | base64 -d > formula.rb
 
           # scoop: jq-edit in place (keeps description/bin/checkver/autoupdate)
-          jq --arg v "$VER" --arg h "$WIN_SHA" \
+          jq --arg v "$VER" --arg h "$WIN_SHA" --arg ha "$WIN_ARM_SHA" \
             '.version = $v
-             | .architecture."64bit".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows.exe")
-             | .architecture."64bit".hash = $h' \
+             | .architecture."64bit".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows-x86_64.exe")
+             | .architecture."64bit".hash = $h
+             | .architecture."arm64".url = ("https://github.com/prokopis3/webrain/releases/download/v" + $v + "/webrain-windows-aarch64.exe")
+             | .architecture."arm64".hash = $ha' \
             bucket.json > /tmp/bucket.json && mv /tmp/bucket.json bucket.json
 
-          # homebrew: sed the version/url/sha256
-          sed -i -E "s|/v[0-9.]+/webrain-macos|/v${VER}/webrain-macos|; s|sha256 \"[a-f0-9]+\"|sha256 \"${MAC_SHA}\"|; s|version \"[0-9.]+\"|version \"${VER}\"|" formula.rb
+          # homebrew: sed the version/url/sha256 (arm64 bottle; Intel Macs need an
+          # on_intel block pointing at webrain-macos-x86_64 — other repo).
+          sed -i -E "s|/v[0-9.]+/webrain-macos[a-z0-9_-]*|/v${VER}/webrain-macos-aarch64|; s|sha256 \"[a-f0-9]+\"|sha256 \"${MAC_SHA}\"|; s|version \"[0-9.]+\"|version \"${VER}\"|" formula.rb
 
           put() {
             local repo="$1" path="$2" file="$3"
