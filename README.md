@@ -352,8 +352,11 @@ webrain_guide(topic="skill:<name>")    # that skill's full text
 
 **Bundled and repo skills**
 
-- `skills/webrain/SKILL.md` — browser/challenge/extraction decision guide + auth-cookie transfer.
-- `.github/skills/` — repo-local (`credentials`, `update-changelog`, `git-cleanup`, `web-research`, `product-market-research`).
+- `skills/webrain/` — the shipped bundle compiled into the binary: the umbrella skill,
+  `web-research`, `product-market-research`, `auth-media-vision`, `credentials`, plus their
+  `references/` and `workflows/` chapters. Edit the product's skills **here**.
+- `.github/skills/` — repo-local only (`update-changelog`, `git-cleanup`, and the design skills).
+  See `.github/skills/README.md` for why the two are not copies.
 
 **Third-party skills** — `npx skills add <owner/repo>` installs into the client's
 own directory (`.agents/skills/<name>/SKILL.md` + a `skills-lock.json`), which
