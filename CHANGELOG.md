@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root: collapsing 65 of them into let-chains is a mechanical cleanup, not part
   of a security fix. README badge, CONTRIBUTING and `docs/contributing.mdx`
   follow.
+- **deps**: `tokio-tungstenite` 0.24 → **0.30** (the CDP WebSocket transport),
+  `scraper` 0.24 → **0.27**, `pdf-inspector` 1.14.1 → **1.25.2**, `ureq` 3.3.0 →
+  **3.4.2**, `aes-gcm` 0.11.0 → **0.11.1**. One line of code changed:
+  `tungstenite` ≥ 0.26 stores text frames as `Utf8Bytes`, so
+  `Message::Text(text)` became `Message::Text(text.into())`. The 114 workspace
+  lib tests are unchanged.
+- **ci**: `Swatinem/rust-cache` 2.9.3, `softprops/action-gh-release` 3.0.3 and
+  Docker's `build-push-action` 7.4.0 / `login-action` 4.7.0 /
+  `setup-buildx-action` 4.4.1 — the five outstanding Dependabot PRs, applied on
+  top of the release-workflow rewrite so they would not have to rebase over it.
 
 ### Added
 

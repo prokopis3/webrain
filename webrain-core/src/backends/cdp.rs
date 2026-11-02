@@ -470,7 +470,8 @@ impl CdpBackend {
         tokio::spawn(async move {
             let mut sink = write;
             while let Some(text) = out_rx.recv().await {
-                if sink.send(Message::Text(text)).await.is_err() {
+                // tungstenite 0.26+ stores text as `Utf8Bytes`, not `String`.
+                if sink.send(Message::Text(text.into())).await.is_err() {
                     break;
                 }
             }

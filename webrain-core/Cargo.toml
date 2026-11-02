@@ -23,7 +23,7 @@ async-trait = "0.1"
 # `connect` alone cannot dial a `wss://` endpoint (no TLS connector), which made
 # Lightpanda Cloud and every hosted CDP unreachable. webpki roots ship in the
 # binary, so no OpenSSL/system-cert dependency on any platform.
-tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
 base64 = "0.23"
@@ -39,7 +39,7 @@ hmac = "0.13"
 sha1 = "0.11"
 regex = "1"
 # Structured SERP parsing (webrain_serp): pure-Rust CSS selector extraction.
-scraper = "0.24"
+scraper = "0.27"
 # HTML → Markdown (turndown.js-equivalent, pure Rust) for webrain_batch op=markdown.
 htmd = "0.5"
 # Optional: Google Pdfium for PDF text extraction (handles ALL fonts).
