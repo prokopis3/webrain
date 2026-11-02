@@ -17,6 +17,10 @@
 // ponytail: one shared handle_rpc for stdio AND HTTP; HTTP gives per-connection
 // session isolation (lightpanda Mcp-Session-Id pattern, one backend per conn).
 
+// See webrain-core/src/lib.rs: nested ifs deliberate, let-chains available at
+// MSRV 1.88 but collapsing the sites is a separate cleanup.
+#![allow(clippy::collapsible_if)]
+
 mod tools;
 
 /// Names of every tool this build exposes. `webrain skills` uses it to warn when

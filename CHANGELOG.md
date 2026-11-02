@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **deps**: `zip` 7.2.0 → **9.2.2**, closing five advisories against the engine
+  archive extractor in `install.rs` (Chrome for Testing, whisper, llama-server):
+  critical GHSA-m665-v7pm-7grj (parser differential / security-control bypass),
+  high GHSA-hjqx-j4rw-g7xv (**arbitrary file write outside the extraction
+  directory**), high GHSA-q7v9-x93c-xqv3 (unbounded symlink target), high
+  GHSA-9hj8-73fh-9963 (legacy Shrink/Reduce/Implode decoder DoS) and medium
+  GHSA-8hxf-qr8p-62x4 (AES-entry HMAC bypass). Only `by_index` / `name()` /
+  `is_dir()` / `unix_mode()` are used; `name()` now returns a `Result`, so the
+  zip-slip guard takes `?`. The guard itself — absolute paths, `..`, drive
+  prefixes — is unchanged and stays the last line of defence.
+- **deps**: `rustls` 0.23.43 → 0.23.46 (reached through `tokio-tungstenite`'s
+  `rustls-tls-webpki-roots`), closing GHSA-2mjx-qc3c-rqvc (TLS 1.3 handshake
+  messages incorrectly accepted), GHSA-h2v8-394m-p7vv (brotli certificate
+  decompression allocation), GHSA-c8m5-c952-6cm4 (session `Debug` formatting
+  exposes the TLS master secret) and GHSA-w44r-93j7-qv28 (an unauthenticated
+  `ServerHello` poisons the per-connection).
+
+### Changed
+
+- **build**: workspace `rust-version` 1.85 → **1.88**, forced by the fix above —
+  every `zip` release that closes the critical advisory declares 1.88. The
+  `clippy::collapsible_if` sites stay nested and are allowed once per crate
+  root: collapsing 65 of them into let-chains is a mechanical cleanup, not part
+  of a security fix. README badge, CONTRIBUTING and `docs/contributing.mdx`
+  follow.
+
 ### Added
 
 - **dist**: a release binary per platform **and architecture**, and installers that

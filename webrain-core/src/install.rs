@@ -534,7 +534,7 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let raw = f.name().replace('\\', "/");
+        let raw = f.name()?.replace('\\', "/");
         // Zip-slip guard: reject host-absolute paths (incl. Windows `C:/`
         // drive prefixes, which `Path::join` treats as absolute on Windows),
         // `..` traversal components, and any drive-prefixed component.

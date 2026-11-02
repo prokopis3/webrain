@@ -2,6 +2,10 @@
 //
 // ponytail: one binary, subcommands via match, no clap dependency.
 
+// See webrain-core/src/lib.rs: nested ifs deliberate, let-chains available at
+// MSRV 1.88 but collapsing the sites is a separate cleanup.
+#![allow(clippy::collapsible_if)]
+
 use serde_json::json;
 use std::env;
 use webrain_core::CdpBackend;
@@ -1808,9 +1812,8 @@ async fn cdp_info(port: u16) -> CdpInfo {
             let n = s.read(&mut buf).await.unwrap_or(0);
             let body = String::from_utf8_lossy(&buf[..n]);
             // find \r\n\r\n separator, take JSON after it. Kept as nested
-            // if-let, not a let-chain: let-chains need Rust 1.88 but the
-            // workspace MSRV is 1.85.
-            #[allow(clippy::collapsible_if)]
+            // if-let for the same reason as webrain-core: the house reads
+            // clearer nested than as a let-chain at this width.
             if let Some(pos) = body.find("\r\n\r\n") {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body[pos + 4..]) {
                     info.name = v

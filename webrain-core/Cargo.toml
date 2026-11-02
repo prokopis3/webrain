@@ -60,7 +60,7 @@ lopdf = "0.42"
 flate2 = "1"
 # agent-browser-style engine install: Chrome for Testing archives are .zip on
 # every platform, so no tar needed (see src/install.rs).
-zip = "7"
+zip = "9"
 # Firecrawl pdf-inspector: pure Rust on lopdf — proper ToUnicode CMap decoding,
 # Markdown output, table detection, layout classification.
 pdf-inspector = "1.14.1"
