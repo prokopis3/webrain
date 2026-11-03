@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never fire from the CLI — the call fell straight through to bing's results.
   `--http` still means no browser at all, and no engine is guest-launched here.
 
+### Fixed (image build)
+
+- **docker**: the image has been failing to build since `skills/` became
+  `include_str!`-embedded (`webrain-core/src/skills.rs`), so **no `ghcr` image
+  was published for 0.14.0 or 0.14.5** — `docker pull`:0.12.1 was the last one
+  that ever existed. The build stage now copies `skills`, and `.dockerignore` no
+  longer excludes it.
+
 ### Fixed
 
 - **cli**: `webrain mcp` no longer aborts with `thread 'main' has overflowed its

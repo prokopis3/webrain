@@ -47,6 +47,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY webrain-core webrain-core
 COPY webrain-mcp webrain-mcp
 COPY webrain-cli webrain-cli
+# `webrain-core/src/skills.rs` embeds these with `include_str!("../../skills/…")`,
+# so they are compiled INTO the binary — not a runtime asset. Leaving them out of
+# the context fails `cargo build` with 16 "couldn't read skills/webrain/…" errors,
+# which is what silently kept every image after 0.12.1 from ever being published.
+COPY skills skills
 # Reuse the cargo registry + target caches across builds (BuildKit) so a source
 # change doesn't recompile the whole dependency tree. The target cache is keyed
 # by TARGETARCH so amd64/arm64 artifacts never mix, and the built binary is
