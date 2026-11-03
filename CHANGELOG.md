@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **cli**: `webrain diff <a> <b> [--max N] [--json]` — what changed between two
+  pages, or a page and a saved baseline. Either side is an http(s) URL (plain
+  HTTP, no browser) or a local file; lines are whitespace-normalised and blanks
+  dropped so re-indentation is not reported as drift, and the exit code is 1 when
+  they differ so a cron job can act on it. The comparison is a multiset line
+  difference (O(n) on a 10k-line page) rather than an LCS — a monitor needs the
+  added and removed lines, not hunk alignment.
+
 ## [0.16.2] - 2026-11-03
 
 ### Added
