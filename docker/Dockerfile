@@ -80,6 +80,19 @@ COPY --from=builder /app/webrain /usr/local/bin/webrain
 # Do that together with --no-sandbox handling in launch.rs (and remap the
 # /root/.config + /root/.cache volumes in docker-compose.yml) when the sandbox
 # story is settled.
+#
+# OCI labels: ghcr.io renders `org.opencontainers.image.description` as the
+# package description. Without it every published version reads "No description
+# provided" (0.11.0 → 0.15.3 all did). VERSION is passed by engine-image.yml from
+# the release tag; a local `docker build` leaves it at "dev".
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="webrain" \
+      org.opencontainers.image.description="Portable MCP browser-automation and scraping server: 18 CDP tools for navigation, extraction, PDF, SERP and media, driven entirely by the LLM prompt." \
+      org.opencontainers.image.source="https://github.com/prokopis3/webrain" \
+      org.opencontainers.image.url="https://github.com/prokopis3/webrain" \
+      org.opencontainers.image.documentation="https://github.com/prokopis3/webrain/blob/main/README.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}"
 EXPOSE 9223
 ENTRYPOINT ["webrain"]
 CMD ["mcp", "--http", "9223"]

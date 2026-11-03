@@ -10,6 +10,11 @@ publish = false
 name = "webrain"
 path = "src/main.rs"
 
+[features]
+# ponytail: forward pdfium through webrain-mcp (its lib.rs gates the
+# render arm on its own feature, which in turn enables webrain-core/pdfium).
+pdfium = ["webrain-mcp/pdfium"]
+
 [dependencies]
 webrain-core = { path = "../webrain-core" }
 webrain-mcp = { path = "../webrain-mcp" }

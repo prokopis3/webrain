@@ -11,7 +11,12 @@ pub struct TileShot {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Empty when a `tiles_dir` was passed: the bytes are on disk at `path`
+    /// instead. A 660 KB PNG page is ~10 MB of base64 across 16 tiles, which is
+    /// the whole cost of a tool call — paths keep the reply at a few hundred bytes.
     pub png_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 pub struct TileEngine {
@@ -19,6 +24,10 @@ pub struct TileEngine {
     pub tile_height: f64,
     pub max_tiles: usize,
 }
+
+/// Above this a full-page raster is ~160 MB of RGBA in the renderer, so the
+/// per-tile clip path is used instead of one capture + crops.
+const MAX_FULL_PAGE_PX: f64 = 40_000_000.0;
 
 impl TileEngine {
     pub fn new(tile_width: f64, tile_height: f64, max_tiles: usize) -> Self {
@@ -30,8 +39,16 @@ impl TileEngine {
     }
 
     /// Split the current page into tiles. Call navigate/snapshot first; does NOT navigate.
-    /// ponytail: CDP clip per tile (no image decode); cap total tiles at max_tiles.
-    pub async fn tile(&self, backend: &impl BrowserBackend) -> anyhow::Result<Vec<TileShot>> {
+    /// `dir` writes the PNGs there and leaves `png_b64` empty.
+    ///
+    /// One capture for the whole page, then local crops: `captureBeyondViewport`
+    /// re-rasterizes the whole surface on every call, so N clip calls cost N full
+    /// renders of the same pixels.
+    pub async fn tile(
+        &self,
+        backend: &impl BrowserBackend,
+        dir: Option<&str>,
+    ) -> anyhow::Result<Vec<TileShot>> {
         let size: Value = backend
             .evaluate(
                 "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]",
@@ -40,34 +57,116 @@ impl TileEngine {
         let page_w = size[0].as_f64().unwrap_or(1280.0).max(1.0);
         let page_h = size[1].as_f64().unwrap_or(800.0).max(1.0);
 
-        let cols = ((page_w / self.tile_width).ceil() as usize).max(1);
-        let rows = ((page_h / self.tile_height).ceil() as usize).max(1);
+        let rects = tile_rects(
+            page_w,
+            page_h,
+            self.tile_width,
+            self.tile_height,
+            self.max_tiles,
+        );
 
-        let mut tiles = Vec::new();
-        let mut idx = 0usize;
-        'outer: for r in 0..rows {
-            for c in 0..cols {
-                if idx >= self.max_tiles {
-                    break 'outer;
-                }
-                let x = c as f64 * self.tile_width;
-                let y = r as f64 * self.tile_height;
-                let w = self.tile_width.min(page_w - x);
-                let h = self.tile_height.min(page_h - y);
-                let png = backend.screenshot_clip(x, y, w, h, 1.0).await?;
-                tiles.push(TileShot {
-                    index: idx,
-                    x,
-                    y,
-                    width: w,
-                    height: h,
-                    png_b64: base64_encode(&png),
-                });
-                idx += 1;
+        // The CLIP form (not `screenshot(full_page)`) on purpose: same scale and
+        // document coordinate space as the per-tile path, so falling back to a
+        // clip can never shift a tile by the device-pixel ratio.
+        let whole = if page_w * page_h <= MAX_FULL_PAGE_PX {
+            match backend.screenshot_clip(0.0, 0.0, page_w, page_h, 1.0).await {
+                Ok(bytes) => image::load_from_memory(&bytes).ok(),
+                Err(_) => None,
             }
+        } else {
+            None
+        };
+
+        let mut tiles = Vec::with_capacity(rects.len());
+        for (index, (x, y, w, h)) in rects.into_iter().enumerate() {
+            let png = match whole.as_ref().and_then(|img| crop_png(img, x, y, w, h)) {
+                Some(p) => p,
+                None => backend.screenshot_clip(x, y, w, h, 1.0).await?,
+            };
+            let path = match dir {
+                Some(d) => Some(write_tile(d, index, &png)?),
+                None => None,
+            };
+            tiles.push(TileShot {
+                index,
+                x,
+                y,
+                width: w,
+                height: h,
+                png_b64: if path.is_some() {
+                    String::new()
+                } else {
+                    base64_encode(&png)
+                },
+                path,
+            });
         }
         Ok(tiles)
     }
+}
+
+/// Tile grid for a page, row-major, clipped to the page edges, capped at `max`.
+fn tile_rects(
+    page_w: f64,
+    page_h: f64,
+    tile_w: f64,
+    tile_h: f64,
+    max: usize,
+) -> Vec<(f64, f64, f64, f64)> {
+    let mut cols = ((page_w / tile_w).ceil() as usize).max(1);
+    let mut rows = ((page_h / tile_h).ceil() as usize).max(1);
+    // A last row or column thinner than a quarter tile is a sliver — a 1210 px
+    // page with 1200 tiles emitted a 10 px strip, a 935 px page with 900 tiles a
+    // 35 px column, and each one costs a whole image in the vision call while
+    // carrying at most a line or two. Fold it into the neighbour instead: that
+    // tile simply runs to the page edge.
+    if cols > 1 && page_w - (cols - 1) as f64 * tile_w < tile_w * 0.25 {
+        cols -= 1;
+    }
+    if rows > 1 && page_h - (rows - 1) as f64 * tile_h < tile_h * 0.25 {
+        rows -= 1;
+    }
+    let mut out = Vec::new();
+    'outer: for r in 0..rows {
+        for c in 0..cols {
+            if out.len() >= max {
+                break 'outer;
+            }
+            let x = c as f64 * tile_w;
+            let y = r as f64 * tile_h;
+            // The last row/column absorbs the remainder: wider or taller than the
+            // nominal tile, never padded.
+            let w = if c == cols - 1 { page_w - x } else { tile_w };
+            let h = if r == rows - 1 { page_h - y } else { tile_h };
+            out.push((x, y, w.min(page_w - x), h.min(page_h - y)));
+        }
+    }
+    out
+}
+
+/// Crop one tile from the page raster. `None` when the rect is empty or outside
+/// the image — the caller then re-captures that one tile.
+fn crop_png(img: &image::DynamicImage, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<u8>> {
+    let (iw, ih) = (img.width() as f64, img.height() as f64);
+    let x = x.round().clamp(0.0, iw);
+    let y = y.round().clamp(0.0, ih);
+    let w = w.round().clamp(0.0, iw - x);
+    let h = h.round().clamp(0.0, ih - y);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let tile = image::imageops::crop_imm(img, x as u32, y as u32, w as u32, h as u32).to_image();
+    let mut buf = Vec::new();
+    tile.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
+
+fn write_tile(dir: &str, index: usize, png: &[u8]) -> anyhow::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let path = std::path::Path::new(dir).join(format!("tile_{index:03}.png"));
+    std::fs::write(&path, png)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -85,6 +184,72 @@ mod tests {
         assert_eq!(encoded, "aGVsbG8=");
         assert_eq!(super::base64_encode(b"a"), "YQ==");
         assert_eq!(super::base64_encode(b"ab"), "YWI=");
+    }
+
+    // ponytail: one check for the tile grid + local crop — the whole point of
+    // capturing once is that these rects land on the same pixels as N clips.
+    #[test]
+    fn tile_rects_tile_the_page_and_respect_the_cap() {
+        let r = super::tile_rects(400.0, 600.0, 200.0, 200.0, 99);
+        assert_eq!(r.len(), 6); // 2 cols x 3 rows
+        assert_eq!(r[0], (0.0, 0.0, 200.0, 200.0));
+        assert_eq!(r[1], (200.0, 0.0, 200.0, 200.0));
+        assert_eq!(r[5], (200.0, 400.0, 200.0, 200.0));
+        // ragged last column/row is clipped to the page edge, never padded
+        let ragged = super::tile_rects(250.0, 250.0, 200.0, 200.0, 99);
+        assert_eq!(ragged[1], (200.0, 0.0, 50.0, 200.0));
+        assert_eq!(super::tile_rects(400.0, 600.0, 200.0, 200.0, 2).len(), 2);
+        // A 10 px last row is folded into the row above, not emitted as a sliver.
+        let tall = super::tile_rects(935.0, 1210.0, 900.0, 1200.0, 99);
+        assert_eq!(tall.len(), 1);
+        assert_eq!((tall[0].2, tall[0].3), (935.0, 1210.0));
+        // Same rule across the page: a 35 px column strip is not its own image.
+        assert_eq!(super::tile_rects(935.0, 600.0, 900.0, 1200.0, 99).len(), 1);
+        // A remainder worth its own image (>= a quarter tile) still gets one.
+        let two = super::tile_rects(935.0, 1600.0, 900.0, 1200.0, 99);
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[1], (0.0, 1200.0, 935.0, 400.0));
+    }
+
+    // ponytail: one check for the caption scan — it decides which pages are worth
+    // a vision call, so both its hits and its misses matter.
+    #[test]
+    fn caption_scan_finds_figure_and_table_captions_only() {
+        assert!(super::has_caption(
+            "Figure 2: Title page of the DocLayNet paper"
+        ));
+        assert!(super::has_caption(
+            "Table 1: Runtime characteristics of Docling"
+        ));
+        assert!(super::has_caption(
+            "see Fig. 3 for the annotation interface"
+        ));
+        assert!(!super::has_caption(
+            "The tables were configured as shown in the diagram"
+        ));
+        assert!(!super::has_caption(
+            "Body text with no captions at all, just prose."
+        ));
+        // spliced figure text alone is NOT a caption — the page's real caption is
+        // what flags it, so this stays false by design
+        assert!(!super::has_caption(
+            "Interpupillary Slide Adjustment **Model AY11230**"
+        ));
+        assert!(!super::has_caption(""));
+    }
+
+    #[test]
+    fn crop_png_cuts_the_requested_region_and_refuses_empty_rects() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            10,
+            30,
+            image::Rgba([9, 9, 9, 255]),
+        ));
+        let png = super::crop_png(&img, 0.0, 20.0, 10.0, 10.0).expect("tile");
+        let cut = image::load_from_memory(&png).expect("png");
+        assert_eq!((cut.width(), cut.height()), (10, 10));
+        // past the bottom edge -> None, so the caller re-captures that one tile
+        assert!(super::crop_png(&img, 0.0, 30.0, 10.0, 10.0).is_none());
     }
 
     // ponytail: one check for the regex JS builder (builtin present, custom overrides).
@@ -3399,7 +3564,57 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
 
     // ponytail: extract images in the same pass. Errors are non-fatal — we
     // still return text+layout even if image extraction fails on exotic formats.
-    let images = extract_images_lopdf(path, None).unwrap_or_default();
+    // ponytail: inventory only. The bytes belong to `op=images dir:…`; inlining
+    // them here made op=extract a 16.8 MB reply for a 4 MB paper the moment the
+    // walker started finding nested Form images (29 of them). The decode still
+    // runs — it is ~1 s and keeps one walker — but no base64 leaves the process.
+    let images: Vec<Value> = extract_images_lopdf(path, None, None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut img| {
+            if let Some(obj) = img.as_object_mut() {
+                obj.remove("image_b64");
+                obj.remove("path");
+            }
+            img
+        })
+        .collect();
+
+    // Which pages can the text layer NOT deliver? Two cases, both cheap to spot:
+    // a caption whose figure is vector art (no raster in `images`, so op=images
+    // cannot see it either), and a page with no text at all. Those are the only
+    // pages worth paying a vision call for.
+    let mut raster_pages: Vec<u32> = images
+        .iter()
+        .filter_map(|i| i["page"].as_u64())
+        .map(|p| p as u32)
+        .collect();
+    raster_pages.sort_unstable();
+    raster_pages.dedup();
+    let mut captioned: Vec<u32> = Vec::new();
+    let mut empty: Vec<u32> = Vec::new();
+    for p in &pages_res.pages {
+        // `p.page` and `raster_pages` disagree on origin (0- vs 1-based), and the
+        // sibling `layout.pages_with_*` fields are 1-based — so normalise to 1-based
+        // here. Mixing them silently un-filtered a captioned page that HAS a raster.
+        if p.markdown.trim().is_empty() {
+            empty.push(p.page + 1);
+        }
+        if has_caption(&p.markdown) {
+            captioned.push(p.page + 1);
+        }
+    }
+    let mut need_vision: Vec<u32> = captioned
+        .iter()
+        .copied()
+        .filter(|p| !raster_pages.contains(p))
+        .collect();
+    for p in &empty {
+        if !need_vision.contains(p) {
+            need_vision.push(*p);
+        }
+    }
+    need_vision.sort_unstable();
 
     Ok(json!({
         "path": requested,
@@ -3411,6 +3626,9 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
             "is_complex": result.layout.is_complex,
             "pages_with_tables": result.layout.pages_with_tables,
             "pages_with_columns": result.layout.pages_with_columns,
+            "pages_with_captions": captioned,
+            "pages_with_raster_images": raster_pages,
+            "pages_needing_vision": need_vision,
         },
         "markdown": result.markdown,
         "texts": texts,
@@ -3418,20 +3636,71 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
     }))
 }
 
+/// Does this page carry a figure/table caption? That is the marker for a figure
+/// whose *content* the text layer does not capture — it either drops it or, worse,
+/// splices the figure's inner labels into the prose. Hand-rolled scan: a regex
+/// dependency for one marker is not worth it.
+fn has_caption(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    for marker in ["figure ", "fig. ", "table "] {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(marker) {
+            let after = &lower[from + i + marker.len()..];
+            if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return true;
+            }
+            from += i + marker.len();
+        }
+    }
+    false
+}
+
+/// One render result: a path when `dir` is set, base64 otherwise.
+#[cfg(feature = "pdfium")]
+fn png_entry(dir: Option<&str>, name: &str, png: &[u8], meta: Value) -> anyhow::Result<Value> {
+    let mut obj = meta;
+    match dir {
+        Some(d) => {
+            std::fs::create_dir_all(d)?;
+            let full = std::path::Path::new(d).join(name);
+            std::fs::write(&full, png)?;
+            obj["path"] = json!(full.display().to_string());
+        }
+        None => {
+            use base64::Engine;
+            obj["image_b64"] = json!(base64::engine::general_purpose::STANDARD.encode(png));
+        }
+    }
+    Ok(obj)
+}
+
 /// Render PDF pages as base64 PNGs — the PixelRAG alternative to text extraction.
 /// If `tile_size` is set (e.g. 800), each page is split into square tiles
 /// for more efficient vision-model processing. Without tiles, one full image
 /// per page. Requires `--features pdfium`.
+/// Pass `dir` to write the PNGs there and get paths back instead of base64: a
+/// 9-page render is ~15 MB of base64 in the tool reply, which is the whole
+/// context budget for a document that would otherwise cost a few hundred bytes.
 #[cfg(feature = "pdfium")]
 pub fn pdf_render(
     path: &str,
     pages: Option<&[u32]>,
     dpi: Option<f32>,
     tile_size: Option<u32>,
+    dir: Option<&str>,
 ) -> anyhow::Result<Value> {
     use pdfium_render::prelude::*;
     let src = PdfSource::open(path)?;
-    let pdfium = Pdfium::default();
+    // pdfium is bound at runtime. Prefer the copy `webrain install pdfium` put in
+    // the engine cache (or one beside the exe); the binding is process-global, so
+    // a second call reports "already initialized" and we reuse it.
+    let pdfium = match crate::install::find_pdfium() {
+        Some(lib) => match Pdfium::bind_to_library(&lib) {
+            Ok(bindings) => Pdfium::new(bindings),
+            Err(_) => Pdfium::default(),
+        },
+        None => Pdfium::default(),
+    };
     let doc = pdfium.load_pdf_from_file(src.path(), None)?;
     let scale = dpi.unwrap_or(150.0) / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
@@ -3458,16 +3727,17 @@ pub fn pdf_render(
                                 &mut std::io::Cursor::new(&mut buf),
                                 image::ImageFormat::Png,
                             )?;
-                            use base64::Engine;
-                            imgs.push(json!({"page": pn, "x": col, "y": row, "w": rw, "h": rh, "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                            let meta = json!({"page": pn, "x": col, "y": row, "w": rw, "h": rh});
+                            let name = format!("p{pn:03}_t{col}x{row}.png");
+                            imgs.push(png_entry(dir, &name, &buf, meta)?);
                         }
                     }
                 }
                 None => {
                     let mut buf = Vec::new();
                     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)?;
-                    use base64::Engine;
-                    imgs.push(json!({"page": pn, "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                    let name = format!("p{pn:03}.png");
+                    imgs.push(png_entry(dir, &name, &buf, json!({"page": pn}))?);
                 }
             }
         }
@@ -3481,14 +3751,18 @@ pub fn pdf_render(
 /// Skips JPEG2000/CCITT/JBIG2 — use `webrain_pdf_render` (pdfium) for those.
 /// `path` is a local file or an `http(s)` URL.
 /// Returns `[{page, index, width, height, image_b64}]`.
-pub fn pdf_images(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Value> {
+pub fn pdf_images(path: &str, pages: Option<&[u32]>, dir: Option<&str>) -> anyhow::Result<Value> {
     let src = PdfSource::open(path)?;
-    let imgs = extract_images_lopdf(src.path(), pages)?;
+    let imgs = extract_images_lopdf(src.path(), pages, dir)?;
     Ok(json!({"path": path, "count": imgs.len(), "images": imgs}))
 }
 
 /// Core image extraction — shared by `pdf_extract` and `pdf_images`.
-fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec<Value>> {
+fn extract_images_lopdf(
+    path: &str,
+    pages: Option<&[u32]>,
+    dir: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     use flate2::read::ZlibDecoder;
     use lopdf::Document;
     use std::io::Read;
@@ -3510,15 +3784,40 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
             Ok(d) => d,
             Err(_) => continue,
         };
-        // ponytail: direct Resources lookup — skip pages without /Resources
-        // (inherited resources from parent nodes are rare in practice).
+        // Resolve a `/Key` one level: real-world PDFs write /Resources and
+        // /XObject as indirect references (`/Resources 100 0 R`). Returns an
+        // owned dict so the walker can push it without fighting `doc`'s borrows.
+        let sub = |d: &lopdf::Dictionary, key: &[u8]| -> Option<lopdf::Dictionary> {
+            match d.get(key).ok()? {
+                lopdf::Object::Reference(id) => doc.get_object(*id).ok()?.as_dict().ok().cloned(),
+                o => o.as_dict().ok().cloned(),
+            }
+        };
+        // /Resources is an indirect reference in every real-world PDF we tested
+        // (`/Resources 100 0 R`), so the unresolved lookup matched nothing and
+        // every embedded image was silently dropped. Resolve one level.
         let resources = page_dict
             .get(b"Resources")
             .ok()
-            .and_then(|r| r.as_dict().ok());
+            .and_then(|r| match r.as_reference() {
+                Ok(id) => doc.get_object(id).ok().and_then(|o| o.as_dict().ok()),
+                Err(_) => r.as_dict().ok(),
+            });
         if let Some(res) = resources {
-            if let Some(xobj) = res.get(b"XObject").ok().and_then(|x| x.as_dict().ok()) {
-                let mut idx = 0u32;
+            // An included page arrives as a `Form` XObject and keeps its Image
+            // XObjects in its own /Resources, so walking only the page's direct
+            // XObjects reported **0** images for arxiv 2206.01062 while the file
+            // holds 37 (17 of them JPEG). Stack, not recursion — a Form can nest
+            // forms, and `depth` stops a self-referencing one from looping.
+            let mut idx = 0u32;
+            let mut stack: Vec<(lopdf::Dictionary, u8)> = vec![(res.clone(), 4)];
+            while let Some((res, depth)) = stack.pop() {
+                if depth == 0 {
+                    continue;
+                }
+                let Some(xobj) = sub(&res, b"XObject") else {
+                    continue;
+                };
                 for (_name, obj_val) in xobj.iter() {
                     let obj_id = match obj_val.as_reference().ok() {
                         Some(id) => id,
@@ -3528,13 +3827,19 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                         Ok(lopdf::Object::Stream(s)) => (s.content.clone(), s.dict.clone()),
                         _ => continue,
                     };
-                    if dict_owned
+                    let subtype: Vec<u8> = dict_owned
                         .get(b"Subtype")
                         .ok()
                         .and_then(|v| v.as_name().ok())
-                        .map(|n| n != b"Image")
-                        .unwrap_or(true)
-                    {
+                        .map(|n| n.to_vec())
+                        .unwrap_or_default();
+                    if subtype == b"Form" {
+                        if let Some(inner) = sub(&dict_owned, b"Resources") {
+                            stack.push((inner, depth - 1));
+                        }
+                        continue;
+                    }
+                    if subtype != b"Image" {
                         continue;
                     }
                     let w = dict_owned
@@ -3550,51 +3855,57 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                     if w == 0 || h == 0 {
                         continue;
                     }
-                    let filter = dict_owned
-                        .get(b"Filter")
-                        .ok()
-                        .and_then(|v| v.as_name().ok());
-                    let data = &content;
-
-                    let img: Option<image::DynamicImage> = match filter {
-                        Some(b"DCTDecode") => image::load_from_memory(data).ok(),
+                    // /Filter is a name OR an array — pdfTeX writes `[/FlateDecode]`,
+                    // which `as_name()` cannot read, so every image in those PDFs was
+                    // silently skipped (5 arXiv papers, 0 images).
+                    let filter: Option<&[u8]> = match dict_owned.get(b"Filter").ok() {
+                        Some(lopdf::Object::Name(n)) => Some(n.as_slice()),
+                        Some(lopdf::Object::Array(a)) => {
+                            a.iter().rev().find_map(|o| o.as_name().ok())
+                        }
+                        _ => None,
+                    };
+                    let decoded: Option<image::DynamicImage> = match filter {
+                        Some(b"DCTDecode") => image::load_from_memory(&content).ok(),
                         Some(b"FlateDecode") => {
                             let mut dec = Vec::new();
-                            if ZlibDecoder::new(&data[..]).read_to_end(&mut dec).is_err() {
+                            if ZlibDecoder::new(&content[..])
+                                .read_to_end(&mut dec)
+                                .is_err()
+                            {
                                 continue;
                             }
-                            let bpp = dict_owned
-                                .get(b"BitsPerComponent")
-                                .ok()
-                                .and_then(|v| v.as_i64().ok())
-                                .unwrap_or(8) as u8;
-                            if bpp != 8 {
-                                continue;
-                            }
-                            let cs = dict_owned
-                                .get(b"ColorSpace")
-                                .ok()
-                                .and_then(|v| v.as_name().ok());
-                            match cs {
-                                Some(b"DeviceRGB") => image::RgbImage::from_raw(w, h, dec)
-                                    .map(image::DynamicImage::ImageRgb8),
-                                _ => image::GrayImage::from_raw(w, h, dec)
-                                    .map(image::DynamicImage::ImageLuma8),
-                            }
+                            flate_to_image(w, h, dec)
                         }
                         _ => None,
                     };
 
-                    if let Some(img) = img {
-                        let rgba = img.to_rgba8();
+                    if let Some(image) = decoded {
+                        let rgba = image.to_rgba8();
                         let mut buf = Vec::new();
                         rgba.write_to(
                             &mut std::io::Cursor::new(&mut buf),
                             image::ImageFormat::Png,
                         )?;
-                        use base64::Engine;
-                        out.push(json!({"page": pn, "index": idx, "width": w, "height": h,
-                            "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                        let meta = json!({"page": pn, "index": idx, "width": w, "height": h});
+                        let name = format!("img_p{pn:03}_{idx:03}.png");
+                        match dir {
+                            Some(d) => {
+                                std::fs::create_dir_all(d)?;
+                                let full = std::path::Path::new(d).join(&name);
+                                std::fs::write(&full, &buf)?;
+                                let mut e = meta;
+                                e["path"] = json!(full.display().to_string());
+                                out.push(e);
+                            }
+                            None => {
+                                use base64::Engine;
+                                let mut e = meta;
+                                e["image_b64"] =
+                                    json!(base64::engine::general_purpose::STANDARD.encode(&buf));
+                                out.push(e);
+                            }
+                        }
                         idx += 1;
                     }
                 }
@@ -3602,6 +3913,35 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
         }
     }
     Ok(out)
+}
+
+/// Decode inflated image samples by their count. /ColorSpace is frequently an
+/// /ICCBased *reference* rather than a name, so the previous name match fell
+/// through to the gray branch and `from_raw` rejected the length — a silent skip.
+fn flate_to_image(w: u32, h: u32, dec: Vec<u8>) -> Option<image::DynamicImage> {
+    let px = (w as usize).checked_mul(h as usize)?;
+    match dec.len() {
+        n if n == px => image::GrayImage::from_raw(w, h, dec).map(image::DynamicImage::ImageLuma8),
+        n if n == px * 3 => {
+            image::RgbImage::from_raw(w, h, dec).map(image::DynamicImage::ImageRgb8)
+        }
+        // CMYK: 4 samples/px. Naive conversion, enough to read a figure.
+        n if n == px * 4 => {
+            let rgb: Vec<u8> = dec
+                .chunks_exact(4)
+                .flat_map(|c| {
+                    let k = 255 - c[3] as u32;
+                    [
+                        ((255 - c[0] as u32) * k / 255) as u8,
+                        ((255 - c[1] as u32) * k / 255) as u8,
+                        ((255 - c[2] as u32) * k / 255) as u8,
+                    ]
+                })
+                .collect();
+            image::RgbImage::from_raw(w, h, rgb).map(image::DynamicImage::ImageRgb8)
+        }
+        _ => None,
+    }
 }
 
 /// Batch PDF extraction: extract files CONCURRENTLY. PDF parsing is CPU-bound
@@ -3637,4 +3977,20 @@ pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
             .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     })
+}
+
+#[cfg(test)]
+mod pdf_image_tests {
+    use super::flate_to_image;
+
+    #[test]
+    fn decodes_by_sample_count_not_by_colorspace_name() {
+        // ICCBased images carry no /ColorSpace name, so only the length can say.
+        assert!(flate_to_image(2, 2, vec![0; 4]).is_some()); // gray
+        assert!(flate_to_image(2, 2, vec![0; 12]).is_some()); // rgb
+        assert!(flate_to_image(2, 2, vec![0; 16]).is_some()); // cmyk -> rgb
+        // 16-bit samples and predictor rows never match w*h*n: still skipped.
+        assert!(flate_to_image(2, 2, vec![0; 8]).is_none());
+        assert!(flate_to_image(2, 2, vec![0; 14]).is_none());
+    }
 }

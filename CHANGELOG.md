@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-03
+
+### Added
+
+- **build**: OCI image labels (`org.opencontainers.image.title/description/source/
+  licenses/version`). ghcr renders `…description` as the package description, so
+  every published version read "No description provided" (0.11.0 → 0.15.3).
+  `engine-image.yml` passes the release tag as `VERSION` for the `version` label.
+- **mcp**: `observe what="assets"` — one pass over the page returning every link
+  (`internal` / `external` grouped by hostname, plus `other_schemes` counts for
+  `mailto:`/`tel:`/`ftp:`, each with file kind), every image (`<img>`, `srcset`,
+  lazy `data-src`, `<picture>`, icons/`og:image`, **and CSS `background-image`**),
+  and every video source (`<video>`/`<source>`/`poster`, known embeds, direct
+  `.mp4`/`.m3u8` links, HLS/DASH requests). `only=links|images|videos` narrows it;
+  `max` caps each array. Companion `webrain_batch op:"assets"` does the same across
+  `urls[]` (per-array cap defaults to 20, counts plus a sample).
+- **skills**: new `monitoring` skill — the self-contained `webrain_eval` tick
+  (≤25 s, samples + distinct count), the agent-driven repeat-and-diff loop,
+  external cron for slower intervals, re-pinning the target every tick, and the
+  gaps it must not paper over (no scheduler, no history, `watch` is video-only,
+  eval answers on the wrong target, `batch` can report `ok` with `ok:0`).
+  Measured on 20 live sites: 20/20 pages, 35.9 s at concurrency 4.
+
+- **mcp**: `webrain_pdf op=extract` now reports, per document, which pages the
+  text layer cannot deliver: `layout.pages_with_captions`,
+  `layout.pages_with_raster_images` and `layout.pages_needing_vision`. Figures
+  drawn as **vector art** appear in no raster and in no caption-free text, so the
+  caller previously had to guess which pages to render; measured on a 9-page
+  report, 6 pages flagged (1 has the only raster, page 7 has 0 chars of text and
+  its appendix/Figure 2 caption exist only as pixels).
+- **mcp**: `webrain_pdf op=render` takes `dir` and writes the page PNGs there
+  (`p001.png`, or `p001_t0x0.png` with `tile_size`), returning `path` instead of
+  `image_b64`. A 9-page 150-dpi render was **15 MB of base64** in the reply — the
+  whole context budget for one document; with `dir` the same render answers in
+  ~500 bytes and the paths feed `webrain_vision{op:"ask", images:[...]}` directly.
+- **mcp**: `observe{what:pixel}` takes `tiles_dir` and writes the PNGs there,
+  returning paths instead of `png_b64`; `webrain_vision{op:"ask"}` takes
+  `images:[paths]` and reads them from disk. A 2-tile page reply drops from
+  ~1.87 MB of base64 to 226 bytes with no accuracy change (measured on HN), and
+  vision needs no second capture. Tiles are cropped from **one** page raster
+  instead of one `Page.captureScreenshot` per tile.
+- **core**: the vision `ask` chain is now a **table**, not four hardcoded
+  `if let` blocks: `VISION_PROVIDERS` lists every OpenAI-compatible hop in
+  priority order — OpenRouter → OpenAI → **Anthropic/Claude** → **Gemini** →
+  Fireworks → **DashScope/Qwen** → Groq → bundled local Qwen3-VL-2B. Anthropic
+  and Gemini are reached through their OpenAI-compatibility endpoints, so they
+  need no second request builder, and the vendor spellings (`CLAUDE_API_KEY`,
+  `GOOGLE_API_KEY`, `QWEN_API_KEY`) are accepted as aliases. Adding a provider is
+  one row; `vision_targets()` reads the env, `vision_targets_from()` stays pure
+  for tests. Endpoints live-checked without a key (anthropic 401, gemini 400,
+  dashscope 401 — they exist and reject the request, not 404).
+- **build**: every release target now builds with `--features pdfium`, and the CLI
+  fetches the library it binds at runtime: `webrain install pdfium` downloads the
+  bblanchon/pdfium-binaries build for this OS/arch into the webrain engine cache
+  (`pdfium-linux-x64`, `-linux-arm64`, `-mac-x64`, `-mac-arm64`, `-win-x64`,
+  `-win-arm64`), and `op=render` looks there first, then beside the executable,
+  before falling back to the system loader. So `op=render` works on a released
+  binary with no `PATH` edit and no source build. musl is the documented
+  exception: the published library is glibc-linked, so Alpine keeps
+  `op=extract` / `op=images`. CI lints the workspace *with* the feature so it
+  cannot rot out of the release matrix again.
+- **skills**: new `page-tiles` skill — text-before-pixels decision rule, the
+  `navigate` → `observe{what:pixel, tiles_dir}` → `vision{images}` recipe, tile
+  geometry, and the prompt shapes a small VLM needs.
+
+### Fixed
+
+- **core**: `webrain_pdf op=extract` returned a **16.8 MB** reply for a 4 MB paper.
+  Fixing the image walker made `extract` inline every figure as base64, so a
+  nine-page report with 29 figures carried all of them in the tool result. The
+  extract now keeps only the inventory (`page`, `index`, `width`, `height`) —
+  the bytes belong to `op=images dir:…`. Reply back to 100 KB.
+- **core**: `webrain_pdf op=images` reported **0 images** for any PDF whose figures are
+  embedded *pages*. An included page arrives as a `/Subtype /Form` XObject and keeps its
+  images in its own `/Resources`; the walker only visited the page's direct XObjects.
+  arXiv 2206.01062: 0 → **29** images (8 of them Figure 4's panels, 6 Figure 6's, both
+  1025×1025), with a depth-capped stack so a nested form cannot loop. `op=images` also
+  takes `dir` and writes `img_pNNN_III.png` at native size — 29 figures inline were
+  ~20 MB of base64.
+- **core**: the vision failover reported only the **last** provider error, so a run whose
+  real faults were "OpenRouter out of credits" **and** "Groq never had that model" **and**
+  "no local model installed" surfaced as one misleading `model 404`. Every failure is
+  now listed with its endpoint, and an empty target list says which key or installer is
+  missing. Groq's hop also pointed at `qwen/qwen3.6-27b`, which Groq does not host — its
+  catalog has `qwen/qwen3.8-27b`, so that hop was dead on every call.
+- **mcp**: `webrain_stats` on Windows/macOS returned five `null`s behind
+  `available:false`, which reads like a broken tool. It now says why (no `/proc`, host
+  stats are Linux-only) and names the platform.
+- **core**: `layout.pages_with_captions` / `pages_needing_vision` were **0-based**
+  while their siblings `pages_with_tables` / `pages_with_columns` and
+  `pages_with_raster_images` are 1-based. Mixed origins also un-filtered the
+  caption test: a captioned page that *does* carry a raster was still reported as
+  needing vision, because the two lists were compared across different numbering.
+  All five per-page lists are now 1-based.
+- **core**: `webrain_pdf op=extract` returned **zero embedded images** for every
+  real PDF. `/Resources` and `/XObject` are indirect references (`/Resources 100
+  0 R`), and the unresolved lookup matched nothing on any page; a single-element
+  `/Filter [ /FlateDecode ]` array was also unreadable by `as_name()`. Raw samples
+  are now decoded by their count instead of by a `/ColorSpace` name, which is
+  normally an `/ICCBased` reference. Verified on arXiv 1706.03762: 0 → 3 images.
+  The other four test papers hold no raster images at all (vector-only `Form`
+  figures), so they correctly stay at 0 — use `op=render` for those.
+- **docs**: the tool count said 17 everywhere; the server advertises **18**
+  (`webrain_stats` was never documented). Corrected in the README, ARCHITECTURE,
+  `webrain-guide`/`webrain-mcp` headers, the whole docs site (incl. the terminal
+  mocks and hero SVGs), the `webrain_guide` tool text, and the GitHub repo
+  description. Batch ops now also list `markdown`, `pdf` and `assets`.
+- **mcp**: `observe what="images"` runs the asset scanner, so it now returns
+  `srcset`/lazy/picture sources and CSS background art — the images a page is
+  mostly made of — instead of only `document.images`.
+- **mcp**: asset link counts are deduped before the array cap. Counting inside the
+  cap guard made every page report exactly the limit (measured: 14 of 20 sites
+  "had" exactly 6 internal links).
+- **mcp**: asset embed detection compares **hostname suffixes**. A substring test
+  matched Google's signin URL (`…continue=…youtube.com…`), so a logged-out YouTube
+  watch page reported an embed that was a login redirect.
+- **ci**: the image workflow pushes `…:latest` when — and only when — the built
+  version is the newest release. ghcr previously carried bare versions only
+  (`0.11.0`, `0.12.1`), so `docker pull webrain:latest` had no defined meaning.
+- **build**: `webrain-cli` forwards the `pdfium` feature to `webrain-mcp`.
+  `webrain-mcp/src/lib.rs` gates the `pdf_render` arm on *its own* feature, so
+  `cargo build -p webrain-cli --features pdfium` used to fail with "package
+  `webrain-cli` does not contain this feature" — `op:"render"` (PNG tiles for
+  vision) was unreachable in every shipped binary. Verified: 5 arXiv PDFs
+  rendered at 110 dpi with `pdfium.dll` on `PATH`.
+
 ## [0.15.3] - 2026-11-03
 
 ### Added

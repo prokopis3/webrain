@@ -309,22 +309,16 @@ pub async fn ask_viewport(
     prompt: &str,
     clip: Option<(f64, f64, f64, f64)>,
     tiles: &[(f64, f64, f64, f64)],
+    // Tile file paths (from `observe what=pixel tiles_dir`). Read from disk —
+    // no second capture, and the paths cost the caller no base64.
+    images: &[String],
     scale: f64,
 ) -> anyhow::Result<String> {
-    // Cloud-first provider chain: OpenRouter → OpenAI → Fireworks → Groq →
-    // bundled local Qwen3-VL-2B. Try each in order — a flaky provider falls
-    // through to the next instead of killing the op (live hit: OpenRouter
-    // returned empty, Groq was fine).
-    let openrouter = std::env::var("OPENROUTER_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let openai = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let fireworks = std::env::var("FIREWORKS_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let groq = std::env::var("GROQ_API_KEY").ok().filter(|s| !s.is_empty());
+    // Cloud-first provider chain: see `video::VISION_PROVIDERS` for the ordered
+    // list (OpenRouter → OpenAI → Anthropic → Gemini → Fireworks → DashScope →
+    // Groq) then bundled local Qwen3-VL-2B. Try each in order — a flaky
+    // provider falls through to the next instead of killing the op (live hit:
+    // OpenRouter returned empty, Groq was fine).
     let local = crate::install::vision_local();
     let (s, _m, _p): (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) = local
         .as_ref()
@@ -337,16 +331,17 @@ pub async fn ask_viewport(
             )
         });
     let targets = crate::video::vision_targets(
-        openrouter.as_deref(),
-        openai.as_deref(),
-        fireworks.as_deref(),
-        groq.as_deref(),
         local.as_ref().map(|t| t.1.as_path()),
         local.as_ref().map(|t| t.2.as_path()),
     );
     if targets.is_empty() {
         anyhow::bail!(
-            "no vision backend — set OPENROUTER_API_KEY/OPENAI_API_KEY/FIREWORKS_API_KEY/GROQ_API_KEY or run `webrain install vision`"
+            "no vision backend — set one of {} or run `webrain install vision`",
+            crate::video::VISION_PROVIDERS
+                .iter()
+                .map(|(names, _, _)| names.join("/"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
 
@@ -366,7 +361,18 @@ pub async fn ask_viewport(
         off[0].as_f64().unwrap_or(0.0),
         off[1].as_f64().unwrap_or(0.0),
     );
-    let content: Value = if !tiles.is_empty() {
+    let content: Value = if !images.is_empty() {
+        // Already-captured tiles: zero CDP calls, and the caller sent paths
+        // instead of megabytes of base64 in the tool arguments.
+        let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
+        for p in images {
+            let bytes =
+                std::fs::read(p).with_context(|| format!("vision: cannot read tile {p}"))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            c.push(json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}));
+        }
+        json!(c)
+    } else if !tiles.is_empty() {
         let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
         for (x, y, w, h) in tiles {
             let png = backend
@@ -408,7 +414,11 @@ pub async fn ask_viewport(
         // Failover: first provider that returns content wins; try the next on
         // error. (Only providers whose API key is set are in `targets` — the
         // env-key gate IS the consent for cloud upload; no key, no cloud.)
-        let mut last_err = None;
+        // Every failure is kept, not just the last: reporting only `last_err`
+        // showed "model qwen/qwen3.6-27b does not exist" for a run whose real
+        // problem was that no local model was installed and every cloud model id
+        // 404s — the message pointed at the wrong fix.
+        let mut failures: Vec<String> = Vec::new();
         for t in &targets {
             let (endpoint, auth, model_name): (String, Option<String>, String) = match t {
                 crate::video::VisionTarget::Cloud {
@@ -417,12 +427,20 @@ pub async fn ask_viewport(
                     key,
                 } => (endpoint.clone(), Some(key.clone()), model.clone()),
                 crate::video::VisionTarget::Local { model, mmproj } => {
-                    let e = crate::video::llama_vision_endpoint(&s, model, mmproj)?;
                     let n = model
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "qwen3-vl-2b".to_string());
-                    (e, None, n)
+                    // A spawn failure is a provider failure, not a reason to abort
+                    // the chain: `?` here made a missing local model look like the
+                    // cloud model id was wrong.
+                    match crate::video::llama_vision_endpoint(&s, model, mmproj) {
+                        Ok(e) => (e, None, n),
+                        Err(err) => {
+                            failures.push(format!("{n} (local): {err}"));
+                            continue;
+                        }
+                    }
                 }
             };
             // The local 2B narrates ~600 tokens before it emits its answer, so a
@@ -439,14 +457,31 @@ pub async fn ask_viewport(
             });
             match crate::video::post_vision(&agent, &endpoint, auth.as_deref(), &body) {
                 Ok(ans) => return Ok(ans),
-                Err(e) => last_err = Some(e),
+                Err(e) => failures.push(format!("{model_name} @ {endpoint}: {e}")),
             }
         }
+        if failures.is_empty() {
+            return Err(anyhow::anyhow!(
+                "vision ask: no provider configured — set {} or install the local model with `webrain install vision`",
+                crate::video::VISION_PROVIDERS
+                    .iter()
+                    .map(|(names, _, _)| names.join("/"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+        let hint = if failures.len() == targets.len() {
+            " (every configured provider failed — a 404/model-not-found means that cloud model id is gone; the local Qwen3-VL-2B is the fallback and is only in the chain once `webrain install vision` has downloaded it)"
+        } else {
+            ""
+        };
         Err(anyhow::anyhow!(
-            "vision ask: {}",
-            last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "all vision providers failed".to_string())
+            "vision ask: {} provider(s) failed:{}{hint}",
+            failures.len(),
+            failures
+                .iter()
+                .map(|f| format!("\n  - {f}"))
+                .collect::<String>()
         ))
     })
     .await
@@ -587,7 +622,7 @@ pub async fn index_current_page(
     max_tiles: usize,
 ) -> anyhow::Result<Value> {
     let engine = crate::engines::TileEngine::new(tile_w, tile_h, max_tiles);
-    let tiles = engine.tile(backend).await?;
+    let tiles = engine.tile(backend, None).await?;
     if tiles.is_empty() {
         anyhow::bail!("no tiles captured — navigate first, or the page is empty");
     }

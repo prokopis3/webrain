@@ -62,25 +62,31 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-17 TOOLS — match the request to a boundary:
+18 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
-                     console|flatten|fit|clean|screenshot|pixel|page_info|annotate|media)
+                     assets|console|flatten|fit|clean|screenshot|pixel|page_info|
+                     annotate|media) — assets = every link internal+external+
+                     non-http scheme, images incl. CSS background-image, video
+                     sources+embeds, in one pass
   webrain_interact   drive the page (action: click|click_coords|type|press|scroll|
                      nav|tab|select|hover|check|dialog|wait|upload|dismiss_overlays|
                      add_init_script)
   webrain_extract    structured data from the page (mode: schema|regex|jsonld|table|
                      autoschema|bm25)
   webrain_scrape     fast no-browser GET of one URL (static pages only)
-  webrain_batch      same op across many URLs in parallel tabs (op: fetch|extract|
-                     interact|eval|screenshot) + cdp_urls per-proxy fan-out
+  webrain_batch      same op across many URLs in parallel tabs (op: fetch|markdown|
+                     extract|interact|eval|assets|screenshot|pdf) + cdp_urls
+                     per-proxy fan-out
   webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
   webrain_search     web search (duckduckgo|google|bing|brave)
   webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
                      engine; duckduckgo|bing|auto are pure HTTP (no browser),
                      google|brave render in the connected CDP engine (auto-launched
                      guest Chrome); relevance-filtered + deduped + paginated + falls back
-  webrain_pdf        pdf work (op: page|extract|render|images)
+  webrain_pdf        pdf work (op: page|extract|render|images) — extract takes a
+                     path or http(s) URL (paths[] batches); render = PNG tiles and
+                     needs a --features pdfium build + pdfium.dll/libpdfium.so on PATH
   webrain_download   files/media (engine: http|ytdlp)
   webrain_watch      video → transcript + frames
   webrain_session    browser/auth/session state (op: open|close|list|cookies|
@@ -89,6 +95,8 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_eval       arbitrary JS (the escape hatch)
   webrain_eval_in_frame  run JS inside a cross-origin iframe (isolated world) →
                      exact reCAPTCHA/hCaptcha grid + verify geometry
+  webrain_stats      host health (load, memory, browser process count) — separates
+                     "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
@@ -193,6 +201,19 @@ EXTRACTION MATRIX
                                       ddg+bing then tops up from baidu/yandex/yahoo —
                                       yahoo last, it is the one that pages deep)
 - relevance filter                 -> extract(mode=bm25)
+- PDF (path or URL)                -> webrain_pdf(op=extract, path|paths[]) — text + pipe
+                                      tables + layout flags, no browser, ~5 s for 9 pages.
+                                      Text first, always: it is ~50x faster than pixels.
+- PDF figures, as files            -> webrain_pdf(op=images, path, dir) — native-size PNGs,
+                                      nested Form XObjects included, paths in the reply
+- PDF pages as pixels             -> webrain_pdf(op=render, path, pages[], dpi:150, dir) —
+                                      needs pdfium: `webrain install pdfium` once
+- read the pixels                 -> vision(op=ask, images:[<paths from the two calls
+                                      above>], prompt) — files are read from disk, no tab
+- which PDF pages need pixels     -> the `layout` block of op=extract
+                                      (pages_needing_vision / _with_raster_images /
+                                      _with_captions); ask vision to DESCRIBE a figure or
+                                      read a table, never to transcribe a whole page
 - watch a video (URL or local file)-> webrain_watch(url) — timestamped transcript
                                       (yt-dlp captions -> local whisper-cli -> Whisper
                                       STT API) + frame file paths; the LLM reads frames
@@ -335,8 +356,12 @@ ENVIRONMENT — read at PROCESS START, a tool call cannot change them
   - WEBRAIN_USER / WEBRAIN_PASS — login env fallback (the vault is tried first).
   - BRAVE_API_KEY / SERPAPI_API_KEY — paid SERP tiers; Brave also makes
     engine=brave work with no browser. Unset only lowers the provider tier.
-  - GROQ_API_KEY / OPENAI_API_KEY / FIREWORKS_API_KEY / OPENROUTER_API_KEY —
-    cloud transcript + vision ask keys. Unset falls back to bundled local models.
+  - Vision `ask` chain, in order: OPENROUTER_API_KEY → OPENAI_API_KEY →
+    ANTHROPIC_API_KEY (or CLAUDE_API_KEY) → GEMINI_API_KEY (or GOOGLE_API_KEY)
+    → FIREWORKS_API_KEY → DASHSCOPE_API_KEY (or QWEN_API_KEY) → GROQ_API_KEY →
+    bundled local Qwen3-VL-2B. Every hop is the same OpenAI-compatible
+    chat/completions call, so one key is enough; unset keys merely drop a hop.
+    Cloud transcript (STT) is a different list: GROQ → OPENAI → FIREWORKS.
   - EMBED_URL / EMBED_MODEL / EMBED_API_KEY (and EMBED_FALLBACK_*) — embeddings
     for webrain_vision index/retrieve.
   - WEBRAIN_HTTP_CACHE=0, WEBRAIN_HTTP_CACHE_DIR, WEBRAIN_DOWNLOAD_MAX_BYTES,
@@ -454,7 +479,7 @@ pub fn guide_from_args(args: &Value) -> Value {
         );
         for (title, body) in &sections {
             // The tool list is used on nearly every call, so it stays inline.
-            if title.starts_with("17 TOOLS") {
+            if title.starts_with("18 TOOLS") {
                 text.push_str(&format!("\n{title}\n{body}"));
                 continue;
             }
@@ -599,6 +624,18 @@ pub fn host_stats() -> Value {
 
     json!({
         "available": load.is_some() && memory.is_some(),
+        // Say WHY instead of shipping five nulls: on Windows/macOS there is no
+        // /proc, and `available:false` alone reads like a broken tool rather than
+        // an unsupported platform. Process counts stay 0 there for the same reason.
+        "reason": if load.is_some() && memory.is_some() {
+            Value::Null
+        } else {
+            json!(format!(
+                "{} has no /proc — host stats are Linux-only by design (no sysinfo dependency, no shell). Pass a cdp_url or use the OS task manager for process counts.",
+                std::env::consts::OS
+            ))
+        },
+        "platform": std::env::consts::OS,
         "load": load.map(|(m1, m5, m15)| json!({"m1": m1, "m5": m5, "m15": m15})),
         "memory": memory.map(|(total_kb, available_kb)| json!({
             "total_mb": total_kb / 1024,
@@ -693,9 +730,11 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_observe",
-            "description": "Read the CURRENT page without navigating. Pick `what` (required): state (page state), a11y (accessibility tree, role/filter/max_nodes), semantic (text tree), html (raw HTML — LAST RESORT), images, console (page errors), flatten (Shadow-DOM text), fit (dense content), clean (boiled text), screenshot (base64+file, full_page/dir), pixel (vision tiles), page_info (scroll/viewport), annotate (numbered-box overlay), media (media URLs, url/wait_ms).",
+            "description": "Read the CURRENT page without navigating. Pick `what` (required): state (page state), a11y (accessibility tree, role/filter/max_nodes), semantic (text tree), html (raw HTML — LAST RESORT), images (img/srcset/lazy/icon + CSS background-image), assets (EVERY link internal+external+non-http scheme, images incl. backgrounds, video sources+embeds, one pass; optional only=links|images|videos and max per array), console (page errors), flatten (Shadow-DOM text), fit (dense content), clean (boiled text), screenshot (base64+file, full_page/dir), pixel (vision tiles), page_info (scroll/viewport), annotate (numbered-box overlay), media (network media URLs, url/wait_ms).",
             "inputSchema": {"type": "object", "properties": {
-                "what": {"type": "string", "enum": ["state","a11y","semantic","html","images","console","flatten","fit","clean","screenshot","pixel","page_info","annotate","media"]},
+                "what": {"type": "string", "enum": ["state","a11y","semantic","html","images","assets","console","flatten","fit","clean","screenshot","pixel","page_info","annotate","media"]},
+                "only": {"type": "string", "enum": ["links","images","videos"], "description": "assets: return just one group"},
+                "max": {"type": "integer", "description": "assets: per-array cap (default 300)"},
                 "role": {"type": "string", "description": "a11y: ARIA role filter"},
                 "filter": {"type": "string", "description": "a11y: name/value/css substring filter"},
                 "max_nodes": {"type": "integer", "description": "a11y: node cap"},
@@ -705,6 +744,7 @@ pub fn list_tools() -> Vec<Value> {
                 "tile_width": {"type": "number", "default": 800, "description": "pixel: tile width px"},
                 "tile_height": {"type": "number", "default": 800, "description": "pixel: tile height px"},
                 "max_tiles": {"type": "integer", "default": 16, "description": "pixel: max tiles"},
+                "tiles_dir": {"type": "string", "description": "pixel: write the tiles here and return paths instead of base64 (a 660 KB PNG page is ~10 MB across 16 tiles — use this, then feed the paths to webrain_vision{op:'ask', images:[...]})"},
                 "word_threshold": {"type": "integer", "default": 2, "description": "clean: min word length"},
                 "format": {"type": "string", "enum": ["png", "jpeg", "webp", "avif"], "default": "png", "description": "screenshot: image encoding — webp/jpeg are ~10x smaller than png; avif is smallest but needs a CPU re-encode (CDP has no avif encoder)"},
                 "quality": {"type": "integer", "default": 80, "description": "screenshot: jpeg/webp quality 1-100 (ignored for png)"},
@@ -776,10 +816,11 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot | pdf (PDF urls[] → markdown + tables + layout, browserless). concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | assets (every link internal+external, images incl. CSS backgrounds, video sources+embeds — counts plus a `max` sample per URL) | screenshot | pdf (PDF urls[] → markdown + tables + layout, browserless). concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema","pdf"], "description": "pdf: PDF extraction over urls[] (http(s) links or local paths) — download + pure-Rust parse, NO browser or tab. Use it for PDF lists; fetch/markdown on a PDF URL return an empty page because Chrome renders PDFs in a viewer plugin with no DOM."},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema","pdf","assets"], "description": "pdf: PDF extraction over urls[] (http(s) links or local paths) — download + pure-Rust parse, NO browser or tab. Use it for PDF lists; fetch/markdown on a PDF URL return an empty page because Chrome renders PDFs in a viewer plugin with no DOM. assets: per-array cap comes from `max` (default 20)."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
+                "max": {"type": "integer", "description": "assets: per-array cap per URL (default 20, max 500)"},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "query": {"type": "string", "description": "markdown: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM)"},
                 "top_k": {"type": "integer", "description": "markdown: keep this many query-relevant chunks (requires query; 0 = whole document)"},
@@ -871,7 +912,8 @@ pub fn list_tools() -> Vec<Value> {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "extract: batch paths"},
                 "pages": {"type": "array", "items": {"type": "integer"}, "description": "render/images: page numbers (1-based), omit = all"},
                 "dpi": {"type": "number", "default": 150, "description": "render: DPI"},
-                "tile_size": {"type": "integer", "description": "render: split pages into square tiles of this px"}
+                "tile_size": {"type": "integer", "description": "render: split pages into square tiles of this px"},
+                "dir": {"type": "string", "description": "render/images: write the PNGs here and return paths instead of base64. render writes p001.png (or p001_t0x0.png with tile_size); images writes img_p001_000.png at the embedded image's native size. A 9-page 150-dpi render is ~15 MB of base64 and 29 extracted figures can be ~20 MB — paths keep both out of the context window."}
             }, "required": ["op"]}
         }),
         json!({
@@ -928,6 +970,7 @@ pub fn list_tools() -> Vec<Value> {
                 "prompt": {"type": "string", "description": "ask: question for the local vision model"},
                 "scale": {"type": "number", "default": 1, "description": "ask: upscale factor for each clip (>1 = higher-res capture — use 3 for small captcha tiles so the 2B model reads them accurately)"},
                 "tiles": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}}, "description": "ask: BATCH mode — array of clip regions; each is captured at `scale` and ALL sent in ONE llama request as numbered images (watch-frames batching). Use for per-tile captcha classification; the prompt must state the numbering (1..N)."},
+                "images": {"type": "array", "items": {"type": "string"}, "description": "ask: file paths of tiles already saved by observe{what:pixel, tiles_dir}. Read from disk — no second capture, and paths keep the tool call small instead of megabytes of base64."},
                 "x": {"type": "number", "description": "ask: clip region x (default full viewport)"},
                 "y": {"type": "number", "description": "ask: clip region y"},
                 "w": {"type": "number", "description": "ask: clip region width"},
@@ -992,6 +1035,174 @@ const PAGE_INFO_JS: &str = r#"(() => {
     total_pages: vh > 0 ? +(ph / vh).toFixed(1) : 0,
     position_pct: ph > vh ? Math.round((sy / (ph - vh)) * 100) : 0 };
 })()"#;
+
+/// One-pass page inventory: EVERY link kind (internal / external / non-http
+/// scheme), images including CSS `background-image` (the ones `document.images`
+/// cannot see), and video sources + embeds. `__LIM__` caps each array, so the
+/// single-page read and the batch read share this one expression instead of two
+/// near-copies that drift.
+///
+/// Why not extend `LINKS_JS` (the `navigate` field): that one is same-origin and
+/// capped at 200 for context economy — every navigate pays for it. This is opt-in
+/// (`observe what=assets`), so it can afford the wider net. Backgrounds need
+/// `getComputedStyle` per element, hence the element cap: 2500 elements is ~0.3 s.
+const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
+  try {
+    const LIM = __LIM__;
+    const host = location.hostname;
+    const abs = (u) => { if (!u) return ''; try { return new URL(u, location.href).href; } catch (e) { return ''; } };
+    const strip = (u) => u.split('#')[0];
+    const kindOf = (u) => {
+      const seg = (u.split('?')[0].split('/').pop() || '').toLowerCase();
+      const d = seg.lastIndexOf('.');
+      const e = d > -1 ? seg.slice(d + 1) : '';
+      if (!e) return 'page';
+      if (e === 'pdf') return 'pdf';
+      if (['jpg','jpeg','png','gif','webp','avif','svg','ico','bmp','tif','tiff'].indexOf(e) > -1) return 'image';
+      if (['mp4','webm','mov','m4v','avi','mkv','flv'].indexOf(e) > -1) return 'video';
+      if (['m3u8','mpd'].indexOf(e) > -1) return 'stream';
+      if (['mp3','m4a','ogg','wav','flac','opus'].indexOf(e) > -1) return 'audio';
+      if (['doc','docx','xls','xlsx','ppt','pptx','csv','txt','md','json','xml','rss','atom'].indexOf(e) > -1) return 'doc';
+      if (['zip','rar','7z','tar','gz','xz','bz2','apk','dmg','iso','msi','exe','deb','rpm'].indexOf(e) > -1) return 'archive';
+      return 'page';
+    };
+
+    // ---- links: every kind. Relative and protocol-relative resolve to http(s);
+    // anything else (mailto, tel, javascript, data, ftp) is counted by scheme.
+    const inAll = new Set(), exAll = new Set(), other = {};
+    const internal = [], external = [];
+    const pushLink = (raw, text) => {
+      const low = raw.toLowerCase();
+      const hasScheme = /^[a-z][a-z0-9+.-]*:/.test(low);
+      const isHttp = low.startsWith('http://') || low.startsWith('https://') || low.startsWith('//');
+      if (hasScheme && !isHttp) {
+        const sc = low.split(':')[0];
+        if (sc && sc.length < 16 && sc !== 'javascript') other[sc] = (other[sc] || 0) + 1;
+        return;
+      }
+      const u = strip(abs(raw));
+      if (!u || !/^https?:/i.test(u)) return;
+      let h = '';
+      try { h = new URL(u).hostname; } catch (e) { return; }
+      const sameSite = h === host || h.endsWith('.' + host);
+      // Dedupe and count BEFORE the cap. Adding to the seen-set only inside the
+      // cap guard made `counts.internal` report the cap (6) instead of the real
+      // total — measured on 14 live sites, every one read exactly the limit.
+      const seen = sameSite ? inAll : exAll;
+      if (seen.has(u)) return;
+      seen.add(u);
+      const item = { url: u, kind: kindOf(u), text: (text || '').replace(/\s+/g, ' ').trim().slice(0, 80) };
+      if (sameSite) {
+        if (internal.length < LIM) internal.push(item);
+      } else if (external.length < LIM) {
+        external.push(item);
+      }
+    };
+    for (const el of document.querySelectorAll('a[href], area[href]')) {
+      pushLink(el.getAttribute('href') || '', el.textContent || '');
+    }
+
+    // ---- images: <img> (+ lazy attrs/srcset), <picture>, icon/og links, and CSS
+    // background-image. `data:` URIs carry no URL an agent can fetch — skipped.
+    const imgSeen = new Set(), images = [];
+    const pushImg = (u, kind, alt) => {
+      if (!u || !/^https?:/i.test(u) || imgSeen.has(u)) return;
+      imgSeen.add(u);
+      if (images.length < LIM) images.push({ src: u, kind: kind, alt: (alt || '').slice(0, 120) });
+    };
+    const srcset = (ss, kind) => {
+      if (!ss) return;
+      for (const part of ss.split(',')) {
+        const u = part.trim().split(/\s+/)[0];
+        if (u) pushImg(abs(u), kind, '');
+      }
+    };
+    for (const img of document.querySelectorAll('img, input[type=image]')) {
+      const alt = img.getAttribute('alt') || '';
+      pushImg(img.currentSrc || img.src || '', 'img', alt);
+      for (const a of ['data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-url']) {
+        const v = img.getAttribute(a);
+        if (v) pushImg(abs(v), 'lazy', alt);
+      }
+      srcset(img.getAttribute('srcset'), 'imgset');
+      srcset(img.getAttribute('data-srcset'), 'lazyset');
+    }
+    for (const s of document.querySelectorAll('picture source, video source[type^="image"]')) {
+      srcset(s.getAttribute('srcset'), 'picture');
+      const sc = s.getAttribute('src');
+      if (sc) pushImg(abs(sc), 'picture', '');
+    }
+    for (const l of document.querySelectorAll('link[rel~="icon"], link[rel="image_src"], link[rel="apple-touch-icon"], meta[property="og:image"], meta[name="twitter:image"]')) {
+      pushImg(abs(l.getAttribute('href') || l.getAttribute('content') || ''), 'icon', '');
+    }
+    const all = document.querySelectorAll('*');
+    const n = Math.min(all.length, 2500);
+    for (let i = 0; i < n; i++) {
+      let bi = '';
+      try { bi = getComputedStyle(all[i]).backgroundImage; } catch (e) { continue; }
+      if (!bi || bi === 'none') continue;
+      const found = bi.match(/url\((['"]?)([^'")]+)\1\)/g) || [];
+      for (const raw of found) {
+        const u = raw.replace(/^url\((['"]?)/, '').replace(/(['"]?)\)$/, '');
+        if (u && !u.startsWith('data:')) pushImg(abs(u), 'background', '');
+      }
+    }
+
+    // ---- videos: elements, posters, <source>, known embeds, direct file links,
+    // and HLS/DASH the page actually requested.
+    const vidSeen = new Set(), videos = [];
+    const pushVid = (u, kind) => {
+      if (!u || !/^https?:/i.test(u) || vidSeen.has(u)) return;
+      vidSeen.add(u);
+      if (videos.length < LIM) videos.push({ src: u, kind: kind });
+    };
+    for (const v of document.querySelectorAll('video, audio')) {
+      pushVid(abs(v.getAttribute('src') || v.currentSrc || ''), v.tagName.toLowerCase());
+      pushVid(abs(v.getAttribute('poster') || ''), 'poster');
+      for (const s of v.querySelectorAll('source')) pushVid(abs(s.getAttribute('src') || ''), 'source');
+    }
+    const embeds = ['youtube.com','youtu.be','youtube-nocookie.com','vimeo.com','dailymotion.com','twitch.tv','tiktok.com','brightcove.net','brightcove.com','jwplayer.com','wistia.com','wistia.net','streamable.com','rumble.com','loom.com','vidyard.com','bilibili.com','rutube.ru','kick.com'];
+    for (const f of document.querySelectorAll('iframe[src], embed[src], object[data]')) {
+      const u = abs(f.getAttribute('src') || f.getAttribute('data') || '');
+      if (!u) continue;
+      let hh = '';
+      try { hh = new URL(u).hostname.toLowerCase(); } catch (e) { continue; }
+      // Host suffix, not substring: Google's signin URL carries
+      // `continue=...youtube.com...` and matched a substring test, so a logged-out
+      // YouTube watch page reported an "embed" that was a login redirect.
+      for (const h of embeds) {
+        if (hh === h || hh.endsWith('.' + h)) { pushVid(u, 'embed'); break; }
+      }
+    }
+    for (const a of document.querySelectorAll('a[href]')) {
+      const u = strip(abs(a.getAttribute('href') || ''));
+      if (!u) continue;
+      const k = kindOf(u);
+      if (k === 'video' || k === 'stream' || k === 'audio') pushVid(u, 'link');
+    }
+    try {
+      for (const e of performance.getEntriesByType('resource')) {
+        const k = kindOf(e.name);
+        if (k === 'video' || k === 'stream') pushVid(e.name, 'network');
+      }
+    } catch (e) {}
+
+    return JSON.stringify({
+      url: location.href,
+      host: host,
+      counts: { internal: inAll.size, external: exAll.size, images: imgSeen.size, videos: vidSeen.size, scanned: n },
+      links: { internal: internal, external: external, other_schemes: other },
+      images: images,
+      videos: videos
+    });
+  } catch (e) { return JSON.stringify({ error: String(e) }); }
+})()"#;
+
+/// `__LIM__` → the per-array cap. Single-page reads want a full list; a 20-URL
+/// batch wants counts plus a sample, or the reply is megabytes of JSON.
+fn asset_scan_js(limit: usize) -> String {
+    ASSET_SCAN_JS_TMPL.replace("__LIM__", &limit.to_string())
+}
 
 /// crawl4ai `PruningContentFilter` borrow: no-query "fit" content extractor.
 /// Walks the DOM scoring blocks by text-vs-link density + tag importance, drops
@@ -1249,6 +1460,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
                     "page_info" => "webrain_page_info",
                     "annotate" => "webrain_annotate",
                     "media" => "webrain_media",
+                    "assets" => "webrain_assets",
                     _ => return None,
                 },
                 a,
@@ -1905,7 +2117,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .unwrap_or(800.0);
             let mt = args.get("max_tiles").and_then(|v| v.as_i64()).unwrap_or(16) as usize;
             let engine = TileEngine::new(tw, th, mt);
-            match engine.tile(backend).await {
+            let dir = args.get("tiles_dir").and_then(|v| v.as_str());
+            match engine.tile(backend, dir).await {
                 Ok(tiles) => json!({"status": "ok", "count": tiles.len(), "tiles": tiles}),
                 Err(e) => err(e),
             }
@@ -2398,6 +2611,17 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             .max(1) as usize;
                         batch_eval(b, urls, &autoschema_js(min), concurrency, opts).await
                     }
+                    // Link/image/video inventory across N URLs. `max` is small by
+                    // default (20) because this is counts-plus-sample: 20 URLs × 300
+                    // internal links would be megabytes of JSON in one reply.
+                    "assets" => {
+                        let lim = args
+                            .get("max")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 500) as usize)
+                            .unwrap_or(20);
+                        batch_eval(b, urls, &asset_scan_js(lim), concurrency, opts).await
+                    }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
             }
@@ -2792,11 +3016,47 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_get_images" => {
-            let js = r#"JSON.stringify(Array.from(document.images).map(img => ({src: img.currentSrc || img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight})).slice(0, 200))"#;
-            match backend.evaluate(js).await {
+            // Same scan the assets op runs, one array out of it: `<img srcset>` was
+            // invisible to the old `document.images` version, and CSS
+            // `background-image` (hero/banner/card art) was never returned at all —
+            // "get images" quietly missed the images a page is mostly made of.
+            match backend.evaluate(&asset_scan_js(200)).await {
                 Ok(v) => {
-                    let arr = parse_json_str(&v);
+                    let obj = parse_json_str(&v);
+                    let arr = obj.get("images").cloned().unwrap_or_else(|| json!([]));
                     json!({"status": "ok", "count": arr_len(&arr), "images": arr})
+                }
+                Err(e) => err(e),
+            }
+        }
+        "webrain_assets" => {
+            let lim = args
+                .get("max")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 2000) as usize)
+                .unwrap_or(300);
+            let only = args.get("only").and_then(|v| v.as_str()).unwrap_or("");
+            match backend.evaluate(&asset_scan_js(lim)).await {
+                Ok(v) => {
+                    let mut obj = parse_json_str(&v);
+                    if let Some(o) = obj.as_object_mut() {
+                        match only {
+                            "links" => {
+                                o.remove("images");
+                                o.remove("videos");
+                            }
+                            "images" => {
+                                o.remove("links");
+                                o.remove("videos");
+                            }
+                            "videos" => {
+                                o.remove("links");
+                                o.remove("images");
+                            }
+                            _ => {}
+                        }
+                    }
+                    json!({"status": "ok", "assets": obj})
                 }
                 Err(e) => err(e),
             }
@@ -2956,7 +3216,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                 }
             }
-            match ask_viewport(backend, &prompt, clip, &tiles, scale).await {
+            let images: Vec<String> = args
+                .get("images")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match ask_viewport(backend, &prompt, clip, &tiles, &images, scale).await {
                 Ok(ans) => json!({"status": "ok", "answer": ans}),
                 Err(e) => err(e),
             }
@@ -3290,7 +3559,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("17 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("18 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 
@@ -3410,6 +3679,7 @@ mod surface_tests {
             ("page_info", "webrain_page_info"),
             ("annotate", "webrain_annotate"),
             ("media", "webrain_media"),
+            ("assets", "webrain_assets"),
         ] {
             let (n, a) = fold("webrain_observe", json!({"what": what}));
             assert_eq!(n, legacy, "observe {what}");

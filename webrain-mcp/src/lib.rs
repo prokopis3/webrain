@@ -1,18 +1,12 @@
 // webrain-mcp: Model Context Protocol server for AI model browser automation.
 //
-// 17 tools: webrain_navigate, webrain_eval (JS→JSON), webrain_screenshot,
-// webrain_click/type/scroll (index-based), webrain_get_html, webrain_spider
-// (BFS/DFS), webrain_snapshot (D1 skip), webrain_pixel (PixelRAG tiles),
-// webrain_extract_json (CSS/XPath schema), webrain_extract_regex, webrain_pdf,
-// webrain_tab (multi-tab), webrain_a11y (accessibility tree),
-// webrain_semantic_tree (text snapshot), webrain_batch
-// (fetch/extract/screenshot over URLs), webrain_download (http+ytdlp),
-// webrain_search (4 engines + plus), webrain_nav, webrain_press, webrain_get_images,
-// webrain_media (CDP network capture), webrain_console, webrain_dismiss_overlays,
-// webrain_vision_index / webrain_vision_retrieve (PixelRAG cosine).
+// 18 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
+// is `tools::AGENT_GUIDE`. This header used to enumerate every tool and drifted two
+// rewrites behind both — one line pointing at the source of truth instead.
+//
 // webrain_navigate returns {url,title,text,elements}; elements are index-only.
-// Precise selectors come from webrain_a11y. No HTML→Markdown converter: text via
-// navigate, layout via webrain_pixel.
+// Precise selectors come from observe(what=a11y). No HTML→Markdown converter: text
+// via navigate, layout via observe(what=pixel).
 //
 // ponytail: one shared handle_rpc for stdio AND HTTP; HTTP gives per-connection
 // session isolation (lightpanda Mcp-Session-Id pattern, one backend per conn).
@@ -678,11 +672,13 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         .get("tile_size")
                         .and_then(|v| v.as_u64())
                         .map(|n| n as u32);
+                    let dir = arguments.get("dir").and_then(|v| v.as_str());
                     let result = match webrain_core::engines::pdf_render(
                         path,
                         pages.as_deref(),
                         dpi,
                         tile_size,
+                        dir,
                     ) {
                         Ok(v) => json!({"status":"ok","result":v}),
                         Err(e) => json!({"status":"error","message":e.to_string()}),
@@ -707,8 +703,10 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                             .collect()
                     });
                 let path = path.to_string();
+                let dir = arguments.get("dir").and_then(|v| v.as_str());
+                let dir = dir.map(|s| s.to_string());
                 let result = match tokio::task::spawn_blocking(move || {
-                    webrain_core::engines::pdf_images(&path, pages.as_deref())
+                    webrain_core::engines::pdf_images(&path, pages.as_deref(), dir.as_deref())
                 })
                 .await
                 {
