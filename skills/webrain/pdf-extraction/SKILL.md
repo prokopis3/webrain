@@ -79,7 +79,9 @@ single calls.
    `{op:"ask", x:0, y:0, w:850, h:420, scale:3, prompt:"Transcribe: TITLE and
    AUTHORS only. UNREADABLE if illegible."}`. CDP captures from the surface, so
    the clip need not fit on screen. Measured on 5 arXiv papers: 5/5 correct with
-   the clip + scale, 0/5 without.
+   the clip + scale, 0/5 without. Past page 1, clip the **whole sheet**
+   (`w:935, h:1210` at `dpi:110`) at `scale:2` — that read page 2's three section
+   headings and page 3's `Figure 1` caption exactly, so one ask covers a page.
 4. Prompt shape decides whether it answers or thinks aloud. A terse
    "TITLE and AUTHORS only. UNREADABLE if illegible." returns two clean lines;
    "give 3 short lines / the first 20 words" made the 2B model dump its whole
