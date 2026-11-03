@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eval answers on the wrong target, `batch` can report `ok` with `ok:0`).
   Measured on 20 live sites: 20/20 pages, 35.9 s at concurrency 4.
 
+- **mcp**: `webrain_pdf op=extract` now reports, per document, which pages the
+  text layer cannot deliver: `layout.pages_with_captions`,
+  `layout.pages_with_raster_images` and `layout.pages_needing_vision`. Figures
+  drawn as **vector art** appear in no raster and in no caption-free text, so the
+  caller previously had to guess which pages to render; measured on a 9-page
+  report, 6 pages flagged (1 has the only raster, page 7 has 0 chars of text and
+  its appendix/Figure 2 caption exist only as pixels).
 - **mcp**: `observe{what:pixel}` takes `tiles_dir` and writes the PNGs there,
   returning paths instead of `png_b64`; `webrain_vision{op:"ask"}` takes
   `images:[paths]` and reads them from disk. A 2-tile page reply drops from

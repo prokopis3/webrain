@@ -211,6 +211,33 @@ mod tests {
         assert_eq!(two[1], (0.0, 1200.0, 935.0, 400.0));
     }
 
+    // ponytail: one check for the caption scan — it decides which pages are worth
+    // a vision call, so both its hits and its misses matter.
+    #[test]
+    fn caption_scan_finds_figure_and_table_captions_only() {
+        assert!(super::has_caption(
+            "Figure 2: Title page of the DocLayNet paper"
+        ));
+        assert!(super::has_caption(
+            "Table 1: Runtime characteristics of Docling"
+        ));
+        assert!(super::has_caption(
+            "see Fig. 3 for the annotation interface"
+        ));
+        assert!(!super::has_caption(
+            "The tables were configured as shown in the diagram"
+        ));
+        assert!(!super::has_caption(
+            "Body text with no captions at all, just prose."
+        ));
+        // spliced figure text alone is NOT a caption — the page's real caption is
+        // what flags it, so this stays false by design
+        assert!(!super::has_caption(
+            "Interpupillary Slide Adjustment **Model AY11230**"
+        ));
+        assert!(!super::has_caption(""));
+    }
+
     #[test]
     fn crop_png_cuts_the_requested_region_and_refuses_empty_rects() {
         let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -3539,6 +3566,39 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
     // still return text+layout even if image extraction fails on exotic formats.
     let images = extract_images_lopdf(path, None).unwrap_or_default();
 
+    // Which pages can the text layer NOT deliver? Two cases, both cheap to spot:
+    // a caption whose figure is vector art (no raster in `images`, so op=images
+    // cannot see it either), and a page with no text at all. Those are the only
+    // pages worth paying a vision call for.
+    let mut raster_pages: Vec<u32> = images
+        .iter()
+        .filter_map(|i| i["page"].as_u64())
+        .map(|p| p as u32)
+        .collect();
+    raster_pages.sort_unstable();
+    raster_pages.dedup();
+    let mut captioned: Vec<u32> = Vec::new();
+    let mut empty: Vec<u32> = Vec::new();
+    for p in &pages_res.pages {
+        if p.markdown.trim().is_empty() {
+            empty.push(p.page);
+        }
+        if has_caption(&p.markdown) {
+            captioned.push(p.page);
+        }
+    }
+    let mut need_vision: Vec<u32> = captioned
+        .iter()
+        .copied()
+        .filter(|p| !raster_pages.contains(p))
+        .collect();
+    for p in &empty {
+        if !need_vision.contains(p) {
+            need_vision.push(*p);
+        }
+    }
+    need_vision.sort_unstable();
+
     Ok(json!({
         "path": requested,
         "pages": result.page_count,
@@ -3549,11 +3609,33 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
             "is_complex": result.layout.is_complex,
             "pages_with_tables": result.layout.pages_with_tables,
             "pages_with_columns": result.layout.pages_with_columns,
+            "pages_with_captions": captioned,
+            "pages_with_raster_images": raster_pages,
+            "pages_needing_vision": need_vision,
         },
         "markdown": result.markdown,
         "texts": texts,
         "images": images,
     }))
+}
+
+/// Does this page carry a figure/table caption? That is the marker for a figure
+/// whose *content* the text layer does not capture — it either drops it or, worse,
+/// splices the figure's inner labels into the prose. Hand-rolled scan: a regex
+/// dependency for one marker is not worth it.
+fn has_caption(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    for marker in ["figure ", "fig. ", "table "] {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(marker) {
+            let after = &lower[from + i + marker.len()..];
+            if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return true;
+            }
+            from += i + marker.len();
+        }
+    }
+    false
 }
 
 /// Render PDF pages as base64 PNGs — the PixelRAG alternative to text extraction.

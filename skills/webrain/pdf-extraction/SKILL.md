@@ -24,6 +24,23 @@ tiles earn their keep: on the measured paper a figure-only page returned **0 cha
 from the text layer, and vision recovered its appendix heading and Figure caption
 (along with a chain-of-thought preamble — take the last paragraph, not the first).
 
+`layout` now answers "which pages" for you, so you do not loop the whole document:
+
+| field | meaning | trust it for |
+|---|---|---|
+| `pages_with_raster_images` | pages holding an image XObject | fact — `op:images` can decode these |
+| `pages_with_captions` | pages whose text has a `Figure N` / `Table N` caption | hint — the figure may be **vector**, invisible to both the text layer and `op:images` |
+| `pages_needing_vision` | empty-text pages + captioned pages with no raster | the routing list (measured: 6 of 9 on a figure-heavy paper) |
+
+A caption is a hint, not a gate: it over-triggers on table pages whose table the text
+layer already recovered (10 pipe rows on the measured report), and it misses a figure
+whose caption sits on the *previous* page. Start from `pages_needing_vision`, then
+subtract any page whose `texts[n].text` already contains the content you need.
+
+A figure page is *not* a transcription job: ask vision to **describe the figure / read
+the table**, not to reproduce the page. Full-page transcription on a dense figure page
+burns the 2048-token budget on the preamble and truncates at ~1000 chars.
+
 ## When to use
 - "extract / read / summarise this PDF", "convert this paper to markdown"
 - "get the tables out of this report", "OCR this scanned document"
