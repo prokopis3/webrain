@@ -69,12 +69,26 @@ single calls.
    If it returns the "needs a build with --features pdfium" error, that is a
    capability limit, not a broken PDF: fall back to `op:images`, or open the PDF
    in real Chrome and screenshot it.
-2. `webrain_vision` `{op:"ask", prompt:"…"}` reads the rendered page; pass
-   `tiles:[{x,y,w,h}]` + `scale:3` to read small type (captions, table cells).
-3. For figure-by-figure descriptions, render the pages that
+2. **`webrain_vision` reads browser pixels, not files.** A rendered page becomes
+   readable only after you decode it to a PNG and navigate to it
+   (`webrain_navigate` → `file:///…/p1.png`; the tool then reports
+   `crippled:true` and empty `text` — that is normal, the pixels are there).
+   Never aim vision at the PDF itself: Chrome's PDF viewer at a 764×485 headless
+   viewport is so small the model invents a completely different document.
+3. Ask with a clip **larger than the viewport**, plus `scale:3`:
+   `{op:"ask", x:0, y:0, w:850, h:420, scale:3, prompt:"Transcribe: TITLE and
+   AUTHORS only. UNREADABLE if illegible."}`. CDP captures from the surface, so
+   the clip need not fit on screen. Measured on 5 arXiv papers: 5/5 correct with
+   the clip + scale, 0/5 without.
+4. Prompt shape decides whether it answers or thinks aloud. A terse
+   "TITLE and AUTHORS only. UNREADABLE if illegible." returns two clean lines;
+   "give 3 short lines / the first 20 words" made the 2B model dump its whole
+   chain of thought into `answer` **and** name the wrong paper. Ask for one or
+   two fields, and never ask a small VLM to count.
+5. For figure-by-figure descriptions, render the pages that
    `layout.pages_with_tables`/caption text point at — never render all pages of a
    long report "just in case".
-4. Pixel retrieval (PixelRAG-style, index → cosine top-k → VLM reads the tile):
+6. Pixel retrieval (PixelRAG-style, index → cosine top-k → VLM reads the tile):
    `webrain_vision` `op:index` → `op:retrieve`. Indexes persist per name; the
    embedder is whatever `EMBED_URL`/`EMBED_MODEL` points at, so point it at a
    vision-embedding model (e.g. `Qwen/Qwen3-VL-Embedding-2B`) for pixel search.
@@ -93,9 +107,10 @@ single calls.
 - `has_encoding_issues: true` → missing ToUnicode maps. Expect ligature damage
   (`ff`/`fi`/`fl` become `U+FFFF`, e.g. `o￿ces`). Quote around it or render that
   page; a pdfium build fixes the text layer.
-- `images: []` is **not** proof the PDF has no figures. Only DCTDecode (JPEG) and
-  FlateDecode XObjects are decoded; vector art, JPEG2000 and page-render figures
-  are skipped. Use `op:render` when you need to *see* them.
+- `images: []` is **not** proof the PDF has no figures. Vector art lives in `Form`
+  XObjects with no `/Subtype /Image` at all (measured: 3 of 5 arXiv papers have
+  zero rasters, only vector figures), and JPEG2000/CCITT/JBIG2 are still skipped.
+  Use `op:render` when you need to *see* them.
 - Appendix pages that are images of pages extract as interleaved garbage (two
   columns spliced mid-sentence). Detect it (`markdown` reads like two texts
   shuffled together) and switch to `op:render` + vision.
