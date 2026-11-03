@@ -201,6 +201,19 @@ EXTRACTION MATRIX
                                       ddg+bing then tops up from baidu/yandex/yahoo —
                                       yahoo last, it is the one that pages deep)
 - relevance filter                 -> extract(mode=bm25)
+- PDF (path or URL)                -> webrain_pdf(op=extract, path|paths[]) — text + pipe
+                                      tables + layout flags, no browser, ~5 s for 9 pages.
+                                      Text first, always: it is ~50x faster than pixels.
+- PDF figures, as files            -> webrain_pdf(op=images, path, dir) — native-size PNGs,
+                                      nested Form XObjects included, paths in the reply
+- PDF pages as pixels             -> webrain_pdf(op=render, path, pages[], dpi:150, dir) —
+                                      needs pdfium: `webrain install pdfium` once
+- read the pixels                 -> vision(op=ask, images:[<paths from the two calls
+                                      above>], prompt) — files are read from disk, no tab
+- which PDF pages need pixels     -> the `layout` block of op=extract
+                                      (pages_needing_vision / _with_raster_images /
+                                      _with_captions); ask vision to DESCRIBE a figure or
+                                      read a table, never to transcribe a whole page
 - watch a video (URL or local file)-> webrain_watch(url) — timestamped transcript
                                       (yt-dlp captions -> local whisper-cli -> Whisper
                                       STT API) + frame file paths; the LLM reads frames
