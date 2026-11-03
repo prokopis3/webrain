@@ -3564,7 +3564,7 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
 
     // ponytail: extract images in the same pass. Errors are non-fatal — we
     // still return text+layout even if image extraction fails on exotic formats.
-    let images = extract_images_lopdf(path, None).unwrap_or_default();
+    let images = extract_images_lopdf(path, None, None).unwrap_or_default();
 
     // Which pages can the text layer NOT deliver? Two cases, both cheap to spot:
     // a caption whose figure is vector art (no raster in `images`, so op=images
@@ -3580,11 +3580,14 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
     let mut captioned: Vec<u32> = Vec::new();
     let mut empty: Vec<u32> = Vec::new();
     for p in &pages_res.pages {
+        // `p.page` and `raster_pages` disagree on origin (0- vs 1-based), and the
+        // sibling `layout.pages_with_*` fields are 1-based — so normalise to 1-based
+        // here. Mixing them silently un-filtered a captioned page that HAS a raster.
         if p.markdown.trim().is_empty() {
-            empty.push(p.page);
+            empty.push(p.page + 1);
         }
         if has_caption(&p.markdown) {
-            captioned.push(p.page);
+            captioned.push(p.page + 1);
         }
     }
     let mut need_vision: Vec<u32> = captioned
@@ -3638,16 +3641,39 @@ fn has_caption(text: &str) -> bool {
     false
 }
 
+/// One render result: a path when `dir` is set, base64 otherwise.
+#[cfg(feature = "pdfium")]
+fn png_entry(dir: Option<&str>, name: &str, png: &[u8], meta: Value) -> anyhow::Result<Value> {
+    let mut obj = meta;
+    match dir {
+        Some(d) => {
+            std::fs::create_dir_all(d)?;
+            let full = std::path::Path::new(d).join(name);
+            std::fs::write(&full, png)?;
+            obj["path"] = json!(full.display().to_string());
+        }
+        None => {
+            use base64::Engine;
+            obj["image_b64"] = json!(base64::engine::general_purpose::STANDARD.encode(png));
+        }
+    }
+    Ok(obj)
+}
+
 /// Render PDF pages as base64 PNGs — the PixelRAG alternative to text extraction.
 /// If `tile_size` is set (e.g. 800), each page is split into square tiles
 /// for more efficient vision-model processing. Without tiles, one full image
 /// per page. Requires `--features pdfium`.
+/// Pass `dir` to write the PNGs there and get paths back instead of base64: a
+/// 9-page render is ~15 MB of base64 in the tool reply, which is the whole
+/// context budget for a document that would otherwise cost a few hundred bytes.
 #[cfg(feature = "pdfium")]
 pub fn pdf_render(
     path: &str,
     pages: Option<&[u32]>,
     dpi: Option<f32>,
     tile_size: Option<u32>,
+    dir: Option<&str>,
 ) -> anyhow::Result<Value> {
     use pdfium_render::prelude::*;
     let src = PdfSource::open(path)?;
@@ -3678,16 +3704,17 @@ pub fn pdf_render(
                                 &mut std::io::Cursor::new(&mut buf),
                                 image::ImageFormat::Png,
                             )?;
-                            use base64::Engine;
-                            imgs.push(json!({"page": pn, "x": col, "y": row, "w": rw, "h": rh, "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                            let meta = json!({"page": pn, "x": col, "y": row, "w": rw, "h": rh});
+                            let name = format!("p{pn:03}_t{col}x{row}.png");
+                            imgs.push(png_entry(dir, &name, &buf, meta)?);
                         }
                     }
                 }
                 None => {
                     let mut buf = Vec::new();
                     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)?;
-                    use base64::Engine;
-                    imgs.push(json!({"page": pn, "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                    let name = format!("p{pn:03}.png");
+                    imgs.push(png_entry(dir, &name, &buf, json!({"page": pn}))?);
                 }
             }
         }
@@ -3701,14 +3728,18 @@ pub fn pdf_render(
 /// Skips JPEG2000/CCITT/JBIG2 — use `webrain_pdf_render` (pdfium) for those.
 /// `path` is a local file or an `http(s)` URL.
 /// Returns `[{page, index, width, height, image_b64}]`.
-pub fn pdf_images(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Value> {
+pub fn pdf_images(path: &str, pages: Option<&[u32]>, dir: Option<&str>) -> anyhow::Result<Value> {
     let src = PdfSource::open(path)?;
-    let imgs = extract_images_lopdf(src.path(), pages)?;
+    let imgs = extract_images_lopdf(src.path(), pages, dir)?;
     Ok(json!({"path": path, "count": imgs.len(), "images": imgs}))
 }
 
 /// Core image extraction — shared by `pdf_extract` and `pdf_images`.
-fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec<Value>> {
+fn extract_images_lopdf(
+    path: &str,
+    pages: Option<&[u32]>,
+    dir: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     use flate2::read::ZlibDecoder;
     use lopdf::Document;
     use std::io::Read;
@@ -3730,6 +3761,15 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
             Ok(d) => d,
             Err(_) => continue,
         };
+        // Resolve a `/Key` one level: real-world PDFs write /Resources and
+        // /XObject as indirect references (`/Resources 100 0 R`). Returns an
+        // owned dict so the walker can push it without fighting `doc`'s borrows.
+        let sub = |d: &lopdf::Dictionary, key: &[u8]| -> Option<lopdf::Dictionary> {
+            match d.get(key).ok()? {
+                lopdf::Object::Reference(id) => doc.get_object(*id).ok()?.as_dict().ok().cloned(),
+                o => o.as_dict().ok().cloned(),
+            }
+        };
         // /Resources is an indirect reference in every real-world PDF we tested
         // (`/Resources 100 0 R`), so the unresolved lookup matched nothing and
         // every embedded image was silently dropped. Resolve one level.
@@ -3741,15 +3781,20 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                 Err(_) => r.as_dict().ok(),
             });
         if let Some(res) = resources {
-            let xobj = res
-                .get(b"XObject")
-                .ok()
-                .and_then(|x| match x.as_reference() {
-                    Ok(id) => doc.get_object(id).ok().and_then(|o| o.as_dict().ok()),
-                    Err(_) => x.as_dict().ok(),
-                });
-            if let Some(xobj) = xobj {
-                let mut idx = 0u32;
+            // An included page arrives as a `Form` XObject and keeps its Image
+            // XObjects in its own /Resources, so walking only the page's direct
+            // XObjects reported **0** images for arxiv 2206.01062 while the file
+            // holds 37 (17 of them JPEG). Stack, not recursion — a Form can nest
+            // forms, and `depth` stops a self-referencing one from looping.
+            let mut idx = 0u32;
+            let mut stack: Vec<(lopdf::Dictionary, u8)> = vec![(res.clone(), 4)];
+            while let Some((res, depth)) = stack.pop() {
+                if depth == 0 {
+                    continue;
+                }
+                let Some(xobj) = sub(&res, b"XObject") else {
+                    continue;
+                };
                 for (_name, obj_val) in xobj.iter() {
                     let obj_id = match obj_val.as_reference().ok() {
                         Some(id) => id,
@@ -3759,13 +3804,19 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                         Ok(lopdf::Object::Stream(s)) => (s.content.clone(), s.dict.clone()),
                         _ => continue,
                     };
-                    if dict_owned
+                    let subtype: Vec<u8> = dict_owned
                         .get(b"Subtype")
                         .ok()
                         .and_then(|v| v.as_name().ok())
-                        .map(|n| n != b"Image")
-                        .unwrap_or(true)
-                    {
+                        .map(|n| n.to_vec())
+                        .unwrap_or_default();
+                    if subtype == b"Form" {
+                        if let Some(inner) = sub(&dict_owned, b"Resources") {
+                            stack.push((inner, depth - 1));
+                        }
+                        continue;
+                    }
+                    if subtype != b"Image" {
                         continue;
                     }
                     let w = dict_owned
@@ -3791,13 +3842,14 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                         }
                         _ => None,
                     };
-                    let data = &content;
-
-                    let img: Option<image::DynamicImage> = match filter {
-                        Some(b"DCTDecode") => image::load_from_memory(data).ok(),
+                    let decoded: Option<image::DynamicImage> = match filter {
+                        Some(b"DCTDecode") => image::load_from_memory(&content).ok(),
                         Some(b"FlateDecode") => {
                             let mut dec = Vec::new();
-                            if ZlibDecoder::new(&data[..]).read_to_end(&mut dec).is_err() {
+                            if ZlibDecoder::new(&content[..])
+                                .read_to_end(&mut dec)
+                                .is_err()
+                            {
                                 continue;
                             }
                             flate_to_image(w, h, dec)
@@ -3805,16 +3857,32 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                         _ => None,
                     };
 
-                    if let Some(img) = img {
-                        let rgba = img.to_rgba8();
+                    if let Some(image) = decoded {
+                        let rgba = image.to_rgba8();
                         let mut buf = Vec::new();
                         rgba.write_to(
                             &mut std::io::Cursor::new(&mut buf),
                             image::ImageFormat::Png,
                         )?;
-                        use base64::Engine;
-                        out.push(json!({"page": pn, "index": idx, "width": w, "height": h,
-                            "image_b64": base64::engine::general_purpose::STANDARD.encode(&buf)}));
+                        let meta = json!({"page": pn, "index": idx, "width": w, "height": h});
+                        let name = format!("img_p{pn:03}_{idx:03}.png");
+                        match dir {
+                            Some(d) => {
+                                std::fs::create_dir_all(d)?;
+                                let full = std::path::Path::new(d).join(&name);
+                                std::fs::write(&full, &buf)?;
+                                let mut e = meta;
+                                e["path"] = json!(full.display().to_string());
+                                out.push(e);
+                            }
+                            None => {
+                                use base64::Engine;
+                                let mut e = meta;
+                                e["image_b64"] =
+                                    json!(base64::engine::general_purpose::STANDARD.encode(&buf));
+                                out.push(e);
+                            }
+                        }
                         idx += 1;
                     }
                 }

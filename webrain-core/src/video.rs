@@ -849,58 +849,94 @@ pub(crate) enum VisionTarget {
     },
 }
 
-/// All configured vision targets in priority order (OpenRouter → OpenAI →
-/// Fireworks → Groq → bundled local) — the failover list for every caller.
-/// ponytail: one ordered list; a flaky provider falls through to the next
-/// instead of killing the op (live hit: OpenRouter returned empty, Groq fine).
-pub(crate) fn vision_targets(
-    openrouter: Option<&str>,
-    openai: Option<&str>,
-    fireworks: Option<&str>,
-    groq: Option<&str>,
+/// One row per OpenAI-compatible vision provider, in priority order:
+/// `(env names — first non-empty wins, endpoint, model)`.
+///
+/// Every hop speaks `POST /chat/completions` with `image_url` data URLs, so the
+/// whole chain is ONE code path (`post_vision`) and adding a provider is one
+/// row. The aliases are what each vendor's own docs call the variable, accepted
+/// so a user does not have to rename their key.
+///
+/// Endpoints live-checked 2026-11-03 with no key present: anthropic 401,
+/// gemini 400, dashscope 401 — they exist and reject the request instead of
+/// 404ing, which is all a URL can be verified for without an account.
+pub(crate) const VISION_PROVIDERS: [(&[&str], &str, &str); 7] = [
+    (
+        &["OPENROUTER_API_KEY"],
+        "https://openrouter.ai/api/v1/chat/completions",
+        "qwen/qwen3.6-27b",
+    ),
+    (
+        &["OPENAI_API_KEY"],
+        "https://api.openai.com/v1/chat/completions",
+        "gpt-4o-mini",
+    ),
+    (
+        &["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+        "https://api.anthropic.com/v1/chat/completions",
+        "claude-sonnet-4-5",
+    ),
+    (
+        &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "gemini-2.5-flash",
+    ),
+    (
+        &["FIREWORKS_API_KEY"],
+        "https://api.fireworks.ai/inference/v1/chat/completions",
+        "accounts/fireworks/models/qwen2.5-vl-72b-instruct",
+    ),
+    (
+        &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "qwen3-vl-plus",
+    ),
+    (
+        &["GROQ_API_KEY"],
+        "https://api.groq.com/openai/v1/chat/completions",
+        // Groq never carried `qwen/qwen3.6-27b` (404 model_not_found, live
+        // 2026-11-03: its catalog lists `qwen/qwen3.8-27b`). Sharing the
+        // OpenRouter id here meant the Groq hop was dead on every call.
+        "qwen/qwen3.8-27b",
+    ),
+];
+
+/// Provider keys present in the environment, in `VISION_PROVIDERS` order.
+/// The env-key gate IS the consent for cloud upload: no key, no cloud hop.
+pub(crate) fn vision_env_keys() -> Vec<(&'static str, String)> {
+    VISION_PROVIDERS
+        .iter()
+        .filter_map(|(names, _, _)| {
+            names.iter().find_map(|n| {
+                std::env::var(n)
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|v| (*n, v))
+            })
+        })
+        .collect()
+}
+
+/// Pure failover list from explicit `(env name, key)` pairs — used by the
+/// runtime after `vision_env_keys()` and by the tests without touching env.
+/// Local Qwen3-VL is always last: it is the fallback when every cloud hop fails.
+pub(crate) fn vision_targets_from(
+    keys: &[(&str, &str)],
     model: Option<&Path>,
     mmproj: Option<&Path>,
 ) -> Vec<VisionTarget> {
-    const OPENROUTER: (&str, &str) = (
-        "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen3.6-27b",
-    );
-    const OPENAI: (&str, &str) = ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini");
-    const FIREWORKS: (&str, &str) = (
-        "https://api.fireworks.ai/inference/v1/chat/completions",
-        "accounts/fireworks/models/qwen2.5-vl-72b-instruct",
-    );
-    const GROQ: (&str, &str) = (
-        "https://api.groq.com/openai/v1/chat/completions",
-        "qwen/qwen3.6-27b",
-    );
     let mut out = Vec::new();
-    if let Some(k) = openrouter {
+    for (name, key) in keys {
+        let Some((_, endpoint, model_id)) = VISION_PROVIDERS
+            .iter()
+            .find(|(names, _, _)| names.contains(name))
+        else {
+            continue;
+        };
         out.push(VisionTarget::Cloud {
-            endpoint: OPENROUTER.0.into(),
-            model: OPENROUTER.1.into(),
-            key: k.into(),
-        });
-    }
-    if let Some(k) = openai {
-        out.push(VisionTarget::Cloud {
-            endpoint: OPENAI.0.into(),
-            model: OPENAI.1.into(),
-            key: k.into(),
-        });
-    }
-    if let Some(k) = fireworks {
-        out.push(VisionTarget::Cloud {
-            endpoint: FIREWORKS.0.into(),
-            model: FIREWORKS.1.into(),
-            key: k.into(),
-        });
-    }
-    if let Some(k) = groq {
-        out.push(VisionTarget::Cloud {
-            endpoint: GROQ.0.into(),
-            model: GROQ.1.into(),
-            key: k.into(),
+            endpoint: (*endpoint).into(),
+            model: (*model_id).into(),
+            key: (*key).into(),
         });
     }
     if let (Some(m), Some(p)) = (model, mmproj) {
@@ -912,19 +948,20 @@ pub(crate) fn vision_targets(
     out
 }
 
+/// All configured vision targets in priority order (see `VISION_PROVIDERS`,
+/// then bundled local) — the failover list for every caller.
+/// ponytail: one ordered list; a flaky provider falls through to the next
+/// instead of killing the op (live hit: OpenRouter returned empty, Groq fine).
+pub(crate) fn vision_targets(model: Option<&Path>, mmproj: Option<&Path>) -> Vec<VisionTarget> {
+    let owned = vision_env_keys();
+    let keys: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    vision_targets_from(&keys, model, mmproj)
+}
+
 /// First configured vision target — where a single provider suffices
 /// (frame captions); `ask_viewport` uses the full `vision_targets` list.
-pub(crate) fn vision_target(
-    openrouter: Option<&str>,
-    openai: Option<&str>,
-    fireworks: Option<&str>,
-    groq: Option<&str>,
-    model: Option<&Path>,
-    mmproj: Option<&Path>,
-) -> Option<VisionTarget> {
-    vision_targets(openrouter, openai, fireworks, groq, model, mmproj)
-        .into_iter()
-        .next()
+pub(crate) fn vision_target(model: Option<&Path>, mmproj: Option<&Path>) -> Option<VisionTarget> {
+    vision_targets(model, mmproj).into_iter().next()
 }
 
 /// OpenAI-compatible chat/completions POST with ONE retry on transient
@@ -1165,21 +1202,15 @@ fn spawn_llama_server_impl(
 /// local Qwen3-VL-2B (32K ctx) gets up to 10 frames for richer coverage,
 /// about 256 tokens/frame @ 512px = ~2.6K visual tokens, well within budget.
 fn describe_frames(frames: &[Frame]) -> Result<String> {
-    let openrouter = std::env::var("OPENROUTER_API_KEY").ok();
-    let openai = std::env::var("OPENAI_API_KEY").ok();
-    let fireworks = std::env::var("FIREWORKS_API_KEY").ok();
-    let groq = std::env::var("GROQ_API_KEY").ok();
     let local = crate::install::vision_local();
     let target = vision_target(
-        openrouter.as_deref(),
-        openai.as_deref(),
-        fireworks.as_deref(),
-        groq.as_deref(),
         local.as_ref().map(|t| t.1.as_path()),
         local.as_ref().map(|t| t.2.as_path()),
     )
     .ok_or_else(|| {
-        anyhow!("frame vision needs GROQ_API_KEY/OPENAI_API_KEY or the local Qwen3-VL (run `webrain install vision`)")
+        anyhow!(
+            "frame vision needs a vision key (OPENROUTER/OPENAI/ANTHROPIC/GEMINI/FIREWORKS/DASHSCOPE/GROQ_API_KEY) or the local Qwen3-VL (run `webrain install vision`)"
+        )
     })?;
     let is_local = matches!(&target, VisionTarget::Local { .. });
     let max_frames = if is_local { 10 } else { 3 };
@@ -1515,8 +1546,14 @@ mod tests {
 
     #[test]
     fn vision_target_prefers_cloud_then_local() {
-        assert!(vision_target(None, None, None, None, None, None).is_none());
-        match vision_target(Some("or"), Some("o"), None, Some("g"), None, None).unwrap() {
+        assert!(vision_targets_from(&[], None, None).is_empty());
+        let cloud = |keys: &[(&str, &str)]| vision_targets_from(keys, None, None);
+        match &cloud(&[
+            ("OPENROUTER_API_KEY", "or"),
+            ("OPENAI_API_KEY", "o"),
+            ("GROQ_API_KEY", "g"),
+        ])[0]
+        {
             VisionTarget::Cloud {
                 endpoint,
                 model,
@@ -1528,7 +1565,12 @@ mod tests {
             }
             _ => panic!("openrouter should win"),
         }
-        match vision_target(None, Some("o"), Some("f"), Some("g"), None, None).unwrap() {
+        match &cloud(&[
+            ("OPENAI_API_KEY", "o"),
+            ("FIREWORKS_API_KEY", "f"),
+            ("GROQ_API_KEY", "g"),
+        ])[0]
+        {
             VisionTarget::Cloud {
                 endpoint, model, ..
             } => {
@@ -1537,7 +1579,7 @@ mod tests {
             }
             _ => panic!("openai beats fireworks+groq"),
         }
-        match vision_target(None, None, Some("f"), Some("g"), None, None).unwrap() {
+        match &cloud(&[("FIREWORKS_API_KEY", "f"), ("GROQ_API_KEY", "g")])[0] {
             VisionTarget::Cloud {
                 endpoint,
                 model,
@@ -1549,7 +1591,7 @@ mod tests {
             }
             _ => panic!("fireworks beats groq"),
         }
-        match vision_target(None, None, None, Some("g"), None, None).unwrap() {
+        match &cloud(&[("GROQ_API_KEY", "g")])[0] {
             VisionTarget::Cloud {
                 endpoint,
                 model,
@@ -1565,13 +1607,43 @@ mod tests {
             std::path::PathBuf::from("m.gguf"),
             std::path::PathBuf::from("p.gguf"),
         );
-        match vision_target(None, None, None, None, Some(&m), Some(&p)).unwrap() {
+        match vision_targets_from(&[], Some(&m), Some(&p))
+            .into_iter()
+            .next()
+            .unwrap()
+        {
             VisionTarget::Local { model, mmproj } => {
                 assert_eq!(model, m);
                 assert_eq!(mmproj, p);
             }
             _ => panic!("local hero fallback"),
         }
+    }
+
+    // A key spelled the way its own vendor documents it must reach the same
+    // endpoint — nobody should have to rename CLAUDE_API_KEY to ANTHROPIC_*.
+    #[test]
+    fn vendor_key_aliases_reach_the_same_endpoint() {
+        let one = |k: &[(&str, &str)]| match &vision_targets_from(k, None, None)[0] {
+            VisionTarget::Cloud {
+                endpoint,
+                model,
+                key,
+            } => (endpoint.clone(), model.clone(), key.clone()),
+            _ => panic!("expected a cloud target"),
+        };
+        let (e1, m1, _) = one(&[("CLAUDE_API_KEY", "k")]);
+        let (e2, m2, _) = one(&[("ANTHROPIC_API_KEY", "k")]);
+        assert!(e1.contains("anthropic.com"), "{e1}");
+        assert_eq!((e1, m1), (e2, m2));
+        let (e, m, _) = one(&[("GOOGLE_API_KEY", "k")]);
+        assert!(e.contains("generativelanguage"), "{e}");
+        assert_eq!(m, "gemini-2.5-flash");
+        let (e, m, _) = one(&[("QWEN_API_KEY", "k")]);
+        assert!(e.contains("dashscope"), "{e}");
+        assert!(m.starts_with("qwen"), "{m}");
+        // an unknown env name is ignored, not a panic
+        assert!(vision_targets_from(&[("NOPE_KEY", "k")], None, None).is_empty());
     }
 
     // ponytail: one runnable check for the failover order — a flaky provider
@@ -1582,11 +1654,13 @@ mod tests {
             std::path::PathBuf::from("m.gguf"),
             std::path::PathBuf::from("p.gguf"),
         );
-        let ts = vision_targets(
-            Some("or"),
-            Some("o"),
-            Some("f"),
-            Some("g"),
+        let ts = vision_targets_from(
+            &[
+                ("OPENROUTER_API_KEY", "or"),
+                ("OPENAI_API_KEY", "o"),
+                ("FIREWORKS_API_KEY", "f"),
+                ("GROQ_API_KEY", "g"),
+            ],
             Some(&m),
             Some(&p),
         );
@@ -1605,10 +1679,15 @@ mod tests {
         assert!(eps[3].contains("groq.com"), "groq fourth: {eps:?}");
         assert_eq!(eps[4], "local", "local always last: {eps:?}");
         // a missing cloud key simply drops that provider, not everything after
-        let ts2 = vision_targets(None, None, None, Some("g"), Some(&m), Some(&p));
+        let ts2 = vision_targets_from(&[("GROQ_API_KEY", "g")], Some(&m), Some(&p));
         assert_eq!(ts2.len(), 2, "only groq + local");
         assert!(ep(&ts2[0]).contains("groq.com"));
         assert_eq!(ep(&ts2[1]), "local");
+        // every table row is reachable, i.e. the table and the resolver agree
+        for (names, _, _) in VISION_PROVIDERS.iter() {
+            let one = vision_targets_from(&[(names[0], "k")], None, None);
+            assert_eq!(one.len(), 1, "{} has no endpoint row", names[0]);
+        }
     }
 
     #[test]

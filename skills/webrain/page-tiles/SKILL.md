@@ -17,7 +17,7 @@ it is **bytes in the tool result**: a 660 KB PNG page becomes ~10 MB of base64 a
 | "what does the chart / table / figure show" | tiles |
 | "the extract is empty / garbled / interleaved" | tiles (image-only page, or two columns spliced) |
 | CAPTCHA / grid geometry | `webrain_vision{op:"ask", tiles:[...]}` (rects, not files) |
-| PDF page | `webrain_pdf{op:"render"}` — see the pdf-extraction skill. Text first: a 9-page paper is 48 KB of markdown in ~5 s, while vision costs ~16 s **per page** and returns ~half the text. Tiles earn their keep only on the pages the text layer returns empty (measured: page 7 gave 0 chars, vision read 2133). |
+| PDF page | `webrain_pdf{op:"render", dir:…}` — PNG paths, no base64. See the pdf-extraction skill. Text first: a 9-page paper is 48 KB of markdown in ~5 s, while vision costs ~16 s **per page** and returns ~half the text. Tiles earn their keep only on the pages the text layer returns empty (measured: page 7 gave 0 chars, vision read 2133). For a paper whose figures are embedded rasters, `op:"images", dir:…` at native size beats any page render. |
 
 `news.ycombinator.com` and `arxiv.org/abs/...` are **text** pages. Tiling them wastes
 a VLM pass to re-read text that `observe{what:"fit"}` already returns.
@@ -58,9 +58,12 @@ tool call stays a few hundred bytes.
 
 ## Traps
 
-- **Vision reads browser pixels, not files.** `op:"ask"` cannot be pointed at a PDF or
-  a URL; capture first (`observe what=pixel`, or `webrain_pdf{op:"render"}` + navigate
-  to the PNG) and pass the pixels.
+- **`op:"ask"` reads files too.** `images:[paths]` is resolved from disk before any
+  browser branch, so a PDF or a saved tile needs no tab: `webrain_pdf{op:"render",
+  dir:"out/pg"}` → `{op:"ask", images:["out/pg/p003.png"]}`. Navigating to a
+  `file://` PNG is the old workaround and is no longer needed. Point at the PDF itself
+  only never — the viewer's pixels are what fooled the model into inventing a
+  different document.
 - **A `crippled:true` reply with empty `text` is normal** on an image document — the
   pixels are there, which is why tiles exist.
 - **`tiles` (rects) is viewport-space, `what:"pixel"` writes document-space tiles.**

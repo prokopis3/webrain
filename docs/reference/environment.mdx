@@ -20,8 +20,11 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory | engine default |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys, tried GROQ → OPENAI → FIREWORKS. The vision `ask` chain is separate: OPENROUTER → OPENAI → FIREWORKS → GROQ → bundled local Qwen3-VL-2B | — |
-| `OPENROUTER_API_KEY` | Vision `ask` chain only (first provider tried) — not an STT key | — |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys, tried GROQ → OPENAI → FIREWORKS. The vision `ask` chain is separate and uses all three too — see [Vision `ask` chain](#vision-ask-chain) | — |
+| `OPENROUTER_API_KEY` | Vision `ask` chain, **first** hop | — |
+| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | Vision `ask` chain, hop 3 (Claude). Either name works | — |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Vision `ask` chain, hop 4 (Gemini). Either name works | — |
+| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Vision `ask` chain, hop 6 (Qwen / DashScope). Either name works | — |
 | `SERPAPI_API_KEY` | serpapi.com paid Google SERP provider — used by `webrain_serp` when `limit > 10` | — |
 | `BRAVE_API_KEY` | Brave Search API (`api.search.brave.com`, 20/page) — makes `engine=brave` work **without a browser**, and `auto` uses it for `limit > 20` before any browser render | — |
 | `WEBRAIN_SKILLS_DIR` | Directory of operator skill files readable via `webrain_guide(topic="skill:<name>")` — ship house rules to the agent without recompiling. Unset means `<engine cache>/skills`, which `webrain install skills` fills and `webrain skills add <url>` extends; an empty directory serves nothing | — (empty) |
@@ -39,6 +42,39 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_ALLOW_UNAUTHENTICATED` | Set `1` to permit a non-loopback HTTP bind with no token — otherwise startup refuses | off |
 | `WEBRAIN_NO_STATE` | Set `1` to refuse the vault / launch / login / session tools and clamp fan-out (shared-instance mode) | off |
 | `RUST_LOG` | Log verbosity (`webrain=info,tungstenite=warn`) | as above |
+
+## Vision `ask` chain
+
+`webrain_vision` `op=ask` (and `watch --vision`) tries every provider whose key
+is set, in this order, then the bundled local model. All cloud hops are the same
+OpenAI-compatible `POST /chat/completions` call with base64 `image_url` content,
+so **one key is enough** and an unset key merely drops its hop. A failing hop
+falls through to the next; the error reports every hop that failed, not just the
+last.
+
+| # | Key (first non-empty wins) | Endpoint | Model |
+|---|---|---|---|
+| 1 | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1/chat/completions` | `qwen/qwen3.6-27b` |
+| 2 | `OPENAI_API_KEY` | `api.openai.com/v1/chat/completions` | `gpt-4o-mini` |
+| 3 | `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | `api.anthropic.com/v1/chat/completions` | `claude-sonnet-4-5` |
+| 4 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `generativelanguage.googleapis.com/v1beta/openai/chat/completions` | `gemini-2.5-flash` |
+| 5 | `FIREWORKS_API_KEY` | `api.fireworks.ai/inference/v1/chat/completions` | `accounts/fireworks/models/qwen2.5-vl-72b-instruct` |
+| 6 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen3-vl-plus` |
+| 7 | `GROQ_API_KEY` | `api.groq.com/openai/v1/chat/completions` | `qwen/qwen3.8-27b` |
+| 8 | — | bundled `llama-server` | `qwen3-vl-2b` (or whatever `webrain install vision` installed) |
+
+Notes that cost real time to learn:
+
+- **Anthropic and Gemini are reached through their OpenAI-compatibility layer**,
+  so the key goes in the normal `Authorization: Bearer` header — no
+  `x-api-key` / `?key=` special-casing, and no second request builder.
+- The alias pairs exist because each vendor documents its variable differently
+  (`CLAUDE_API_KEY`, `GOOGLE_API_KEY`, `QWEN_API_KEY` are all accepted).
+- No key at all is not a silent failure: the error names every variable to set
+  and points at `webrain install vision` for the offline fallback.
+- DeepSeek is deliberately absent — its hosted API rejects `image_url` content.
+- Groq's id is `qwen/qwen3.8-27b`, **not** OpenRouter's `qwen/qwen3.6-27b`;
+  Groq never carried the 3.6 id, so sharing it made that hop a permanent 404.
 
 ## Local AI (watch & vision)
 

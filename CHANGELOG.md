@@ -35,18 +35,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller previously had to guess which pages to render; measured on a 9-page
   report, 6 pages flagged (1 has the only raster, page 7 has 0 chars of text and
   its appendix/Figure 2 caption exist only as pixels).
+- **mcp**: `webrain_pdf op=render` takes `dir` and writes the page PNGs there
+  (`p001.png`, or `p001_t0x0.png` with `tile_size`), returning `path` instead of
+  `image_b64`. A 9-page 150-dpi render was **15 MB of base64** in the reply — the
+  whole context budget for one document; with `dir` the same render answers in
+  ~500 bytes and the paths feed `webrain_vision{op:"ask", images:[...]}` directly.
 - **mcp**: `observe{what:pixel}` takes `tiles_dir` and writes the PNGs there,
   returning paths instead of `png_b64`; `webrain_vision{op:"ask"}` takes
   `images:[paths]` and reads them from disk. A 2-tile page reply drops from
   ~1.87 MB of base64 to 226 bytes with no accuracy change (measured on HN), and
   vision needs no second capture. Tiles are cropped from **one** page raster
   instead of one `Page.captureScreenshot` per tile.
+- **core**: the vision `ask` chain is now a **table**, not four hardcoded
+  `if let` blocks: `VISION_PROVIDERS` lists every OpenAI-compatible hop in
+  priority order — OpenRouter → OpenAI → **Anthropic/Claude** → **Gemini** →
+  Fireworks → **DashScope/Qwen** → Groq → bundled local Qwen3-VL-2B. Anthropic
+  and Gemini are reached through their OpenAI-compatibility endpoints, so they
+  need no second request builder, and the vendor spellings (`CLAUDE_API_KEY`,
+  `GOOGLE_API_KEY`, `QWEN_API_KEY`) are accepted as aliases. Adding a provider is
+  one row; `vision_targets()` reads the env, `vision_targets_from()` stays pure
+  for tests. Endpoints live-checked without a key (anthropic 401, gemini 400,
+  dashscope 401 — they exist and reject the request, not 404).
 - **skills**: new `page-tiles` skill — text-before-pixels decision rule, the
   `navigate` → `observe{what:pixel, tiles_dir}` → `vision{images}` recipe, tile
   geometry, and the prompt shapes a small VLM needs.
 
 ### Fixed
 
+- **core**: `webrain_pdf op=images` reported **0 images** for any PDF whose figures are
+  embedded *pages*. An included page arrives as a `/Subtype /Form` XObject and keeps its
+  images in its own `/Resources`; the walker only visited the page's direct XObjects.
+  arXiv 2206.01062: 0 → **29** images (8 of them Figure 4's panels, 6 Figure 6's, both
+  1025×1025), with a depth-capped stack so a nested form cannot loop. `op=images` also
+  takes `dir` and writes `img_pNNN_III.png` at native size — 29 figures inline were
+  ~20 MB of base64.
+- **core**: the vision failover reported only the **last** provider error, so a run whose
+  real faults were "OpenRouter out of credits" **and** "Groq never had that model" **and**
+  "no local model installed" surfaced as one misleading `model 404`. Every failure is
+  now listed with its endpoint, and an empty target list says which key or installer is
+  missing. Groq's hop also pointed at `qwen/qwen3.6-27b`, which Groq does not host — its
+  catalog has `qwen/qwen3.8-27b`, so that hop was dead on every call.
+- **mcp**: `webrain_stats` on Windows/macOS returned five `null`s behind
+  `available:false`, which reads like a broken tool. It now says why (no `/proc`, host
+  stats are Linux-only) and names the platform.
+- **core**: `layout.pages_with_captions` / `pages_needing_vision` were **0-based**
+  while their siblings `pages_with_tables` / `pages_with_columns` and
+  `pages_with_raster_images` are 1-based. Mixed origins also un-filtered the
+  caption test: a captioned page that *does* carry a raster was still reported as
+  needing vision, because the two lists were compared across different numbering.
+  All five per-page lists are now 1-based.
 - **core**: `webrain_pdf op=extract` returned **zero embedded images** for every
   real PDF. `/Resources` and `/XObject` are indirect references (`/Resources 100
   0 R`), and the unresolved lookup matched nothing on any page; a single-element

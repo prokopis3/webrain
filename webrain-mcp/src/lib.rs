@@ -672,11 +672,13 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         .get("tile_size")
                         .and_then(|v| v.as_u64())
                         .map(|n| n as u32);
+                    let dir = arguments.get("dir").and_then(|v| v.as_str());
                     let result = match webrain_core::engines::pdf_render(
                         path,
                         pages.as_deref(),
                         dpi,
                         tile_size,
+                        dir,
                     ) {
                         Ok(v) => json!({"status":"ok","result":v}),
                         Err(e) => json!({"status":"error","message":e.to_string()}),
@@ -701,8 +703,10 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                             .collect()
                     });
                 let path = path.to_string();
+                let dir = arguments.get("dir").and_then(|v| v.as_str());
+                let dir = dir.map(|s| s.to_string());
                 let result = match tokio::task::spawn_blocking(move || {
-                    webrain_core::engines::pdf_images(&path, pages.as_deref())
+                    webrain_core::engines::pdf_images(&path, pages.as_deref(), dir.as_deref())
                 })
                 .await
                 {

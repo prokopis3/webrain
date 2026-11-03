@@ -270,15 +270,24 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "GROQ_API_KEY",
-                "cloud STT key — tried first (vision ask falls back to it too)",
+                "cloud STT key (tried first) + last cloud vision hop",
             ),
             (
                 "OPENAI_API_KEY / FIREWORKS_API_KEY",
-                "cloud STT keys — second and third",
+                "cloud STT keys 2nd/3rd; OpenAI is also a vision hop",
+            ),
+            ("OPENROUTER_API_KEY", "vision ask chain — first hop"),
+            (
+                "ANTHROPIC_API_KEY / CLAUDE_API_KEY",
+                "vision hop (Claude) — either name",
             ),
             (
-                "OPENROUTER_API_KEY",
-                "vision ask chain only — the first provider tried",
+                "GEMINI_API_KEY / GOOGLE_API_KEY",
+                "vision hop (Gemini) — either name",
+            ),
+            (
+                "DASHSCOPE_API_KEY / QWEN_API_KEY",
+                "vision hop (Qwen / DashScope) — either name",
             ),
             (
                 "EMBED_URL / EMBED_MODEL / EMBED_API_KEY",

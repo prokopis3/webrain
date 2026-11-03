@@ -343,8 +343,12 @@ ENVIRONMENT — read at PROCESS START, a tool call cannot change them
   - WEBRAIN_USER / WEBRAIN_PASS — login env fallback (the vault is tried first).
   - BRAVE_API_KEY / SERPAPI_API_KEY — paid SERP tiers; Brave also makes
     engine=brave work with no browser. Unset only lowers the provider tier.
-  - GROQ_API_KEY / OPENAI_API_KEY / FIREWORKS_API_KEY / OPENROUTER_API_KEY —
-    cloud transcript + vision ask keys. Unset falls back to bundled local models.
+  - Vision `ask` chain, in order: OPENROUTER_API_KEY → OPENAI_API_KEY →
+    ANTHROPIC_API_KEY (or CLAUDE_API_KEY) → GEMINI_API_KEY (or GOOGLE_API_KEY)
+    → FIREWORKS_API_KEY → DASHSCOPE_API_KEY (or QWEN_API_KEY) → GROQ_API_KEY →
+    bundled local Qwen3-VL-2B. Every hop is the same OpenAI-compatible
+    chat/completions call, so one key is enough; unset keys merely drop a hop.
+    Cloud transcript (STT) is a different list: GROQ → OPENAI → FIREWORKS.
   - EMBED_URL / EMBED_MODEL / EMBED_API_KEY (and EMBED_FALLBACK_*) — embeddings
     for webrain_vision index/retrieve.
   - WEBRAIN_HTTP_CACHE=0, WEBRAIN_HTTP_CACHE_DIR, WEBRAIN_DOWNLOAD_MAX_BYTES,
@@ -607,6 +611,18 @@ pub fn host_stats() -> Value {
 
     json!({
         "available": load.is_some() && memory.is_some(),
+        // Say WHY instead of shipping five nulls: on Windows/macOS there is no
+        // /proc, and `available:false` alone reads like a broken tool rather than
+        // an unsupported platform. Process counts stay 0 there for the same reason.
+        "reason": if load.is_some() && memory.is_some() {
+            Value::Null
+        } else {
+            json!(format!(
+                "{} has no /proc — host stats are Linux-only by design (no sysinfo dependency, no shell). Pass a cdp_url or use the OS task manager for process counts.",
+                std::env::consts::OS
+            ))
+        },
+        "platform": std::env::consts::OS,
         "load": load.map(|(m1, m5, m15)| json!({"m1": m1, "m5": m5, "m15": m15})),
         "memory": memory.map(|(total_kb, available_kb)| json!({
             "total_mb": total_kb / 1024,
@@ -883,7 +899,8 @@ pub fn list_tools() -> Vec<Value> {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "extract: batch paths"},
                 "pages": {"type": "array", "items": {"type": "integer"}, "description": "render/images: page numbers (1-based), omit = all"},
                 "dpi": {"type": "number", "default": 150, "description": "render: DPI"},
-                "tile_size": {"type": "integer", "description": "render: split pages into square tiles of this px"}
+                "tile_size": {"type": "integer", "description": "render: split pages into square tiles of this px"},
+                "dir": {"type": "string", "description": "render/images: write the PNGs here and return paths instead of base64. render writes p001.png (or p001_t0x0.png with tile_size); images writes img_p001_000.png at the embedded image's native size. A 9-page 150-dpi render is ~15 MB of base64 and 29 extracted figures can be ~20 MB — paths keep both out of the context window."}
             }, "required": ["op"]}
         }),
         json!({
