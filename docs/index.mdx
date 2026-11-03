@@ -497,16 +497,16 @@ mode: custom
         <div className="bench-stat"><b data-count="3"><em className="num">3</em></b><span>browser engines behind one CDP backend, plus a no-browser HTTP path</span></div>
         <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies. One ~22 MB Rust binary on macOS, Linux, and Windows</span></div>
       </div>
-      <div className="bench-bars">
-        <div className="bar-row">
-          <div className="bar-name">Agent loop · 407 products</div>
-          <div className="bar-track"><div className="bar-fill" data-w="100" style={{ '--fill': '100%', background: 'linear-gradient(90deg,#0e5f78,#38f0ff)' }} /></div>
-          <div className="bar-val"><b data-tv="46000">46,000</b><span>tokens</span></div>
+      <div className="bench-compare">
+        <div className="bench-cmp">
+          <b data-count="46000"><em className="num">46,000</em></b>
+          <span className="bench-cmp-unit">tokens</span>
+          <p>Agent loop, 407 products</p>
         </div>
-        <div className="bar-row">
-          <div className="bar-name">Structured extract · zero LLM</div>
-          <div className="bar-track"><div className="bar-fill" data-w="1" style={{ '--fill': '1%', background: 'linear-gradient(90deg,#6b4bd8,#ff5da8)' }} /></div>
-          <div className="bar-val"><b>0</b><span>tokens</span></div>
+        <div className="bench-cmp is-zero">
+          <b data-count="0"><em className="num">0</em></b>
+          <span className="bench-cmp-unit">tokens</span>
+          <p>Structured extract, same 407 products</p>
         </div>
         <p className="proven-note">Same store, same 407 products. The extraction engine does the work with no LLM in the loop: zero tokens, zero cost per row.</p>
       </div>
@@ -530,6 +530,7 @@ mode: custom
           </div>
         </div>
       </div>
+      <p className="proven-note">PDF, same 9-page paper both ways: <b>5.2 s</b> and 48 KB of markdown from the text layer, versus <b>157.9 s</b> through render + tiles + local vision for half the characters. Tiling is 1.4% of that run, so the win is routing, not parallelism: extract first, then send only the pages whose text layer came back empty to vision.</p>
       <p className="proven-note">Every figure is in the repo: the <a href="/guides/agent-decision-guide">agent guide</a>, the <a href="https://github.com/prokopis3/webrain">changelog</a></p>
     </div>
   </div>
@@ -539,7 +540,7 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Structured search. Five engines, one tool.</h2>
-        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches duckduckgo + bing in parallel over plain HTTP and merges them — relevance-filtered and deduped (google and brave join the merge when a CDP engine is attached).</p>
+        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches duckduckgo + bing in parallel over plain HTTP and merges them, relevance-filtered and deduped (google and brave join the merge when a CDP engine is attached).</p>
       </div>
       <div className="serp">
         <div className="serp-copy">

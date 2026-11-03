@@ -40,7 +40,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
-| `webrain_pdf` (`op=…`) | page · extract · images · render | ❌ no browser |
+| `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
 | `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state (`inline`) · restore_state (`payload`) · profiles · login · close_launch | ✅ CDP + vault |
@@ -494,11 +494,11 @@ Convert a PDF to Markdown (pure Rust on lopdf). Returns page count, `pdf_type` (
 </Accordion>
 
 <Accordion title="webrain_pdf_render">
-Render PDF pages as PNGs — the vision-model alternative to text extraction (bypasses font encoding issues). Optional `tile_size` splits each page into square tiles; every entry carries `page`, `x`, `y`, `w`, `h`. Optional `dir` writes the PNGs there (`p001.png`, or `p001_t0x0.png` with `tile_size`) and returns `path` instead of `image_b64`: a 9-page 150-dpi render is ~15 MB of base64, so pass `dir` and feed those paths straight to `webrain_vision{op:"ask", images:[...]}`. Every release is built with `--features pdfium`; the library is bound at **runtime**, looked up in the webrain engine cache first (`webrain install pdfium`) and then beside the executable, falling back to the system loader. A `cargo install` build needs `--features pdfium` explicitly, and musl builds cannot load the glibc library — there use `op=extract` for text and tables or `op=images` for embedded figures.
+Render PDF pages as base64 PNGs — the vision-model alternative to text extraction (bypasses font encoding issues). Optional `tile_size` splits each page into square tiles; every entry carries `page`, `x`, `y`, `w`, `h`. **Requires a `--features pdfium` build** *and* `pdfium.dll` / `libpdfium.so` on `PATH`. Prebuilt binaries ship without pdfium, so `op=render` errors there — use `op=extract` for text and tables, `op=images` for embedded figures, or open the PDF in Chrome and `webrain_observe` `what=screenshot` for a raster.
 </Accordion>
 
 <Accordion title="webrain_pdf_images">
-Extract embedded images/figures from a PDF as PNGs at their native size — zero system deps, works in the default build. Walks nested `/Subtype /Form` XObjects, so an appendix made of *included pages* yields its images too (arXiv 2206.01062: 0 reported before the fix, 29 after). Handles DCTDecode (JPEG) and FlateDecode; skips JPEG2000/CCITT/JBIG2 (use `webrain_pdf_render` for those). Optional `dir` writes `img_pNNN_III.png` and returns paths — 29 figures inline were ~20 MB. `page` means the page whose `/Resources` expose the XObject, not necessarily the page that draws it.
+Extract embedded images/figures from a PDF as base64 PNGs — zero system deps. Handles DCTDecode (JPEG) and FlateDecode. Skips JPEG2000/CCITT/JBIG2 (use `webrain_pdf_render` for those). Works in the default build.
 </Accordion>
 
 <Accordion title="webrain_download">
