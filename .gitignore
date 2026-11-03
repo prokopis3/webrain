@@ -12,3 +12,5 @@ __pycache__/
 /skills/webrain/dist/
 boat-diy/README.md
 /vendor/
+reamd_owasp.md
+deploy/
