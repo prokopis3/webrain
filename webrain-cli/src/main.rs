@@ -846,13 +846,39 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
                 rt.block_on(CdpBackend::connect_default()).ok()
-            } else {
-                // HTTP-only engine (duckduckgo): pure ureq HTTP — NEVER
-                // launch/connect a browser (auto probes for an attached one above).
+            } else if http_only {
+                // --http: pure ureq HTTP — NEVER launch/connect a browser.
                 if !json_out {
                     println!("engine {}: pure HTTP — no browser launched", opts.engine);
                 }
                 None
+            } else {
+                // HTTP-first engines (duckduckgo/yandex/yahoo/baidu) still join
+                // an ATTACHED browser (CDP_URL). yandex answers a SmartCaptcha
+                // wall over plain HTTP and only a real tab — carrying the
+                // profile's solved-cookie session — returns rows; without a
+                // backend the wall-retry in `serp_search` can never run and the
+                // call silently borrows bing instead. ATTACH only, never
+                // guest-launch: a wall must stay visible in the browser you
+                // control, not be answered by a throwaway profile. `--http` is
+                // the explicit opt-out.
+                match rt.block_on(CdpBackend::connect_default()) {
+                    Ok(b) => {
+                        if !json_out {
+                            println!("engine {}: attached to the CDP_URL browser", opts.engine);
+                        }
+                        Some(b)
+                    }
+                    Err(e) => {
+                        if !json_out {
+                            println!(
+                                "engine {}: no browser attached ({e}) — pure HTTP",
+                                opts.engine
+                            );
+                        }
+                        None
+                    }
+                }
             };
             match rt.block_on(webrain_core::serp::serp_search(&opts, backend.as_ref())) {
                 Ok(r) => {
