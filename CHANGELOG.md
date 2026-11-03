@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **mcp**: `observe what="assets"` — one pass over the page returning every link
+  (`internal` / `external` grouped by hostname, plus `other_schemes` counts for
+  `mailto:`/`tel:`/`ftp:`, each with file kind), every image (`<img>`, `srcset`,
+  lazy `data-src`, `<picture>`, icons/`og:image`, **and CSS `background-image`**),
+  and every video source (`<video>`/`<source>`/`poster`, known embeds, direct
+  `.mp4`/`.m3u8` links, HLS/DASH requests). `only=links|images|videos` narrows it;
+  `max` caps each array. Companion `webrain_batch op:"assets"` does the same across
+  `urls[]` (per-array cap defaults to 20, counts plus a sample).
+- **skills**: new `monitoring` skill — the self-contained `webrain_eval` tick
+  (≤25 s, samples + distinct count), the agent-driven repeat-and-diff loop,
+  external cron for slower intervals, re-pinning the target every tick, and the
+  gaps it must not paper over (no scheduler, no history, `watch` is video-only,
+  eval answers on the wrong target, `batch` can report `ok` with `ok:0`).
+  Measured on 20 live sites: 20/20 pages, 35.9 s at concurrency 4.
+
+### Fixed
+
+- **mcp**: `observe what="images"` runs the asset scanner, so it now returns
+  `srcset`/lazy/picture sources and CSS background art — the images a page is
+  mostly made of — instead of only `document.images`.
+- **mcp**: asset link counts are deduped before the array cap. Counting inside the
+  cap guard made every page report exactly the limit (measured: 14 of 20 sites
+  "had" exactly 6 internal links).
+- **mcp**: asset embed detection compares **hostname suffixes**. A substring test
+  matched Google's signin URL (`…continue=…youtube.com…`), so a logged-out YouTube
+  watch page reported an embed that was a login redirect.
+- **ci**: the image workflow pushes `…:latest` when — and only when — the built
+  version is the newest release. ghcr previously carried bare versions only
+  (`0.11.0`, `0.12.1`), so `docker pull webrain:latest` had no defined meaning.
+
 ## [0.15.3] - 2026-11-03
 
 ### Added
