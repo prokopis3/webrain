@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ci**: the image workflow pushes `…:latest` when — and only when — the built
   version is the newest release. ghcr previously carried bare versions only
   (`0.11.0`, `0.12.1`), so `docker pull webrain:latest` had no defined meaning.
+- **build**: `webrain-cli` forwards the `pdfium` feature to `webrain-mcp`.
+  `webrain-mcp/src/lib.rs` gates the `pdf_render` arm on *its own* feature, so
+  `cargo build -p webrain-cli --features pdfium` used to fail with "package
+  `webrain-cli` does not contain this feature" — `op:"render"` (PNG tiles for
+  vision) was unreachable in every shipped binary. Verified: 5 arXiv PDFs
+  rendered at 110 dpi with `pdfium.dll` on `PATH`.
 
 ## [0.15.3] - 2026-11-03
 
