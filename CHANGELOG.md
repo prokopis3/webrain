@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-03
+
 ### Added
 
 - **core**: `webrain_pdf` accepts an `http(s)` URL anywhere it took a file path
@@ -44,17 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTTP — no browser launched" and the SmartCaptcha retry in `serp_search` could
   never fire from the CLI — the call fell straight through to bing's results.
   `--http` still means no browser at all, and no engine is guest-launched here.
-
-### Fixed (image build)
-
-- **docker**: the image has been failing to build since `skills/` became
-  `include_str!`-embedded (`webrain-core/src/skills.rs`), so **no `ghcr` image
-  was published for 0.14.0 or 0.14.5** — `docker pull`:0.12.1 was the last one
-  that ever existed. The build stage now copies `skills`, and `.dockerignore` no
-  longer excludes it.
-
-### Fixed
-
+- **build**: the container image has been failing to build since `skills/`
+  became `include_str!`-embedded (`webrain-core/src/skills.rs`), so no `ghcr`
+  image was published for 0.14.0 or 0.14.5 — `0.12.1` was the last one that
+  ever existed. The build stage now copies `skills`, and `.dockerignore` no
+  longer excludes it; `0.15.3` is the first tag whose tree builds an image.
 - **cli**: `webrain mcp` no longer aborts with `thread 'main' has overflowed its
   stack` on the first `navigate` / `tab new` on Windows. The server (stdio and
   HTTP) now runs on a thread with a 16 MB stack instead of the 1 MB the OS gives
