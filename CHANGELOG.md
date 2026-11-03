@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **core**: `webrain_pdf` accepts an `http(s)` URL anywhere it took a file path
+  (`path`, `paths[]`, `images`, `render`). The link is fetched once into a temp
+  `.pdf` that is removed on every exit path, so "extract this PDF" no longer
+  needs a manual `webrain_download` (plus rename) first.
+- **mcp**: `webrain_batch` gained `op: "pdf"` — the same browserless
+  download+extract engine as `webrain_pdf op=extract`, concurrent across
+  `urls[]` and preserving input order. PDF extraction needs no CDP tab, so this
+  path serves before any browser connect; previously every batch op drove a tab
+  and a PDF URL returned empty text (Chrome's viewer has no DOM).
+- **skills**: new `pdf-extraction` skill — single/batch/URL extraction, table and
+  figure handling, when to escalate from text to `render` + vision.
+
 - **mcp**: `interact` `action=click` accepts a `selector`. It resolves through
   CDP (`DOM.getDocument({pierce: true})` → per-shadow-root query) instead of page
   JS, so it is the one path that can click a widget inside a **closed** shadow

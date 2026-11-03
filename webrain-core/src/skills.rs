@@ -44,6 +44,10 @@ pub const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../skills/webrain/evals/README.md"),
     ),
     (
+        "webrain/pdf-extraction/SKILL.md",
+        include_str!("../../skills/webrain/pdf-extraction/SKILL.md"),
+    ),
+    (
         "webrain/product-market-research/SKILL.md",
         include_str!("../../skills/webrain/product-market-research/SKILL.md"),
     ),

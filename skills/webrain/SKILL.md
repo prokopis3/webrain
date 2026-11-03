@@ -108,8 +108,11 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 - URLs unknown → `eval`: pagination hrefs (current-path + `/<N>` + next/prev) → range → batch
 - whole site → `crawl(mode=spider)`; patterns (emails/prices) → `extract(mode=regex)`
 - JSON-LD → `extract(mode=jsonld)`; tables → `extract(mode=table)`
-- a PDF, by URL or local path → `webrain_pdf` — text + tables, no browser, no LLM
-  (use this before installing an OCR stack or sending the file to a model)
+- a PDF (one, or many, by URL or local path) → `webrain_pdf op=extract`
+  (`path` / `paths[]`) or `webrain_batch(op=pdf, urls)` — text + tables, no
+  browser, no LLM. OCR / figure fallback and the traps that bite: the
+  `pdf-extraction` skill (read it before installing an OCR stack or sending the
+  file to a model)
 - infinite scroll / load-more → `crawl(mode=scan)` then extract; or find the `/ajax/` offset endpoint
 - search → `webrain_search`; relevance → `extract(mode=bm25)`
 

@@ -3240,6 +3240,18 @@ pub fn download_files(urls: &[String], dir: &str, proxy: Option<&str>) -> Vec<Ba
                 .filter(|s| !s.is_empty())
                 .map(|s| s.split(['?', '#']).next().unwrap_or(s))
                 .unwrap_or("download");
+            // An extensionless link (`arxiv.org/pdf/2408.09869`) saves a file no
+            // pdf tool will accept by name, so take the type from the RESPONSE.
+            let mut name = name.to_string();
+            if !name.to_ascii_lowercase().ends_with(".pdf")
+                && resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|c| c.contains("pdf"))
+            {
+                name.push_str(".pdf");
+            }
             let path = format!("{dir}/{i}_{name}");
             let mut f = std::fs::File::create(&path)?;
             let reader = resp.into_body().into_reader();
@@ -3298,11 +3310,80 @@ pub fn build_clean_js(word_threshold: usize, exclude_social: bool) -> String {
 // Text + images work in the default build; the optional `pdfium` feature adds
 // vision rendering (`pdf_render`) + JPEG2000/CCITT image fallback via Google Pdfium.
 
+/// A PDF input that may be a link. Resolving happens here — once — so
+/// `extract`, `images`, `render` and the whole batch path (which maps onto
+/// `pdf_extract`) all accept URLs. The temp copy is removed on every exit path,
+/// error returns included, so a failed parse does not leak a 5 MB file.
+struct PdfSource {
+    path: String,
+    temp: bool,
+}
+
+impl PdfSource {
+    fn open(src: &str) -> anyhow::Result<Self> {
+        if !(src.starts_with("http://") || src.starts_with("https://")) {
+            return Ok(Self {
+                path: src.to_string(),
+                temp: false,
+            });
+        }
+        let resp = browser_req(http_agent(None)?.get(src))
+            .call()
+            .map_err(|e| anyhow::anyhow!("pdf download failed for {src}: {e}"))?;
+        // Same filename hygiene as `download_files`: a CDN link carries
+        // `?sig&params`, and an extensionless link (`arxiv.org/pdf/2408.09869`)
+        // would otherwise save a file no pdf tool can identify.
+        let mut name = src
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(['?', '#']).next().unwrap_or(s))
+            .unwrap_or("download")
+            .to_string();
+        if !name.to_ascii_lowercase().ends_with(".pdf") {
+            name.push_str(".pdf");
+        }
+        let dir = std::env::temp_dir().join("webrain-pdf");
+        std::fs::create_dir_all(&dir)?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("{stamp}-{name}"));
+        let mut f = std::fs::File::create(&path)?;
+        let n = std::io::copy(&mut resp.into_body().into_reader(), &mut f)?;
+        if n == 0 {
+            let _ = std::fs::remove_file(&path);
+            anyhow::bail!("{src} returned an empty body (not a PDF)");
+        }
+        Ok(Self {
+            path: path.to_string_lossy().into_owned(),
+            temp: true,
+        })
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl Drop for PdfSource {
+    fn drop(&mut self) {
+        if self.temp {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Extract PDF → Markdown + embedded images (Firecrawl pdf-inspector + lopdf).
-/// Pure Rust, zero system deps. Returns full-document markdown (headings/lists/
-/// tables/bold-italic), per-page text with OCR-needs-flag, layout classification,
-/// and embedded images as base64 PNGs (DCTDecode JPEG + FlateDecode raw).
-pub fn pdf_extract(path: &str) -> anyhow::Result<Value> {
+/// Pure Rust, zero system deps. `path` is a local file **or** an `http(s)` URL
+/// (downloaded to a temp `.pdf` first). Returns full-document markdown
+/// (headings/lists/tables/bold-italic), per-page text with OCR-needs-flag,
+/// layout classification, and embedded images as base64 PNGs (DCTDecode JPEG +
+/// FlateDecode raw).
+pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
+    let src = PdfSource::open(requested)?;
+    let path = src.path();
     let result =
         pdf_inspector::process_pdf(path).map_err(|e| anyhow::anyhow!("pdf extract failed: {e}"))?;
 
@@ -3321,7 +3402,7 @@ pub fn pdf_extract(path: &str) -> anyhow::Result<Value> {
     let images = extract_images_lopdf(path, None).unwrap_or_default();
 
     Ok(json!({
-        "path": path,
+        "path": requested,
         "pages": result.page_count,
         "pdf_type": format!("{:?}", result.pdf_type),
         "confidence": result.confidence,
@@ -3349,8 +3430,9 @@ pub fn pdf_render(
     tile_size: Option<u32>,
 ) -> anyhow::Result<Value> {
     use pdfium_render::prelude::*;
+    let src = PdfSource::open(path)?;
     let pdfium = Pdfium::default();
-    let doc = pdfium.load_pdf_from_file(path, None)?;
+    let doc = pdfium.load_pdf_from_file(src.path(), None)?;
     let scale = dpi.unwrap_or(150.0) / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
     let all_pages = doc.pages();
@@ -3397,9 +3479,11 @@ pub fn pdf_render(
 /// Uses lopdf to find image XObjects, then `image` crate decodes DCTDecode
 /// (JPEG) and FlateDecode (zlib raw pixels) → re-encodes as PNG.
 /// Skips JPEG2000/CCITT/JBIG2 — use `webrain_pdf_render` (pdfium) for those.
+/// `path` is a local file or an `http(s)` URL.
 /// Returns `[{page, index, width, height, image_b64}]`.
 pub fn pdf_images(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Value> {
-    let imgs = extract_images_lopdf(path, pages)?;
+    let src = PdfSource::open(path)?;
+    let imgs = extract_images_lopdf(src.path(), pages)?;
     Ok(json!({"path": path, "count": imgs.len(), "images": imgs}))
 }
 
