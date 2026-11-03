@@ -764,6 +764,40 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                     }
                 });
             }
+            // A PDF batch needs no browser. `op:"pdf"` is the same engine as
+            // webrain_pdf_extract (fetch → pure-Rust parse), so serve it BEFORE
+            // the CDP connect. Routing it through batch_map instead drives a tab
+            // that renders the PDF in Chrome's viewer plugin — no DOM, so the
+            // result was an empty page that read like a failed scrape.
+            if tool_name == "webrain_batch"
+                && arguments.get("op").and_then(|v| v.as_str()) == Some("pdf")
+            {
+                let targets: Vec<String> = arguments
+                    .get("urls")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if targets.is_empty() {
+                    return tool_error(id, "urls required (op=pdf)");
+                }
+                let results = tokio::task::spawn_blocking(move || {
+                    webrain_core::engines::pdf_extract_batch(&targets)
+                })
+                .await
+                .unwrap_or_default();
+                let result = json!({"status": "ok", "count": results.len(), "results": results});
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                        "isError": false
+                    }
+                });
+            }
             // ponytail: vault listing needs no browser — serve without a CDP backend.
             if tool_name == "webrain_profiles" {
                 let result = match tokio::task::spawn_blocking(webrain_core::vault::list).await {

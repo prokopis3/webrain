@@ -776,9 +776,9 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | screenshot | pdf (PDF urls[] → markdown + tables + layout, browserless). concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema"]},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema","pdf"], "description": "pdf: PDF extraction over urls[] (http(s) links or local paths) — download + pure-Rust parse, NO browser or tab. Use it for PDF lists; fetch/markdown on a PDF URL return an empty page because Chrome renders PDFs in a viewer plugin with no DOM."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "query": {"type": "string", "description": "markdown: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM)"},
@@ -864,10 +864,10 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_pdf",
-            "description": "PDF work. Pick `op` (required): page (save current page as PDF) | extract (PDF → markdown/JSON: path or paths[]) | render (PDF pages → PNG tiles for vision: path + optional pages/dpi/tile_size) — needs a --features pdfium build | images (extract embedded images: path + optional pages).",
+            "description": "PDF work. Pick `op` (required): page (save current page as PDF) | extract (PDF → markdown/JSON: path or paths[], each a file OR an http(s) URL) | render (PDF pages → PNG tiles for vision: path + optional pages/dpi/tile_size) — needs a --features pdfium build | images (extract embedded images: path + optional pages).",
             "inputSchema": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": ["page","extract","render","images"]},
-                "path": {"type": "string", "description": "extract/render/images: PDF file path"},
+                "path": {"type": "string", "description": "extract/render/images: PDF file path OR http(s) URL (fetched to a temp .pdf first — no browser needed)"},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "extract: batch paths"},
                 "pages": {"type": "array", "items": {"type": "integer"}, "description": "render/images: page numbers (1-based), omit = all"},
                 "dpi": {"type": "number", "default": 150, "description": "render: DPI"},
