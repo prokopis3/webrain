@@ -1757,6 +1757,22 @@ fn self_update() -> anyhow::Result<()> {
         cfg!(target_env = "musl"),
     )?;
     let asset = asset.as_str();
+    // Never replace a newer build with an older release. Without this check
+    // `upgrade` on a build ahead of the last tag silently DOWNGRADED it, since
+    // `releases/latest` answers with whatever was tagged last.
+    if !upgrade_forced() {
+        if let Some(latest) = latest_release_version() {
+            let current = env!("CARGO_PKG_VERSION");
+            if version_cmp(current, &latest) >= std::cmp::Ordering::Equal {
+                println!(
+                    "webrain: already up to date ({} >= release v{latest}). Re-run with --force to reinstall anyway.",
+                    current
+                );
+                return Ok(());
+            }
+            println!("webrain: {current} -> v{latest}");
+        }
+    }
     let url = format!("https://github.com/prokopis3/webrain/releases/latest/download/{asset}");
     let sums_url =
         "https://github.com/prokopis3/webrain/releases/latest/download/checksums.txt".to_string();
@@ -1816,6 +1832,78 @@ fn chrono_now() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", t.as_secs())
+}
+
+fn upgrade_forced() -> bool {
+    std::env::args().any(|a| a == "--force")
+}
+
+/// Version of the newest published release, read off the `/releases/latest`
+/// redirect (`curl` ships with every supported OS; no API token, no rate limit).
+/// `None` offline or unreadable — self_update then runs exactly as before.
+fn latest_release_version() -> Option<String> {
+    let sink = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let out = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "-o",
+            sink,
+            "-w",
+            "%{url_effective}",
+            "https://github.com/prokopis3/webrain/releases/latest",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout);
+    let tag = url.rsplit("/tag/").next()?.trim();
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    (!tag.is_empty() && tag.starts_with(|c: char| c.is_ascii_digit())).then(|| tag.to_string())
+}
+
+/// Numeric-triple compare — enough for `0.16.2` vs `0.15.3`. Missing parts count
+/// as 0 and a pre-release suffix (`-rc1`) is ignored: the goal is "never install
+/// an older release over a newer build", not full semver ordering.
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |v: &str| -> Vec<u32> {
+        v.trim_start_matches('v')
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (
+            pa.get(i).copied().unwrap_or(0),
+            pb.get(i).copied().unwrap_or(0),
+        );
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+#[cfg(test)]
+mod version_cmp_tests {
+    use super::version_cmp;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn orders_numeric_triples_and_ignores_noise() {
+        assert_eq!(version_cmp("0.16.2", "0.15.3"), Ordering::Greater);
+        assert_eq!(version_cmp("0.16.2", "0.16.2"), Ordering::Equal);
+        assert_eq!(version_cmp("v0.16.2", "0.16.2"), Ordering::Equal);
+        assert_eq!(version_cmp("0.9.0", "0.10.0"), Ordering::Less);
+        assert_eq!(version_cmp("1.0", "1.0.0"), Ordering::Equal);
+        assert_eq!(version_cmp("0.16.2", "0.16.2-rc1"), Ordering::Equal);
+    }
 }
 
 /// First free TCP port from `start` — used by `--fresh` to never collide with

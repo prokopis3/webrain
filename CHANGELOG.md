@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **cli**: `webrain upgrade` on a build newer than the last tag **silently
+  downgraded** it — `self_update` downloaded `releases/latest` with no version
+  comparison, so a 0.16.2 build was replaced by the 0.15.3 release. It now reads
+  the newest tag off the `/releases/latest` redirect and refuses when the running
+  build is equal or newer ("already up to date"), with `--force` to reinstall on
+  purpose. Homebrew/Scoop installs still delegate to the package manager, which
+  is what always happened on those.
 - **core**: `webrain_pdf op=extract` returned a **16.8 MB** reply for a 4 MB paper.
   Fixing the image walker made `extract` inline every figure as base64, so a
   nine-page report with 29 figures carried all of them in the tool result. The
