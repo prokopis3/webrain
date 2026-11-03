@@ -48,6 +48,12 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "",
     ),
     (
+        "diff",
+        "webrain diff <a> <b> [--max N] [--json]",
+        "What changed between two pages, or a page and a saved baseline. Exit 1 when they differ.",
+        "Each side takes an http(s) URL or a local file. Lines are whitespace-normalised and blank\n  lines dropped, so re-indentation or re-minification is not reported as a change. Needs no\n  browser: both sides are fetched over plain HTTP.",
+    ),
+    (
         "upgrade",
         "webrain upgrade",
         "Update webrain, detected per install method (brew, scoop, or self-update).",
@@ -315,6 +321,152 @@ fn env_section() -> String {
         }
     }
     s
+}
+
+/// `webrain diff <a> <b>` — a page against another page, or against a saved
+/// baseline file. Each side is an http(s) URL (plain HTTP, no browser) or a local
+/// file.
+///
+/// A line *set* difference, not an LCS: a monitor needs the added and the removed
+/// lines, and a multiset keeps it O(n) on a 10k-line page where a full diff would
+/// allocate a matrix. Order is preserved inside each side.
+fn cmd_diff(args: &[String]) -> anyhow::Result<()> {
+    let sides: Vec<&str> = args
+        .iter()
+        .skip(2)
+        .filter(|a| !a.starts_with("--"))
+        .map(|a| a.as_str())
+        .collect();
+    if sides.len() != 2 {
+        print!("{}", help_page("diff"));
+        std::process::exit(2);
+    }
+    let json_out = args.contains(&"--json".to_string());
+    let max: usize = args
+        .iter()
+        .position(|a| a == "--max")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let a = diff_lines(sides[0])?;
+    let b = diff_lines(sides[1])?;
+    let (removed, added) = line_diff(&a, &b);
+    let same = removed.is_empty() && added.is_empty();
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "a": sides[0],
+                "b": sides[1],
+                "identical": same,
+                "lines_a": a.len(),
+                "lines_b": b.len(),
+                "removed": removed.iter().take(max).collect::<Vec<_>>(),
+                "added": added.iter().take(max).collect::<Vec<_>>(),
+                "removed_total": removed.len(),
+                "added_total": added.len(),
+            })
+        );
+    } else {
+        println!(
+            "{} -> {}\n  -{} line(s)   +{} line(s){}",
+            sides[0],
+            sides[1],
+            removed.len(),
+            added.len(),
+            if same { "   (identical)" } else { "" }
+        );
+        for line in removed.iter().take(max) {
+            println!("- {line}");
+        }
+        if removed.len() > max {
+            println!("- ... {} more removed", removed.len() - max);
+        }
+        for line in added.iter().take(max) {
+            println!("+ {line}");
+        }
+        if added.len() > max {
+            println!("+ ... {} more added", added.len() - max);
+        }
+    }
+    // Exit 1 on a difference so a cron job or `webrain batch` can act on it.
+    if !same {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// One normalised line per entry. Whitespace is collapsed and blank lines dropped
+/// so re-indentation, re-minification or a changed newline style is not reported
+/// as content drift.
+fn diff_lines(src: &str) -> anyhow::Result<Vec<String>> {
+    let text = if src.starts_with("http://") || src.starts_with("https://") {
+        // 0 = no cap. The 3000-char default is a probe budget: a diff truncated
+        // there reports the tail of every page as "removed".
+        let v = webrain_core::engines::http_fetch_capped(src, 0)?;
+        v.get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        std::fs::read_to_string(src)?
+    };
+    Ok(text
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Multiset difference in both directions: `(removed from a, added in b)`.
+fn line_diff(a: &[String], b: &[String]) -> (Vec<String>, Vec<String>) {
+    fn surplus(from: &[String], against: &[String]) -> Vec<String> {
+        let mut left: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for line in against {
+            *left.entry(line.as_str()).or_default() += 1;
+        }
+        let mut out = Vec::new();
+        for line in from {
+            match left.get_mut(line.as_str()) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => out.push(line.clone()),
+            }
+        }
+        out
+    }
+    (surplus(a, b), surplus(b, a))
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::{diff_lines, line_diff};
+
+    fn v(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reports_added_and_removed_lines_by_multiset() {
+        let (removed, added) = line_diff(&v(&["x", "y", "y"]), &v(&["y", "z"]));
+        assert_eq!(removed, v(&["x", "y"]), "one duplicate is a removal");
+        assert_eq!(added, v(&["z"]));
+        let (r, a) = line_diff(&v(&["same"]), &v(&["same"]));
+        assert!(
+            r.is_empty() && a.is_empty(),
+            "identical pages report nothing"
+        );
+    }
+
+    #[test]
+    fn normalisation_ignores_layout_not_content() {
+        let a = diff_lines(std::env::current_exe().unwrap().to_str().unwrap());
+        assert!(a.is_err(), "a binary is not UTF-8 text");
+        let path = std::env::temp_dir().join("webrain_diff_norm.txt");
+        std::fs::write(&path, "  alpha   beta\n\n\tgamma\n").unwrap();
+        let got = diff_lines(path.to_str().unwrap()).unwrap();
+        assert_eq!(got, v(&["alpha beta", "gamma"]));
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Render the overview (no command) or one command's page.
@@ -1474,6 +1626,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("upgrade") => {
             upgrade()?;
+        }
+        Some("diff") => {
+            cmd_diff(&args)?;
         }
         Some("-v" | "--version" | "version") => {
             println!("webrain {}", env!("CARGO_PKG_VERSION"));

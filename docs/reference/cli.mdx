@@ -24,6 +24,7 @@ flags.
 | `webrain install [--force] [--engine chrome\|obscura\|lightpanda\|whisper\|vision\|watch] [--stealth] [--model NAME\|ID] [--model-update]` | Download a browser engine, or the local AI stack: `watch` = ffmpeg+yt-dlp+whisper-cli+model, `whisper` = STT GGUF model, `vision` = llama-server + one local vision model (ids in the [installation guide](/installation#optional-bundles)) |
 | `webrain uninstall vision [--model ID \| --all]` | Remove one installed local vision model, or all of them (also clears a legacy single-model install) |
 | `webrain upgrade` | Update to the latest release |
+| `webrain diff <a> <b> [--max N] [--json]` | What changed between two pages, or a page and a saved baseline. Either side is an http(s) URL or a local file; no browser. Exit 1 when they differ |
 | `webrain obscura [--port N]` | Spawn the Obscura CDP server (default 9224) |
 | `webrain lightpanda [--port N]` | Spawn the Lightpanda CDP server (default 9225) |
 | `webrain launch <service> <profile> [url] [--headless] [--port N]` | Spawn a stealth Chrome with a persistent per-account profile |
