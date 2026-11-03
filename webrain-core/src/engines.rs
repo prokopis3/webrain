@@ -11,7 +11,12 @@ pub struct TileShot {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Empty when a `tiles_dir` was passed: the bytes are on disk at `path`
+    /// instead. A 660 KB PNG page is ~10 MB of base64 across 16 tiles, which is
+    /// the whole cost of a tool call — paths keep the reply at a few hundred bytes.
     pub png_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 pub struct TileEngine {
@@ -19,6 +24,10 @@ pub struct TileEngine {
     pub tile_height: f64,
     pub max_tiles: usize,
 }
+
+/// Above this a full-page raster is ~160 MB of RGBA in the renderer, so the
+/// per-tile clip path is used instead of one capture + crops.
+const MAX_FULL_PAGE_PX: f64 = 40_000_000.0;
 
 impl TileEngine {
     pub fn new(tile_width: f64, tile_height: f64, max_tiles: usize) -> Self {
@@ -30,8 +39,16 @@ impl TileEngine {
     }
 
     /// Split the current page into tiles. Call navigate/snapshot first; does NOT navigate.
-    /// ponytail: CDP clip per tile (no image decode); cap total tiles at max_tiles.
-    pub async fn tile(&self, backend: &impl BrowserBackend) -> anyhow::Result<Vec<TileShot>> {
+    /// `dir` writes the PNGs there and leaves `png_b64` empty.
+    ///
+    /// One capture for the whole page, then local crops: `captureBeyondViewport`
+    /// re-rasterizes the whole surface on every call, so N clip calls cost N full
+    /// renders of the same pixels.
+    pub async fn tile(
+        &self,
+        backend: &impl BrowserBackend,
+        dir: Option<&str>,
+    ) -> anyhow::Result<Vec<TileShot>> {
         let size: Value = backend
             .evaluate(
                 "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]",
@@ -40,34 +57,101 @@ impl TileEngine {
         let page_w = size[0].as_f64().unwrap_or(1280.0).max(1.0);
         let page_h = size[1].as_f64().unwrap_or(800.0).max(1.0);
 
-        let cols = ((page_w / self.tile_width).ceil() as usize).max(1);
-        let rows = ((page_h / self.tile_height).ceil() as usize).max(1);
+        let rects = tile_rects(
+            page_w,
+            page_h,
+            self.tile_width,
+            self.tile_height,
+            self.max_tiles,
+        );
 
-        let mut tiles = Vec::new();
-        let mut idx = 0usize;
-        'outer: for r in 0..rows {
-            for c in 0..cols {
-                if idx >= self.max_tiles {
-                    break 'outer;
-                }
-                let x = c as f64 * self.tile_width;
-                let y = r as f64 * self.tile_height;
-                let w = self.tile_width.min(page_w - x);
-                let h = self.tile_height.min(page_h - y);
-                let png = backend.screenshot_clip(x, y, w, h, 1.0).await?;
-                tiles.push(TileShot {
-                    index: idx,
-                    x,
-                    y,
-                    width: w,
-                    height: h,
-                    png_b64: base64_encode(&png),
-                });
-                idx += 1;
+        // The CLIP form (not `screenshot(full_page)`) on purpose: same scale and
+        // document coordinate space as the per-tile path, so falling back to a
+        // clip can never shift a tile by the device-pixel ratio.
+        let whole = if page_w * page_h <= MAX_FULL_PAGE_PX {
+            match backend.screenshot_clip(0.0, 0.0, page_w, page_h, 1.0).await {
+                Ok(bytes) => image::load_from_memory(&bytes).ok(),
+                Err(_) => None,
             }
+        } else {
+            None
+        };
+
+        let mut tiles = Vec::with_capacity(rects.len());
+        for (index, (x, y, w, h)) in rects.into_iter().enumerate() {
+            let png = match whole.as_ref().and_then(|img| crop_png(img, x, y, w, h)) {
+                Some(p) => p,
+                None => backend.screenshot_clip(x, y, w, h, 1.0).await?,
+            };
+            let path = match dir {
+                Some(d) => Some(write_tile(d, index, &png)?),
+                None => None,
+            };
+            tiles.push(TileShot {
+                index,
+                x,
+                y,
+                width: w,
+                height: h,
+                png_b64: if path.is_some() {
+                    String::new()
+                } else {
+                    base64_encode(&png)
+                },
+                path,
+            });
         }
         Ok(tiles)
     }
+}
+
+/// Tile grid for a page, row-major, clipped to the page edges, capped at `max`.
+fn tile_rects(
+    page_w: f64,
+    page_h: f64,
+    tile_w: f64,
+    tile_h: f64,
+    max: usize,
+) -> Vec<(f64, f64, f64, f64)> {
+    let cols = ((page_w / tile_w).ceil() as usize).max(1);
+    let rows = ((page_h / tile_h).ceil() as usize).max(1);
+    let mut out = Vec::new();
+    'outer: for r in 0..rows {
+        for c in 0..cols {
+            if out.len() >= max {
+                break 'outer;
+            }
+            let x = c as f64 * tile_w;
+            let y = r as f64 * tile_h;
+            out.push((x, y, tile_w.min(page_w - x), tile_h.min(page_h - y)));
+        }
+    }
+    out
+}
+
+/// Crop one tile from the page raster. `None` when the rect is empty or outside
+/// the image — the caller then re-captures that one tile.
+fn crop_png(img: &image::DynamicImage, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<u8>> {
+    let (iw, ih) = (img.width() as f64, img.height() as f64);
+    let x = x.round().clamp(0.0, iw);
+    let y = y.round().clamp(0.0, ih);
+    let w = w.round().clamp(0.0, iw - x);
+    let h = h.round().clamp(0.0, ih - y);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let tile = image::imageops::crop_imm(img, x as u32, y as u32, w as u32, h as u32).to_image();
+    let mut buf = Vec::new();
+    tile.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
+
+fn write_tile(dir: &str, index: usize, png: &[u8]) -> anyhow::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let path = std::path::Path::new(dir).join(format!("tile_{index:03}.png"));
+    std::fs::write(&path, png)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -85,6 +169,35 @@ mod tests {
         assert_eq!(encoded, "aGVsbG8=");
         assert_eq!(super::base64_encode(b"a"), "YQ==");
         assert_eq!(super::base64_encode(b"ab"), "YWI=");
+    }
+
+    // ponytail: one check for the tile grid + local crop — the whole point of
+    // capturing once is that these rects land on the same pixels as N clips.
+    #[test]
+    fn tile_rects_tile_the_page_and_respect_the_cap() {
+        let r = super::tile_rects(400.0, 600.0, 200.0, 200.0, 99);
+        assert_eq!(r.len(), 6); // 2 cols x 3 rows
+        assert_eq!(r[0], (0.0, 0.0, 200.0, 200.0));
+        assert_eq!(r[1], (200.0, 0.0, 200.0, 200.0));
+        assert_eq!(r[5], (200.0, 400.0, 200.0, 200.0));
+        // ragged last column/row is clipped to the page edge, never padded
+        let ragged = super::tile_rects(250.0, 250.0, 200.0, 200.0, 99);
+        assert_eq!(ragged[1], (200.0, 0.0, 50.0, 200.0));
+        assert_eq!(super::tile_rects(400.0, 600.0, 200.0, 200.0, 2).len(), 2);
+    }
+
+    #[test]
+    fn crop_png_cuts_the_requested_region_and_refuses_empty_rects() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            10,
+            30,
+            image::Rgba([9, 9, 9, 255]),
+        ));
+        let png = super::crop_png(&img, 0.0, 20.0, 10.0, 10.0).expect("tile");
+        let cut = image::load_from_memory(&png).expect("png");
+        assert_eq!((cut.width(), cut.height()), (10, 10));
+        // past the bottom edge -> None, so the caller re-captures that one tile
+        assert!(super::crop_png(&img, 0.0, 30.0, 10.0, 10.0).is_none());
     }
 
     // ponytail: one check for the regex JS builder (builtin present, custom overrides).

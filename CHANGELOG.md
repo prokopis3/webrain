@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eval answers on the wrong target, `batch` can report `ok` with `ok:0`).
   Measured on 20 live sites: 20/20 pages, 35.9 s at concurrency 4.
 
+- **mcp**: `observe{what:pixel}` takes `tiles_dir` and writes the PNGs there,
+  returning paths instead of `png_b64`; `webrain_vision{op:"ask"}` takes
+  `images:[paths]` and reads them from disk. A 2-tile page reply drops from
+  ~1.87 MB of base64 to 226 bytes with no accuracy change (measured on HN), and
+  vision needs no second capture. Tiles are cropped from **one** page raster
+  instead of one `Page.captureScreenshot` per tile.
+- **skills**: new `page-tiles` skill — text-before-pixels decision rule, the
+  `navigate` → `observe{what:pixel, tiles_dir}` → `vision{images}` recipe, tile
+  geometry, and the prompt shapes a small VLM needs.
+
 ### Fixed
 
 - **core**: `webrain_pdf op=extract` returned **zero embedded images** for every

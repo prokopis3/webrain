@@ -715,6 +715,7 @@ pub fn list_tools() -> Vec<Value> {
                 "tile_width": {"type": "number", "default": 800, "description": "pixel: tile width px"},
                 "tile_height": {"type": "number", "default": 800, "description": "pixel: tile height px"},
                 "max_tiles": {"type": "integer", "default": 16, "description": "pixel: max tiles"},
+                "tiles_dir": {"type": "string", "description": "pixel: write the tiles here and return paths instead of base64 (a 660 KB PNG page is ~10 MB across 16 tiles — use this, then feed the paths to webrain_vision{op:'ask', images:[...]})"},
                 "word_threshold": {"type": "integer", "default": 2, "description": "clean: min word length"},
                 "format": {"type": "string", "enum": ["png", "jpeg", "webp", "avif"], "default": "png", "description": "screenshot: image encoding — webp/jpeg are ~10x smaller than png; avif is smallest but needs a CPU re-encode (CDP has no avif encoder)"},
                 "quality": {"type": "integer", "default": 80, "description": "screenshot: jpeg/webp quality 1-100 (ignored for png)"},
@@ -939,6 +940,7 @@ pub fn list_tools() -> Vec<Value> {
                 "prompt": {"type": "string", "description": "ask: question for the local vision model"},
                 "scale": {"type": "number", "default": 1, "description": "ask: upscale factor for each clip (>1 = higher-res capture — use 3 for small captcha tiles so the 2B model reads them accurately)"},
                 "tiles": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}}, "description": "ask: BATCH mode — array of clip regions; each is captured at `scale` and ALL sent in ONE llama request as numbered images (watch-frames batching). Use for per-tile captcha classification; the prompt must state the numbering (1..N)."},
+                "images": {"type": "array", "items": {"type": "string"}, "description": "ask: file paths of tiles already saved by observe{what:pixel, tiles_dir}. Read from disk — no second capture, and paths keep the tool call small instead of megabytes of base64."},
                 "x": {"type": "number", "description": "ask: clip region x (default full viewport)"},
                 "y": {"type": "number", "description": "ask: clip region y"},
                 "w": {"type": "number", "description": "ask: clip region width"},
@@ -2085,7 +2087,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .unwrap_or(800.0);
             let mt = args.get("max_tiles").and_then(|v| v.as_i64()).unwrap_or(16) as usize;
             let engine = TileEngine::new(tw, th, mt);
-            match engine.tile(backend).await {
+            let dir = args.get("tiles_dir").and_then(|v| v.as_str());
+            match engine.tile(backend, dir).await {
                 Ok(tiles) => json!({"status": "ok", "count": tiles.len(), "tiles": tiles}),
                 Err(e) => err(e),
             }
@@ -3183,7 +3186,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                 }
             }
-            match ask_viewport(backend, &prompt, clip, &tiles, scale).await {
+            let images: Vec<String> = args
+                .get("images")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match ask_viewport(backend, &prompt, clip, &tiles, &images, scale).await {
                 Ok(ans) => json!({"status": "ok", "answer": ans}),
                 Err(e) => err(e),
             }

@@ -309,6 +309,9 @@ pub async fn ask_viewport(
     prompt: &str,
     clip: Option<(f64, f64, f64, f64)>,
     tiles: &[(f64, f64, f64, f64)],
+    // Tile file paths (from `observe what=pixel tiles_dir`). Read from disk —
+    // no second capture, and the paths cost the caller no base64.
+    images: &[String],
     scale: f64,
 ) -> anyhow::Result<String> {
     // Cloud-first provider chain: OpenRouter → OpenAI → Fireworks → Groq →
@@ -366,7 +369,18 @@ pub async fn ask_viewport(
         off[0].as_f64().unwrap_or(0.0),
         off[1].as_f64().unwrap_or(0.0),
     );
-    let content: Value = if !tiles.is_empty() {
+    let content: Value = if !images.is_empty() {
+        // Already-captured tiles: zero CDP calls, and the caller sent paths
+        // instead of megabytes of base64 in the tool arguments.
+        let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
+        for p in images {
+            let bytes =
+                std::fs::read(p).with_context(|| format!("vision: cannot read tile {p}"))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            c.push(json!({"type":"image_url","image_url":{"url": format!("data:image/png;base64,{b64}")}}));
+        }
+        json!(c)
+    } else if !tiles.is_empty() {
         let mut c: Vec<Value> = vec![json!({"type":"text","text": prompt})];
         for (x, y, w, h) in tiles {
             let png = backend
@@ -587,7 +601,7 @@ pub async fn index_current_page(
     max_tiles: usize,
 ) -> anyhow::Result<Value> {
     let engine = crate::engines::TileEngine::new(tile_w, tile_h, max_tiles);
-    let tiles = engine.tile(backend).await?;
+    let tiles = engine.tile(backend, None).await?;
     if tiles.is_empty() {
         anyhow::bail!("no tiles captured — navigate first, or the page is empty");
     }
