@@ -62,7 +62,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-17 TOOLS — match the request to a boundary:
+18 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
@@ -75,15 +75,18 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_extract    structured data from the page (mode: schema|regex|jsonld|table|
                      autoschema|bm25)
   webrain_scrape     fast no-browser GET of one URL (static pages only)
-  webrain_batch      same op across many URLs in parallel tabs (op: fetch|extract|
-                     interact|eval|assets|screenshot) + cdp_urls per-proxy fan-out
+  webrain_batch      same op across many URLs in parallel tabs (op: fetch|markdown|
+                     extract|interact|eval|assets|screenshot|pdf) + cdp_urls
+                     per-proxy fan-out
   webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
   webrain_search     web search (duckduckgo|google|bing|brave)
   webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
                      engine; duckduckgo|bing|auto are pure HTTP (no browser),
                      google|brave render in the connected CDP engine (auto-launched
                      guest Chrome); relevance-filtered + deduped + paginated + falls back
-  webrain_pdf        pdf work (op: page|extract|render|images)
+  webrain_pdf        pdf work (op: page|extract|render|images) — extract takes a
+                     path or http(s) URL (paths[] batches); render = PNG tiles and
+                     needs a --features pdfium build + pdfium.dll/libpdfium.so on PATH
   webrain_download   files/media (engine: http|ytdlp)
   webrain_watch      video → transcript + frames
   webrain_session    browser/auth/session state (op: open|close|list|cookies|
@@ -92,6 +95,8 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_eval       arbitrary JS (the escape hatch)
   webrain_eval_in_frame  run JS inside a cross-origin iframe (isolated world) →
                      exact reCAPTCHA/hCaptcha grid + verify geometry
+  webrain_stats      host health (load, memory, browser process count) — separates
+                     "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
@@ -457,7 +462,7 @@ pub fn guide_from_args(args: &Value) -> Value {
         );
         for (title, body) in &sections {
             // The tool list is used on nearly every call, so it stays inline.
-            if title.starts_with("17 TOOLS") {
+            if title.starts_with("18 TOOLS") {
                 text.push_str(&format!("\n{title}\n{body}"));
                 continue;
             }
@@ -3512,7 +3517,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("17 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("18 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 

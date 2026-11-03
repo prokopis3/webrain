@@ -179,6 +179,9 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          # Feeds the OCI `version` label, so the package page names the release
+          # instead of "dev".
+          build-args: VERSION=${{ env.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

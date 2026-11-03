@@ -27,7 +27,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 |---|---|---|
 | **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
 | **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
-| **LLM-ready** | MCP server, 17 tools, built-in decision guide | you hand-roll tool functions |
+| **LLM-ready** | MCP server, 18 tools, built-in decision guide | you hand-roll tool functions |
 | **Anti-bot** | challenge detection + persistent profile + native login | manual |
 | **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
 | **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
@@ -181,7 +181,7 @@ webrain uninstall vision --model ID | --all        # remove installed vision mod
 webrain serp "<query>" [--engine …] [--limit N]   # structured JSON search (5 engines + auto)
 ```
 
-The 17-tool MCP surface is discovered dynamically — `webrain_guide` lists
+The 18-tool MCP surface is discovered dynamically — `webrain_guide` lists
 it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## Browser Engines
@@ -202,7 +202,7 @@ it for the LLM (see [MCP Tools](#mcp-tools)).
 
 ## MCP Tools
 
-The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 17 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
+The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 18 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
 
 | Tool | What it does |
 |---|---|
@@ -222,6 +222,7 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_vision` | Screenshot-tile vision: `op` = index · retrieve · ask (local Qwen3-VL question answering over a viewport or clip region) |
 | `webrain_eval` | Arbitrary JS in the page (escape hatch) |
 | `webrain_eval_in_frame` | Run JS inside a cross-origin iframe (isolated world) |
+| `webrain_stats` | Host health — load, memory, browser process count (is the page slow, or the machine?) |
 | `webrain_guide` | Agent decision guide (browser/challenge/extraction/delegation) |
 
 Legacy one-action tool names still dispatch (backward compatible via `map_surface()`).
@@ -275,7 +276,7 @@ The complete list, with defaults and the allow/deny rules, is in
 
 ## Marketplace / IDE Plugins
 
-Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 17 tools appear.
+Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 18 tools appear.
 
 Both transports work in every client: **stdio** (`webrain mcp`) or **HTTP**
 (`webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`).
@@ -419,7 +420,7 @@ LLM prompt → tool call (webrain_navigate/extract/batch/…) → CdpBackend →
 | [Quickstart](docs/quickstart.mdx) | Engine → MCP server → a live scrape in minutes |
 | [Installation](docs/installation.mdx) | Every install path, Linux libraries, updating |
 | [Agent Decision Guide](docs/AGENT_DECISION_GUIDE.md) | Which engine, which tool, how to handle a challenge |
-| [Tools reference](docs/reference/tools.mdx) | The 17-tool surface, per tool and per selector |
+| [Tools reference](docs/reference/tools.mdx) | The 18-tool surface, per tool and per selector |
 | [CLI reference](docs/reference/cli.mdx) | Every subcommand and flag |
 | [Environment variables](docs/reference/environment.mdx) | Every knob, with defaults |
 | [Architecture](docs/ARCHITECTURE.md) · [ADRs](docs/adr/) | How the layers fit, and why |

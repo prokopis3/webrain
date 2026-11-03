@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **build**: OCI image labels (`org.opencontainers.image.title/description/source/
+  licenses/version`). ghcr renders `…description` as the package description, so
+  every published version read "No description provided" (0.11.0 → 0.15.3).
+  `engine-image.yml` passes the release tag as `VERSION` for the `version` label.
 - **mcp**: `observe what="assets"` — one pass over the page returning every link
   (`internal` / `external` grouped by hostname, plus `other_schemes` counts for
   `mailto:`/`tel:`/`ftp:`, each with file kind), every image (`<img>`, `srcset`,
@@ -26,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **docs**: the tool count said 17 everywhere; the server advertises **18**
+  (`webrain_stats` was never documented). Corrected in the README, ARCHITECTURE,
+  `webrain-guide`/`webrain-mcp` headers, the whole docs site (incl. the terminal
+  mocks and hero SVGs), the `webrain_guide` tool text, and the GitHub repo
+  description. Batch ops now also list `markdown`, `pdf` and `assets`.
 - **mcp**: `observe what="images"` runs the asset scanner, so it now returns
   `srcset`/lazy/picture sources and CSS background art — the images a page is
   mostly made of — instead of only `document.images`.
