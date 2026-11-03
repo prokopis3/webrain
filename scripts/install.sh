@@ -96,10 +96,23 @@ fi
 chmod +x "$TMP"
 mv -f "$TMP" "$INSTALL_DIR/webrain"
 
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*|*":$INSTALL_DIR/:"*) : ;;
-  *) echo "webrain: installed to $INSTALL_DIR/webrain — add $INSTALL_DIR to your PATH." >&2 ;;
-esac
+# Does a ":$PATH:" string contain this directory? (a PATH entry may be written
+# with a trailing slash, so accept both forms)
+has_dir() { case ":$1:" in *":$2:"*|*":$2/:"*) return 0 ;; esac; return 1; }
+
+# The invoking shell is usually a NON-login shell (`curl | bash`), which never
+# read ~/.profile — so a bare $PATH test warns about a directory that every new
+# terminal already has (Debian/Ubuntu add ~/.local/bin for login shells as soon
+# as it exists). Ask the login shell what PATH it actually gets before nagging.
+if ! has_dir "$PATH" "$INSTALL_DIR"; then
+  LOGIN_PATH="$("${SHELL:-bash}" -lc 'printf "%s" "$PATH"' 2>/dev/null || true)"
+  if has_dir "$LOGIN_PATH" "$INSTALL_DIR"; then
+    echo "webrain: $INSTALL_DIR is already on PATH — run 'webrain version' in a fresh shell."
+  else
+    echo "webrain: installed to $INSTALL_DIR/webrain — add it to PATH, then reopen the shell:" >&2
+    echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.profile   # ~/.zshrc for zsh" >&2
+  fi
+fi
 
 echo "webrain: installed. Next steps:"
 echo "  webrain install          # download Chrome for Testing (first run)"
