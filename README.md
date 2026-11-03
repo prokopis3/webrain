@@ -249,6 +249,23 @@ Cloud keys (`GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY`) are optiona
 if you run the local stack. `webrain install watch` prints a `warnings` block if
 anything's missing.
 
+## Measured
+
+Numbers from real runs in this repo, not estimates. Rerun the PDF comparison with
+`output/bench_pdf.ps1` (it drives the MCP server over HTTP).
+
+| Job | Result |
+|---|---|
+| Product scrape, live store | 407 products, ~17 tool calls, ~46K tokens |
+| Parallel batch | 132 products in one call, ~2-4 s/page on Lightpanda |
+| PDF text layer, 9-page paper ([arxiv 2408.09869](https://arxiv.org/pdf/2408.09869)) | **5.2 s**, 48 KB markdown, 32,401 chars, 10 table rows |
+| Same PDF via render + tiles + local vision | 157.9 s (render 4.6 + tiles 2.3 + vision 151.0), 17,330 chars |
+| Vision on a page the text layer lost | page 7: **0 chars** in text, recovered the appendix heading + the Figure 2 caption in 16 s |
+
+Tiling is 1.4% of the tiled path and `llama-server` is single-slot, so parallel
+tiling is not the lever — routing is: extract text, then render + vision only the
+pages whose text layer came back empty or short.
+
 ## Environment Variables
 
 The ones you are most likely to set. **Every variable is read once, at process

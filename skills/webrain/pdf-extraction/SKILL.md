@@ -7,7 +7,22 @@ description: 'Extract text, tables, figures and page images from PDFs — one fi
 
 Zero system dependencies for text. The parse is **pure Rust** (`pdf-inspector` on
 `lopdf`), so it needs no browser, no Python, no poppler — which also means a PDF
-never needs a CDP tab and never hits anti-bot.
+never needs a CDP tab and never hits anti-bot. A URL is fetched and parsed
+in-memory: you never have to save the file yourself.
+
+## Text first — measured on a 9-page paper
+
+| path | time | output |
+|---|---|---|
+| `op:extract` | **5.2 s** | 48 KB markdown, 32,401 chars, 10 table rows |
+| `op:render` + tiles + local vision | 157.9 s | 17,330 chars (53% of the text) |
+
+Vision costs ~16 s **per page** (2048-token cap at ~12 tok/s) and the tiling step is
+1.4% of that — so never parallelize tiles, route instead: extract, then send only the
+pages whose `texts[n].text` is empty or short to `op:render` + vision. That is where
+tiles earn their keep: on the measured paper a figure-only page returned **0 chars**
+from the text layer, and vision recovered its appendix heading and Figure caption
+(along with a chain-of-thought preamble — take the last paragraph, not the first).
 
 ## When to use
 - "extract / read / summarise this PDF", "convert this paper to markdown"
