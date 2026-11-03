@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   difference (O(n) on a 10k-line page) rather than an LCS — a monitor needs the
   added and removed lines, not hunk alignment.
 
+### Fixed
+
+- **install**: the POSIX installer claimed "add ~/.local/bin to your PATH" on
+  Debian/Ubuntu, where `~/.profile` already does exactly that — it was reading
+  the invoking shell's `PATH`, and `curl | bash` is not a login shell, so the
+  directory it had just created was invisible. It now asks the login shell what
+  `PATH` it gets and prints the accurate "already on PATH — run `webrain version`
+  in a fresh shell" line, reserving the `export` command for directories that
+  really are missing (naming the actual path, trailing-slash tolerant).
+- **build**: `.gitattributes` pins `*.sh` to `text eol=lf`. A CRLF checkout
+  committed from Windows would ship an installer that dies with
+  `syntax error near unexpected token 'in'` the moment it is piped into `bash`.
+
 ## [0.16.2] - 2026-11-03
 
 ### Added

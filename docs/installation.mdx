@@ -22,6 +22,15 @@ irm https://raw.githubusercontent.com/prokopis3/webrain/main/scripts/install.ps1
 
 </CodeGroup>
 
+<Note>
+  The script verifies the download against the release's `checksums.txt` before
+  installing, into `~/.local/bin` (override with `WEBRAIN_INSTALL_DIR`). On
+  Debian/Ubuntu that directory is already on `PATH` via `~/.profile`, so a new
+  shell is all you need afterwards — the installer checks the login shell and
+  says so instead of asking you to edit your profile. Inside WSL the same
+  command works as-is and picks the glibc `linux-x86_64` build.
+</Note>
+
 Then, in any terminal:
 
 ```bash

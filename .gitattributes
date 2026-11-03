@@ -1,0 +1,4 @@
+# Shell scripts are piped straight into `bash` from raw.githubusercontent.com —
+# a CRLF copy dies at the first `case` ("syntax error near unexpected token").
+# Pin them to LF so no Windows checkout can commit a broken installer.
+*.sh text eol=lf
