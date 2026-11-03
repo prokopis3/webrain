@@ -36,16 +36,20 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Changed
 
-- **docs** — accuracy audit against the 17-tool surface: `quickstart` /
+- **docs** — accuracy audit against the 18-tool surface: `quickstart` /
   `cursor` / `agent-decision-guide` / `runtime-flow` stale "15"/"63-tool"
   counts fixed (the agent-guide table gained the missing `webrain_serp` row);
   the CLI reference drops the non-existent `webrain snapshot`, the false
   click-with-`selector` claim, and gains the missing `webrain serp` command;
   the environment reference adds the SERP / vision / stealth env vars, the
   `WEBRAIN_PROXIES` rotation pool, the HTTP-cache, download-cap and
-  fetch-timeout knobs, and `EMBED_FALLBACK_*`; the agent decision guide's tool
-  dialect is modernized to the consolidated names; two unreferenced landing
-  images removed.
+  fetch-timeout knobs, and `EMBED_FALLBACK_*`; the tools reference gains the
+  `webrain_stats` tool plus the selectors added since the last pass
+  (`observe what=assets` with `only`/`max`, `batch op=pdf|assets`, `interact
+  action=hold`, browserless `scrape` schemas, `session save_state inline` /
+  `restore_state payload`, `vision images[]`) and names the 11 tools that
+  declare `session_id`; the agent decision guide's tool dialect is modernized
+  to the consolidated names; two unreferenced landing images removed.
 
 ## v0.7.3
 
