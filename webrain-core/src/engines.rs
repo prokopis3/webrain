@@ -3510,14 +3510,25 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
             Ok(d) => d,
             Err(_) => continue,
         };
-        // ponytail: direct Resources lookup — skip pages without /Resources
-        // (inherited resources from parent nodes are rare in practice).
+        // /Resources is an indirect reference in every real-world PDF we tested
+        // (`/Resources 100 0 R`), so the unresolved lookup matched nothing and
+        // every embedded image was silently dropped. Resolve one level.
         let resources = page_dict
             .get(b"Resources")
             .ok()
-            .and_then(|r| r.as_dict().ok());
+            .and_then(|r| match r.as_reference() {
+                Ok(id) => doc.get_object(id).ok().and_then(|o| o.as_dict().ok()),
+                Err(_) => r.as_dict().ok(),
+            });
         if let Some(res) = resources {
-            if let Some(xobj) = res.get(b"XObject").ok().and_then(|x| x.as_dict().ok()) {
+            let xobj = res
+                .get(b"XObject")
+                .ok()
+                .and_then(|x| match x.as_reference() {
+                    Ok(id) => doc.get_object(id).ok().and_then(|o| o.as_dict().ok()),
+                    Err(_) => x.as_dict().ok(),
+                });
+            if let Some(xobj) = xobj {
                 let mut idx = 0u32;
                 for (_name, obj_val) in xobj.iter() {
                     let obj_id = match obj_val.as_reference().ok() {
@@ -3550,10 +3561,16 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                     if w == 0 || h == 0 {
                         continue;
                     }
-                    let filter = dict_owned
-                        .get(b"Filter")
-                        .ok()
-                        .and_then(|v| v.as_name().ok());
+                    // /Filter is a name OR an array — pdfTeX writes `[/FlateDecode]`,
+                    // which `as_name()` cannot read, so every image in those PDFs was
+                    // silently skipped (5 arXiv papers, 0 images).
+                    let filter: Option<&[u8]> = match dict_owned.get(b"Filter").ok() {
+                        Some(lopdf::Object::Name(n)) => Some(n.as_slice()),
+                        Some(lopdf::Object::Array(a)) => {
+                            a.iter().rev().find_map(|o| o.as_name().ok())
+                        }
+                        _ => None,
+                    };
                     let data = &content;
 
                     let img: Option<image::DynamicImage> = match filter {
@@ -3563,24 +3580,7 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
                             if ZlibDecoder::new(&data[..]).read_to_end(&mut dec).is_err() {
                                 continue;
                             }
-                            let bpp = dict_owned
-                                .get(b"BitsPerComponent")
-                                .ok()
-                                .and_then(|v| v.as_i64().ok())
-                                .unwrap_or(8) as u8;
-                            if bpp != 8 {
-                                continue;
-                            }
-                            let cs = dict_owned
-                                .get(b"ColorSpace")
-                                .ok()
-                                .and_then(|v| v.as_name().ok());
-                            match cs {
-                                Some(b"DeviceRGB") => image::RgbImage::from_raw(w, h, dec)
-                                    .map(image::DynamicImage::ImageRgb8),
-                                _ => image::GrayImage::from_raw(w, h, dec)
-                                    .map(image::DynamicImage::ImageLuma8),
-                            }
+                            flate_to_image(w, h, dec)
                         }
                         _ => None,
                     };
@@ -3602,6 +3602,35 @@ fn extract_images_lopdf(path: &str, pages: Option<&[u32]>) -> anyhow::Result<Vec
         }
     }
     Ok(out)
+}
+
+/// Decode inflated image samples by their count. /ColorSpace is frequently an
+/// /ICCBased *reference* rather than a name, so the previous name match fell
+/// through to the gray branch and `from_raw` rejected the length — a silent skip.
+fn flate_to_image(w: u32, h: u32, dec: Vec<u8>) -> Option<image::DynamicImage> {
+    let px = (w as usize).checked_mul(h as usize)?;
+    match dec.len() {
+        n if n == px => image::GrayImage::from_raw(w, h, dec).map(image::DynamicImage::ImageLuma8),
+        n if n == px * 3 => {
+            image::RgbImage::from_raw(w, h, dec).map(image::DynamicImage::ImageRgb8)
+        }
+        // CMYK: 4 samples/px. Naive conversion, enough to read a figure.
+        n if n == px * 4 => {
+            let rgb: Vec<u8> = dec
+                .chunks_exact(4)
+                .flat_map(|c| {
+                    let k = 255 - c[3] as u32;
+                    [
+                        ((255 - c[0] as u32) * k / 255) as u8,
+                        ((255 - c[1] as u32) * k / 255) as u8,
+                        ((255 - c[2] as u32) * k / 255) as u8,
+                    ]
+                })
+                .collect();
+            image::RgbImage::from_raw(w, h, rgb).map(image::DynamicImage::ImageRgb8)
+        }
+        _ => None,
+    }
 }
 
 /// Batch PDF extraction: extract files CONCURRENTLY. PDF parsing is CPU-bound
@@ -3637,4 +3666,20 @@ pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
             .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     })
+}
+
+#[cfg(test)]
+mod pdf_image_tests {
+    use super::flate_to_image;
+
+    #[test]
+    fn decodes_by_sample_count_not_by_colorspace_name() {
+        // ICCBased images carry no /ColorSpace name, so only the length can say.
+        assert!(flate_to_image(2, 2, vec![0; 4]).is_some()); // gray
+        assert!(flate_to_image(2, 2, vec![0; 12]).is_some()); // rgb
+        assert!(flate_to_image(2, 2, vec![0; 16]).is_some()); // cmyk -> rgb
+        // 16-bit samples and predictor rows never match w*h*n: still skipped.
+        assert!(flate_to_image(2, 2, vec![0; 8]).is_none());
+        assert!(flate_to_image(2, 2, vec![0; 14]).is_none());
+    }
 }

@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core**: `webrain_pdf op=extract` returned **zero embedded images** for every
+  real PDF. `/Resources` and `/XObject` are indirect references (`/Resources 100
+  0 R`), and the unresolved lookup matched nothing on any page; a single-element
+  `/Filter [ /FlateDecode ]` array was also unreadable by `as_name()`. Raw samples
+  are now decoded by their count instead of by a `/ColorSpace` name, which is
+  normally an `/ICCBased` reference. Verified on arXiv 1706.03762: 0 → 3 images.
+  The other four test papers hold no raster images at all (vector-only `Form`
+  figures), so they correctly stay at 0 — use `op=render` for those.
 - **docs**: the tool count said 17 everywhere; the server advertises **18**
   (`webrain_stats` was never documented). Corrected in the README, ARCHITECTURE,
   `webrain-guide`/`webrain-mcp` headers, the whole docs site (incl. the terminal
