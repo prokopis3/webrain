@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core**: `webrain_pdf op=extract` returned a **16.8 MB** reply for a 4 MB paper.
+  Fixing the image walker made `extract` inline every figure as base64, so a
+  nine-page report with 29 figures carried all of them in the tool result. The
+  extract now keeps only the inventory (`page`, `index`, `width`, `height`) —
+  the bytes belong to `op=images dir:…`. Reply back to 100 KB.
 - **core**: `webrain_pdf op=images` reported **0 images** for any PDF whose figures are
   embedded *pages*. An included page arrives as a `/Subtype /Form` XObject and keeps its
   images in its own `/Resources`; the walker only visited the page's direct XObjects.

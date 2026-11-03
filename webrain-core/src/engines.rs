@@ -3564,7 +3564,21 @@ pub fn pdf_extract(requested: &str) -> anyhow::Result<Value> {
 
     // ponytail: extract images in the same pass. Errors are non-fatal — we
     // still return text+layout even if image extraction fails on exotic formats.
-    let images = extract_images_lopdf(path, None, None).unwrap_or_default();
+    // ponytail: inventory only. The bytes belong to `op=images dir:…`; inlining
+    // them here made op=extract a 16.8 MB reply for a 4 MB paper the moment the
+    // walker started finding nested Form images (29 of them). The decode still
+    // runs — it is ~1 s and keeps one walker — but no base64 leaves the process.
+    let images: Vec<Value> = extract_images_lopdf(path, None, None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut img| {
+            if let Some(obj) = img.as_object_mut() {
+                obj.remove("image_b64");
+                obj.remove("path");
+            }
+            img
+        })
+        .collect();
 
     // Which pages can the text layer NOT deliver? Two cases, both cheap to spot:
     // a caption whose figure is vector art (no raster in `images`, so op=images
