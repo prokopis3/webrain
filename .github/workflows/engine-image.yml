@@ -187,6 +187,8 @@ jobs:
       # means the summary can only ever report what was actually uploaded.
       - name: Push to ghcr
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           REF="ghcr.io/${{ github.repository_owner }}/$IMAGE:$TAG"
@@ -195,6 +197,20 @@ jobs:
           printf '%s\n' "$OUT"
           DIGEST="$(printf '%s\n' "$OUT" | sed -n 's/.*digest: \(sha256:[a-f0-9]*\).*/\1/p' | tail -n1)"
           echo "| \`ghcr.io/${{ github.repository_owner }}\` | \`${DIGEST:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+          # `latest` is a claim about which version is current, so it is decided by
+          # the release API rather than assumed from the trigger: a re-run of an old
+          # run must never move the tag backwards. Until this existed, ghcr carried
+          # only bare versions (`0.11.0`, `0.12.1`) and `docker pull webrain:latest`
+          # resolved to whatever the reader assumed.
+          LATEST_TAG="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ "v${TAG}" = "${LATEST_TAG}" ]; then
+            docker tag "$IMAGE:$TAG" "ghcr.io/${{ github.repository_owner }}/$IMAGE:latest"
+            docker push "ghcr.io/${{ github.repository_owner }}/$IMAGE:latest"
+            echo "| \`ghcr.io/${{ github.repository_owner }}/$IMAGE:latest\` | moved to \`${TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::not moving :latest — newest release is '${LATEST_TAG:-unknown}', this build is '${TAG}'"
+          fi
 
       - name: Push to Docker Hub
         if: env.DOCKERHUB_TOKEN != ''
