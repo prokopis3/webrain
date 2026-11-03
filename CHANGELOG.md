@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-03
+
 ### Added
 
 - **build**: OCI image labels (`org.opencontainers.image.title/description/source/
@@ -56,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one row; `vision_targets()` reads the env, `vision_targets_from()` stays pure
   for tests. Endpoints live-checked without a key (anthropic 401, gemini 400,
   dashscope 401 — they exist and reject the request, not 404).
+- **build**: every release target now builds with `--features pdfium`, and the CLI
+  fetches the library it binds at runtime: `webrain install pdfium` downloads the
+  bblanchon/pdfium-binaries build for this OS/arch into the webrain engine cache
+  (`pdfium-linux-x64`, `-linux-arm64`, `-mac-x64`, `-mac-arm64`, `-win-x64`,
+  `-win-arm64`), and `op=render` looks there first, then beside the executable,
+  before falling back to the system loader. So `op=render` works on a released
+  binary with no `PATH` edit and no source build. musl is the documented
+  exception: the published library is glibc-linked, so Alpine keeps
+  `op=extract` / `op=images`. CI lints the workspace *with* the feature so it
+  cannot rot out of the release matrix again.
 - **skills**: new `page-tiles` skill — text-before-pixels decision rule, the
   `navigate` → `observe{what:pixel, tiles_dir}` → `vision{images}` recipe, tile
   geometry, and the prompt shapes a small VLM needs.

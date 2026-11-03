@@ -381,6 +381,79 @@ pub fn install_obscura(force: bool, stealth: bool, render: bool) -> Result<PathB
         .with_context(|| format!("obscura binary not found in {}", dest.display()))
 }
 
+/// bblanchon/pdfium-binaries asset key for this target. `None` on musl: the
+/// published `.so` is glibc-linked, so an Alpine binary cannot load it — there
+/// `op=extract` and `op=images` still work, only `op=render` needs pdfium.
+fn pdfium_asset_key() -> Option<&'static str> {
+    let arm = cfg!(target_arch = "aarch64");
+    if cfg!(target_os = "linux") {
+        if cfg!(target_env = "musl") {
+            None
+        } else if arm {
+            Some("linux-arm64")
+        } else {
+            Some("linux-x64")
+        }
+    } else if cfg!(target_os = "macos") {
+        Some(if arm { "mac-arm64" } else { "mac-x64" })
+    } else if cfg!(target_os = "windows") {
+        Some(if arm { "win-arm64" } else { "win-x64" })
+    } else {
+        None
+    }
+}
+
+/// The file `Pdfium::bind_to_library` must be pointed at inside the package.
+fn pdfium_lib_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+/// Locate a pdfium library this process can load: the engine cache first (what
+/// `webrain install pdfium` fills), then a copy sitting beside the executable.
+/// `None` means "use the system loader", which is the old behaviour.
+pub fn find_pdfium() -> Option<PathBuf> {
+    find_named(&browsers_dir().join("pdfium"), pdfium_lib_name(), 4).or_else(|| {
+        let beside = std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join(pdfium_lib_name());
+        beside.exists().then_some(beside)
+    })
+}
+
+/// Download the prebuilt pdfium shared library for this target into the engine
+/// cache, so `webrain_pdf op=render` works on a released binary without the
+/// user touching PATH. Static asset names, so no releases-API round trip.
+pub fn install_pdfium(force: bool) -> Result<PathBuf> {
+    if !force {
+        if let Some(lib) = find_pdfium() {
+            println!("pdfium already installed: {}", lib.display());
+            return Ok(lib);
+        }
+    }
+    let key = pdfium_asset_key()
+        .context("no prebuilt pdfium for this target (the published library is glibc-only, so musl builds cannot load it — use op=extract / op=images)")?;
+    let name = format!("pdfium-{key}.tgz");
+    let url =
+        format!("https://github.com/bblanchon/pdfium-binaries/releases/latest/download/{name}");
+    println!("Downloading pdfium ({name})...");
+    let bytes = download_bytes(&url)?;
+    let dest = browsers_dir().join("pdfium");
+    let _ = std::fs::remove_dir_all(&dest);
+    extract_archive(&bytes, &dest, &name)?;
+    let lib = find_named(&dest, pdfium_lib_name(), 4)
+        .with_context(|| format!("{} not found in {}", pdfium_lib_name(), dest.display()))?;
+    println!("pdfium ready: {}", lib.display());
+    println!("  `webrain_pdf op=render` finds it automatically (engine cache)");
+    Ok(lib)
+}
+
 /// lightpanda asset suffix, e.g. "x86_64-linux". lightpanda ships NO Windows
 /// build — on Windows there is nothing to download (use the Docker image
 /// lightpanda/browser:nightly instead).

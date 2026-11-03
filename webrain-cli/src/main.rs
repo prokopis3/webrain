@@ -977,6 +977,13 @@ fn main() -> anyhow::Result<()> {
                     println!("engine ready: lightpanda at {}", bin.display());
                     println!("  start it: `webrain lightpanda`");
                 }
+                "pdfium" => {
+                    // webrain install pdfium [--force]
+                    // op=render binds this library at runtime; without it only the
+                    // pdfium error path is available on a released binary.
+                    let lib = webrain_core::install::install_pdfium(force)?;
+                    println!("render ready: pdfium at {}", lib.display());
+                }
                 "chrome" => {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());

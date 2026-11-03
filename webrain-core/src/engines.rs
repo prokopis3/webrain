@@ -3677,7 +3677,16 @@ pub fn pdf_render(
 ) -> anyhow::Result<Value> {
     use pdfium_render::prelude::*;
     let src = PdfSource::open(path)?;
-    let pdfium = Pdfium::default();
+    // pdfium is bound at runtime. Prefer the copy `webrain install pdfium` put in
+    // the engine cache (or one beside the exe); the binding is process-global, so
+    // a second call reports "already initialized" and we reuse it.
+    let pdfium = match crate::install::find_pdfium() {
+        Some(lib) => match Pdfium::bind_to_library(&lib) {
+            Ok(bindings) => Pdfium::new(bindings),
+            Err(_) => Pdfium::default(),
+        },
+        None => Pdfium::default(),
+    };
     let doc = pdfium.load_pdf_from_file(src.path(), None)?;
     let scale = dpi.unwrap_or(150.0) / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);

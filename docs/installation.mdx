@@ -95,11 +95,20 @@ webrain install
 </CodeGroup>
 
 <Note>
-  Prebuilt binaries — install script, Homebrew, Scoop, `cargo install` — ship
-  **without pdfium**, so `webrain_pdf` `op=render` (PDF pages → PNG tiles for
-  vision) is not available there. `op=extract` and `op=images` work in every
-  build. To render pages, build from source with `--features pdfium` and put
-  `pdfium.dll` / `libpdfium.so` on `PATH`.
+  Prebuilt binaries — install script, Homebrew, Scoop, `cargo install` — are
+  built **with** `--features pdfium`, so `webrain_pdf` `op=render` (PDF pages →
+  PNG tiles for vision) is available in every release. The library is bound at
+  runtime, so fetch it once:
+
+  ```bash
+  webrain install pdfium
+  ```
+
+  That drops `pdfium.dll` / `libpdfium.so` / `libpdfium.dylib` into the webrain
+  engine cache, which `op=render` checks before the system loader — no `PATH`
+  edit. It also accepts a copy sitting beside the executable. **musl builds are
+  the exception**: the published pdfium is glibc-linked and cannot load on
+  Alpine, so there `op=extract` and `op=images` are the paths that work.
 </Note>
 
 ## From source
@@ -113,10 +122,10 @@ cargo build --release --bin webrain
 ```
 
 Add `--features pdfium` to that `cargo build` if you need `webrain_pdf`
-`op=render`. Download a pdfium build from
-[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases)
-and drop the shared library next to the binary or on `PATH` — it is loaded at
-runtime, not linked in.
+`op=render` (`cargo install webrain` does not pass features). Then
+`webrain install pdfium` — it downloads the bblanchon/pdfium-binaries build for
+this OS/arch into the engine cache, which is loaded at runtime rather than linked
+in.
 
 ## Linux dependencies
 

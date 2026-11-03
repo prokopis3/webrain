@@ -100,7 +100,10 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --bin webrain --target ${{ matrix.target }}
+        # --features pdfium: op=render is a released feature, not a source-only
+        # one. The library itself is loaded at runtime (`webrain install pdfium`
+        # puts it in the engine cache), so no extra link step is needed here.
+        run: cargo build --release --features pdfium --bin webrain --target ${{ matrix.target }}
 
       # Per-target output dirs, so every job emits the SAME asset name it
       # uploads — merge-multiple then cannot overwrite one platform with another

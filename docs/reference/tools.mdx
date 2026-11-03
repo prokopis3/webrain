@@ -9,8 +9,11 @@ All 18 tools are discovered dynamically — `webrain_guide` lists them for the
 LLM. The surface is **intent-based** (firecrawl-style): each tool has a `what`
 / `action` / `op` / `mode` selector that routes to the legacy capability via
 `map_surface()`. This page is the authoritative reference; descriptions match
-`webrain-mcp/src/tools.rs`. Every browser tool also accepts an optional
-`session_id` to route to a `webrain_open_session` pool.
+`webrain-mcp/src/tools.rs`. Eleven page tools declare an optional `session_id`
+(`navigate`, `observe`, `interact`, `eval`, `eval_in_frame`, `extract`, `vision`,
+`pdf`, `crawl`, `search`, `serp`) that routes the call to a
+`webrain_open_session` pool. The browserless tools do not declare it, and
+`webrain_batch` spreads across browsers with `cdp_urls` instead.
 
 > The accordions below document the **legacy one-action tool names** (e.g.
 > `webrain_click`, `webrain_snapshot`) that still dispatch — they are the
@@ -29,22 +32,23 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | Tool (selector) | Selector values (→ legacy arm) | Browser? |
 |---|---|---|
 | `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
-| `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · console · flatten · fit · clean · screenshot · pixel · page_info · annotate · media | ✅ CDP |
+| `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · assets (every link internal+external+non-http, images incl. CSS `background-image`, video sources+embeds in one pass; `only`+`max`) · console · flatten · fit · clean · screenshot (`format`+`quality`) · pixel (`tiles_dir`) · page_info · annotate · media | ✅ CDP |
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
-| `webrain_scrape` | fetch_http (no-browser HTTP) | ❌ no browser |
-| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · autoschema · interact · eval · screenshot (+ `cdp_urls` fan-out) | 🔶 mixed |
+| `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
+| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · autoschema · interact · eval · screenshot · pdf (urls[] → markdown, browserless) · assets (link/image/video inventory; `max`) (+ `cdp_urls` fan-out, per-URL `wait_selectors`) | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
-| `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
+| `webrain_pdf` (`op=…`) | page · extract · images · render | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
-| `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state · restore_state · profiles · login · close_launch | ✅ CDP + vault |
-| `webrain_vision` (`op=…`) | index · retrieve · ask | ✅ CDP (screenshot) |
+| `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state (`inline`) · restore_state (`payload`) · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_vision` (`op=…`) | index · retrieve · ask (viewport · `tiles[]` batch · `images[]` paths saved by `observe what=pixel tiles_dir`) | ✅ CDP (screenshot) |
 | `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_eval_in_frame` | Run JS inside a specific cross-origin iframe (isolated world, matched by `url_contains` src substring) — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile challenge frames | ✅ CDP |
-| `webrain_guide` | agent decision guide | ❌ no browser |
+| `webrain_guide` (`topic=…`) | agent decision guide — index + tool list by default; `topic` reads one section, `all` the whole guide, `skills` / `skill:<name>` an operator skill from `WEBRAIN_SKILLS_DIR` | ❌ no browser |
+| `webrain_stats` | host health: load average, memory total/available, process + browser-process counts, uptime (`available:false` on platforms with no `/proc`) | ❌ no browser |
 
 **Shared vs engine-specific:** everything behind `CdpBackend` works on Chrome,
 lightpanda, and obscura alike — the differences are capability (screenshots,
@@ -53,6 +57,25 @@ dependency (`webrain_scrape`, `webrain_search`, `webrain_serp` HTTP engines,
 `webrain_crawl` mode=sitemap,
 `webrain_download`, `webrain_pdf`, `webrain_watch`) are intercepted in
 `webrain-mcp/src/lib.rs` `handle_rpc` before a backend is even attached.
+
+## Host
+
+<AccordionGroup>
+
+<Accordion title="webrain_stats">
+Liveness for the machine webrain is running on, read straight from `/proc` (no shell, no sidecar):
+
+- `load` — 1/5/15-minute load averages, so a slow job can be told apart from a busy host.
+- `memory` — `total_mb` and `available_mb`. Available, not free: `MemFree` counts page cache as gone, which reads as an emergency on a healthy box.
+- `processes` — `total`, plus `browser_processes` counting engines by `comm` (`chrome`, `chromium`, `headless_shell`, `obscura`, `obscura-worker`, `lightpanda`). One Chrome shows up as several (zygote, GPU, renderers), so treat it as a liveness signal, not a tab count.
+- `uptime_s` — how long the container or host has been up.
+
+`available: false` means the platform has no `/proc` (macOS, Windows). That is a fact to report, not a number to invent.
+
+Takes no arguments and is read-only. Disk usage is deliberately absent: every way to get it costs either a dependency or a child process, and spawning processes is the thing this tool exists to avoid.
+</Accordion>
+
+</AccordionGroup>
 
 ## Navigate & Observe
 
@@ -471,11 +494,11 @@ Convert a PDF to Markdown (pure Rust on lopdf). Returns page count, `pdf_type` (
 </Accordion>
 
 <Accordion title="webrain_pdf_render">
-Render PDF pages as base64 PNGs — the vision-model alternative to text extraction (bypasses font encoding issues). Optional `tile_size` splits each page into square tiles; every entry carries `page`, `x`, `y`, `w`, `h`. **Requires a `--features pdfium` build** *and* `pdfium.dll` / `libpdfium.so` on `PATH`. Prebuilt binaries ship without pdfium, so `op=render` errors there — use `op=extract` for text and tables, `op=images` for embedded figures, or open the PDF in Chrome and `webrain_observe` `what=screenshot` for a raster.
+Render PDF pages as PNGs — the vision-model alternative to text extraction (bypasses font encoding issues). Optional `tile_size` splits each page into square tiles; every entry carries `page`, `x`, `y`, `w`, `h`. Optional `dir` writes the PNGs there (`p001.png`, or `p001_t0x0.png` with `tile_size`) and returns `path` instead of `image_b64`: a 9-page 150-dpi render is ~15 MB of base64, so pass `dir` and feed those paths straight to `webrain_vision{op:"ask", images:[...]}`. Every release is built with `--features pdfium`; the library is bound at **runtime**, looked up in the webrain engine cache first (`webrain install pdfium`) and then beside the executable, falling back to the system loader. A `cargo install` build needs `--features pdfium` explicitly, and musl builds cannot load the glibc library — there use `op=extract` for text and tables or `op=images` for embedded figures.
 </Accordion>
 
 <Accordion title="webrain_pdf_images">
-Extract embedded images/figures from a PDF as base64 PNGs — zero system deps. Handles DCTDecode (JPEG) and FlateDecode. Skips JPEG2000/CCITT/JBIG2 (use `webrain_pdf_render` for those). Works in the default build.
+Extract embedded images/figures from a PDF as PNGs at their native size — zero system deps, works in the default build. Walks nested `/Subtype /Form` XObjects, so an appendix made of *included pages* yields its images too (arXiv 2206.01062: 0 reported before the fix, 29 after). Handles DCTDecode (JPEG) and FlateDecode; skips JPEG2000/CCITT/JBIG2 (use `webrain_pdf_render` for those). Optional `dir` writes `img_pNNN_III.png` and returns paths — 29 figures inline were ~20 MB. `page` means the page whose `/Resources` expose the XObject, not necessarily the page that draws it.
 </Accordion>
 
 <Accordion title="webrain_download">

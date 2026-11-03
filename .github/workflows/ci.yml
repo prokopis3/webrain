@@ -45,7 +45,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --features pdfium
 
       - name: test
         run: cargo test --workspace
