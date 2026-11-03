@@ -113,8 +113,19 @@ fn tile_rects(
     tile_h: f64,
     max: usize,
 ) -> Vec<(f64, f64, f64, f64)> {
-    let cols = ((page_w / tile_w).ceil() as usize).max(1);
-    let rows = ((page_h / tile_h).ceil() as usize).max(1);
+    let mut cols = ((page_w / tile_w).ceil() as usize).max(1);
+    let mut rows = ((page_h / tile_h).ceil() as usize).max(1);
+    // A last row or column thinner than a quarter tile is a sliver — a 1210 px
+    // page with 1200 tiles emitted a 10 px strip, a 935 px page with 900 tiles a
+    // 35 px column, and each one costs a whole image in the vision call while
+    // carrying at most a line or two. Fold it into the neighbour instead: that
+    // tile simply runs to the page edge.
+    if cols > 1 && page_w - (cols - 1) as f64 * tile_w < tile_w * 0.25 {
+        cols -= 1;
+    }
+    if rows > 1 && page_h - (rows - 1) as f64 * tile_h < tile_h * 0.25 {
+        rows -= 1;
+    }
     let mut out = Vec::new();
     'outer: for r in 0..rows {
         for c in 0..cols {
@@ -123,7 +134,11 @@ fn tile_rects(
             }
             let x = c as f64 * tile_w;
             let y = r as f64 * tile_h;
-            out.push((x, y, tile_w.min(page_w - x), tile_h.min(page_h - y)));
+            // The last row/column absorbs the remainder: wider or taller than the
+            // nominal tile, never padded.
+            let w = if c == cols - 1 { page_w - x } else { tile_w };
+            let h = if r == rows - 1 { page_h - y } else { tile_h };
+            out.push((x, y, w.min(page_w - x), h.min(page_h - y)));
         }
     }
     out
@@ -184,6 +199,16 @@ mod tests {
         let ragged = super::tile_rects(250.0, 250.0, 200.0, 200.0, 99);
         assert_eq!(ragged[1], (200.0, 0.0, 50.0, 200.0));
         assert_eq!(super::tile_rects(400.0, 600.0, 200.0, 200.0, 2).len(), 2);
+        // A 10 px last row is folded into the row above, not emitted as a sliver.
+        let tall = super::tile_rects(935.0, 1210.0, 900.0, 1200.0, 99);
+        assert_eq!(tall.len(), 1);
+        assert_eq!((tall[0].2, tall[0].3), (935.0, 1210.0));
+        // Same rule across the page: a 35 px column strip is not its own image.
+        assert_eq!(super::tile_rects(935.0, 600.0, 900.0, 1200.0, 99).len(), 1);
+        // A remainder worth its own image (>= a quarter tile) still gets one.
+        let two = super::tile_rects(935.0, 1600.0, 900.0, 1200.0, 99);
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[1], (0.0, 1200.0, 935.0, 400.0));
     }
 
     #[test]

@@ -17,7 +17,7 @@ it is **bytes in the tool result**: a 660 KB PNG page becomes ~10 MB of base64 a
 | "what does the chart / table / figure show" | tiles |
 | "the extract is empty / garbled / interleaved" | tiles (image-only page, or two columns spliced) |
 | CAPTCHA / grid geometry | `webrain_vision{op:"ask", tiles:[...]}` (rects, not files) |
-| PDF page | `webrain_pdf{op:"render"}` — see the pdf-extraction skill |
+| PDF page | `webrain_pdf{op:"render"}` — see the pdf-extraction skill. Text first: a 9-page paper is 48 KB of markdown in ~5 s, while vision costs ~16 s **per page** and returns ~half the text. Tiles earn their keep only on the pages the text layer returns empty (measured: page 7 gave 0 chars, vision read 2133). |
 
 `news.ycombinator.com` and `arxiv.org/abs/...` are **text** pages. Tiling them wastes
 a VLM pass to re-read text that `observe{what:"fit"}` already returns.

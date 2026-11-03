@@ -203,3 +203,34 @@ Also measured: the local 2B emits a preamble ("The user wants a summary of the
 provided screenshots.") before the answer at `max_tokens: 2048`, so prompts must ask
 for the output directly and callers must tolerate one leading line.
 
+## 10. PDF benchmark, all pages (2026-11-03, arxiv 2408.09869, 9 pages, 5.5 MB)
+
+Same document, both paths, local pdfium + local Qwen3-VL-2B. Drives the MCP server
+over HTTP (`output/bench_pdf.ps1`, results in `output/pdfbench/`).
+
+| | text path (`op:extract`) | tiles + vision |
+|---|---|---|
+| wall clock | **5.2 s** | **157.9 s** (render 4.6 + tiles 2.3 + vision 151.0) |
+| output | 48 KB markdown | 17.3 KB answers |
+| characters | **32,401** | 17,330 (53%) |
+| table rows recovered | 10 pipe rows | partial, per page |
+| tiles per page | - | **1** (935x1210 page at 1000x1300) |
+
+Per-page: `render` 0.3-0.9 s, `tiles` 0.15-0.33 s, `vision` 15-20 s (2048-token cap
+at ~12 tok/s). Vision is **95.6%** of the tiled path; tiling is **1.4%**.
+
+**The one page that matters:** page 7 (the Appendix) has **0 characters** in the text
+layer; vision read 2133. That is the real value of tiles - not speed.
+
+Conclusions that changed the design:
+
+1. **Scrolling does not apply to PDFs** - one fixed raster per page, nothing lazy.
+2. **Tiling a PDF page is a no-op** (1 tile), so "parallel tiles" optimizes 1.4% of
+   the runtime; `llama-server` is single-slot, so parallel page calls only queue.
+3. **Route, don't parallelize**: extract first; render + vision only for pages whose
+   `texts[n].text` is empty/short or that hold a table/figure. Here that is 1 page of
+   9 -> ~16 s instead of 152 s, with better coverage than either path alone.
+4. The sliver rule from the HN run (a 10 px row / 35 px column getting its own image)
+   is fixed in `tile_rects` and asserted in tests.
+
+
