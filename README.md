@@ -183,11 +183,19 @@ webrain watch <video-url-or-file> [--vision]       # transcript + frames (no bro
 webrain install watch|whisper [--model NAME]       # ffmpeg + yt-dlp + whisper (STT)
 webrain install vision [--model ID] [--model-update]  # llama-server + a local vision model
 webrain uninstall vision --model ID | --all        # remove installed vision models
-webrain serp "<query>" [--engine …] [--limit N]   # structured JSON search (5 engines + auto)
+webrain serp "<query>" [--engine …] [--limit N]   # structured JSON search (7 engines + auto)
+webrain diff <a> <b> [--max N] [--json]           # what changed between two pages (exit 1 if so)
+webrain chat "<prompt>" [--provider P] [--search] # one agent turn on your own model key
 ```
 
 The 18-tool MCP surface is discovered dynamically — `webrain_guide` lists
 it for the LLM (see [MCP Tools](#mcp-tools)).
+
+`webrain chat` needs a build made with `--features chat`: it runs one Copilot agent turn on
+your own model key, with this binary's MCP tools attached, and `--search` grounds the turn on
+live web results first (the vendor's own search where it sells one — OpenRouter `:online`,
+DeepSeek, OpenAI, Anthropic, Gemini — and webrain's engines everywhere else). Provider table,
+flags and the cost line: [chat guide](docs/guides/chat.mdx).
 
 ## Browser Engines
 
