@@ -1,6 +1,6 @@
 ---
 title: Overview
-description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping — one binary, three browser engines plus fast no-browser HTTP, 17 intent-based tools, any OS, any MCP client.
+description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping — one binary, three browser engines plus fast no-browser HTTP, 18 intent-based tools, any OS, any MCP client, plus `webrain chat` on your own model key.
 ---
 
 # What is webrain?
@@ -8,7 +8,9 @@ description: webrain is an open-source Rust MCP server for LLM-driven browser au
 **webrain** is an open-source (MIT) Rust **MCP server** for LLM-driven browser
 automation and web scraping. It is one static binary that drives **three
 browser engines** (Chrome, Lightpanda, Obscura) plus a fast no-browser HTTP
-path, and it exposes **17 intent-based tools** over the Model Context Protocol.
+path, and it exposes **18 intent-based tools** over the Model Context Protocol.
+It also ships `webrain chat`, which runs the agent loop itself against your own
+model key, so you do not need a separate client at all.
 Install it on any system, point any MCP client (GitHub Copilot, Claude, Codex,
 Cursor, …) at it, and the model decides everything — search, crawl, scrape,
 navigate, interact — from a plain-language prompt. No hardcoded intent
@@ -46,6 +48,10 @@ it directly.
   tiles (screenshot → vector store) for tables and charts.
 - **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus
   `webrain_scrape` for static pages 10–100× faster than a browser.
+- **Or run the loop yourself** — `webrain chat "<prompt>"` runs one Copilot
+  agent turn with these tools attached and your own model key (BYOK: seven
+  provider rows or any OpenAI-compatible endpoint, including a keyless local
+  server). See [Chat](/guides/chat).
 
 ## How it's built
 

@@ -86,6 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli**: `chat` asks for **4096** output tokens by default rather than the
   runtime's 64k. Some providers reserve the requested maximum against your
   balance and refuse the whole request when it does not fit.
+- **docs**: the landing page and overview now state what the binary actually
+  ships. Three claims were wrong: **18** intent-based tools (said 17), **seven**
+  SERP engines (said five; `yahoo`, `baidu` and `yandex` were missing from a
+  surface that has shipped for releases), and "~22 MB, 0 runtime dependencies"
+  now says the default build, because a `chat` build embeds a ~135 MB runtime.
+  New landing section for `webrain chat` — one command, your key, the same 18
+  tools and nothing else — plus the same count fixes in `overview.mdx` and
+  `guides/agent-decision-guide.mdx`. The FAQ's "no API key needed" answer now
+  admits that a chat turn does need one (or a keyless local server), and gains
+  an entry for what `webrain chat` does and does not read from your own Copilot
+  setup.
 
 ### Fixed
 
