@@ -14,6 +14,11 @@ path = "src/main.rs"
 # ponytail: forward pdfium through webrain-mcp (its lib.rs gates the
 # render arm on its own feature, which in turn enables webrain-core/pdfium).
 pdfium = ["webrain-mcp/pdfium"]
+# `webrain chat`: the Copilot agent loop + a bundled CLI runtime (~135 MB per
+# platform, downloaded and SHA-verified at build time). Off by default so
+# `cargo build` stays lean; the release matrix turns it on for every target
+# that can link OS OpenSSL 3.
+chat = ["dep:github-copilot-sdk"]
 
 [dependencies]
 webrain-core = { path = "../webrain-core" }
@@ -25,3 +30,6 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
 sha2 = "0.11"
+# Optional: `webrain chat`. Brings its own JSON-RPC client, permission
+# handlers and the bundled runtime; nothing else in the crate depends on it.
+github-copilot-sdk = { version = "1", optional = true }

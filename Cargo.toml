@@ -6,9 +6,11 @@ members = ["webrain-core", "webrain-mcp", "webrain-cli"]
 version = "0.16.2"
 edition = "2024"
 license = "MIT"
-# 1.88 is forced by `zip` 9.0.5+ — every release that fixes the critical
-# parser-differential advisory (GHSA-m665-v7pm-7grj) declares 1.88.
-rust-version = "1.88"
+# 1.94 is forced by `github-copilot-sdk` (the optional `chat` feature), which
+# declares rust-version 1.94.0; cargo's MSRV-aware resolver (resolver = "3")
+# refuses to build the graph below that even with the feature off. `zip` 9
+# raised the old floor to 1.88 for GHSA-m665-v7pm-7grj.
+rust-version = "1.94"
 description = "WebRain: portable MCP browser-automation & scraping server (CDP engines, vault, vision, video watch)"
 repository = "https://github.com/prokopis3/webrain"
 
