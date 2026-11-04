@@ -288,3 +288,11 @@ stragglers.
 No interactive REPL and no `--session` resume in this version: one prompt, one
 turn, one exit code. Everything here is additive to `webrain mcp`, which keeps
 its stdout contract — chat's own logs go to stderr for that reason.
+
+No GUI either. The runtime already emits everything a conversation window needs
+(streamed deltas, tool calls, permission requests, context and cost meters) and
+the CLI flattens all of it into stderr lines; [ADR-004](/adr/0004-chat-gui-surface)
+maps each event to the element it should become and specifies `webrain chat
+--serve` as the smallest interface that keeps the binary self-contained —
+including which SDK handler slots a UI has to fill, because today they are
+policy, not a person.
