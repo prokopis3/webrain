@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
   larger catalog entry). Its search endpoint is what `--search` calls.
+- **cli**: `webrain chat` reports what the turn cost. Every model call prints
+  `· model · N in / M out` as it happens, and the turn ends with a stderr block
+  giving totals, `tok/s` (output tokens over real API time, not wall clock),
+  request count and cost. The numbers come from the runtime's own accounting
+  (`session.usage.getMetrics`: `lastCallInputTokens`, per-model `usage` and
+  `requests`, `totalApiDurationMs`, `totalNanoAiu`), so `--json` gains a `usage`
+  object with the same fields. Cost is `n/a` on BYOK turns — `nano_aiu` is
+  GitHub's billing unit and is 0 when your own key pays the provider.
 - **cli**: `webrain diff <a> <b> [--max N] [--json]` — what changed between two
   pages, or a page and a saved baseline. Either side is an http(s) URL (plain
   HTTP, no browser) or a local file; lines are whitespace-normalised and blanks
