@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use github_copilot_sdk::types::{
-    InfiniteSessionConfig, McpServerConfig, McpStdioServerConfig, PermissionRequestData,
-    PermissionRequestKind, ProviderConfig, SessionConfig, SystemMessageConfig,
+    InfiniteSessionConfig, McpServerConfig, McpStdioServerConfig, MemoryConfiguration,
+    PermissionRequestData, PermissionRequestKind, ProviderConfig, SessionConfig,
+    SystemMessageConfig,
 };
-use github_copilot_sdk::{Client, ClientOptions, IndexMap, MessageOptions};
+use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
 use super::chat::Args;
 use webrain_core::byok::ChatProvider;
@@ -139,33 +140,47 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
     }
     config.streaming = Some(args.stream);
     config.enable_session_store = Some(false);
+    // One turn, no memory writes: the runtime's memory feature is on by default
+    // in CLI mode and would accumulate state a one-shot command never reads.
+    config.memory = Some(MemoryConfiguration::disabled());
+    // Nothing about this turn is Copilot's to measure.
+    config.enable_session_telemetry = Some(false);
     // Keep the agent's reachable surface to our own tools. Note what this does
     // NOT do: measured (`session.usage_info`) the prompt is still
     // `toolDefinitionsTokens: 8080` / `systemTokens: 272` ~= 8.4k either way, so
     // the allowlist is a behavioural guard (the model cannot call the runtime's
-    // built-in GitHub tools), not a way to shrink the prompt. Trimming the
-    // budget further means fewer `webrain_*` tools, which is a product call.
+    // built-in tools), not a way to shrink the prompt. Trimming the budget
+    // further means fewer `webrain_*` tools, which is a product call.
+    //
+    // `ToolSet` rather than raw strings: it validates each name at build time
+    // and emits the runtime's documented `mcp:<server>-<tool>` form.
     config.enable_config_discovery = Some(false);
     config.available_tools = Some(
         webrain_mcp::tool_names()
             .iter()
-            .map(|n| format!("mcp:webrain-{n}"))
-            .collect(),
+            .fold(ToolSet::new(), |set, n| {
+                set.add_mcp(&format!("webrain-{n}"))
+                    .expect("tool_names() are runtime-valid names")
+            })
+            .into_vec(),
     );
 
     // A process that exits must not leave the runtime holding a session: reap
     // it server-side instead of relying on the disconnect being enough.
     //
-    // `base_directory` becomes `COPILOT_HOME` on the spawned CLI, which is the
-    // only thing that actually stops this machine's Copilot config from being
-    // read: the MCP servers, skills, and instructions under `~/.copilot` are
-    // discovered by the CLI itself, before any session option applies. Without
-    // it every turn loaded ~20 unrelated servers (~480 tools) and blew the
-    // context window. A BYOK chat owns its configuration, so give it one.
+    // `ClientMode::Empty` is the SDK's own answer to "do not behave like an
+    // installed CLI": optional features are off unless asked for, and it
+    // *requires* an explicit `base_directory` (no implicit `~/.copilot`
+    // fallback) — which is exactly the isolation this command needs. Before
+    // both, every turn merged this machine's ~20 MCP servers (~480 tools,
+    // `toolDefinitionsTokens: 137019` against `tokenLimit: 128000`) and died
+    // with `compaction_static_context_blocked`; `enable_config_discovery =
+    // false` alone did not stop it.
     let home = std::env::var_os("WEBRAIN_CHAT_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("webrain-copilot-home"));
     let mut options = ClientOptions::default()
+        .with_mode(ClientMode::Empty)
         .with_session_idle_timeout_seconds(60)
         .with_base_directory(home);
     options.working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
