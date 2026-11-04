@@ -39,6 +39,10 @@ pub struct Args {
     pub json: bool,
     pub stream: bool,
     pub print_config: bool,
+    /// `--serve`: same session, in a browser. The page is served by this binary
+    /// and answers permission prompts itself, so `--yes` is not implied.
+    pub serve: bool,
+    pub port: u16,
 }
 
 /// Pull the value for a flag, accepting `--x y` and `--x=y`. `i` advances past
@@ -63,6 +67,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     let mut a = Args {
         timeout_secs: 300,
         stream: true,
+        port: 8787,
         ..Default::default()
     };
     let mut words: Vec<String> = Vec::new();
@@ -99,6 +104,13 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--yes" => a.yes = true,
             "--search" => a.search = true,
+            "--serve" => a.serve = true,
+            "--port" => {
+                let v = value_of(argv, &mut i, name, inline)?;
+                a.port = v
+                    .parse()
+                    .map_err(|_| format!("--port {v}: not a port number"))?;
+            }
             "--json" => a.json = true,
             "--no-stream" => a.stream = false,
             "--stream" => a.stream = true,
@@ -190,6 +202,23 @@ pub fn run(argv: &[String], rt: &tokio::runtime::Runtime) -> anyhow::Result<()> 
         eprintln!("webrain chat: {} ", no_key_hint());
         std::process::exit(2);
     };
+
+    // `--serve` needs no prompt: the browser sends them.
+    if args.serve {
+        if args.json {
+            eprintln!("webrain chat: --serve writes no JSON to stdout; drop --json");
+            std::process::exit(2);
+        }
+        #[cfg(feature = "chat")]
+        return rt.block_on(crate::chat_server::run(&args, &provider));
+
+        #[cfg(not(feature = "chat"))]
+        {
+            eprintln!("webrain chat: --serve needs a build with --features chat");
+            std::process::exit(2);
+        }
+    }
+
     let prompt = match args.prompt.as_deref() {
         Some(p) if !p.trim().is_empty() => p,
         _ => {

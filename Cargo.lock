@@ -4194,6 +4194,7 @@ name = "webrain-cli"
 version = "0.16.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "github-copilot-sdk",
  "openssl",
  "rpassword",

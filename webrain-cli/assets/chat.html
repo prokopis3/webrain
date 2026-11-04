@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>webrain chat</title>
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --panel: #12161b;
+        --line: #1f262e;
+        --text: #d6dee6;
+        --dim: #7c8794;
+        --accent: #49d6a3;
+        --warn: #e0b050;
+        --bad: #e05d5d;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 1rem;
+        padding: 0.7rem 1rem;
+        border-bottom: 1px solid var(--line);
+        color: var(--dim);
+      }
+      header b { color: var(--text); font-weight: 600; }
+      main { padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+      .msg { border: 1px solid var(--line); border-radius: 8px; padding: 0.7rem 0.85rem; white-space: pre-wrap; word-break: break-word; }
+      .msg.user { border-color: #26313c; background: #0e1318; }
+      .msg.assistant { background: var(--panel); }
+      .msg.err { border-color: var(--bad); color: #ffb3b3; }
+      .who { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.35rem; }
+      .tool { border-left: 2px solid var(--warn); padding: 0.25rem 0.6rem; color: var(--dim); font-size: 13px; }
+      .tool.done { border-left-color: var(--accent); }
+      .tool.fail { border-left-color: var(--bad); color: #ffb3b3; }
+      footer { border-top: 1px solid var(--line); padding: 0.7rem 1rem; display: flex; gap: 0.6rem; }
+      textarea {
+        flex: 1; resize: none; min-height: 2.6rem; max-height: 8rem;
+        background: var(--panel); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 0.6rem 0.75rem; font: inherit;
+      }
+      textarea:focus { outline: 1px solid var(--accent); }
+      button {
+        background: var(--accent); color: #06110c; border: 0; border-radius: 8px;
+        padding: 0 1rem; font: inherit; font-weight: 600; cursor: pointer;
+      }
+      button:disabled { opacity: 0.45; cursor: default; }
+      #modal {
+        position: fixed; inset: 0; background: #000a; display: none;
+        place-items: center; padding: 1rem;
+      }
+      #modal.on { display: grid; }
+      .card {
+        background: var(--panel); border: 1px solid var(--warn); border-radius: 10px;
+        padding: 1rem; max-width: 44rem; width: 100%;
+      }
+      .card h2 { margin: 0 0 0.5rem; font-size: 14px; color: var(--warn); }
+      .card pre { white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: 12px; max-height: 40vh; overflow: auto; }
+      .row { display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 0.8rem; }
+      .deny { background: #2a313a; color: var(--text); }
+      #meter { color: var(--dim); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span><b>webrain chat</b> · one turn at a time</span>
+      <span id="meter">idle</span>
+    </header>
+    <main id="log"></main>
+    <footer>
+      <textarea id="prompt" placeholder="Ask, scrape, extract — Enter sends, Shift+Enter adds a line"></textarea>
+      <button id="send">Send</button>
+    </footer>
+    <div id="modal">
+      <div class="card">
+        <h2>Permission requested</h2>
+        <pre id="ask"></pre>
+        <div class="row">
+          <button class="deny" id="deny">Deny</button>
+          <button id="allow">Approve once</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      // No framework on purpose: the binary serves this file, and a build step
+      // would put Node back in the release path. Everything below is the
+      // runtime's own event vocabulary mapped to one element per event.
+      const log = document.getElementById("log");
+      const meter = document.getElementById("meter");
+      const promptBox = document.getElementById("prompt");
+      const send = document.getElementById("send");
+      const modal = document.getElementById("modal");
+      let bubble = null; // the assistant bubble the next delta appends to
+      let cards = new Map(); // toolCallId -> element
+      let pending = null; // { id }
+
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        // textContent, never innerHTML: model output is untrusted input.
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+      const scroll = () => (log.scrollTop = log.scrollHeight);
+
+      function message(role, text) {
+        const box = el("div", `msg ${role}`);
+        box.append(el("div", "who", role === "user" ? "you" : "webrain"));
+        const body = el("div", "", text);
+        box.append(body);
+        log.append(box);
+        scroll();
+        return body;
+      }
+
+      function onFrame(f) {
+        const d = f.data || {};
+        switch (f.type) {
+          case "user.prompt":
+            return;
+          case "assistant.message_delta":
+            if (!bubble) bubble = message("assistant", "");
+            bubble.textContent += d.deltaContent || "";
+            return scroll();
+          case "assistant.message":
+            bubble = message("assistant", d.content || "");
+            bubble = null;
+            return;
+          case "tool.execution_start": {
+            const card = el("div", "tool", `▸ ${d.toolName || "tool"} ${d.arguments ? JSON.stringify(d.arguments) : ""}`);
+            cards.set(d.toolCallId || d.toolName, card);
+            log.append(card);
+            return scroll();
+          }
+          case "tool.execution_complete":
+          case "tool.execution_end": {
+            const card = cards.get(d.toolCallId || d.toolName);
+            const failed = d.success === false || d.error;
+            if (card) {
+              card.className = `tool ${failed ? "fail" : "done"}`;
+              card.textContent = `${failed ? "✗" : "✓"} ${d.toolName || ""} ${failed ? (d.error || "failed") : ""}`.trim();
+            }
+            return scroll();
+          }
+          case "session.usage_info": {
+            const cur = d.currentTokens ?? d.current_tokens;
+            const max = d.tokenLimit ?? d.token_limit;
+            if (cur) meter.textContent = `${cur}${max ? " / " + max : ""} tokens`;
+            return;
+          }
+          case "session.usage_checkpoint":
+            if (d.totalNanoAiu) meter.textContent += ` · ${d.totalNanoAiu} AIU`;
+            return;
+          case "model.call_failure":
+            return message("err", d.message || "model call failed");
+          case "session.error":
+            return message("err", d.message || "turn failed");
+          case "session.compaction_start":
+            return log.append(el("div", "tool", "… compacting context"));
+          case "session.compaction_complete":
+            return log.append(el("div", "tool done", "… context compacted"));
+          case "webrain.permission":
+            return ask(d);
+          case "webrain.error":
+            return message("err", d.message || "error");
+          case "assistant.idle":
+          case "session.idle":
+            bubble = null;
+            meter.textContent = "idle";
+            return setBusy(false);
+          default:
+            return;
+        }
+      }
+
+      function ask(d) {
+        pending = d;
+        document.getElementById("ask").textContent =
+          `${d.kind || "request"}\n\n${d.request || ""}`;
+        modal.classList.add("on");
+      }
+
+      function answer(allow) {
+        if (pending) fetch("/permission", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: pending.id, allow }),
+        });
+        pending = null;
+        modal.classList.remove("on");
+      }
+      document.getElementById("allow").onclick = () => answer(true);
+      document.getElementById("deny").onclick = () => answer(false);
+
+      function setBusy(busy) {
+        send.disabled = busy;
+        meter.textContent = busy ? "running…" : "ready";
+      }
+
+      async function sendTurn() {
+        const prompt = promptBox.value.trim();
+        if (!prompt) return;
+        promptBox.value = "";
+        message("user", prompt);
+        setBusy(true);
+        const r = await fetch("/turn", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ prompt }),
+        });
+        if (!r.ok) {
+          setBusy(false);
+          message("err", r.status === 409 ? "a turn is already running" : `turn rejected (${r.status})`);
+        }
+      }
+
+      send.onclick = sendTurn;
+      promptBox.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendTurn();
+        }
+      });
+
+      const stream = new EventSource("/events");
+      stream.onmessage = (e) => {
+        try {
+          onFrame(JSON.parse(e.data));
+        } catch (err) {
+          console.error("bad frame", err);
+        }
+      };
+      stream.onerror = () => (meter.textContent = "stream lost — retrying");
+    </script>
+  </body>
+</html>

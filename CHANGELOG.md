@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   search field into the turn. A vendor call that fails prints why and falls back
   to webrain's engines rather than failing the turn. One line on stderr names the
   source and what it found.
+- **cli**: `webrain chat --serve [--port N]` — the same session in a browser. The
+  binary serves its own page (`include_str!`, no build step, nothing fetched from
+  a CDN) plus four loopback routes: `GET /`, `GET /events` (SSE), `POST /turn`,
+  `POST /permission`. Each runtime event becomes one element — a delta appends to
+  the assistant bubble, `tool.execution_*` opens and closes a card,
+  `session.usage_info` drives the token meter, `model.call_failure` is an error
+  card carrying the provider's own message — and the composer re-enables on
+  `assistant.idle`, the only signal that a turn is over. Event names stay the
+  runtime's own rather than a translated dialect; the one addition is
+  `webrain.permission`, which carries the id the modal answers.
+- **cli**: the browser UI answers permission prompts itself, so `--serve` does
+  **not** imply `--yes`: the modal shows the exact request, approving there is
+  the same authority as `--yes`, and no answer within 120 s is a deny (the turn
+  reports it instead of hanging). The listener is `127.0.0.1` only — a port that
+  can approve a shell command must not be on the LAN.
 - **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
   larger catalog entry). Its search endpoint is what `--search` calls.
