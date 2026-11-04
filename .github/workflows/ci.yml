@@ -74,7 +74,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Ubuntu is pinned to the image the release builds against, not
+        # `ubuntu-latest`: GitHub has announced `ubuntu-latest` migrating to a
+        # newer LTS, and a surprise OpenSSL/glibc change is exactly the failure
+        # this job exists to catch — it must not be the thing that causes one.
+        # macOS/Windows stay on the floating labels; their `-latest` images are
+        # the ones whose TLS backend we want to exercise.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
