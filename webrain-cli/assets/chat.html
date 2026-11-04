@@ -44,6 +44,7 @@
       .tool { border-left: 2px solid var(--warn); padding: 0.25rem 0.6rem; color: var(--dim); font-size: 13px; }
       .tool.done { border-left-color: var(--accent); }
       .tool.fail { border-left-color: var(--bad); color: #ffb3b3; }
+      .usage { border-top: 1px dashed var(--line); padding-top: 0.4rem; color: var(--dim); font-size: 12px; }
       footer { border-top: 1px solid var(--line); padding: 0.7rem 1rem; display: flex; gap: 0.6rem; }
       textarea {
         flex: 1; resize: none; min-height: 2.6rem; max-height: 8rem;
@@ -70,12 +71,63 @@
       .row { display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 0.8rem; }
       .deny { background: #2a313a; color: var(--text); }
       #meter { color: var(--dim); font-size: 12px; }
+      /* ── harness chrome ─────────────────────────────────────────────────
+         The page is a terminal-native harness, not a chatbot skin: a stats
+         rail that answers "what is this costing me" without scrolling, a
+         single column of evidence, and one composer at the bottom. */
+      header {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 0.5rem 1.5rem;
+        padding: 0.85rem 1.25rem;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #0e1217, var(--bg));
+      }
+      .brand { display: flex; align-items: center; gap: 0.55rem; }
+      .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--accent); box-shadow: 0 0 0 3px #49d6a322;
+      }
+      .dot.busy { background: var(--warn); box-shadow: 0 0 0 3px #e0b05022; }
+      .dot.bad { background: var(--bad); box-shadow: 0 0 0 3px #e05d5d22; }
+      .brand b { letter-spacing: -0.01em; }
+      .brand span { color: var(--dim); font-size: 12px; }
+      .stats { display: flex; gap: 1.25rem; align-items: center; }
+      .stat { display: flex; flex-direction: column; gap: 1px; min-width: 4.5rem; }
+      .stat u { text-decoration: none; color: #5c6773; font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; }
+      .stat b { font-weight: 600; font-variant-numeric: tabular-nums; }
+      main { padding: 1.25rem clamp(1rem, 6vw, 4rem); gap: 0.9rem; }
+      .msg { line-height: 1.6; }
+      .msg.assistant .who { color: var(--accent); }
+      .tool { display: flex; gap: 0.5rem; align-items: baseline; }
+      footer {
+        padding: 0.85rem clamp(1rem, 6vw, 4rem);
+        background: linear-gradient(0deg, #0e1217, transparent);
+        align-items: flex-end;
+      }
+      .hint { color: #4b555f; font-size: 11px; padding: 0 0.25rem 0.35rem; }
+      @media (prefers-reduced-motion: no-preference) {
+        .dot.busy { animation: pulse 1.4s ease-in-out infinite; }
+        @keyframes pulse { 50% { opacity: 0.35; } }
+      }
     </style>
   </head>
   <body>
     <header>
-      <span><b>webrain chat</b> · one turn at a time</span>
-      <span id="meter">idle</span>
+      <div class="brand">
+        <i class="dot" id="dot"></i>
+        <div>
+          <b>webrain chat</b><br />
+          <span id="meter">ready</span>
+        </div>
+      </div>
+      <div class="stats">
+        <span class="stat"><u>model</u><b id="stat-model">—</b></span>
+        <span class="stat"><u>tokens in / out</u><b id="stat-tok">— / —</b></span>
+        <span class="stat"><u>tok / s</u><b id="stat-speed">—</b></span>
+        <span class="stat"><u>cost</u><b id="stat-cost">—</b></span>
+      </div>
     </header>
     <main id="log"></main>
     <footer>
@@ -98,6 +150,13 @@
       // runtime's own event vocabulary mapped to one element per event.
       const log = document.getElementById("log");
       const meter = document.getElementById("meter");
+      const dot = document.getElementById("dot");
+      const stat = {
+        model: document.getElementById("stat-model"),
+        tok: document.getElementById("stat-tok"),
+        speed: document.getElementById("stat-speed"),
+        cost: document.getElementById("stat-cost"),
+      };
       const promptBox = document.getElementById("prompt");
       const send = document.getElementById("send");
       const modal = document.getElementById("modal");
@@ -134,9 +193,28 @@
             bubble.textContent += d.deltaContent || "";
             return scroll();
           case "assistant.message":
-            bubble = message("assistant", d.content || "");
-            bubble = null;
+            // The streamed bubble is the same message: replace its text with the
+            // final one (self-healing if a delta was dropped) instead of opening
+            // a second bubble.
+            if (bubble) {
+              bubble.textContent = d.content || bubble.textContent;
+              bubble = null;
+            } else {
+              message("assistant", d.content || "");
+            }
             return;
+          case "webrain.model":
+            // The CLI's `· model · N in / M out`, once per model call.
+            stat.model.textContent = d.model;
+            stat.tok.textContent = `${d.input} / ${d.output}`;
+            log.append(el("div", "usage", `· ${d.model} · ${d.input} in / ${d.output} out`));
+            return scroll();
+          case "webrain.usage":
+            stat.model.textContent = d.model;
+            stat.tok.textContent = `${d.input} / ${d.output}`;
+            stat.speed.textContent = d.tokens_per_sec ? d.tokens_per_sec.toFixed(1) : "—";
+            stat.cost.textContent = d.nano_aiu > 0 ? `${(d.nano_aiu / 1e9).toFixed(6)} AIU` : "n/a";
+            return usageBlock(d);
           case "tool.execution_start": {
             const card = el("div", "tool", `▸ ${d.toolName || "tool"} ${d.arguments ? JSON.stringify(d.arguments) : ""}`);
             cards.set(d.toolCallId || d.toolName, card);
@@ -184,6 +262,21 @@
         }
       }
 
+      function usageBlock(u) {
+        const cost = u.nano_aiu > 0 ? `${(u.nano_aiu / 1e9).toFixed(6)} AIU` : "n/a (your key pays)";
+        const secs = u.api_ms ? (u.api_ms / 1000).toFixed(1) : "0.0";
+        const speed = u.tokens_per_sec ? u.tokens_per_sec.toFixed(1) : "0.0";
+        log.append(
+          el(
+            "div",
+            "usage",
+            `${u.model} · ${u.input} in / ${u.output} out · ${u.requests} request(s) · ` +
+              `${secs}s API · ${speed} tok/s · ${cost}`,
+          ),
+        );
+        scroll();
+      }
+
       function ask(d) {
         pending = d;
         document.getElementById("ask").textContent =
@@ -206,6 +299,7 @@
       function setBusy(busy) {
         send.disabled = busy;
         meter.textContent = busy ? "running…" : "ready";
+        dot.className = busy ? "dot busy" : "dot";
       }
 
       async function sendTurn() {
