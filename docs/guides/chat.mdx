@@ -148,7 +148,7 @@ Two honest limits:
   tokens by itself; each agent step that follows one does. That is why the live
   line reads `· model ·` next to the `· tool ·` lines rather than on them.
 
-## `--search`: live web results, three ways
+## `--search`: live web results, per provider
 
 The vendors do not sell the same thing, so the flag does whatever the provider
 actually supports instead of pretending they are interchangeable:
@@ -157,22 +157,44 @@ actually supports instead of pretending they are interchangeable:
 |---|---|---|
 | `openrouter` | rewrites the model to its `:online` slug: the `web` plugin uses the vendor's **native** search for Anthropic, Google, OpenAI, Perplexity and xAI models, Exa for everything else. Results arrive as citations. | the model's own |
 | `deepseek` | webrain calls DeepSeek's **Search API** (`POST https://api.deepseek.com/v1/tools/search`, same key) *before* the turn and prepends the top 5 titles, urls and snippets with an instruction to cite them | DeepSeek |
-| `groq`, `openai`, `anthropic`, `gemini`, `fireworks`, `dashscope`, local servers | webrain searches with its **own engines** (duckduckgo + bing over pooled HTTP, no browser) and prepends the same citation block | webrain's SERP |
+| `openai` | webrain calls the **Responses API** (`POST /v1/responses`) with `tools: [{"type":"web_search"}]` and prepends the returned answer, which carries `url_citation` annotations | OpenAI |
+| `anthropic` / `claude` | webrain calls the **Messages API** with the `web_search_20250305` server tool (`max_uses: 3`) and prepends the answer plus the urls in its `web_search_tool_result` blocks | Anthropic |
+| `gemini` / `google` | webrain calls the **Interactions API** (`POST /v1beta/interactions`) with `tools: [{"type":"google_search"}]` and prepends the grounded answer with its `url_citation` annotations | Google |
+| `groq`, `fireworks`, `dashscope`, local servers | webrain searches with its **own engines** (duckduckgo + bing over pooled HTTP, no browser) and prepends the same citation block | webrain's SERP |
 
 Why the split: this CLI cannot inject a request field into the model call — the
 Copilot SDK forwards a fixed provider config, not arbitrary body parameters — so
-the only search it can switch on is one the vendor exposes as a *model variant*
-(OpenRouter) or as an *endpoint it can call itself* (DeepSeek, and ours).
+the search it can switch on is one the vendor exposes as a *model variant*
+(OpenRouter) or as an *endpoint it can call itself* (DeepSeek, OpenAI, Anthropic,
+Gemini, and ours). The vendor row means the vendor's model plans the queries and
+writes the grounded answer; the fourth column is whose index found the pages.
 
-Every branch prints one line on stderr naming the source and the count:
+Two things that follow from that shape:
+
+- **The vendor call is a second request, billed by the vendor.** OpenAI, Anthropic
+  and Google charge per search on top of the turn (Gemini 3+ bills per query the
+  model decides to run, with 5,000 free per month). Their fees do not appear in
+  webrain's closing cost block — that block reports the runtime's token totals,
+  which only cover the turn.
+- **A vendor search that fails falls back to ours, never to a dead turn.** A
+  rejected key, a model that cannot use the tool, or an empty answer prints the
+  reason and grounds the turn on webrain's own results instead.
+
+Every branch prints one line on stderr naming the source and what it found:
 
 ```
 · search · 5 results (auto)
 · search · 5 results (deepseek)
+· search · 1840 chars (openai web_search)
+· search · 2310 chars (anthropic web_search)
+· search · 1690 chars (gemini google_search)
 ```
 
 ```bash
 webrain chat "what changed in Rust 1.95" --provider deepseek --search
+webrain chat "what changed in Rust 1.95" --provider openai --search
+webrain chat "what changed in Rust 1.95" --provider anthropic --search
+webrain chat "what changed in Rust 1.95" --provider gemini --search
 webrain chat "what changed in Rust 1.95" --provider openrouter --search
 webrain chat "what changed in Rust 1.95" --provider groq --search
 ```

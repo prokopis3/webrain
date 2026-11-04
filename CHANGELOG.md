@@ -13,12 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever provider is in use. On `openrouter` it rewrites the model to its
   `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
   models, Exa otherwise). On `deepseek` webrain calls the Search API itself
-  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets.
-  Every other provider — Groq, OpenAI, Anthropic, Gemini, Fireworks, DashScope,
-  local servers — gets the same citation block built from webrain's own engines
-  (duckduckgo + bing over pooled HTTP, no browser), because the Copilot SDK
-  forwards a fixed provider config and cannot inject a vendor search field.
-  One line on stderr names the source and the count.
+  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets. On
+  `openai` it calls the Responses API with `tools: [{"type":"web_search"}]`, on
+  `anthropic` the Messages API with the `web_search_20250305` server tool, and on
+  `gemini` the Interactions API with `tools: [{"type":"google_search"}]` — each
+  with the same key, each prepending the vendor's grounded, cited answer. Groq,
+  Fireworks, DashScope and local servers get the same citation block built from
+  webrain's own engines (duckduckgo + bing over pooled HTTP, no browser), because
+  the Copilot SDK forwards a fixed provider config and cannot inject a vendor
+  search field into the turn. A vendor call that fails prints why and falls back
+  to webrain's engines rather than failing the turn. One line on stderr names the
+  source and what it found.
 - **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
   larger catalog entry). Its search endpoint is what `--search` calls.

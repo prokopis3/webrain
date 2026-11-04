@@ -134,6 +134,15 @@ pub enum SearchMode {
     /// Search is a separate REST endpoint that must run before the turn:
     /// DeepSeek's `POST /v1/tools/search`.
     DeepSeekApi,
+    /// Same shape, OpenAI's hosted tool: `POST /v1/responses` with
+    /// `tools: [{type:"web_search"}]`.
+    OpenAiResponses,
+    /// Same shape, Anthropic's server tool: `POST /v1/messages` with
+    /// `tools: [{type:"web_search_20250305"}]`.
+    AnthropicTool,
+    /// Same shape, Gemini's grounding tool: `POST /v1beta/interactions` with
+    /// `tools: [{type:"google_search"}]`.
+    GeminiGrounding,
     /// No vendor search is reachable through the SDK, so webrain searches with
     /// its own engines and grounds the turn on the results. Every provider can
     /// get this, which is why `--search` never has to be refused.
@@ -147,13 +156,23 @@ impl ChatProvider {
         self.bearer.as_deref()
     }
 
-    /// Which search mechanism this provider has: a model variant (OpenRouter),
-    /// its own search endpoint (DeepSeek), or our engines (everything else).
+    /// Which search mechanism this provider has.
+    ///
+    /// Only OpenRouter can be searched *inside* the turn (`:online` model id).
+    /// The four vendors below expose their web-search tool on a request of
+    /// their own, which `vendor_search` issues with the same key before the
+    /// turn; everything else falls back to webrain's engines.
     pub fn search_mode(&self) -> SearchMode {
         if self.base_url.contains("openrouter.ai") {
             SearchMode::ModelVariant
         } else if self.base_url.contains("api.deepseek.com") {
             SearchMode::DeepSeekApi
+        } else if self.base_url.contains("api.openai.com") {
+            SearchMode::OpenAiResponses
+        } else if self.base_url.contains("api.anthropic.com") {
+            SearchMode::AnthropicTool
+        } else if self.base_url.contains("generativelanguage.googleapis.com") {
+            SearchMode::GeminiGrounding
         } else {
             SearchMode::WebrainSerp
         }
@@ -162,11 +181,11 @@ impl ChatProvider {
     /// `--search`: turn search on.
     ///
     /// Only OpenRouter is rewritten here, to its `:online` slug, because a
-    /// model id is the one per-turn field this SDK exposes. DeepSeek and
-    /// everyone else are grounded by a call the caller makes before the turn —
-    /// see `search_mode`. Nothing is uncertain enough to fail: a provider with
-    /// no search product still gets webrain's own results, which is not the
-    /// vendor searching but is still live web context.
+    /// model id is the one per-turn field this SDK exposes. Everyone else is
+    /// grounded by a call the caller makes before the turn — see `search_mode`
+    /// and `vendor_search`. Nothing is uncertain enough to fail: a provider
+    /// with no search product still gets webrain's own results, which is not
+    /// the vendor searching but is still live web context.
     pub fn with_search(self, search: bool) -> Self {
         if !search || self.search_mode() != SearchMode::ModelVariant {
             return self;
@@ -582,6 +601,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(or.search_mode(), SearchMode::ModelVariant);
+
+        // The three vendors that ship a search tool get their own endpoint, and
+        // their model id stays untouched for the same reason as DeepSeek.
+        for (key, mode, model) in [
+            ("OPENAI_API_KEY", SearchMode::OpenAiResponses, "gpt-5"),
+            (
+                "ANTHROPIC_API_KEY",
+                SearchMode::AnthropicTool,
+                "claude-sonnet-4-5",
+            ),
+            (
+                "GEMINI_API_KEY",
+                SearchMode::GeminiGrounding,
+                "gemini-2.5-pro",
+            ),
+        ] {
+            let p = resolve_from(&env(&[(key, "k")]), &ChatFlags::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.search_mode(), mode, "{key}");
+            assert_eq!(p.clone().with_search(true).model, model, "{key}");
+        }
 
         // A provider with no search product still gets live context, from
         // webrain's own engines, so the flag is never refused.

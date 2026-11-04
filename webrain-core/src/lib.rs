@@ -23,6 +23,7 @@ pub mod proxy;
 pub mod serp;
 pub mod skills;
 pub mod vault;
+pub mod vendor_search;
 pub mod video;
 pub mod vision;
 
