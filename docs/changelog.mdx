@@ -70,6 +70,10 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Fixed
 
+- **`webrain chat --serve`** on a taken port said `oserror 10048`, which names
+  neither the port nor the cause. It now says the address is in use, suggests
+  `--port N`, and points at the usual reason: a previous `--serve` whose terminal
+  was closed without stopping the process.
 - **`webrain help chat`** now lists `--search` and `DEEPSEEK_API_KEY`. The flag
   worked but appeared in no help text, so the only provider search a user could
   discover was the one the chat guide mentioned.
