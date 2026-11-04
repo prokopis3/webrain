@@ -111,6 +111,55 @@ is `async` and may outlive the request that triggered it, so it needs a
 `tokio::sync::oneshot` per request plus a map keyed by `requestId`, and a
 timeout that answers "no" rather than hanging the turn.
 
+## Research: is there a frontend to reuse? (2026-11-04)
+
+Checked before writing any HTML, because a ready UI would have beaten option A.
+
+**The SDK ships no frontend.** In `github/copilot-sdk` the runnable examples are
+terminal programs (`rust/examples/chat.rs` prints deltas and fills the
+user-input slot with a `StdinUserInputHandler`; `nodejs/examples/basic-example.ts`
+logs events). The web-facing documentation is backend-only —
+`docs/setup/backend-services.md` (Express + `sendAndWait`, `RuntimeConnection.forUri`)
+and `docs/setup/scaling.md` (session resume, `deleteSession`) — i.e. it tells you
+how to put *your* UI on top, and stops there. So "adopt the vendor's chat UI" is
+not an option that exists.
+
+**AG-UI is the closest thing to a standard UI contract.** The Agent User
+Interaction Protocol (`docs.ag-ui.com`) is a streaming event vocabulary over SSE,
+and CopilotKit renders it with maintained React components. Its events map onto
+what `session.subscribe()` already delivers:
+
+| SDK event | AG-UI wire event |
+|---|---|
+| first `assistant.message_delta` of a turn | `RUN_STARTED` + `TEXT_MESSAGE_START` |
+| `assistant.message_delta` | `TEXT_MESSAGE_CONTENT` (`delta`) |
+| `assistant.message` | `TEXT_MESSAGE_END` |
+| `tool.execution_start` | `TOOL_CALL_START` (`toolCallName`) |
+| `tool.execution_complete` | `TOOL_CALL_END` + `TOOL_CALL_RESULT` |
+| `session.usage_info` / `session.usage_checkpoint` | `CUSTOM` (`name: "usage"`) |
+| `permission.requested` | `CUSTOM` (`name: "permission"`) — AG-UI's interrupt model is the general form, out of scope here |
+| `model.call_failure` / `session.error` | `RUN_ERROR` |
+| `assistant.idle` / `session.idle` | `RUN_FINISHED` |
+
+**Decision, amended:** `/events` uses those names. Same bytes, same SSE framing,
+same one-file page — but a CopilotKit (or any AG-UI) client can be pointed at the
+endpoint later without the server changing, and `--serve`'s output stops being a
+private format. We do **not** add a Node build to get CopilotKit now: it would
+put a second toolchain in a repo whose selling point is one static binary, and
+the page it would replace is ~300 lines.
+
+**Why not a Rust GUI crate.** All four were considered and dropped:
+
+| Crate | Why it loses here |
+|---|---|
+| `eframe`/`egui` | immediate-mode, no HTML: markdown, tables and images from model output are re-implemented by hand, and the binary gains a windowing stack (winit + wgpu/glow) that is useless on the headless boxes and containers this server usually runs on |
+| `iced` | same windowing cost, plus an async message architecture that duplicates the event loop the SDK already provides |
+| `slint` | needs the `.slint` compiler in the build and its own runtime; a UI language bought for one screen |
+| `tauri` | correct for a desktop product, but it is a second binary + a web frontend build, i.e. strictly more than A for the same browser UI |
+
+The pattern worth copying is the one `llama.cpp` uses for `llama-server`: the
+binary serves its own page. That is A.
+
 ## Consequences
 
 - One binary keeps serving its own UI, which is the property that made `webrain
