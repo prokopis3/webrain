@@ -69,16 +69,16 @@ struct Collected {
 /// `session.usage.getMetrics`; `nano_aiu` is GitHub's billing unit and is 0 on
 /// a BYOK turn, where the provider bills the key directly.
 #[derive(Default, Clone, Copy, PartialEq)]
-struct Totals {
-    input: i64,
-    output: i64,
-    requests: i64,
-    api_ms: i64,
-    nano_aiu: f64,
+pub(crate) struct Totals {
+    pub(crate) input: i64,
+    pub(crate) output: i64,
+    pub(crate) requests: i64,
+    pub(crate) api_ms: i64,
+    pub(crate) nano_aiu: f64,
 }
 
 impl Totals {
-    fn tokens_per_sec(self) -> f64 {
+    pub(crate) fn tokens_per_sec(self) -> f64 {
         if self.api_ms <= 0 {
             return 0.0;
         }
@@ -88,7 +88,7 @@ impl Totals {
 
 /// Sum every model the session used. One model per turn in practice, but a
 /// tool that switches models would otherwise be under-reported.
-fn totals_of(m: &UsageGetMetricsResult) -> Totals {
+pub(crate) fn totals_of(m: &UsageGetMetricsResult) -> Totals {
     let mut t = Totals {
         api_ms: m.total_api_duration_ms,
         nano_aiu: m.total_nano_aiu.unwrap_or(0.0),

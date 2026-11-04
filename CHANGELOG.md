@@ -134,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **cli**: `webrain chat --serve` on a port that is already taken said
   `Only one usage of each socket address … (oserror 10048)`, which names neither
@@ -240,6 +247,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   geometry, and the prompt shapes a small VLM needs.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **cli**: `webrain upgrade` on a build newer than the last tag **silently
   downgraded** it — `self_update` downloaded `releases/latest` with no version
@@ -331,6 +345,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getContentQuads` → trusted click at the element centre).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **core**: `observe what=a11y` now prints a css path for nodes inside shadow
   roots (open and closed). Their path is root-scoped (`button:nth-of-type(2)`)
@@ -374,6 +395,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly on the target, so the following `mousePressed` has no 2–3px jump.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **ci**: the Scoop manifest bumped by the release workflow now declares `bin`
   per architecture (`webrain-windows-x86_64.exe` / `-aarch64.exe`). One
@@ -502,6 +530,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names, and now there is a documented path for both tools.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **skills**: `WEBRAIN_SKILLS_DIR` was printed by `webrain install skills` as "pin the
   dir" and listed in `--help`, but `skills::dir()` never read it — only
@@ -592,6 +627,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something is installed.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **mcp**: `filter_extension` on `webrain_download` was **ignored on the MCP path**.
   The `handle_rpc` no-browser short-circuit returns before the dispatcher, and only
@@ -734,6 +776,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the docs table as well and is now listed there.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **install vision**: a failed model download was reported as
   `"model": "skip: probe https://…"` and the command still exited 0, so a 404 or
@@ -802,6 +851,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's fallback chain reports the engine as `skipped` with that reason.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **mcp**: `webrain_batch` now exposes **`op=markdown`**. `batch_markdown` has
 existed in core (htmd HTML→Markdown, full page, optional `query`+`top_k` bm25
@@ -873,6 +929,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   of the earlier guess "sites that distrust the spoofed profile".
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **mcp**: `wait_selectors` is honoured on the `cdp_urls` path. The grouping that
   turns per-URL wait lists into batches was built **inside** the
@@ -1318,6 +1381,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   identical list).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **core**: SERP pagination advanced by a **guessed** page size, so deep requests
   truncated silently. duckduckgo stepped `s` by 30 while the HTML endpoint serves
@@ -1397,6 +1467,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 - **deps**: bump `async-trait` 0.1.91 → 0.1.92.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **cli**: `webrain vault user` no longer echoes the username back to the
   terminal (CodeQL cleartext-log — a username is half a credential).
@@ -1486,6 +1563,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   3500-slot blocklist cap (#27).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **core**: `bm25_filter` document-frequency now counts distinct documents per
   term, not raw occurrences — a term repeated inside one doc could inflate
@@ -1823,6 +1907,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 ## [0.7.3] - 2026-08-15
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
   `String::from_utf8_lossy` instead of ureq's charset-header-driven
@@ -2369,6 +2460,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   binary detection, and interactive **Turnstile** checkbox click + token wait.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **tools** (`webrain_download` http + ytdlp engines): the http
   engine derived the output filename from the URL *including its query string*,
@@ -2518,6 +2616,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   scopes).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **login truth** (`webrain-core/src/login.rs` + `webrain-mcp`): `webrain_login`
   stopped lying. `SESSION_COOKIES` no longer includes `datr`/`dpr`/`mid`/`ig_did`
@@ -2677,6 +2782,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   tip (poll DOM growth with webrain_wait before extracting a JS shell).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **cli**: `webrain upgrade` on Windows/Scoop now closes other running webrain
   instances before `scoop update` — the MCP server kept the exe locked, so
@@ -2701,6 +2813,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   Mintlify theme + a GitHub icon in the navbar.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **cli**: `webrain upgrade` now spawns the package-manager update (brew /
   scoop) detached and exits, so Scoop no longer sees the upgrade command
@@ -2750,6 +2869,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   (`try chrome, obscura, or lightpanda`) instead of silently installing Chrome.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **mcp**: `webrain_open_session(cdp_url=…)` now actually routes tools to that
   session — every browser tool accepts an optional `session_id` argument.
@@ -2777,6 +2903,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 - **cli**: `webrain -v` / `--version` / `version` prints the version.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 
 - **core**: `webrain install` failed with "the response body is larger than
   request limit" — ureq's `read_to_vec()` caps bodies at 10 MB, too small for
@@ -2820,6 +2953,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   binaries) and the working scoop bucket (`prokopis3/scoop-webrain`).
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 - **ci**: the Linux release binary now builds on `ubuntu-22.04` (glibc 2.35) —
   the previous `ubuntu-latest` build required glibc 2.39, so `webrain-linux`
   failed with "GLIBC_2.39 not found" on Ubuntu 22.04 / Debian 12 and older.
@@ -3195,6 +3335,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   `webrain_navigate` responses from ~40 KB to ~9 KB.
 
 ### Fixed
+- **cli**: the `--serve` page printed the assistant reply twice: the streamed
+  bubble and the final `assistant.message` are one message, so the final one now
+  replaces the bubble text instead of opening a second bubble.
+- **cli**: `--serve` reports tokens the way the CLI does - a per-model-call line
+  plus a closing block with input/output totals, request count, API seconds,
+  tok/s and cost (n/a on BYOK turns). The page shows the same numbers in a
+  stats rail, so what a turn cost is visible without scrolling.
 - **core**: `with_crawl_timeout(0)` now means "no cap". Before, tools.rs passed
   `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
   stopped before the first page (returned 0 pages). One guard in the shared

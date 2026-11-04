@@ -93,6 +93,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         bus,
         permission,
         session: Arc::new(session),
+        model: provider.model.clone(),
         timeout: Duration::from_secs(args.timeout_secs),
         busy: AtomicBool::new(false),
     });
@@ -112,6 +113,7 @@ struct State {
     bus: Bus,
     permission: Arc<WebPermission>,
     session: Arc<github_copilot_sdk::session::Session>,
+    model: String,
     timeout: Duration,
     busy: AtomicBool,
 }
@@ -191,10 +193,56 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             tokio::spawn(async move {
                 let wait = github_copilot_sdk::MessageOptions::new(prompt.as_str())
                     .with_wait_timeout(st.timeout);
-                if let Err(e) = st.session.send_and_wait(wait).await {
+                let turn = st.session.send_and_wait(wait);
+                tokio::pin!(turn);
+
+                // Same sampler as the CLI: the runtime only reports tokens per
+                // *model call*, through `usage.getMetrics`. Without this the page
+                // shows a stream of text and no idea what it cost.
+                let mut ticker = tokio::time::interval(Duration::from_millis(900));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut seen = (0i64, 0i64);
+                let outcome = loop {
+                    tokio::select! {
+                        r = &mut turn => break r,
+                        _ = ticker.tick() => {
+                            if let Ok(m) = st.session.rpc().usage().get_metrics().await {
+                                let call = (m.last_call_input_tokens, m.last_call_output_tokens);
+                                if call != seen && call.1 > 0 {
+                                    seen = call;
+                                    let _ = st.bus.send(
+                                        json!({"type": "webrain.model", "data": {
+                                            "model": st.model, "input": call.0, "output": call.1,
+                                        }})
+                                        .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                };
+                if let Err(e) = outcome {
                     let _ = st.bus.send(
                         json!({"type": "webrain.error", "data": {"message": e.to_string()}})
                             .to_string(),
+                    );
+                }
+                // The closing block. `nano_aiu` is 0 on BYOK turns — the key
+                // pays the provider — so the page shows cost as n/a rather than
+                // inventing one.
+                if let Ok(m) = st.session.rpc().usage().get_metrics().await {
+                    let t = chat_session::totals_of(&m);
+                    let _ = st.bus.send(
+                        json!({"type": "webrain.usage", "data": {
+                            "model": st.model,
+                            "input": t.input,
+                            "output": t.output,
+                            "requests": t.requests,
+                            "api_ms": t.api_ms,
+                            "tokens_per_sec": t.tokens_per_sec(),
+                            "nano_aiu": t.nano_aiu,
+                        }})
+                        .to_string(),
                     );
                 }
                 st.busy.store(false, Ordering::SeqCst);
