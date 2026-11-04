@@ -175,15 +175,27 @@ above).
 
 ## Isolation from your own Copilot install
 
-A BYOK chat owns its configuration. The runtime is started with `COPILOT_HOME`
-redirected to a scratch directory, so none of `~/.copilot` applies: no ambient
-MCP servers, no user skills, no instructions file, no session store. This is not
-politeness — measured on a real turn, inheriting the machine's config loaded
-~20 unrelated MCP servers (~480 tools, `toolDefinitionsTokens: 137019` against a
-`tokenLimit: 128000`) and the turn died before it reached the provider.
+A BYOK chat owns its configuration. The client starts in the SDK's
+**`ClientMode::Empty`** — the mode Microsoft documents for "CLI-like ambient
+behaviour is unsafe" — which requires an explicit state directory instead of the
+implicit `~/.copilot` fallback, disables optional features unless asked for, and
+keeps the OS keychain out of the runtime's reach.
 
-Point it elsewhere with `WEBRAIN_CHAT_HOME` if you want a stable directory
-(default: `webrain-copilot-home` under the system temp directory).
+So none of your own Copilot setup applies: no ambient MCP servers, no user
+skills, no instructions file, no cross-session store, no memory writes, no
+session telemetry. This is not politeness — measured on a real turn, inheriting
+the machine's config loaded ~20 unrelated MCP servers (~480 tools,
+`toolDefinitionsTokens: 137019` against a `tokenLimit: 128000`) and the turn died
+before it reached the provider.
+
+Point the state directory elsewhere with `WEBRAIN_CHAT_HOME` (default:
+`webrain-copilot-home` under the system temp directory).
+
+What is *not* removable: the runtime's built-in `github-mcp-server` (5 tools)
+still loads, and the tool list is filtered separately with the SDK's `ToolSet`
+so the model can only call `webrain-*`. Measured, `toolDefinitionsTokens` stays
+**8080** either way — the 18 `webrain_*` schemas are the floor, not the
+stragglers.
 
 ## What chat does not do
 

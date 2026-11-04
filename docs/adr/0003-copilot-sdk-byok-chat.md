@@ -173,5 +173,30 @@ Verification performed:
 `No response was returned.`, i.e. the session was created and the MCP server was
 configured, but the provider produced no usable answer (that model may not
 support tool calling). `WEBRAIN_CHAT_DEBUG=1` now mirrors every raw event so the
-provider's own error is visible. The end-to-end turn still needs one run against
-a tool-capable model before the feature is called proven.
+provider's own error is visible.
+
+## Follow-up from live traces (2026-11-04, second pass)
+
+The first live attempts failed for three reasons that the event stream named, and
+that no amount of reading the API docs had surfaced:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `compaction_static_context_blocked`, then `session.error {"errorType":"query"}` | the runtime read this machine's `~/.copilot` and merged ~20 MCP servers; `toolDefinitionsTokens: 137019` vs `tokenLimit: 128000` | `ClientMode::Empty` + `base_directory` (`WEBRAIN_CHAT_HOME`) — Empty mode *requires* an explicit state dir and refuses the implicit fallback |
+| 8048 static tokens per turn | inheriting the runtime's coding-agent system prompt | `SystemMessageConfig` `mode: "replace"` with a webrain prompt → **272** |
+| `402 ... requested up to 64000 tokens, but can only afford 171` | we let the runtime ask for a 64k completion, which some providers reserve against the balance | `max_output_tokens` default **4096** |
+
+Also adopted from the upstream README: `ToolSet` for `available_tools`
+(`mcp:webrain-<tool>`), `MemoryConfiguration::disabled()`, and
+`enable_session_telemetry = false`. Not adopted: `disable_client_telemetry` and
+`install_bundled_runtime`, which are newer than the pinned `1.0.28`.
+
+**What is still unproven, and why it is not a code defect:** a completed tool
+turn. A tool-enabled prompt is ~8.4k tokens by the runtime's own count (18
+`webrain_*` schemas ≈ 8080 + 272 system), the allowlist does not reduce that
+count (only what the model may call), and the runtime's builtin
+`github-mcp-server` cannot be unloaded from `ClientOptions`. Groq's free tier
+allows 7000 input tokens/minute — `413 ... Requested 10020 ... Limit 7000` — and
+the second key on hand can afford 171 tokens. The guide and the CLI's error path
+both explain this; proving the turn needs a key with headroom, or a deliberate
+decision to expose fewer than 18 tools.

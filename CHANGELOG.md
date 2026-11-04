@@ -73,13 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **build**: `.gitattributes` pins `*.sh` to `text eol=lf`. A CRLF checkout
   committed from Windows would ship an installer that dies with
   `syntax error near unexpected token 'in'` the moment it is piped into `bash`.
-- **cli**: `chat` no longer inherits this machine's Copilot install. The runtime
-  now starts with `COPILOT_HOME` pointed at a scratch directory
-  (`WEBRAIN_CHAT_HOME`), because `~/.copilot` is discovered by the CLI before any
-  session option applies: a real turn loaded ~20 unrelated MCP servers
+- **cli**: `chat` no longer inherits this machine's Copilot install. The client
+  starts in the SDK's `ClientMode::Empty` — the mode documented for "CLI-like
+  ambient behaviour is unsafe" — which *requires* an explicit state directory
+  (`WEBRAIN_CHAT_HOME`, default a scratch dir) instead of the implicit
+  `~/.copilot`, keeps the OS keychain out of the runtime, and turns off optional
+  features unless asked for. Before, a real turn loaded ~20 unrelated MCP servers
   (`toolDefinitionsTokens: 137019` against `tokenLimit: 128000`) and died with
-  `compaction_static_context_blocked` before reaching the provider.
+  `compaction_static_context_blocked` before reaching the provider;
   `enable_config_discovery = false` alone did not stop it.
+- **cli**: `chat` builds its `available_tools` filter with the SDK's `ToolSet`
+  (`mcp:webrain-<tool>`), validates each name at construction, and disables the
+  runtime's memory feature and session telemetry for a one-shot turn.
 - **cli**: `chat` explains a rejected prompt instead of echoing the SDK's
   catch-all. Both real causes are quotas, not the context window — a ~8.4k
   tool-schema prompt against a per-minute input cap, or a reserved output budget
