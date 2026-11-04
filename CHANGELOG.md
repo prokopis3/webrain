@@ -89,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **cli**: `webrain help chat` now lists `--search` and `DEEPSEEK_API_KEY`. The
+  flag worked but appeared in no help text, so the only provider search a user
+  could discover was the one the chat guide mentioned.
 - **install**: the POSIX installer claimed "add ~/.local/bin to your PATH" on
   Debian/Ubuntu, where `~/.profile` already does exactly that — it was reading
   the invoking shell's `PATH`, and `curl | bash` is not a login shell, so the

@@ -56,6 +56,9 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Fixed
 
+- **`webrain help chat`** now lists `--search` and `DEEPSEEK_API_KEY`. The flag
+  worked but appeared in no help text, so the only provider search a user could
+  discover was the one the chat guide mentioned.
 - **chat** — no longer inherits this machine's Copilot install. The client starts
   in `ClientMode::Empty` with an explicit state directory, so a turn stops loading
   ~20 unrelated MCP servers (`toolDefinitionsTokens: 137019` against a 128000
