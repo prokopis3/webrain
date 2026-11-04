@@ -134,6 +134,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -247,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   geometry, and the prompt shapes a small VLM needs.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -345,6 +351,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getContentQuads` → trusted click at the element centre).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -395,6 +404,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly on the target, so the following `mousePressed` has no 2–3px jump.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -530,6 +542,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names, and now there is a documented path for both tools.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -627,6 +642,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something is installed.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -776,6 +794,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the docs table as well and is now listed there.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -851,6 +872,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's fallback chain reports the engine as `skipped` with that reason.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -929,6 +953,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   of the earlier guess "sites that distrust the spoofed profile".
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -1381,6 +1408,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   identical list).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -1467,6 +1497,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 - **deps**: bump `async-trait` 0.1.91 → 0.1.92.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -1563,6 +1596,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   3500-slot blocklist cap (#27).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -1907,6 +1943,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 ## [0.7.3] - 2026-08-15
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2460,6 +2499,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   binary detection, and interactive **Turnstile** checkbox click + token wait.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2616,6 +2658,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   scopes).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2782,6 +2827,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   tip (poll DOM growth with webrain_wait before extracting a JS shell).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2813,6 +2861,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   Mintlify theme + a GitHub icon in the navbar.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2869,6 +2920,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   (`try chrome, obscura, or lightpanda`) instead of silently installing Chrome.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2903,6 +2957,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 - **cli**: `webrain -v` / `--version` / `version` prints the version.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -2953,6 +3010,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   binaries) and the working scoop bucket (`prokopis3/scoop-webrain`).
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.
@@ -3335,6 +3395,9 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   `webrain_navigate` responses from ~40 KB to ~9 KB.
 
 ### Fixed
+- **cli**: the `--serve` page is a harness, not a chat window: evidence column
+  plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
+  API seconds and cost after the transcript has scrolled them away.
 - **cli**: the `--serve` page printed the assistant reply twice: the streamed
   bubble and the final `assistant.message` are one message, so the final one now
   replaces the bubble text instead of opening a second bubble.

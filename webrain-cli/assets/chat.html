@@ -111,6 +111,48 @@
         .dot.busy { animation: pulse 1.4s ease-in-out infinite; }
         @keyframes pulse { 50% { opacity: 0.35; } }
       }
+      /* ── harness layout ─────────────────────────────────────────────────
+         Two regions: the evidence column and the turn ledger. The ledger is
+         what makes this a harness rather than a chat window - every turn keeps
+         its own tokens, speed and cost, so a run can be read back. */
+      body { grid-template-rows: auto 1fr auto; }
+      #shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 17rem;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #log { overflow-y: auto; min-height: 0; }
+      #side {
+        border-left: 1px solid var(--line);
+        background: #0d1116;
+        overflow-y: auto;
+        padding: 1rem 0.9rem;
+        font-size: 12px;
+      }
+      .side-h {
+        color: #5c6773; font-size: 10px; text-transform: uppercase;
+        letter-spacing: 0.1em; margin-bottom: 0.6rem;
+      }
+      .turn {
+        border: 1px solid var(--line); border-left: 2px solid var(--accent);
+        border-radius: 6px; padding: 0.5rem 0.6rem; margin-bottom: 0.5rem;
+      }
+      .turn.bad { border-left-color: var(--bad); }
+      .turn .n { color: #5c6773; }
+      .turn dl { margin: 0.25rem 0 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 0.5rem; }
+      .turn dt { color: #5c6773; }
+      .turn dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+      @media (max-width: 1100px) {
+        #shell { grid-template-columns: minmax(0, 1fr); }
+        #side { display: none; }
+      }
+      .msg { border-left-width: 2px; }
+      .msg.user { border-left-color: #2b3742; }
+      .msg.assistant { border-left-color: var(--accent); }
+      .msg.err { border-left-color: var(--bad); }
+      textarea { font-variant-ligatures: none; }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     </style>
   </head>
   <body>
@@ -129,7 +171,13 @@
         <span class="stat"><u>cost</u><b id="stat-cost">—</b></span>
       </div>
     </header>
-    <main id="log"></main>
+    <div id="shell">
+      <main id="log"></main>
+      <aside id="side">
+        <div class="side-h">turns</div>
+        <div id="turns"></div>
+      </aside>
+    </div>
     <footer>
       <textarea id="prompt" placeholder="Ask, scrape, extract — Enter sends, Shift+Enter adds a line"></textarea>
       <button id="send">Send</button>
@@ -274,7 +322,30 @@
               `${secs}s API · ${speed} tok/s · ${cost}`,
           ),
         );
+        ledger(u);
         scroll();
+      }
+
+      // One row per finished turn, so the harness keeps the evidence the
+      // transcript scrolls away from.
+      let turnNo = 0;
+      function ledger(u) {
+        turnNo += 1;
+        const row = el("div", "turn" + (u.requests ? "" : " bad"));
+        row.append(el("div", "n", `turn ${turnNo} · ${u.model}`));
+        const dl = document.createElement("dl");
+        const facts = [
+          ["in", u.input],
+          ["out", u.output],
+          ["tok/s", u.tokens_per_sec ? u.tokens_per_sec.toFixed(1) : "0.0"],
+          ["api", `${(u.api_ms / 1000).toFixed(1)}s`],
+          ["cost", u.nano_aiu > 0 ? `${(u.nano_aiu / 1e9).toFixed(4)} AIU` : "n/a"],
+        ];
+        for (const [k, v] of facts) {
+          dl.append(el("dt", "", k), el("dd", "", String(v)));
+        }
+        row.append(dl);
+        document.getElementById("turns").prepend(row);
       }
 
       function ask(d) {
