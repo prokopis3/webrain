@@ -31,8 +31,10 @@ pub struct Args {
     pub max_prompt_tokens: Option<i64>,
     pub timeout_secs: u64,
     pub yes: bool,
-    /// `--search`: provider-native web search, where the vendor sells it as a
-    /// model variant (OpenRouter's `:online`). See `ChatProvider::with_search`.
+    /// `--search`: live web results in front of the turn. Which mechanism
+    /// depends on the provider — a `:online` model variant (OpenRouter), the
+    /// vendor's own search endpoint (DeepSeek, OpenAI, Anthropic, Gemini), or
+    /// webrain's engines. See `ChatProvider::search_mode`.
     pub search: bool,
     pub json: bool,
     pub stream: bool,

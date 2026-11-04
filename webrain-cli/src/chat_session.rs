@@ -147,6 +147,42 @@ fn not_destructive(d: &PermissionRequestData) -> bool {
     )
 }
 
+/// Ground `prompt` with webrain's own engines and return the prompt to send.
+/// `http_only`: no browser needed for auto (duckduckgo + bing over pooled
+/// HTTP), and a chat turn should not pay a Chrome launch.
+async fn serp_grounding(prompt: &str) -> anyhow::Result<String> {
+    let opts = webrain_core::serp::SerpOpts {
+        query: prompt.to_string(),
+        limit: 5,
+        http_only: true,
+        ..Default::default()
+    };
+    let resp: webrain_core::serp::SerpResponse =
+        webrain_core::serp::serp_search(&opts, None::<&CdpBackend>).await?;
+    let block = webrain_core::serp::grounding_block("webrain serp", prompt, &resp.results);
+    if !block.is_empty() {
+        eprintln!(
+            "· search · {} results ({})",
+            resp.results.len(),
+            resp.engine
+        );
+    }
+    Ok(format!("{block}\nQuestion: {prompt}"))
+}
+
+/// Name of the search mechanism, for the `· search ·` line.
+fn mode_label(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::OpenAiResponses => "openai web_search",
+        SearchMode::AnthropicTool => "anthropic web_search",
+        SearchMode::GeminiGrounding => "gemini google_search",
+        SearchMode::DeepSeekApi => "deepseek search",
+        SearchMode::ModelVariant => "openrouter :online",
+        SearchMode::WebrainSerp => "webrain serp",
+        SearchMode::Off => "off",
+    }
+}
+
 pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
 
@@ -304,11 +340,12 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         }
     });
 
-    // `--search`, per provider. OpenRouter already searched (the `:online`
-    // slug did it). DeepSeek has an endpoint, so call it. Everyone else has no
-    // vendor search the SDK can reach, so webrain searches with its own
-    // engines and hands the model the results — the flag means "ground this
-    // turn on live web results", not "use the vendor's search".
+    // `--search`, per provider. OpenRouter already searched (the `:online` slug
+    // did it). The four vendors that sell a web-search tool expose it on a
+    // request of their own, which the SDK cannot put inside the turn, so it runs
+    // here first and its answer rides in the prompt. Everyone else — and any
+    // vendor call that fails — is grounded by webrain's own engines, so the flag
+    // always means "ground this turn on live web results".
     let prompt = match provider.search_mode() {
         SearchMode::DeepSeekApi if args.search => {
             let key = provider.bearer_token().unwrap_or_default().to_string();
@@ -325,27 +362,52 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
             }
             format!("{block}\nQuestion: {prompt}")
         }
-        SearchMode::WebrainSerp if args.search => {
-            // `http_only`: no browser needed for auto (duckduckgo + bing over
-            // pooled HTTP), and a chat turn should not pay a Chrome launch.
-            let opts = webrain_core::serp::SerpOpts {
-                query: prompt.to_string(),
-                limit: 5,
-                http_only: true,
-                ..Default::default()
-            };
-            let resp: webrain_core::serp::SerpResponse =
-                webrain_core::serp::serp_search(&opts, None::<&CdpBackend>).await?;
-            let block = webrain_core::serp::grounding_block("webrain serp", prompt, &resp.results);
-            if !block.is_empty() {
-                eprintln!(
-                    "· search · {} results ({})",
-                    resp.results.len(),
-                    resp.engine
-                );
+        mode @ (SearchMode::OpenAiResponses
+        | SearchMode::AnthropicTool
+        | SearchMode::GeminiGrounding)
+            if args.search =>
+        {
+            let key = provider.bearer_token().unwrap_or_default().to_string();
+            let base = provider.base_url.clone();
+            let model = provider.model.clone();
+            let q = prompt.to_string();
+            let call = tokio::task::spawn_blocking(move || match mode {
+                SearchMode::OpenAiResponses => {
+                    webrain_core::vendor_search::openai_web_search(&base, &key, &model, &q)
+                }
+                SearchMode::AnthropicTool => {
+                    webrain_core::vendor_search::anthropic_web_search(&base, &key, &model, &q)
+                }
+                _ => webrain_core::vendor_search::gemini_grounded(&base, &key, &model, &q),
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("search task failed: {e}")));
+            let label = mode_label(mode);
+            match call {
+                Ok(answer) if !answer.trim().is_empty() => {
+                    eprintln!("· search · {} chars ({label})", answer.chars().count());
+                    format!(
+                        "Live web answer for the question below, from {label}. \
+Use it and cite the urls it names.\n\n{answer}\n\nQuestion: {prompt}"
+                    )
+                }
+                Ok(_) => {
+                    eprintln!("· search · {label} answered nothing; using webrain serp");
+                    serp_grounding(prompt).await.unwrap_or_else(|e| {
+                        eprintln!("· search · serp failed: {e}");
+                        prompt.to_string()
+                    })
+                }
+                Err(e) => {
+                    eprintln!("· search · {label} failed: {e}; using webrain serp");
+                    serp_grounding(prompt).await.unwrap_or_else(|e| {
+                        eprintln!("· search · serp failed: {e}");
+                        prompt.to_string()
+                    })
+                }
             }
-            format!("{block}\nQuestion: {prompt}")
         }
+        SearchMode::WebrainSerp if args.search => serp_grounding(prompt).await?,
         _ => prompt.to_string(),
     };
 
