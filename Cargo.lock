@@ -4195,6 +4195,7 @@ version = "0.16.2"
 dependencies = [
  "anyhow",
  "github-copilot-sdk",
+ "openssl",
  "rpassword",
  "serde_json",
  "sha2 0.11.0",

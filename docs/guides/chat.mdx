@@ -19,9 +19,9 @@ engine cache, so it drives whatever browser the CLI would.
 
 - A release binary from this repository (`webrain-linux-x86_64`,
   `webrain-macos-aarch64`, `webrain-windows-x86_64.exe`, …). The `chat` feature
-  is built into every target except the two static **musl** builds, which cannot
-  link the OpenSSL 3 the Copilot runtime needs — there `webrain chat` resolves
-  your provider, prints it, and tells you to rebuild.
+  is built into every published target, the two static **musl** builds included —
+  those vendor OpenSSL 3 and compile it with `musl-gcc`, so the result stays a
+  static binary.
 - Building from source needs **Rust 1.94+** and `--features chat`:
 
 ```bash
@@ -37,18 +37,27 @@ Expect a large binary: the feature embeds the Copilot CLI runtime
 | --- | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | yes | yes | links the distro's OpenSSL 3 |
 | `aarch64-unknown-linux-gnu` | yes | yes | same, cross-linked |
-| `x86_64-unknown-linux-musl` | yes | **no** | static: cannot link OpenSSL 3, and the SDK rejects a vendored copy |
-| `aarch64-unknown-linux-musl` | yes | **no** | same |
+| `x86_64-unknown-linux-musl` | yes | yes | static: **vendors** OpenSSL 3 (`openssl` `vendored`, built by `musl-gcc`) |
+| `aarch64-unknown-linux-musl` | yes | yes | same, cross-linked |
 | `aarch64-apple-darwin` | yes | yes | TLS via Security.framework |
 | `x86_64-apple-darwin` | yes | yes | same |
 | `x86_64-pc-windows-msvc` | yes | yes | TLS via schannel |
 | `aarch64-pc-windows-msvc` | yes | yes | same |
 
-CI compiles `pdfium,chat` on Linux for every PR, and on Linux, macOS and Windows
-for every push to `main` — the three host triples that a release tag would
-otherwise be the first to try. To get chat onto musl you would have to replace
-the SDK's `network-forwarding` with a custom `CopilotRequestHandler`; the
-feature is not merely unbuilt there, it cannot link.
+CI compiles `pdfium,chat` on Linux for every PR, and on Linux, macOS, Windows
+**and static musl** for every push to `main` — the four shapes a release tag would
+otherwise be the first to try.
+
+The musl rows are the reason this table exists at all. `chat` reaches
+`native-tls` through the SDK's `network-forwarding`, which is `openssl-sys` on
+Linux; a static target has no OpenSSL to link, so `webrain-cli` declares
+`openssl` with the `vendored` feature for `target_env = "musl"` only and the
+build compiles OpenSSL 3 from source with `musl-gcc`. The SDK itself supports the
+platform: its build script fetches `copilot-linuxmusl-x64`, not a glibc
+package. Building it needs `musl-tools`, `perl`, `make`, `pkg-config` and
+`libssl-dev` (the last one for the build-host copy of `openssl-sys`), and about
+8 GB of RAM to compile the SDK crate — build with `-j 1` if your machine is
+tighter than that.
 
 The container image is glibc (Debian) and takes features as a build arg:
 
