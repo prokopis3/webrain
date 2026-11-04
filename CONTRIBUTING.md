@@ -38,7 +38,7 @@ independently.
   `revert`. Valid scopes (mirror the crates/subsystems): `core`, `engines`,
   `mcp`, `tools`, `cli`, `install`, `launch`, `login`, `vault`, `vision`,
   `pdf`, `download`, `cookies`, `batch`, `extraction`, `navigation`,
-  `stealth`, `antibot`, `session`, `media`, `docs`, `build`, `ci`, `style`,
+  `stealth`, `antibot`, `session`, `media`, `chat`, `docs`, `build`, `ci`, `style`,
   `perf`, `dist`, `deps`, `config`, `test`, `skill`, `script`, `release`.
   See `commitlint.config.js`.
 - **CHANGELOG.md is mandatory.** If you change Rust source under

@@ -72,6 +72,7 @@ jobs:
             antibot
             session
             media
+            chat
             docs
             build
             ci

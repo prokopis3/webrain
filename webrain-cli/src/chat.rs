@@ -31,6 +31,9 @@ pub struct Args {
     pub max_prompt_tokens: Option<i64>,
     pub timeout_secs: u64,
     pub yes: bool,
+    /// `--search`: provider-native web search, where the vendor sells it as a
+    /// model variant (OpenRouter's `:online`). See `ChatProvider::with_search`.
+    pub search: bool,
     pub json: bool,
     pub stream: bool,
     pub print_config: bool,
@@ -93,6 +96,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     .map_err(|_| format!("--timeout {v}: not a number of seconds"))?;
             }
             "--yes" => a.yes = true,
+            "--search" => a.search = true,
             "--json" => a.json = true,
             "--no-stream" => a.stream = false,
             "--stream" => a.stream = true,
@@ -157,6 +161,9 @@ pub fn run(argv: &[String], rt: &tokio::runtime::Runtime) -> anyhow::Result<()> 
             std::process::exit(2);
         }
     };
+    // Before `--print-config`, so what it prints is the model that will be
+    // sent (`--search` rewrites `openrouter` models to their `:online` slug).
+    let resolved = resolved.map(|p| p.with_search(args.search));
 
     // --print-config is the whole resolution chain, offline and deterministic:
     // it works in a default build precisely so CI can assert it.

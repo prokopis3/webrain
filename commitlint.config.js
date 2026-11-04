@@ -18,7 +18,7 @@ module.exports = {
       'install', 'launch', 'login', 'vault', 'vision',
       // feature areas
       'pdf', 'download', 'cookies', 'batch', 'extraction',
-      'navigation', 'stealth', 'antibot', 'session', 'media',
+      'navigation', 'stealth', 'antibot', 'session', 'media', 'chat',
       // housekeeping
       'docs', 'build', 'ci', 'style', 'perf', 'dist',
       'deps', 'config', 'test', 'skill', 'script', 'release',

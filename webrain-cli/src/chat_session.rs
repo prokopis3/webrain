@@ -22,7 +22,8 @@ use github_copilot_sdk::types::{
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
 use super::chat::Args;
-use webrain_core::byok::ChatProvider;
+use webrain_core::backends::cdp::CdpBackend;
+use webrain_core::byok::{ChatProvider, SearchMode};
 
 /// The session's system prompt, replacing the runtime's coding-agent default.
 ///
@@ -244,8 +245,53 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         }
     });
 
-    let wait =
-        MessageOptions::new(prompt).with_wait_timeout(Duration::from_secs(args.timeout_secs));
+    // `--search`, per provider. OpenRouter already searched (the `:online`
+    // slug did it). DeepSeek has an endpoint, so call it. Everyone else has no
+    // vendor search the SDK can reach, so webrain searches with its own
+    // engines and hands the model the results — the flag means "ground this
+    // turn on live web results", not "use the vendor's search".
+    let prompt = match provider.search_mode() {
+        SearchMode::DeepSeekApi if args.search => {
+            let key = provider.bearer_token().unwrap_or_default().to_string();
+            let base = provider.base_url.clone();
+            let q = prompt.to_string();
+            let hits = tokio::task::spawn_blocking(move || {
+                webrain_core::serp::deepseek_search(&base, &key, &q, 5)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("search task failed: {e}")))?;
+            let block = webrain_core::serp::grounding_block("DeepSeek Search", prompt, &hits);
+            if !block.is_empty() {
+                eprintln!("· search · {} results (deepseek)", hits.len());
+            }
+            format!("{block}\nQuestion: {prompt}")
+        }
+        SearchMode::WebrainSerp if args.search => {
+            // `http_only`: no browser needed for auto (duckduckgo + bing over
+            // pooled HTTP), and a chat turn should not pay a Chrome launch.
+            let opts = webrain_core::serp::SerpOpts {
+                query: prompt.to_string(),
+                limit: 5,
+                http_only: true,
+                ..Default::default()
+            };
+            let resp: webrain_core::serp::SerpResponse =
+                webrain_core::serp::serp_search(&opts, None::<&CdpBackend>).await?;
+            let block = webrain_core::serp::grounding_block("webrain serp", prompt, &resp.results);
+            if !block.is_empty() {
+                eprintln!(
+                    "· search · {} results ({})",
+                    resp.results.len(),
+                    resp.engine
+                );
+            }
+            format!("{block}\nQuestion: {prompt}")
+        }
+        _ => prompt.to_string(),
+    };
+
+    let wait = MessageOptions::new(prompt.as_str())
+        .with_wait_timeout(Duration::from_secs(args.timeout_secs));
     let result = session.send_and_wait(wait).await;
 
     // disconnect() closes the subscription so the reader task ends on its own;
