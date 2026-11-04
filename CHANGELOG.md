@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **docs**: ADR-004, the GUI decision for `webrain chat`. The runtime already
+  emits streamed deltas, tool calls, permission requests and context/cost meters;
+  the CLI flattens them into stderr lines, which is right for a pipe and wrong
+  for a conversation window. The ADR maps every event to the element it should
+  become, names the three SDK handler slots a UI must fill (`PermissionHandler`,
+  `UserInputHandler`, `ElicitationHandler` — today they are policy, not a person),
+  and picks `webrain chat --serve` (raw TCP like `run_http`, one `include_str!`'d
+  page, SSE events) over a TUI, an OpenAI-compatible proxy, or a desktop app.
+
 - **cli**: `webrain chat --search` — live web results in front of the turn,
   whichever provider is in use. On `openrouter` it rewrites the model to its
   `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
