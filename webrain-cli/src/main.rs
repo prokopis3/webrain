@@ -61,9 +61,9 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "chat",
-        "webrain chat \"<prompt>\" [--provider P] [--model ID] [--key-from VAR] [--base-url URL]\n    [--max-output-tokens N] [--timeout SECS] [--yes] [--json] [--no-stream] [--print-config]",
+        "webrain chat \"<prompt>\" [--provider P] [--model ID] [--key-from VAR] [--base-url URL]\n    [--search] [--max-output-tokens N] [--timeout SECS] [--yes] [--json] [--no-stream]\n    [--print-config]",
         "Run one Copilot agent turn on your own model key, with webrain's own MCP tools attached.",
-        "The agent's tools ARE this binary (`webrain mcp` over stdio), so it can navigate, extract\n  and screenshot. The key comes from --key-from, WEBRAIN_CHAT_API_KEY, or the ambient\n  OPENROUTER/OPENAI/ANTHROPIC/GEMINI/FIREWORKS/DASHSCOPE/GROQ variables — first hit wins, in\n  that order. --print-config resolves the chain, prints it with the key redacted and exits,\n  which is the offline way to see what would be used. Tool calls that write or click need\n  --yes; the default approves reads and navigation only. Needs a build made with\n  --features chat (the release binaries have it; musl builds do not).",
+        "The agent's tools ARE this binary (`webrain mcp` over stdio), so it can navigate, extract\n  and screenshot. The key comes from --key-from, WEBRAIN_CHAT_API_KEY, or the ambient\n  OPENROUTER/OPENAI/ANTHROPIC/GEMINI/FIREWORKS/DASHSCOPE/GROQ/DEEPSEEK variables — first hit\n  wins, in that order. --print-config resolves the chain, prints it with the key redacted and\n  exits, which is the offline way to see what would be used. --search grounds the turn on live\n  web results first, using the vendor's own search where it sells one (openrouter `:online`,\n  deepseek /v1/tools/search, openai `web_search`, anthropic `web_search_20250305`, gemini\n  `google_search`) and webrain's own engines otherwise. Every model call prints its tokens and\n  the turn ends with totals, tok/s and cost. Tool calls that write or click need --yes; the\n  default approves reads and navigation only. Needs a build made with --features chat (the\n  release binaries have it; musl builds do not).",
     ),
     (
         "upgrade",

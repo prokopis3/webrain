@@ -8,6 +8,477 @@ description: Version history for webrain — the 18-tool MCP surface, watch/vide
 All notable changes, in reverse chronological order. The full version lives in
 [`CHANGELOG.md`](https://github.com/prokopis3/webrain/blob/main/CHANGELOG.md).
 
+## Unreleased
+
+<p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
+
+### Added
+
+- **`webrain chat`** — one Copilot agent turn on your own model key, with the
+  18 `webrain_*` tools attached over stdio. BYOK resolution is a table, first
+  match wins: flags → `WEBRAIN_CHAT_*` → the ambient vendor variable, across
+  OpenRouter, OpenAI, Anthropic/Claude, Gemini/Google, Fireworks, DashScope/Qwen,
+  Groq and DeepSeek. `--print-config` resolves and prints the chain with the key
+  redacted, offline, even in a build without the feature. Exit 0 completed,
+  1 turn failed, 2 could not start. `webrain doctor` reports chat as a third state
+  beside engines and vault.
+- **`--search`** — live web results in front of the turn, per provider: OpenRouter
+  rewrites the model to its `:online` slug; DeepSeek, OpenAI, Anthropic and Gemini
+  are asked on their own search endpoints with the same key
+  (`/v1/tools/search`, `/v1/responses` + `web_search`,
+  `/v1/messages` + `web_search_20250305`, `/v1beta/interactions` +
+  `google_search`); every other provider is grounded by webrain's own engines.
+  A vendor call that fails falls back to ours instead of ending the turn.
+- **chat cost line** — each model call prints `· model · N in / M out` as it
+  runs, and the turn ends with totals, `tok/s` (output tokens over real API time),
+  request count and cost, straight from the runtime's own metrics; `--json`
+  carries the same `usage` object.
+- **`webrain diff <a> <b> [--max N] [--json]`** — what changed between two pages
+  (URL or local file). Whitespace-normalised line multiset, not an LCS diff; exit
+  1 when they differ so a cron job can act on it.
+- **build** — releases build `--features pdfium,chat` on the six targets that can
+  link OS OpenSSL 3 (the two static musl builds stay `pdfium`-only); a
+  `chat-build` matrix job builds the feature on Linux, macOS and Windows on every
+  push; the container image takes `--build-arg FEATURES=`.
+- **docs** — a [chat guide](/guides/chat) with the provider table, plus the
+  `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
+
+### Changed
+
+- **build** — workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
+  (resolver 3 is MSRV-aware, so the floor applies even with the feature off). The
+  container builder moves to `rust:1.94-slim-bookworm` with it.
+- **chat** — sends its own system prompt instead of inheriting the runtime's
+  coding-agent one: 8048 → **272** static tokens per turn, and the agent is told
+  it drives a browser rather than that it edits repositories. Output budget is
+  4096 rather than the runtime's 64k, because some providers reserve the
+  requested maximum against your balance.
+
+### Fixed
+
+- **chat** — no longer inherits this machine's Copilot install. The client starts
+  in `ClientMode::Empty` with an explicit state directory, so a turn stops loading
+  ~20 unrelated MCP servers (`toolDefinitionsTokens: 137019` against a 128000
+  limit) and dying with `compaction_static_context_blocked`.
+- **chat** — explains a rejected prompt instead of echoing the SDK's catch-all:
+  both real causes are quotas, not the context window, and the message now says
+  which knob to turn.
+- **install** — the POSIX installer asks the login shell what `PATH` it gets, so
+  it stops claiming to have added `~/.local/bin` on Debian/Ubuntu, where
+  `~/.profile` already does exactly that (`curl | bash` is not a login shell).
+- **build** — `.gitattributes` pins `*.sh` to `text eol=lf`; a CRLF checkout
+  committed from Windows shipped an installer that died the moment it was piped
+  into `bash`.
+
+## v0.16.2
+
+<p className="text-[#888] text-sm">November 3, 2026</p>
+
+### Added
+
+- **`observe what="assets"`** — one pass returning every link (internal/external
+  grouped by host, `other_schemes` counts, file kinds), every image (`srcset`,
+  lazy `data-src`, `<picture>`, icons/`og:image`, **CSS `background-image`**) and
+  every video source (embeds, `.mp4`/`.m3u8`, HLS/DASH requests).
+  `only=links|images|videos` narrows it, `max` caps each array; the companion
+  `batch op:"assets"` does the same across `urls[]`.
+- **PDF layout map** — `webrain_pdf op=extract` reports which pages the text layer
+  cannot deliver (`pages_with_captions`, `pages_with_raster_images`,
+  `pages_needing_vision`), so `op=render` is a decision instead of a guess.
+- **`op=render dir:` / `observe what=pixel tiles_dir:`** — PNGs are written to
+  disk and returned as paths. A 9-page render was 15 MB of base64 in one reply;
+  with `dir` the same render answers in ~500 bytes and feeds
+  `vision{op:"ask", images:[...]}` directly. Tiles are cropped from one page
+  raster instead of one screenshot per tile.
+- **vision providers are a table** — `VISION_PROVIDERS` lists every
+  OpenAI-compatible hop in priority order (OpenRouter → OpenAI → Anthropic →
+  Gemini → Fireworks → DashScope → Groq → bundled local Qwen3-VL-2B), with the
+  vendor spellings (`CLAUDE_API_KEY`, `GOOGLE_API_KEY`, `QWEN_API_KEY`) accepted
+  as aliases. Adding a provider is one row.
+- **`webrain install pdfium`** — downloads the bblanchon/pdfium-binaries build for
+  this OS/arch into the engine cache, so `op=render` works on a released binary
+  with no PATH edit and no source build. Every release target now builds
+  `--features pdfium`; musl stays extract-only (the published library is
+  glibc-linked).
+- **skills** — `monitoring` (the self-contained `webrain_eval` tick, repeat-and-
+  diff, external cron, and what it must not paper over) and `page-tiles`
+  (text-before-pixels rule, tile geometry, VLM prompt shapes).
+- **build** — OCI image labels, so ghcr stops showing "No description provided";
+  `engine-image.yml` passes the release tag as `VERSION`.
+
+### Fixed
+
+- **`webrain upgrade` silently downgraded a build newer than the last tag** —
+  it downloaded `releases/latest` with no version comparison, replacing 0.16.2
+  with the 0.15.3 release. It now reads the newest tag off the redirect and
+  refuses when the running build is equal or newer, with `--force` to reinstall.
+- **PDF extraction** — `op=extract` returned a **16.8 MB** reply once the image
+  walker was fixed, and **0 images** before that: `/Resources` and `/XObject` are
+  indirect references, and a single-element `/Filter [ /FlateDecode ]` array was
+  unreadable. Both fixed (arXiv 1706.03762: 0 → 3 images); extract now keeps only
+  the inventory and the bytes belong to `op=images dir:…`.
+- **PDF images** — figures embedded as *pages* arrive as `/Subtype /Form`
+  XObjects with their own `/Resources`, which the walker never visited: arXiv
+  2206.01062 went 0 → **29** images, with a depth cap so a nested form cannot
+  loop.
+- **vision failover** — reported only the last provider error, so "OpenRouter out
+  of credits" + "Groq never had that model" + "no local model" surfaced as one
+  misleading 404. Every failure is listed with its endpoint, and Groq's dead
+  `qwen/qwen3.6-27b` hop was corrected to `qwen/qwen3.8-27b`.
+- **per-page PDF lists** — `pages_with_captions` / `pages_needing_vision` were
+  0-based while their siblings were 1-based, and comparing across the two
+  origins reported captioned pages as needing vision. All five lists are 1-based.
+- **`webrain_stats`** returned five `null`s behind `available:false` on
+  Windows/macOS; it now says why (host stats are Linux-only) and names the
+  platform.
+- **assets** — `observe what="images"` runs the asset scanner, so it returns the
+  `srcset`/lazy/background images a page is mostly made of; counts are deduped
+  before the cap (pages were all reporting exactly the limit); embed detection
+  compares hostname suffixes, so a YouTube login redirect is no longer an embed.
+- **ci** — the image workflow pushes `…:latest` only when the built version is the
+  newest release; `webrain-cli` forwards the `pdfium` feature to `webrain-mcp`, so
+  `op:"render"` is reachable in shipped binaries at all.
+- **docs** — the tool count said 17 everywhere; the server advertises **18**
+  (`webrain_stats` was never documented).
+
+## v0.15.3
+
+<p className="text-[#888] text-sm">November 3, 2026</p>
+
+### Added
+
+- **`webrain_pdf` takes an `http(s)` URL** anywhere it took a path (`path`,
+  `paths[]`, `images`, `render`) — the link is fetched once into a temp file that
+  is removed on every exit path, so "extract this PDF" needs no manual download.
+- **`webrain_batch op:"pdf"`** — the same browserless download+extract engine,
+  concurrent across `urls[]`, in input order. PDF extraction needs no CDP tab, so
+  it serves before any browser connect; previously a PDF URL returned empty text
+  because Chrome's viewer has no DOM.
+- **`interact action=click` accepts a `selector`**, resolved through CDP
+  (`DOM.getDocument({pierce:true})` → per-shadow-root query) — the one path that
+  can click a widget inside a **closed** shadow root, a node page JS cannot see
+  and no `index` can name.
+- **skills** — `pdf-extraction` (single/batch/URL extraction, tables and figures,
+  when to escalate from text to `render` + vision).
+
+### Fixed
+
+- **shadow DOM** — `observe what=a11y` prints a css path for nodes inside shadow
+  roots (root-scoped, since no absolute path can cross the boundary), and the
+  shared selector→nodeId resolver falls back to the pierced tree, so a selector
+  that only matches inside a shadow root resolves instead of "not found".
+- **`webrain serp`** attaches the browser for the HTTP-first engines
+  (duckduckgo/yandex/yahoo/baidu) unless `--http` is set — previously only
+  google/brave/bing built a backend, so `--engine yandex` silently fell through to
+  bing and the SmartCaptcha retry could never fire from the CLI.
+- **container image** — the build had been failing since `skills/` became
+  `include_str!`-embedded, so 0.14.0 and 0.14.5 published no image at all. The
+  build stage copies `skills` and `.dockerignore` no longer excludes it.
+- **`webrain mcp`** no longer aborts with `thread 'main' has overflowed its stack`
+  on the first `navigate` on Windows — the server runs on a 16 MB-stack thread
+  instead of the 1 MB the OS gives `main`.
+
+## v0.14.5
+
+<p className="text-[#888] text-sm">November 2, 2026</p>
+
+### Added
+
+- **`WEBRAIN_TZ` / `WEBRAIN_LOCALE`** — applied as CDP `Emulation.setTimezoneOverride`
+  / `setLocaleOverride` on every attached tab before page scripts run. Chrome
+  reports the **host's** timezone and locale, so a foreign proxy exit had the page
+  telling two conflicting stories. Geolocation stays unset: without coordinates it
+  would be a third lie.
+- **trusted-pointer path seeded per call** — randomised start offset, 12–22 steps,
+  quadratic/cubic easing, ±3–6px jitter, 6–18ms cadence, landing exactly on the
+  target so the following `mousePressed` has no jump. The previous constant trace
+  was identical in every profile, which is itself a behavioural fingerprint.
+
+### Fixed
+
+- **ci** — the Scoop manifest now declares `bin` per architecture; one top-level
+  entry naming `webrain-windows.exe` shimmed nothing and `scoop install` ended with
+  *Can't shim 'webrain-windows.exe': File doesn't exist*.
+- **`webrain_pdf`** no longer advertises `op=render` as always available — the
+  default build's error names what a release-binary user *can* do instead of
+  telling them to rebuild.
+- **docs** — troubleshooting gains the three install-time symptoms that cost real
+  time: *Hash check failed* from a good download, the pdfium-gated `op=render`,
+  and an older manual binary shadowing a package-managed one.
+
+## v0.14.0
+
+<p className="text-[#888] text-sm">November 2, 2026</p>
+
+### Security
+
+- **`zip` 7.2.0 → 9.2.2**, closing five advisories against the engine archive
+  extractor (Chrome for Testing, whisper, llama-server) — critical
+  GHSA-m665-v7pm-7grj and high GHSA-hjqx-j4rw-g7xv (**arbitrary file write
+  outside the extraction directory**) among them. The zip-slip guard is unchanged
+  and stays the last line of defence.
+- **`rustls` 0.23.43 → 0.23.46**, closing four advisories including a
+  `Debug` that exposed the TLS master secret.
+
+### Added
+
+- **a binary per platform *and* architecture** — the matrix was three native
+  builds named `webrain-linux` / `webrain-macos` / `webrain-windows.exe`, so
+  `webrain-macos` was whatever `macos-latest` happened to be (arm64) while
+  `install.sh` **refused arm64 and accepted x86_64**. Assets are now
+  `webrain-{linux,macos}-{x86_64,aarch64}`, `…-linux-{x86_64,aarch64}-musl` and
+  `webrain-windows-{x86_64,aarch64}.exe`, with arm64 Linux and arm64 musl built
+  natively on GitHub's arm64 runner. An unpublished combination fails with "build
+  from source" instead of downloading a binary for another architecture.
+- **`checksums.txt` from `sha256sum *`** instead of three hardcoded filenames, so
+  adding a target cannot ship a binary with no checksum (which every installer
+  treats as "skip verification"). The Scoop bump also writes the `arm64` entry.
+- **docs** — a `Skills` section in the README: `webrain install skills` (offline
+  bundle), `skills` / `skills add` / `skills rm`, where files land, how the agent
+  reads them, and the third-party `npx skills add` route.
+
+### Changed
+
+- **build** — workspace `rust-version` 1.85 → **1.88**, forced by the `zip` fix.
+  `clippy::collapsible_if` sites stay nested and are allowed once per crate root.
+- **deps** — `tokio-tungstenite` 0.24 → 0.30, `scraper` 0.24 → 0.27,
+  `pdf-inspector` 1.14.1 → 1.25.2, `ureq` 3.3.0 → 3.4.2, `aes-gcm` 0.11.0 →
+  0.11.1, plus the five outstanding Dependabot action bumps.
+- **`ARCHITECTURE.md`** was an August scaffold kept as "superseded history", so
+  the file GitHub shows first described 11 MCP tools, two *planned* backends, a
+  `webrain-python` crate and modules that do not exist. Replaced with the map.
+- **skills** — `.github/skills/` carried copies of four product skills, one of
+  which had already drifted onto tool names folded away releases earlier. The
+  copies are gone; `skills/webrain/**` is the only place a product skill is
+  edited.
+- **docs** — `AGENTS.md` and `ARCHITECTURE.md` named `map_surface` routing targets
+  (`webrain_a11y`, `webrain_spider`, `webrain_cookies`, …) as if they were MCP
+  tools; none is in `list_tools()`. Both now name the real entry points.
+
+### Fixed
+
+- **`WEBRAIN_SKILLS_DIR`** was printed by `webrain install skills` and listed in
+  `--help`, but `skills::dir()` never read it — following the instruction changed
+  nothing.
+- **`install.sh`** sent Windows users to a `scoop bucket add` that needs a manual
+  step; it now points at `install.ps1`.
+
+## v0.13.0
+
+<p className="text-[#888] text-sm">November 2, 2026</p>
+
+### Added
+
+- **skills, offline** — `webrain install skills` writes the bundled operator
+  skills into the engine cache from `include_str!`, so an install cannot drift
+  from the tool surface that serves it; `skills add <url|path>` / `skills rm` /
+  `skills` manage single skills. The frontmatter `name:` is authoritative and
+  required (it is the `webrain_guide(topic="skill:<name>")` key), and install
+  warns when a skill names a `webrain_*` tool this build does not expose.
+- **per-session proxy** — `webrain_session{op:"open", proxy}` creates a Chrome
+  browser context carrying `proxyServer` and attaches its first tab, which is the
+  only way to change a *live* browser's egress. Real Chrome only; obscura and
+  lightpanda have no per-context proxy and now say so instead of reporting egress
+  they do not have. `keep_identity` copies the previous session's cookies.
+- **`proxy` on the HTTP paths** — `webrain_download` (both engines),
+  `webrain_crawl{mode:"sitemap"|"validate"}`, `webrain_scrape` (all three HTTP
+  forms) and `webrain_search`, through the same per-proxy agent pool as serp. The
+  schema omits it where it cannot apply.
+- **`webrain_batch{op:"autoschema"}`** — selector discovery across URLs, sharing
+  one in-page expression with the single-page tool so the two cannot drift.
+- **`webrain launch <service> <profile> [url] --proxy URL`** — the same
+  launch-time exit without the MCP surface.
+
+### Fixed
+
+- **`filter_extension`** was ignored on the MCP path: the no-browser
+  short-circuit returns before the dispatcher, so a caller asking for `.pdf` got
+  every type downloaded.
+- **`session_id`** is now declared on all eleven page/browser tools. The router
+  always honoured it, but an undeclared parameter is one no client sends, so
+  `session{op:"open", cdp_url}` was write-only for everything except `batch`.
+- **`webrain_serp`** guest-launched its fallback Chrome on a hardcoded `9222`
+  whatever endpoint the call named, and two endpoints shared one guest profile —
+  Chrome hands a second launch to the running instance and exits 0 without opening
+  CDP. Non-default endpoints now get their own profile.
+- **engines** — a batch worker that cannot get a tab reported "no tab available"
+  for every URL; the real error is carried into the per-URL message.
+- **media** — `webrain watch` reported `transcript_source: "none"` for every video
+  after a non-default `install whisper --model X`, because the model lookup was
+  hardcoded while the installer writes `ggml-<model>.bin`. It now uses whichever
+  model is on disk, multilingual before English-only.
+- **docs** — two facts an operator previously had to read the Rust to learn:
+  cookie transfer moves **login state, not bot clearance** (`cf_clearance` is
+  TLS-fingerprint-bound, so obscura and lightpanda stay on the challenge page), and
+  what each engine's `--storage-dir` / `--user-agent` / `--cookie` really are.
+
+## v0.12.1
+
+<p className="text-[#888] text-sm">October 29, 2026</p>
+
+### Added
+
+- **`install vision --model <id>`** — an allowlist (`qwen3-vl-2b`,
+  `qwen3-vl-2b-q6k`, four `qwen35-9b` quants), each with its own mmproj; an
+  unknown id prints the choices with download size and RAM/VRAM. Models live in
+  `vision/<id>/` and an existing flat install keeps working. `--model-update`
+  re-checks against Hugging Face, and `uninstall vision --model <id>|--all`.
+- **GPU offload for the local Qwen3-VL** — `-ngl 99` when a GPU backend library
+  sits beside the `llama-server` binary (a capability check on the build, not a
+  probe of the machine, because `-ngl` on a CPU-only build is silently ignored).
+  `WEBRAIN_VISION_GPU=0|1` forces it off or on.
+- **screenshots arrive as a real MCP `image` content block** beside the JSON, so a
+  client can display them without decoding a megabyte of base64 it also bills as
+  text tokens. `format` (`png|jpeg|webp|avif`) and `quality`; avif is captured as
+  png and converted in-process by `ravif` (no system libavif).
+- **interact** — `hold` (trusted press-and-hold for "Press & Hold to confirm you
+  are a human" widgets, default 6 s), `drag ms` (hold before the movement starts),
+  `press key` combos (`ctrl+a`, `shift+Tab`) sent on keyDown *and* keyUp with a
+  real `code`, `type ms` (real per-key events instead of `Input.insertText`), and
+  `scroll x/y` to wheel the element under that point instead of the window.
+
+### Changed
+
+- **interact drag** — the 10-step straight-line teleport became an eased, slightly
+  arced 28-step path with a settle on both ends; even steps read as synthetic to
+  slider captchas.
+- **cli help** — `--help` printed 12 of the ~40 environment variables the binary
+  reads. The env block is now a grouped table built from one `ENV` constant, and
+  `webrain help env` prints just that section.
+
+### Fixed
+
+- **`install vision`** reported a failed download as `"skip: probe …"` and exited
+  0, so a 404 looked like a deliberate no-op. The model step is fatal.
+- **`vision ask`** clipped the wrong band on any scrolled page: CDP's `clip` rect
+  is document-space while every caller speaks viewport-space, so with
+  `scrollY=307` a clip at y=440 captured 307px too low and the model answered
+  confidently about nav text.
+- **CDP input** is no longer silently dropped on a background or occluded tab
+  (12 `mouseMoved` landed, 0 `mousePressed`): `Page.bringToFront` +
+  `Emulation.setFocusEmulationEnabled` are sent at attach.
+
+## v0.11.0
+
+<p className="text-[#888] text-sm">October 26, 2026</p>
+
+### Added
+
+- **three more SERP engines** — `yahoo`, `baidu`, `yandex` on both paths with
+  their parsers, `--safe`/`--region` mapping and pagination, each derived from a
+  real captured SERP rather than an assumed layout: yahoo needs a cookie jar
+  (a replay without one answers `500 INKApi Error`) and its redirect host is
+  *not* constant (`r.` over HTTP, `rd.` rendered), baidu keeps the target in the
+  container's `mu` attribute and the abstract in a `<!--s-data:…-->` island,
+  yandex is `li.serp-item` + `.OrganicText`.
+- **`engine=auto` fills to the requested limit** — after the ddg+bing merge it
+  tops up from baidu, yandex, then yahoo last (the only one of the three that
+  pages reliably), asking yahoo for the full limit because the merge dedupes
+  afterwards. `--limit 50 --http`: 25 results before, **50** after.
+- **a challenge page is reported as a challenge**, never as an empty result set.
+  Baidu answers ~7 rows then 302s to a captcha; yandex answers a 14 KB
+  SmartCaptcha from a datacenter IP. Both used to parse to 0 and read "this engine
+  has nothing for your query".
+
+### Fixed
+
+- **`webrain_batch` exposes `op=markdown`** — `batch_markdown` existed in core but
+  the tool's `op` enum stopped at `screenshot` and the catch-all sent every
+  unknown op to `batch_fetch`, so `op=markdown` silently returned innerText and no
+  agent could reach the capability. 50 URLs at concurrency 8: 50/50 ok, 14 s.
+- **`--limit` above ten** returned one page in the browser path for the new
+  engines (the paged loop was gated to `google|brave|bing`), and `browser_pages`
+  used integer division, so `--limit 25` budgeted two pages and stalled short.
+- **an engine that walled with no fallback** returned an empty list, which reads
+  as "no results"; the wall error is now propagated.
+- **docs** — `--guest` Chrome cannot create tabs over CDP (`Target.createTarget` →
+  *Failed to open a new tab*), so `webrain_batch` fails there while `navigate` on
+  the existing tab keeps working.
+
+## v0.10.0
+
+<p className="text-[#888] text-sm">October 26, 2026</p>
+
+### Added
+
+- **`webrain_guide` answers progressively** — no `topic` returns the tool list
+  plus an index, `topic=<section>` returns one section, `topic="all"` returns
+  everything (827 / 763 / 2745 tokens measured). Topic selection stays the
+  model's job on purpose: matching a prompt to a section in Rust is the intent
+  detection this server exists to avoid.
+- **operator skills via `WEBRAIN_SKILLS_DIR`** — `topic="skills"` lists,
+  `topic="skill:<name>"` returns one. Names are validated before the join and both
+  sides canonicalized, because the argument would otherwise be an arbitrary file
+  read on behalf of a remote model.
+- **real help pages** — `webrain --help`, `webrain <command> --help` and
+  `webrain help <command>`, all from one `HELP` table, plus `help env`.
+- **the agent guide documents environment variables** — including the fact that
+  decides most failures: they are read at process start / CDP attach, so no tool
+  call can change one.
+
+### Fixed
+
+- **`wait_selectors`** was ignored whenever `cdp_urls` was set (the grouping lived
+  inside the `cdp_urls.is_empty()` branch), so a site that hydrates after
+  `readyState: complete` came back as shells. Probed: plural returned in 492 ms,
+  singular took 12.6 s; after the fix, 13.0 s and the expected rows.
+- **`wss://` CDP endpoints** connected at all: `tokio-tungstenite` had no TLS
+  connector, so every hosted endpoint — Lightpanda Cloud included — failed despite
+  `resolve_ws` passing `wss://` through. `rustls-tls-webpki-roots` now ships the
+  roots in the binary.
+- **`webrain_batch` with `cdp_urls`** returns rows in **input order** (they were
+  appended per backend, so `results[i].url` did not match `urls[i]`), runs the
+  per-backend batches **concurrently** (the loop awaited each in turn, so N
+  backends bought zero throughput), and counts the tab budget across backends
+  (`per_backend_concurrency` is clamped to `tab_budget / backends`).
+- **batch now uses a fixed tab pool** — one tab per worker draining a shared
+  queue instead of an attach + init per URL, so live tabs are bounded by
+  `concurrency` however long the list is; `stats` reports
+  `requested/effective_concurrency`, `single_target` and `ms_wall`, because
+  lightpanda silently collapses to one tab and `ms_total` cannot show parallelism.
+- **a killed browser no longer wedges the server** — after a kill the error is
+  `CDP write failed: channel closed`, which shares no phrase with
+  `connection closed`, so `is_connection_error` never dropped the cached backend
+  and every later call replayed the dead socket until the MCP process restarted.
+- **bing returned zero results on every query** and had for a while, silently,
+  because `auto` just merged duckduckgo and moved on: its HTML SERP is
+  JS-rendered for programmatic clients. Page 0 now uses the RSS form Bing
+  advertises (which deliberately omits `mkt`/`cc` — both empty the feed), so
+  `--limit 20` reports `bing ok(10)` where it used to report `bing empty(0)`.
+- **google returned zero results from a perfectly good page** — the target is now
+  an opaque `/goto?url=CAES…` token, so every row resolved to `google.com` and was
+  discarded as an internal link. The URL is recovered from the `<cite>` line
+  (9 of 10 organic rows); a cite holding metadata yields nothing rather than a
+  fabricated link.
+- **`webrain_scrape` can parse instead of probe** — the browserless fetch capped
+  every body at 3000 chars, so 3 KB of `<head>` was all a caller ever saw.
+  `max_chars` / `full` lift it and the reply reports the true `bytes` plus
+  `truncated`; a Sklavenitis page is 427 KB in 266 ms, 3–8× faster than the same
+  page in a tab.
+- **`serp --http`** — never touch a browser. `--engine bing --limit 50` used to
+  guest-launch Chrome for 26 s and return 10 results; with `--http` the same 10
+  arrive in 0.3 s.
+- **Chrome's own throttling, not the SERP code, made browser searches slow by
+  5–30×** — an automated window behind the editor reads
+  `document.visibilityState === "hidden"` and one google page took 16–22 s against
+  3.4 s visible. `webrain launch` now passes
+  `--disable-features=CalculateNativeWinOcclusion` plus the backgrounding flags.
+- **`auto` asked browser engines for the full limit**, so a deep request became 8
+  google pages and the 20 s browser cap threw the render away; the browser stage
+  is a diversity top-up and now asks for exactly one page.
+- **`consent_button` clicked the last button inside any dialog** when no
+  accept/reject label matched — Google's own "About this result" panel is a
+  dialog, so every run opened a side panel over a good results page. The blind
+  fallback is deleted.
+- **docs** — obscura does have a paint engine (`fetch -s out.png` wrote a 63 KB
+  PNG); what fails on a data-driven SPA is **boot, not paint**, and the cause is
+  that obscura gives every element one shared `Element` prototype, so a polyfill
+  for `HTMLTemplateElement.firstChild` patches `firstChild` for all elements and
+  React never hydrates. Probe before trusting any engine on an SPA:
+  `HTMLTemplateElement.prototype === Element.prototype` must be `false`. The MCP
+  relaunch recipe is written down too, including the trap that `webrain serp` sets
+  `WEBRAIN_NO_STEALTH=1` on itself.
+
 ## v0.9.0
 
 <p className="text-[#888] text-sm">October 23, 2026</p>
@@ -50,6 +521,84 @@ All notable changes, in reverse chronological order. The full version lives in
   `restore_state payload`, `vision images[]`) and names the 11 tools that
   declare `session_id`; the agent decision guide's tool dialect is modernized
   to the consolidated names; two unreferenced landing images removed.
+
+## v0.8.0
+
+<p className="text-[#888] text-sm">August 27, 2026</p>
+
+### Security
+
+- **engine archives are extracted behind a zip-slip guard** — absolute paths,
+  `..` traversal and Windows drive-prefixed entries are rejected, exec bits are
+  preserved, and each download chunk has a timeout.
+- **`lightpanda` / `obscura` CDP servers bind to `127.0.0.1`** (they were on
+  `0.0.0.0`, exposing unauthenticated browser control on the LAN).
+- **2captcha credentials leave the URL** — the submit is a form POST, so the key
+  and proxy credentials stop appearing in access logs; the proxy is validated
+  up-front instead of silently dropped from a paid solve.
+- **vault hardening** — `vault.key` is created exclusively with `0600`,
+  unreadable keys error instead of reading as "empty", writes are atomic, and
+  read-modify-write is serialized so concurrent mutations cannot drop an entry.
+- **installers verify the binary** against the release's `checksums.txt` and
+  fail closed; downloads go to a temp file and move into place atomically, and
+  HTML-200 downloads are rejected by magic bytes.
+- **HTTP transport caps the request body** at 16 MiB; search queries are
+  percent-encoded (`&`/`#`/`%` could inject parameters or truncate); third-party
+  Actions are pinned to full commit SHAs.
+
+### Added
+
+- **`batch op=markdown`** — full page HTML → Markdown via pure-Rust `htmd`,
+  past the 3000-char `innerText` cap, with optional `query` + `top_k` BM25
+  pruning (zero LLM).
+- **`per_engine` SERP breakdown** — `[{engine, status: ok|empty|skipped, count}]`
+  so a reply says which engines contributed and which were skipped.
+
+### Fixed
+
+- **`auto` is relevance-filtered** — results sharing no significant query token
+  are dropped at the source, so a junk page from a flagged IP can no longer fill
+  `limit` ahead of duckduckgo's real results; a fallback reply now carries
+  `source` (the actual provider), so substituted results are never mislabelled.
+- **consent dismissal can no longer click a search result** — Google's app-shell
+  `#yDmH0d` was in the consent-gate selector and the last-button fallback then
+  clicked a result link. The gate now requires a real dialog/banner container.
+- **google's URL is a real-browser URL** again — `num` and `lr` made it answer an
+  empty page on automated sessions, and that soft-block is now detected as a
+  wall so the retry loop fails fast instead of burning four attempts.
+- **bing** routes through the browser (`first=1,11,21…`) and falls back to plain
+  HTTP when no Chrome can be launched; its browser path makes one attempt, so a
+  no-result query falls back in ~6 s instead of ~30 s.
+- **serp reliability** — an HTTP engine that parses to zero on a 2xx page is
+  retried before being called broken, google pagination budgets ~7 results per
+  page (carousels and AI overviews crowd the SERP), `brave` left
+  `HTTP_ENGINES`, and `limit` went 50 → **100**.
+- **CDP** — consistent `active → tabs` lock order (a deadlock inversion), a 30 s
+  response timeout, a serialized first attach, unique per-element selectors so a
+  bare `input` cannot set files on the wrong node, and the network block list is
+  re-applied on every navigation.
+- **`detect_antibot` requires two corroborating markers** for generic phrases,
+  so a support article mentioning "access denied" is no longer read as a block;
+  `crippled` is gated on element-extraction success.
+- **`ELEMENTS_JS` / `LINKS_JS` moved onto the `BrowserBackend` trait**, so any
+  backend supplies its own extraction script instead of the shared snapshot path
+  reaching into `backends::cdp`.
+- **`serp`'s stealth-off is a per-backend flag**, not
+  `std::env::set_var("WEBRAIN_NO_STEALTH")` from a concurrent handler — an
+  edition-2024 data race that disabled stealth for every session in the process.
+- **long-running work left the executor** — `webrain_watch`, `http_fetch`,
+  `pdf_images`, `vault::list`, robots.txt fetch, vision's provider chain and
+  `index_current_page` all run off-thread, so a slow call no longer ties up a
+  tokio worker (the watch session table is capped at 64).
+- **`vault`/`login`** — a TOTP seed with non-zero trailing bits is refused, and a
+  missing captcha token bails with `waiting_for_human` instead of submitting a
+  guaranteed-403 empty one.
+- **docker** — the release build no longer loses the binary (the target cache
+  mount never reaches the image layer), and the cache is keyed by `$TARGETARCH`.
+- **docs** — landing coverflow order, its no-JS fallback and the playground
+  generation guard fixed; the SERP showcase made capability-honest (duckduckgo
+  over HTTP, "2 browserless by default"), tool counts corrected to 16, and a
+  docs-orphan check added to CI.
 
 ## v0.7.3
 
