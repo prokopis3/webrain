@@ -1,0 +1,135 @@
+---
+title: Chat — one prompt, an agent, webrain's own tools
+description: Run a single Copilot agent turn on your own model key, with webrain's MCP tools attached. Provider table, flags, exit codes, troubleshooting.
+---
+
+# Chat
+
+```bash
+webrain chat "scrape news.ycombinator.com and summarise the top 5 posts"
+```
+
+One command. The model runs on **your** key (BYOK), and the agent's tools *are
+webrain itself*: the session spawns `webrain mcp` over stdio, so the model gets
+the same 18 `webrain_*` tools an MCP client would, named `webrain-webrain_*`.
+Nothing is reimplemented for chat — the child inherits your `CDP_URL`, vault and
+engine cache, so it drives whatever browser the CLI would.
+
+## Requirements
+
+- A release binary from this repository (`webrain-linux-x86_64`,
+  `webrain-macos-aarch64`, `webrain-windows-x86_64.exe`, …). The `chat` feature
+  is built into every target except the two static **musl** builds, which cannot
+  link the OpenSSL 3 the Copilot runtime needs — there `webrain chat` resolves
+  your provider, prints it, and tells you to rebuild.
+- Building from source needs **Rust 1.94+** and `--features chat`:
+
+```bash
+cargo build --release --features chat
+```
+
+Expect a large binary: the feature embeds the Copilot CLI runtime
+(~135 MB per platform, downloaded and SHA-256 verified at build time).
+
+## Quick start
+
+```bash
+export OPENAI_API_KEY=sk-…          # or any row below
+webrain chat "what does https://example.com say?" --json
+```
+
+See what *would* be used before spending a token — this works in every build,
+with or without the feature, and never prints the key:
+
+```bash
+webrain chat --print-config
+```
+
+## Provider resolution
+
+First match wins:
+
+1. `--provider`, `--model`, `--base-url`, `--key-from`.
+2. `WEBRAIN_CHAT_PROVIDER` / `_MODEL` / `_BASE_URL` / `_API_KEY`.
+3. The ambient key chain, in this order:
+
+| Key (aliases) | `base_url` | default model |
+|---|---|---|
+| `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4.5` |
+| `OPENAI_API_KEY` | `https://api.openai.com/v1` | `gpt-5` |
+| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | `https://api.anthropic.com/v1` | `claude-sonnet-4-5` |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
+| `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
+| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
+| `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
+
+`--provider` accepts any alias stem: `openrouter`, `openai`, `anthropic`,
+`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`. A named
+provider uses **only its own** variables — naming `groq` while `OPENAI_API_KEY`
+is set is an error, not a silent mix-up.
+
+### A local server needs no key
+
+Any OpenAI-compatible endpoint works. Point the base url at it and a key is
+optional:
+
+```bash
+WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
+```
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `--provider P` | pick a row (see above) |
+| `--model ID` | override the row's model id |
+| `--key-from VAR` | read the key from `VAR` instead of the row's own name |
+| `--base-url URL` | override the endpoint (also the keyless-local path) |
+| `--max-output-tokens N` | cap the reply |
+| `--timeout SECS` | per-turn wall clock, default 300 |
+| `--yes` | approve **every** tool call |
+| `--json` | emit `{provider, model, base_url, answer, tools, exit_code}` on stdout |
+| `--no-stream` | print only the final answer instead of token deltas |
+| `--print-config` | resolve, print, exit — no key, no network, no runtime |
+
+## Permissions
+
+Without `--yes` the session approves reads, navigation and MCP tool calls, and
+**denies** shell commands and file writes. `--yes` installs an approve-all
+handler — say it out loud when you mean it, because the agent can then drive a
+logged-in browser.
+
+The key is used in-process to configure the runtime and is never written to
+stdout, stderr, or a log. `--print-config`, `--json` and every error path print
+`<redacted>` plus the *name* of the variable that supplied it.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | the turn completed |
+| 1 | the turn ran and failed (provider error, timeout, refused) |
+| 2 | could not start: no provider configured, a bad flag, or a build without `chat` |
+
+## When a turn fails with no answer
+
+The SDK reports `No response was returned. Send your message again to retry.`
+whenever the provider produced nothing usable, which can also mean the model
+does not support tool calling. See what the runtime actually emitted:
+
+```bash
+WEBRAIN_CHAT_DEBUG=1 webrain chat "hi" --provider groq
+```
+
+Every raw event is mirrored to stderr — including the provider's own error
+payload, which is not in the SDK's error string.
+
+If the model answers but never calls a tool, it is usually a model that does not
+support tool calling; pick another row (`--provider openai`) rather than
+retrying.
+
+## What chat does not do
+
+No interactive REPL and no `--session` resume in this version: one prompt, one
+turn, one exit code. Everything here is additive to `webrain mcp`, which keeps
+its stdout contract — chat's own logs go to stderr for that reason.

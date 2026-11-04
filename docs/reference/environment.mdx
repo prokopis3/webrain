@@ -93,6 +93,41 @@ llama-server, `webrain install vision`) when no cloud key is set.
 Models live in `vision/<id>/` with their own mmproj; the ids, sizes and RAM/VRAM
 needs are listed in the [installation guide](/installation#optional-bundles).
 
+## Chat (Copilot BYOK)
+
+`webrain chat` reuses the **same key names** as the vision chain above — set one
+variable and both work — but resolves them for a chat model instead of a vision
+model. First match wins: flags → `WEBRAIN_CHAT_*` → the ambient chain.
+
+| Variable | Description | Default |
+|---|---|---|
+| `WEBRAIN_CHAT_PROVIDER` | row to use: `openrouter`, `openai`, `anthropic`/`claude`, `gemini`/`google`, `fireworks`, `dashscope`/`qwen`, `groq` | ambient order |
+| `WEBRAIN_CHAT_MODEL` | override the row's default model id | row default |
+| `WEBRAIN_CHAT_BASE_URL` | override the row's base url. Any OpenAI-compatible endpoint; **a key is then optional**, which is how a local Ollama/vLLM server is reached | row default |
+| `WEBRAIN_CHAT_API_KEY` | the key itself, for one variable instead of a vendor-named one | — |
+| `COPILOT_CLI_PATH` | use a Copilot runtime you already have instead of the bundled one | bundled |
+| `COPILOT_CLI_EXTRACT_DIR` | where the bundled runtime is unpacked on first use | platform cache |
+| `BUNDLED_CLI_CACHE_DIR` | build-time cache of the runtime archives (CI) | — |
+| `WEBRAIN_CHAT_DEBUG` | mirror every raw session event to stderr — the only way to see the provider's own error when a turn returns no answer | off |
+
+The ambient chain, in order, with each row's base url and default model:
+
+| Key (aliases) | `base_url` | default model |
+|---|---|---|
+| `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4.5` |
+| `OPENAI_API_KEY` | `https://api.openai.com/v1` | `gpt-5` |
+| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | `https://api.anthropic.com/v1` | `claude-sonnet-4-5` |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
+| `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
+| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
+| `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
+
+A **named** provider uses only its own variables: `--provider groq` with just
+`OPENAI_API_KEY` set is an error rather than a key sent to the wrong vendor.
+`webrain chat --print-config` resolves the whole chain and prints it with the
+key replaced by `<redacted>` — offline, no runtime needed. See
+[the chat guide](/guides/chat).
+
 ## Discovery order
 
 Binaries are discovered automatically on every OS: **env override → PATH →

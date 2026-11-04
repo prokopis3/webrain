@@ -1,6 +1,6 @@
 # ADR-003: `webrain chat` — GitHub Copilot SDK with BYOK
 
-- Status: Proposed
+- Status: Accepted (implemented 2026-11-04)
 - Date: 2026-11-04
 - Supersedes: none
 - Related: ADR-001 (architecture), ADR-002 (intent tool surface)
@@ -76,12 +76,19 @@ the existing key chain, or the default build.
 - `chat` builds pull `github-copilot-sdk` with `bundled-cli` by default:
   ~132–157 MB of runtime per platform, downloaded and SHA-verified at build
   time (`BUNDLED_CLI_CACHE_DIR` caches it). The binary grows accordingly.
-- The crate requires Rust 1.94 (workspace MSRV is 1.88) and, on Linux,
-  OS OpenSSL 3 dev files for the default `network-forwarding` feature.
-- Static/musl release targets cannot carry `chat` (no system OpenSSL 3, and a
-  static TLS stack is rejected by the SDK).
-- Bundling the Copilot CLI into a redistributed binary is a licensing question
-  that must be answered before release builds enable the feature.
+- The crate requires Rust 1.94 and, on Linux, OS OpenSSL 3 dev files for the
+  default `network-forwarding` feature. Because the workspace uses resolver 3
+  (MSRV-aware), the floor applies to *every* build, not just `--features chat`
+  — so the workspace `rust-version` moved to 1.94 rather than being overridden
+  per package.
+- The two static musl release targets cannot carry `chat`: the SDK does publish
+  `linuxmusl-*` runtime assets, but `network-forwarding` links the OS OpenSSL 3
+  and the SDK rejects a static or vendored copy.
+- Bundling the Copilot CLI into a redistributed binary is a licensing question.
+  The release matrix now builds `--features pdfium,chat` for the six non-musl
+  targets, so **that answer is now a release blocker rather than a design
+  question**: if redistribution is not permitted, revert the matrix to
+  `--features pdfium` and keep `chat` source-only — the code does not change.
 
 ### Neutral
 
@@ -129,3 +136,42 @@ edges):
   per target, including musl variants.
 - Core module set (`webrain-core/src/*.rs`): nothing chat- or LLM-loop-shaped
   today; vision and video are the only files holding provider tables.
+
+## Implementation notes (2026-11-04)
+
+What landed, and where it differs from the plan above:
+
+| File | Role |
+|---|---|
+| `webrain-core/src/byok.rs` | `CHAT_PROVIDERS` (7 rows), `resolve_from`, `ChatProvider` (private `bearer`, redacting `Debug`), `CHAT_ENV_GROUP` — spliced into the CLI's `ENV` table so `help env` cannot advertise a variable the resolver does not read |
+| `webrain-cli/src/chat.rs` | flag parsing (no clap), `--print-config`, the no-feature stub |
+| `webrain-cli/src/chat_session.rs` | the SDK session, `#[cfg(feature = "chat")]` only |
+
+Deviations worth recording:
+
+- `ProviderConfig` carries **both** `api_key` and `bearer_token` (bearer wins);
+  the plan listed only one. The implementation sets `api_key`, which is what the
+  OpenAI-compatible rows expect.
+- The model is set in two places on purpose: `SessionConfig::with_model` (what
+  the runtime selects) and `ProviderConfig::model_id` (what the provider is told
+  to bill/serve). They are the same string, but the runtime falls back to the
+  session value when the provider leaves it unset.
+- A named provider uses **only its own** variables. An earlier draft borrowed any
+  ambient key, which would have shipped an OpenAI key to Groq; a test now pins
+  that it errors instead.
+
+Verification performed:
+
+- `cargo test -p webrain-core byok` — 12 tests (7 rows, 3 alias pairs, order,
+  unknown provider, `--key-from` unset, keyless base url, redaction, `WEBRAIN_CHAT_*`).
+- `cargo test -p webrain-cli chat` — 5 tests over flag parsing and the redacted
+  config payload.
+- clippy clean in both feature states; `mintlify validate` and the docs orphan
+  check pass; `webrain doctor` prints the three chat states.
+
+**Open item:** a live turn against Groq's `qwen/qwen3.8-27b` returned the SDK's
+`No response was returned.`, i.e. the session was created and the MCP server was
+configured, but the provider produced no usable answer (that model may not
+support tool calling). `WEBRAIN_CHAT_DEBUG=1` now mirrors every raw event so the
+provider's own error is visible. The end-to-end turn still needs one run against
+a tool-capable model before the feature is called proven.
