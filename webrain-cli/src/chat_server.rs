@@ -75,7 +75,19 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         }
     });
 
-    let listener = TcpListener::bind(&addr).await?;
+    // `oserror 10048` / `EADDRINUSE` is the second-most-likely thing to happen
+    // here (a previous `--serve` still running), and the OS wording says nothing
+    // about it.
+    let listener = TcpListener::bind(&addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "{addr} is already in use — is another `webrain chat --serve` running? \
+                 Stop it, or pick another port with `--port N`"
+            )
+        } else {
+            anyhow::anyhow!("could not listen on {addr}: {e}")
+        }
+    })?;
     eprintln!("webrain chat · serving on http://{addr}/ · Ctrl-C to stop");
     let state = Arc::new(State {
         bus,

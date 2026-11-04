@@ -135,6 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **cli**: `webrain chat --serve` on a port that is already taken said
+  `Only one usage of each socket address … (oserror 10048)`, which names neither
+  the port nor the cause. It now says `127.0.0.1:8787 is already in use — is
+  another \`webrain chat --serve\` running? Stop it, or pick another port with
+  \`--port N\``. The usual cause is a previous `--serve` whose terminal was
+  closed without stopping the process.
 - **cli**: `webrain help chat` now lists `--search` and `DEEPSEEK_API_KEY`. The
   flag worked but appeared in no help text, so the only provider search a user
   could discover was the one the chat guide mentioned.
