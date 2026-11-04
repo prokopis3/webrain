@@ -31,6 +31,31 @@ cargo build --release --features chat
 Expect a large binary: the feature embeds the Copilot CLI runtime
 (~135 MB per platform, downloaded and SHA-256 verified at build time).
 
+### What each build target carries
+
+| Target | `pdfium` | `chat` | Why |
+| --- | --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | yes | yes | links the distro's OpenSSL 3 |
+| `aarch64-unknown-linux-gnu` | yes | yes | same, cross-linked |
+| `x86_64-unknown-linux-musl` | yes | **no** | static: cannot link OpenSSL 3, and the SDK rejects a vendored copy |
+| `aarch64-unknown-linux-musl` | yes | **no** | same |
+| `aarch64-apple-darwin` | yes | yes | TLS via Security.framework |
+| `x86_64-apple-darwin` | yes | yes | same |
+| `x86_64-pc-windows-msvc` | yes | yes | TLS via schannel |
+| `aarch64-pc-windows-msvc` | yes | yes | same |
+
+CI compiles `pdfium,chat` on Linux for every PR, and on Linux, macOS and Windows
+for every push to `main` — the three host triples that a release tag would
+otherwise be the first to try. To get chat onto musl you would have to replace
+the SDK's `network-forwarding` with a custom `CopilotRequestHandler`; the
+feature is not merely unbuilt there, it cannot link.
+
+The container image is glibc (Debian) and takes features as a build arg:
+
+```bash
+docker build -f docker/Dockerfile --build-arg FEATURES=pdfium,chat -t webrain .
+```
+
 ## Quick start
 
 ```bash
@@ -85,7 +110,7 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--model ID` | override the row's model id |
 | `--key-from VAR` | read the key from `VAR` instead of the row's own name |
 | `--base-url URL` | override the endpoint (also the keyless-local path) |
-| `--max-output-tokens N` | cap the reply |
+| `--max-output-tokens N` | cap the reply (default **4096**, see below) |
 | `--timeout SECS` | per-turn wall clock, default 300 |
 | `--yes` | approve **every** tool call |
 | `--json` | emit `{provider, model, base_url, answer, tools, exit_code}` on stdout |
@@ -95,9 +120,10 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 ## Permissions
 
 Without `--yes` the session approves reads, navigation and MCP tool calls, and
-**denies** shell commands and file writes. `--yes` installs an approve-all
-handler — say it out loud when you mean it, because the agent can then drive a
-logged-in browser.
+**denies** shell commands, file writes, and any permission category the SDK does
+not model (an unrecognised category is not an invitation). `--yes` installs an
+approve-all handler — say it out loud when you mean it, because the agent can
+then drive a logged-in browser.
 
 The key is used in-process to configure the runtime and is never written to
 stdout, stderr, or a log. `--print-config`, `--json` and every error path print
@@ -127,6 +153,37 @@ payload, which is not in the SDK's error string.
 If the model answers but never calls a tool, it is usually a model that does not
 support tool calling; pick another row (`--provider openai`) rather than
 retrying.
+
+### "The prompt was rejected as too long"
+
+That message is the provider refusing the request, not a webrain limit, and both
+real causes are quotas — neither is the model's context window:
+
+- **Tokens per minute.** A tool-enabled turn is ~8.4k tokens before your
+  question: 18 tool schemas (~8.0k) plus a short system prompt (~0.3k). Groq's
+  free tier allows 7000 input tokens/minute, so it rejects that outright
+  (`413`, `Requested 18102 ... Limit 7000` once retries are counted). Use a paid
+  tier or a provider with room.
+- **Output budget against balance.** The runtime asks for a 64k-token
+  completion by default, and some providers reserve the requested maximum
+  against your balance: OpenRouter answered *"you requested up to 64000 tokens,
+  but can only afford 171"*. webrain therefore asks for **4096** by default and
+  `--max-output-tokens` only lowers it further.
+
+Both are visible only in the raw stream (see the `WEBRAIN_CHAT_DEBUG` example
+above).
+
+## Isolation from your own Copilot install
+
+A BYOK chat owns its configuration. The runtime is started with `COPILOT_HOME`
+redirected to a scratch directory, so none of `~/.copilot` applies: no ambient
+MCP servers, no user skills, no instructions file, no session store. This is not
+politeness — measured on a real turn, inheriting the machine's config loaded
+~20 unrelated MCP servers (~480 tools, `toolDefinitionsTokens: 137019` against a
+`tokenLimit: 128000`) and the turn died before it reached the provider.
+
+Point it elsewhere with `WEBRAIN_CHAT_HOME` if you want a stable directory
+(default: `webrain-copilot-home` under the system temp directory).
 
 ## What chat does not do
 

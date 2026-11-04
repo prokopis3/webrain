@@ -13,7 +13,7 @@ WebRain exposes 17 intent-based tools over the **Model Context Protocol**. Insta
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)](https://github.com/prokopis3/webrain/releases)
 [![Last Commit](https://badgen.net/github/last-commit/prokopis3/webrain/main?icon=github)](https://github.com/prokopis3/webrain/commits/main)
 [![GitHub Stars](https://badgen.net/github/stars/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/stargazers)
-[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](Cargo.toml)
 
 </div>
 
@@ -85,10 +85,15 @@ together with the Linux system libraries Chrome needs.
 ```bash
 git clone https://github.com/prokopis3/webrain
 cd webrain
-cargo build --release --bin webrain
+cargo build --release --bin webrain --features pdfium   # what the release builds
 ./target/release/webrain install   # Download Chrome (first time only)
 ./target/release/webrain mcp --http 9223
 ```
+
+`--features pdfium` enables `pdf_render` (it binds the system pdfium at runtime, so
+`webrain install pdfium` still supplies the library). Add `,chat` for
+[`webrain chat`](docs/guides/chat.mdx) — that pulls a ~135 MB Copilot runtime and
+needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+.
 
 ### Updating
 

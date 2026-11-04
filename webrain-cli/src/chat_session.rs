@@ -7,21 +7,48 @@
 //! second implementation to drift. The child inherits this process's env, so
 //! `CDP_URL`, the vault and the engine cache apply unchanged.
 //!
-//! ponytail: no REPL, no session resume, no tool allowlist — one prompt, one
-//! turn, an exit code. Everything below is the smallest path through the SDK.
+//! ponytail: no REPL, no session resume — one prompt, one turn, an exit code.
+//! Everything below is the smallest path through the SDK.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use github_copilot_sdk::types::{
-    McpServerConfig, McpStdioServerConfig, PermissionRequestData, PermissionRequestKind,
-    ProviderConfig, SessionConfig,
+    InfiniteSessionConfig, McpServerConfig, McpStdioServerConfig, PermissionRequestData,
+    PermissionRequestKind, ProviderConfig, SessionConfig, SystemMessageConfig,
 };
 use github_copilot_sdk::{Client, ClientOptions, IndexMap, MessageOptions};
 
 use super::chat::Args;
 use webrain_core::byok::ChatProvider;
+
+/// The session's system prompt, replacing the runtime's coding-agent default.
+///
+/// Two reasons to replace rather than append: the default is ~8k tokens about
+/// writing code and editing repositories, which is both wrong for a scraping
+/// agent and, measured on a real turn, half the per-turn prompt budget
+/// (`systemTokens: 8048` against `toolDefinitionsTokens: 8080`) — enough to
+/// exceed a small provider's per-minute quota before the question is asked.
+fn system_prompt() -> String {
+    let mut names: Vec<String> = webrain_mcp::tool_names();
+    names.sort_unstable();
+    format!(
+        "You are webrain, a browser-automation and web-scraping agent. You answer \
+         questions by driving a real browser through one tool server, `webrain`, \
+         which exposes: {}.\n\n\
+         How to work:\n\
+         - Static HTML: `webrain_http` (no browser). Rendered/JS pages: `webrain_navigate`.\n\
+         - After every navigate, read the `challenge` field. A non-null challenge means \
+         the page is gated, not loaded: say so instead of extracting it as content.\n\
+         - Discover selectors with `webrain_observe`/`webrain_autoschema`; never guess them.\n\
+         - Report only what a tool actually returned, and name the URL you read it from. \
+         If a tool failed, say what failed. Never invent page content or prices.\n\
+         - Do not write files or edit the user's code unless they ask for it.\n\
+         - Answer in prose, briefly, with the numbers and titles you found.",
+        names.join(", ")
+    )
+}
 
 /// Text and tool names gathered off the event stream, because `send_and_wait`
 /// only returns the terminal event.
@@ -40,15 +67,22 @@ fn first_str<'a>(data: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> 
         .find_map(|k| data.get(*k).and_then(|v| v.as_str()))
 }
 
-/// Without `--yes`: reads, navigation and MCP calls run; a shell command or a
-/// file write is the agent reaching outside the web, which a human should see.
+/// Without `--yes`: reads, navigation and MCP calls run; a shell command, a
+/// file write, or a permission category we do not recognise is the agent
+/// reaching outside the web, and a human should see it. `Unknown` is denied on
+/// purpose — the SDK only says "the CLI sent a `kind` we do not model", and
+/// blanket-allowing a category nobody has defined is how a gate stops gating.
+/// An absent `kind` stays allowed: the CLI omits it for ordinary tool calls,
+/// so denying it would block every `webrain_*` call.
 fn not_destructive(d: &PermissionRequestData) -> bool {
     if d.managed_approval_required == Some(true) {
         return false;
     }
     !matches!(
         d.kind,
-        Some(PermissionRequestKind::Shell) | Some(PermissionRequestKind::Write)
+        Some(PermissionRequestKind::Shell)
+            | Some(PermissionRequestKind::Write)
+            | Some(PermissionRequestKind::Unknown)
     )
 }
 
@@ -68,26 +102,72 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         }),
     );
 
-    // `ProviderConfig` is #[non_exhaustive], so fields are set on a default.
-    let mut provider_cfg = ProviderConfig::default();
-    provider_cfg.provider_type = Some(provider.provider_type.to_string());
-    provider_cfg.base_url = provider.base_url.clone();
-    provider_cfg.api_key = provider.bearer_token().map(str::to_string);
+    // SDK builders (ProviderConfig::new(..).with_*), so a renamed field is a
+    // compile error rather than a silently-dropped setting.
+    let mut provider_cfg =
+        ProviderConfig::new(provider.base_url.clone()).with_provider_type(provider.provider_type);
+    if let Some(k) = provider.bearer_token() {
+        provider_cfg = provider_cfg.with_api_key(k);
+    }
     provider_cfg.model_id = Some(provider.model.clone());
-    provider_cfg.max_output_tokens = args.max_output_tokens.map(i64::from);
+    // Only when the user asked: the runtime already knows the model's real
+    // limit, and overriding it upward makes a small-context model reject the
+    // prompt as too long.
+    provider_cfg.max_prompt_tokens = args.max_prompt_tokens;
+    // The runtime's default asks the provider for a 64k-token completion. That
+    // is a *reservation* in some billing models: measured on a real turn,
+    // OpenRouter refused a request outright ("you requested up to 64000 tokens,
+    // but can only afford 171"). A chat answer does not need 64k.
+    provider_cfg.max_output_tokens = Some(i64::from(args.max_output_tokens.unwrap_or(4096)));
 
     let mut config = SessionConfig::default()
         .with_model(provider.model.clone())
-        .with_mcp_servers(servers);
+        .with_provider(provider_cfg)
+        .with_mcp_servers(servers)
+        .with_system_message(
+            SystemMessageConfig::new()
+                .with_mode("replace")
+                .with_content(system_prompt()),
+        )
+        // One-shot: no persistent workspace, no cross-session store, no
+        // `~/.copilot/session-state/<id>` left behind for a command that exits.
+        .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(false));
     if args.yes {
         config = config.approve_all_permissions();
     } else {
         config = config.approve_permissions_if(not_destructive);
     }
-    config.provider = Some(provider_cfg);
     config.streaming = Some(args.stream);
+    config.enable_session_store = Some(false);
+    // Keep the agent's reachable surface to our own tools. Note what this does
+    // NOT do: measured (`session.usage_info`) the prompt is still
+    // `toolDefinitionsTokens: 8080` / `systemTokens: 272` ~= 8.4k either way, so
+    // the allowlist is a behavioural guard (the model cannot call the runtime's
+    // built-in GitHub tools), not a way to shrink the prompt. Trimming the
+    // budget further means fewer `webrain_*` tools, which is a product call.
+    config.enable_config_discovery = Some(false);
+    config.available_tools = Some(
+        webrain_mcp::tool_names()
+            .iter()
+            .map(|n| format!("mcp:webrain-{n}"))
+            .collect(),
+    );
 
-    let mut options = ClientOptions::default();
+    // A process that exits must not leave the runtime holding a session: reap
+    // it server-side instead of relying on the disconnect being enough.
+    //
+    // `base_directory` becomes `COPILOT_HOME` on the spawned CLI, which is the
+    // only thing that actually stops this machine's Copilot config from being
+    // read: the MCP servers, skills, and instructions under `~/.copilot` are
+    // discovered by the CLI itself, before any session option applies. Without
+    // it every turn loaded ~20 unrelated servers (~480 tools) and blew the
+    // context window. A BYOK chat owns its configuration, so give it one.
+    let home = std::env::var_os("WEBRAIN_CHAT_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("webrain-copilot-home"));
+    let mut options = ClientOptions::default()
+        .with_session_idle_timeout_seconds(60)
+        .with_base_directory(home);
     options.working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let client = Client::start(options)

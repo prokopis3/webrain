@@ -14,29 +14,37 @@
 # ── Build stage ─────────────────────────────────────────────────
 # Pinned to a concrete minor version (not a floating `latest`) so rebuilds are
 # reproducible. (A full @sha256: digest pin is the next step — obtain it with
-# `docker buildx imagetools inspect rust:1.88-slim-bookworm`.)
+# `docker buildx imagetools inspect rust:1.94-slim-bookworm`.)
 #
-# Debian, not Alpine; 1.88, not 1.85. Two independent reasons:
+# Debian, not Alpine; 1.94, not 1.85. Three independent reasons:
 #   * this toolchain must MATCH THE RUNTIME. The builder's libc decides the
 #     binary's libc, and the runtime has to be glibc so it can exec Obscura
 #     (see the runtime stage). A musl-built binary in a glibc image is a
 #     mismatch waiting to surface at the first browser launch.
 #   * the workspace resolves deps needing rustc 1.88, so the 1.85 toolchain
 #     fails `cargo build --release` outright.
+#   * the workspace `rust-version` is 1.94 (forced by the optional `chat`
+#     feature's SDK), and cargo refuses to build a package below its declared
+#     rust-version — so the old 1.88 base fails even with chat off.
 # `musl-dev` is gone with Alpine: it was there to link against musl, which is
 # exactly what we no longer want.
-FROM rust:1.88-slim-bookworm AS builder
+FROM rust:1.94-slim-bookworm AS builder
 # BuildKit's automatic platform args exist only in the global scope BEFORE the
 # first FROM, so `$TARGETARCH` used inside a stage without redeclaring it here
 # expands to EMPTY. That silently collapsed the target cache below into one
 # shared key for every architecture, which is the opposite of what its comment
 # claims. Docker's own lint flagged it (UndefinedVar, line 49).
 ARG TARGETARCH
+# Which cargo features to compile in. `pdfium` is the default (bounding-box
+# rasterisation); `chat` adds the ~135 MB Copilot runtime and links OS OpenSSL,
+# so it is opt-in:  docker build --build-arg FEATURES=pdfium,chat …
+ARG FEATURES=pdfium
 # Link-time build deps. The slim Rust image normally already carries these;
 # installing them explicitly means a future base change cannot remove one
-# silently and surface as an unexplained link error.
+# silently and surface as an unexplained link error. `libssl-dev` is for the
+# optional `chat` feature, which links OS OpenSSL 3 rather than a vendored copy.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config \
+    && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # Copy only the workspace manifests + crate sources — the previous `COPY . .`
@@ -59,7 +67,7 @@ COPY skills skills
 # contents are discarded when the RUN ends and never reach the image layer).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target,id=webrain-target-$TARGETARCH \
-    cargo build --release --bin webrain \
+    cargo build --release --bin webrain --features "$FEATURES" \
     && cp /app/target/release/webrain /app/webrain
 
 # ── Runtime stage ───────────────────────────────────────────────

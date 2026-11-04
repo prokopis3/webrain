@@ -125,10 +125,14 @@ webrain install
 ```bash
 git clone https://github.com/prokopis3/webrain
 cd webrain
-cargo build --release --bin webrain
+cargo build --release --bin webrain --features pdfium   # what the release builds
 ./target/release/webrain install   # Download Chrome (first time only)
 ./target/release/webrain mcp --http 9223
 ```
+
+`--features pdfium` is what the published binaries carry — add `,chat` to that
+cargo build for `webrain chat`. `cargo install webrain` passes no features, so a
+from-source install there is the plain binary.
 
 Add `--features pdfium` to that `cargo build` if you need `webrain_pdf`
 `op=render` (`cargo install webrain` does not pass features). Then
