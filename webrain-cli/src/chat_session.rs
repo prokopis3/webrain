@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use github_copilot_sdk::rpc::UsageGetMetricsResult;
 use github_copilot_sdk::types::{
     InfiniteSessionConfig, McpServerConfig, McpStdioServerConfig, MemoryConfiguration,
     PermissionRequestData, PermissionRequestKind, ProviderConfig, SessionConfig,
@@ -22,7 +23,8 @@ use github_copilot_sdk::types::{
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
 use super::chat::Args;
-use webrain_core::byok::ChatProvider;
+use webrain_core::backends::cdp::CdpBackend;
+use webrain_core::byok::{ChatProvider, SearchMode};
 
 /// The session's system prompt, replacing the runtime's coding-agent default.
 ///
@@ -60,6 +62,64 @@ struct Collected {
     tools: Vec<String>,
 }
 
+/// What the runtime counted for the turn. Tokens and duration come from
+/// `session.usage.getMetrics`; `nano_aiu` is GitHub's billing unit and is 0 on
+/// a BYOK turn, where the provider bills the key directly.
+#[derive(Default, Clone, Copy, PartialEq)]
+struct Totals {
+    input: i64,
+    output: i64,
+    requests: i64,
+    api_ms: i64,
+    nano_aiu: f64,
+}
+
+impl Totals {
+    fn tokens_per_sec(self) -> f64 {
+        if self.api_ms <= 0 {
+            return 0.0;
+        }
+        self.output as f64 / (self.api_ms as f64 / 1000.0)
+    }
+}
+
+/// Sum every model the session used. One model per turn in practice, but a
+/// tool that switches models would otherwise be under-reported.
+fn totals_of(m: &UsageGetMetricsResult) -> Totals {
+    let mut t = Totals {
+        api_ms: m.total_api_duration_ms,
+        nano_aiu: m.total_nano_aiu.unwrap_or(0.0),
+        ..Default::default()
+    };
+    for metric in m.model_metrics.values() {
+        t.input += metric.usage.input_tokens;
+        t.output += metric.usage.output_tokens;
+        t.requests += metric.requests.count;
+    }
+    t
+}
+
+/// The closing block: what it cost, how fast it ran. Written to stderr so the
+/// answer on stdout stays pipeable.
+fn render_usage(t: Totals, model: &str) -> String {
+    let cost = if t.nano_aiu > 0.0 {
+        format!("{:.6} AIU", t.nano_aiu / 1e9)
+    } else {
+        "n/a (BYOK: your provider bills the key)".to_string()
+    };
+    format!(
+        "tokens  {} in / {} out · {:.1} tok/s\nmodel   {} · {} request{} · {:.1} s API\ncost    {}",
+        t.input,
+        t.output,
+        t.tokens_per_sec(),
+        model,
+        t.requests,
+        if t.requests == 1 { "" } else { "s" },
+        t.api_ms as f64 / 1000.0,
+        cost
+    )
+}
+
 /// Reads the first string present among several key spellings: event payloads
 /// are untyped JSON and the exact key differs between event kinds (and has
 /// moved between SDK releases before).
@@ -85,6 +145,42 @@ fn not_destructive(d: &PermissionRequestData) -> bool {
             | Some(PermissionRequestKind::Write)
             | Some(PermissionRequestKind::Unknown)
     )
+}
+
+/// Ground `prompt` with webrain's own engines and return the prompt to send.
+/// `http_only`: no browser needed for auto (duckduckgo + bing over pooled
+/// HTTP), and a chat turn should not pay a Chrome launch.
+async fn serp_grounding(prompt: &str) -> anyhow::Result<String> {
+    let opts = webrain_core::serp::SerpOpts {
+        query: prompt.to_string(),
+        limit: 5,
+        http_only: true,
+        ..Default::default()
+    };
+    let resp: webrain_core::serp::SerpResponse =
+        webrain_core::serp::serp_search(&opts, None::<&CdpBackend>).await?;
+    let block = webrain_core::serp::grounding_block("webrain serp", prompt, &resp.results);
+    if !block.is_empty() {
+        eprintln!(
+            "· search · {} results ({})",
+            resp.results.len(),
+            resp.engine
+        );
+    }
+    Ok(format!("{block}\nQuestion: {prompt}"))
+}
+
+/// Name of the search mechanism, for the `· search ·` line.
+fn mode_label(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::OpenAiResponses => "openai web_search",
+        SearchMode::AnthropicTool => "anthropic web_search",
+        SearchMode::GeminiGrounding => "gemini google_search",
+        SearchMode::DeepSeekApi => "deepseek search",
+        SearchMode::ModelVariant => "openrouter :online",
+        SearchMode::WebrainSerp => "webrain serp",
+        SearchMode::Off => "off",
+    }
 }
 
 pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
@@ -244,9 +340,104 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         }
     });
 
-    let wait =
-        MessageOptions::new(prompt).with_wait_timeout(Duration::from_secs(args.timeout_secs));
-    let result = session.send_and_wait(wait).await;
+    // `--search`, per provider. OpenRouter already searched (the `:online` slug
+    // did it). The four vendors that sell a web-search tool expose it on a
+    // request of their own, which the SDK cannot put inside the turn, so it runs
+    // here first and its answer rides in the prompt. Everyone else — and any
+    // vendor call that fails — is grounded by webrain's own engines, so the flag
+    // always means "ground this turn on live web results".
+    let prompt = match provider.search_mode() {
+        SearchMode::DeepSeekApi if args.search => {
+            let key = provider.bearer_token().unwrap_or_default().to_string();
+            let base = provider.base_url.clone();
+            let q = prompt.to_string();
+            let hits = tokio::task::spawn_blocking(move || {
+                webrain_core::serp::deepseek_search(&base, &key, &q, 5)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("search task failed: {e}")))?;
+            let block = webrain_core::serp::grounding_block("DeepSeek Search", prompt, &hits);
+            if !block.is_empty() {
+                eprintln!("· search · {} results (deepseek)", hits.len());
+            }
+            format!("{block}\nQuestion: {prompt}")
+        }
+        mode @ (SearchMode::OpenAiResponses
+        | SearchMode::AnthropicTool
+        | SearchMode::GeminiGrounding)
+            if args.search =>
+        {
+            let key = provider.bearer_token().unwrap_or_default().to_string();
+            let base = provider.base_url.clone();
+            let model = provider.model.clone();
+            let q = prompt.to_string();
+            let call = tokio::task::spawn_blocking(move || match mode {
+                SearchMode::OpenAiResponses => {
+                    webrain_core::vendor_search::openai_web_search(&base, &key, &model, &q)
+                }
+                SearchMode::AnthropicTool => {
+                    webrain_core::vendor_search::anthropic_web_search(&base, &key, &model, &q)
+                }
+                _ => webrain_core::vendor_search::gemini_grounded(&base, &key, &model, &q),
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("search task failed: {e}")));
+            let label = mode_label(mode);
+            match call {
+                Ok(answer) if !answer.trim().is_empty() => {
+                    eprintln!("· search · {} chars ({label})", answer.chars().count());
+                    format!(
+                        "Live web answer for the question below, from {label}. \
+Use it and cite the urls it names.\n\n{answer}\n\nQuestion: {prompt}"
+                    )
+                }
+                Ok(_) => {
+                    eprintln!("· search · {label} answered nothing; using webrain serp");
+                    serp_grounding(prompt).await.unwrap_or_else(|e| {
+                        eprintln!("· search · serp failed: {e}");
+                        prompt.to_string()
+                    })
+                }
+                Err(e) => {
+                    eprintln!("· search · {label} failed: {e}; using webrain serp");
+                    serp_grounding(prompt).await.unwrap_or_else(|e| {
+                        eprintln!("· search · serp failed: {e}");
+                        prompt.to_string()
+                    })
+                }
+            }
+        }
+        SearchMode::WebrainSerp if args.search => serp_grounding(prompt).await?,
+        _ => prompt.to_string(),
+    };
+
+    let wait = MessageOptions::new(prompt.as_str())
+        .with_wait_timeout(Duration::from_secs(args.timeout_secs));
+    let turn = session.send_and_wait(wait);
+    tokio::pin!(turn);
+    // The runtime reports tokens per *model call*, not per tool call, and only
+    // through `session.usage.getMetrics` (`lastCallInputTokens` /
+    // `lastCallOutputTokens`). Sample it while the turn runs so each agent step
+    // can be costed as it happens, not just summed at the end.
+    let mut ticker = tokio::time::interval(Duration::from_millis(900));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut seen = (0i64, 0i64);
+    let result = loop {
+        tokio::select! {
+            r = &mut turn => break r,
+            _ = ticker.tick() => {
+                if let Ok(m) = session.rpc().usage().get_metrics().await {
+                    let call = (m.last_call_input_tokens, m.last_call_output_tokens);
+                    if call != seen && call.1 > 0 {
+                        eprintln!("· model · {} in / {} out", call.0, call.1);
+                        seen = call;
+                    }
+                }
+            }
+        }
+    };
+    let usage = session.rpc().usage().get_metrics().await.ok();
+    let totals = usage.as_ref().map(totals_of).unwrap_or_default();
 
     // disconnect() closes the subscription so the reader task ends on its own;
     // stop() flushes runtime telemetry.
@@ -270,6 +461,11 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
     if streaming && !answer.is_empty() {
         println!();
     }
+    // Nothing to report if no request ever reached the model (bad key, refused
+    // prompt): zeros would read as "it was free" instead of "it did not run".
+    if !args.json && totals.requests > 0 {
+        eprintln!("{}", render_usage(totals, &provider.model));
+    }
     if !args.stream && !answer.is_empty() {
         println!("{answer}");
     }
@@ -284,6 +480,7 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
                     "base_url": provider.base_url,
                     "answer": answer,
                     "tools": tools,
+                    "usage": usage_json(totals),
                     "error": e.to_string(),
                     "exit_code": 1,
                 })
@@ -301,9 +498,78 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
                 "base_url": provider.base_url,
                 "answer": answer,
                 "tools": tools,
+                "usage": usage_json(totals),
                 "exit_code": 0,
             })
         );
     }
     Ok(())
+}
+
+/// The same numbers as `render_usage`, for `--json` consumers.
+fn usage_json(t: Totals) -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": t.input,
+        "output_tokens": t.output,
+        "requests": t.requests,
+        "api_ms": t.api_ms,
+        "tokens_per_sec": (t.tokens_per_sec() * 10.0).round() / 10.0,
+        "nano_aiu": t.nano_aiu,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_per_sec_is_output_tokens_over_api_seconds() {
+        let t = Totals {
+            output: 250,
+            api_ms: 2000,
+            ..Default::default()
+        };
+        assert!((t.tokens_per_sec() - 125.0).abs() < 0.01);
+        // A turn that never reached the model has no duration: no division by
+        // zero, no invented speed.
+        assert_eq!(Totals::default().tokens_per_sec(), 0.0);
+    }
+
+    #[test]
+    fn the_closing_block_says_byok_when_no_aiu_is_reported() {
+        let t = Totals {
+            input: 8412,
+            output: 312,
+            requests: 1,
+            api_ms: 7400,
+            nano_aiu: 0.0,
+        };
+        let out = render_usage(t, "deepseek-flash");
+        assert!(out.contains("8412 in / 312 out"), "{out}");
+        assert!(out.contains("42.2 tok/s"), "{out}");
+        assert!(out.contains("1 request ·"), "{out}");
+        assert!(out.contains("BYOK"), "{out}");
+
+        // A real AIU figure is rendered in AI units, not nano.
+        let paid = Totals {
+            nano_aiu: 1_500_000.0,
+            ..t
+        };
+        assert!(render_usage(paid, "m").contains("0.001500 AIU"));
+    }
+
+    #[test]
+    fn json_usage_rounds_speed_to_one_decimal() {
+        let t = Totals {
+            input: 10,
+            output: 100,
+            requests: 2,
+            api_ms: 3000,
+            nano_aiu: 0.0,
+        };
+        let v = usage_json(t);
+        assert_eq!(v["tokens_per_sec"], 33.3);
+        assert_eq!(v["input_tokens"], 10);
+        assert_eq!(v["requests"], 2);
+    }
 }

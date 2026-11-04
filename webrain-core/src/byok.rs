@@ -15,7 +15,7 @@
 ///
 /// `provider_type` is derived from the row, not stored: only Anthropic speaks a
 /// non-OpenAI wire format, and every other row is an OpenAI-compatible gateway.
-pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 7] = [
+pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 8] = [
     (
         &["OPENROUTER_API_KEY"],
         "https://openrouter.ai/api/v1",
@@ -49,6 +49,16 @@ pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 7] = [
         // catalog lists 3.8 (live 2026-11-03).
         "qwen/qwen3.8-27b",
     ),
+    (
+        &["DEEPSEEK_API_KEY"],
+        // No `/v1`: DeepSeek's OpenAI base url is the host root and its own
+        // docs show `https://api.deepseek.com/chat/completions`.
+        "https://api.deepseek.com",
+        // `deepseek-flash` is the current name (served by V4.1-Flash); the
+        // legacy `deepseek-v4-flash` is still accepted. `deepseek-v4-pro` is
+        // the other catalog entry, reachable with --model.
+        "deepseek-flash",
+    ),
 ];
 
 /// The `Chat` group of `webrain help env`, defined here so the variables the
@@ -59,7 +69,7 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
     &[
         (
             "WEBRAIN_CHAT_PROVIDER",
-            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, dashscope/qwen, groq",
+            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, dashscope/qwen, groq, deepseek",
         ),
         ("WEBRAIN_CHAT_MODEL", "override the row's default model id"),
         (
@@ -79,6 +89,10 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
         ("FIREWORKS_API_KEY", "chat row 5"),
         ("DASHSCOPE_API_KEY / QWEN_API_KEY", "chat row 6 (Qwen)"),
         ("GROQ_API_KEY", "chat row 7"),
+        (
+            "DEEPSEEK_API_KEY",
+            "chat row 8 (deepseek-flash; --model deepseek-v4-pro)",
+        ),
         (
             "COPILOT_CLI_PATH",
             "use a Copilot runtime you already have instead of the bundled one",
@@ -109,11 +123,80 @@ pub struct ChatProvider {
     bearer: Option<String>,
 }
 
+/// How `--search` is served for a resolved provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// No `--search`, or nothing to search with.
+    Off,
+    /// The provider searches the web itself: OpenRouter's `:online` model
+    /// variant (native search where the vendor has it, Exa otherwise).
+    ModelVariant,
+    /// Search is a separate REST endpoint that must run before the turn:
+    /// DeepSeek's `POST /v1/tools/search`.
+    DeepSeekApi,
+    /// Same shape, OpenAI's hosted tool: `POST /v1/responses` with
+    /// `tools: [{type:"web_search"}]`.
+    OpenAiResponses,
+    /// Same shape, Anthropic's server tool: `POST /v1/messages` with
+    /// `tools: [{type:"web_search_20250305"}]`.
+    AnthropicTool,
+    /// Same shape, Gemini's grounding tool: `POST /v1beta/interactions` with
+    /// `tools: [{type:"google_search"}]`.
+    GeminiGrounding,
+    /// No vendor search is reachable through the SDK, so webrain searches with
+    /// its own engines and grounds the turn on the results. Every provider can
+    /// get this, which is why `--search` never has to be refused.
+    WebrainSerp,
+}
+
 impl ChatProvider {
     /// The secret. Callers hand it to `ProviderConfig::bearer_token` and
     /// nothing else.
     pub fn bearer_token(&self) -> Option<&str> {
         self.bearer.as_deref()
+    }
+
+    /// Which search mechanism this provider has.
+    ///
+    /// Only OpenRouter can be searched *inside* the turn (`:online` model id).
+    /// The four vendors below expose their web-search tool on a request of
+    /// their own, which `vendor_search` issues with the same key before the
+    /// turn; everything else falls back to webrain's engines.
+    pub fn search_mode(&self) -> SearchMode {
+        if self.base_url.contains("openrouter.ai") {
+            SearchMode::ModelVariant
+        } else if self.base_url.contains("api.deepseek.com") {
+            SearchMode::DeepSeekApi
+        } else if self.base_url.contains("api.openai.com") {
+            SearchMode::OpenAiResponses
+        } else if self.base_url.contains("api.anthropic.com") {
+            SearchMode::AnthropicTool
+        } else if self.base_url.contains("generativelanguage.googleapis.com") {
+            SearchMode::GeminiGrounding
+        } else {
+            SearchMode::WebrainSerp
+        }
+    }
+
+    /// `--search`: turn search on.
+    ///
+    /// Only OpenRouter is rewritten here, to its `:online` slug, because a
+    /// model id is the one per-turn field this SDK exposes. Everyone else is
+    /// grounded by a call the caller makes before the turn — see `search_mode`
+    /// and `vendor_search`. Nothing is uncertain enough to fail: a provider
+    /// with no search product still gets webrain's own results, which is not
+    /// the vendor searching but is still live web context.
+    pub fn with_search(self, search: bool) -> Self {
+        if !search || self.search_mode() != SearchMode::ModelVariant {
+            return self;
+        }
+        if self.model.ends_with(":online") {
+            return self;
+        }
+        Self {
+            model: format!("{}:online", self.model),
+            ..self
+        }
     }
 }
 
@@ -465,5 +548,88 @@ mod tests {
         let p = resolve_from(&e, &ChatFlags::default()).unwrap().unwrap();
         assert!(p.base_url.contains("dashscope"), "{}", p.base_url);
         assert_eq!(p.model, "qwen-custom");
+    }
+
+    #[test]
+    fn deepseek_row_takes_both_catalog_models() {
+        let flags = ChatFlags {
+            provider: Some("deepseek"),
+            ..Default::default()
+        };
+        let p = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &flags)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.base_url, "https://api.deepseek.com");
+        assert_eq!(p.model, "deepseek-flash");
+        assert_eq!(p.provider_type, "openai");
+
+        let pro = ChatFlags {
+            model: Some("deepseek-v4-pro"),
+            ..flags
+        };
+        let p = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &pro)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.model, "deepseek-v4-pro");
+        assert_eq!(p.base_url, "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn search_appends_online_once_on_openrouter() {
+        let p = resolve_from(&env(&[("OPENROUTER_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        let plain = p.model.clone();
+        let searched = p.clone().with_search(true);
+        assert_eq!(searched.model, "anthropic/claude-sonnet-4.5:online");
+        // Idempotent: `--search` twice (or a model the user already marked)
+        // must not become `:online:online`.
+        assert_eq!(searched.clone().with_search(true).model, searched.model);
+        assert_eq!(p.with_search(false).model, plain);
+    }
+
+    #[test]
+    fn search_mode_matches_the_providers_shape() {
+        let ds = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(ds.search_mode(), SearchMode::DeepSeekApi);
+        // DeepSeek's model id is untouched: the search runs as its own call.
+        assert_eq!(ds.clone().with_search(true).model, "deepseek-flash");
+
+        let or = resolve_from(&env(&[("OPENROUTER_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(or.search_mode(), SearchMode::ModelVariant);
+
+        // The three vendors that ship a search tool get their own endpoint, and
+        // their model id stays untouched for the same reason as DeepSeek.
+        for (key, mode, model) in [
+            ("OPENAI_API_KEY", SearchMode::OpenAiResponses, "gpt-5"),
+            (
+                "ANTHROPIC_API_KEY",
+                SearchMode::AnthropicTool,
+                "claude-sonnet-4-5",
+            ),
+            (
+                "GEMINI_API_KEY",
+                SearchMode::GeminiGrounding,
+                "gemini-2.5-pro",
+            ),
+        ] {
+            let p = resolve_from(&env(&[(key, "k")]), &ChatFlags::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.search_mode(), mode, "{key}");
+            assert_eq!(p.clone().with_search(true).model, model, "{key}");
+        }
+
+        // A provider with no search product still gets live context, from
+        // webrain's own engines, so the flag is never refused.
+        let groq = resolve_from(&env(&[("GROQ_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(groq.search_mode(), SearchMode::WebrainSerp);
+        assert_eq!(groq.clone().with_search(true).model, groq.model);
     }
 }

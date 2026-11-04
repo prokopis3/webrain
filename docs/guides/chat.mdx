@@ -87,11 +87,12 @@ First match wins:
 | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
 | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
+| `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` (`--model deepseek-v4-pro` for the larger one) |
 
 `--provider` accepts any alias stem: `openrouter`, `openai`, `anthropic`,
-`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`. A named
-provider uses **only its own** variables — naming `groq` while `OPENAI_API_KEY`
-is set is an error, not a silent mix-up.
+`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`,
+`deepseek`. A named provider uses **only its own** variables — naming `groq`
+while `OPENAI_API_KEY` is set is an error, not a silent mix-up.
 
 ### A local server needs no key
 
@@ -112,10 +113,95 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--base-url URL` | override the endpoint (also the keyless-local path) |
 | `--max-output-tokens N` | cap the reply (default **4096**, see below) |
 | `--timeout SECS` | per-turn wall clock, default 300 |
+| `--search` | turn on the provider's own web search, where it has one (see below) |
 | `--yes` | approve **every** tool call |
-| `--json` | emit `{provider, model, base_url, answer, tools, exit_code}` on stdout |
+| `--json` | emit `{provider, model, base_url, answer, tools, usage, exit_code}` on stdout |
 | `--no-stream` | print only the final answer instead of token deltas |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
+
+## What it cost
+
+The turn ends with three lines on stderr, so the answer on stdout stays
+pipeable:
+
+```
+· model · 8412 in / 312 out          ← one line per model call, as it happens
+tokens  8412 in / 312 out · 42.2 tok/s
+model   deepseek-flash · 1 request · 7.4 s API
+cost    n/a (BYOK: your provider bills the key)
+```
+
+Numbers come from the runtime's own accounting
+(`session.usage.getMetrics`), not from counting characters: `input_tokens` /
+`output_tokens` per model, request count, and the time actually spent in model
+API calls — which is what the `tok/s` figure divides by. `--json` carries the
+same numbers as `usage: {input_tokens, output_tokens, requests, api_ms,
+tokens_per_sec, nano_aiu}`.
+
+Two honest limits:
+
+- **Cost is `n/a` on a BYOK turn.** `nano_aiu` is GitHub's billing unit and the
+  runtime reports 0 because your key pays the provider, not GitHub. Piping
+  through OpenRouter removes even that (OpenRouter meters its own credits), so
+  the AIU line only means something with GitHub-authenticated models.
+- **Tokens are per model call, not per tool call.** A tool call consumes no
+  tokens by itself; each agent step that follows one does. That is why the live
+  line reads `· model ·` next to the `· tool ·` lines rather than on them.
+
+## `--search`: live web results, per provider
+
+The vendors do not sell the same thing, so the flag does whatever the provider
+actually supports instead of pretending they are interchangeable:
+
+| Provider | What `--search` does | Whose search |
+|---|---|---|
+| `openrouter` | rewrites the model to its `:online` slug: the `web` plugin uses the vendor's **native** search for Anthropic, Google, OpenAI, Perplexity and xAI models, Exa for everything else. Results arrive as citations. | the model's own |
+| `deepseek` | webrain calls DeepSeek's **Search API** (`POST https://api.deepseek.com/v1/tools/search`, same key) *before* the turn and prepends the top 5 titles, urls and snippets with an instruction to cite them | DeepSeek |
+| `openai` | webrain calls the **Responses API** (`POST /v1/responses`) with `tools: [{"type":"web_search"}]` and prepends the returned answer, which carries `url_citation` annotations | OpenAI |
+| `anthropic` / `claude` | webrain calls the **Messages API** with the `web_search_20250305` server tool (`max_uses: 3`) and prepends the answer plus the urls in its `web_search_tool_result` blocks | Anthropic |
+| `gemini` / `google` | webrain calls the **Interactions API** (`POST /v1beta/interactions`) with `tools: [{"type":"google_search"}]` and prepends the grounded answer with its `url_citation` annotations | Google |
+| `groq`, `fireworks`, `dashscope`, local servers | webrain searches with its **own engines** (duckduckgo + bing over pooled HTTP, no browser) and prepends the same citation block | webrain's SERP |
+
+Why the split: this CLI cannot inject a request field into the model call — the
+Copilot SDK forwards a fixed provider config, not arbitrary body parameters — so
+the search it can switch on is one the vendor exposes as a *model variant*
+(OpenRouter) or as an *endpoint it can call itself* (DeepSeek, OpenAI, Anthropic,
+Gemini, and ours). The vendor row means the vendor's model plans the queries and
+writes the grounded answer; the fourth column is whose index found the pages.
+
+Two things that follow from that shape:
+
+- **The vendor call is a second request, billed by the vendor.** OpenAI, Anthropic
+  and Google charge per search on top of the turn (Gemini 3+ bills per query the
+  model decides to run, with 5,000 free per month). Their fees do not appear in
+  webrain's closing cost block — that block reports the runtime's token totals,
+  which only cover the turn.
+- **A vendor search that fails falls back to ours, never to a dead turn.** A
+  rejected key, a model that cannot use the tool, or an empty answer prints the
+  reason and grounds the turn on webrain's own results instead.
+
+Every branch prints one line on stderr naming the source and what it found:
+
+```
+· search · 5 results (auto)
+· search · 5 results (deepseek)
+· search · 1840 chars (openai web_search)
+· search · 2310 chars (anthropic web_search)
+· search · 1690 chars (gemini google_search)
+```
+
+```bash
+webrain chat "what changed in Rust 1.95" --provider deepseek --search
+webrain chat "what changed in Rust 1.95" --provider openai --search
+webrain chat "what changed in Rust 1.95" --provider anthropic --search
+webrain chat "what changed in Rust 1.95" --provider gemini --search
+webrain chat "what changed in Rust 1.95" --provider openrouter --search
+webrain chat "what changed in Rust 1.95" --provider groq --search
+```
+
+`--search` adds one search per turn. The agent can also call `webrain_search` /
+`webrain_serp` itself, mid-turn, as many times as the question needs — that is
+what it does without the flag.
 
 ## Permissions
 

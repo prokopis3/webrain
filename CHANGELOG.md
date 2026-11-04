@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **cli**: `webrain chat --search` — live web results in front of the turn,
+  whichever provider is in use. On `openrouter` it rewrites the model to its
+  `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
+  models, Exa otherwise). On `deepseek` webrain calls the Search API itself
+  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets. On
+  `openai` it calls the Responses API with `tools: [{"type":"web_search"}]`, on
+  `anthropic` the Messages API with the `web_search_20250305` server tool, and on
+  `gemini` the Interactions API with `tools: [{"type":"google_search"}]` — each
+  with the same key, each prepending the vendor's grounded, cited answer. Groq,
+  Fireworks, DashScope and local servers get the same citation block built from
+  webrain's own engines (duckduckgo + bing over pooled HTTP, no browser), because
+  the Copilot SDK forwards a fixed provider config and cannot inject a vendor
+  search field into the turn. A vendor call that fails prints why and falls back
+  to webrain's engines rather than failing the turn. One line on stderr names the
+  source and what it found.
+- **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
+  `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
+  larger catalog entry). Its search endpoint is what `--search` calls.
+- **cli**: `webrain chat` reports what the turn cost. Every model call prints
+  `· model · N in / M out` as it happens, and the turn ends with a stderr block
+  giving totals, `tok/s` (output tokens over real API time, not wall clock),
+  request count and cost. The numbers come from the runtime's own accounting
+  (`session.usage.getMetrics`: `lastCallInputTokens`, per-model `usage` and
+  `requests`, `totalApiDurationMs`, `totalNanoAiu`), so `--json` gains a `usage`
+  object with the same fields. Cost is `n/a` on BYOK turns — `nano_aiu` is
+  GitHub's billing unit and is 0 when your own key pays the provider.
 - **cli**: `webrain diff <a> <b> [--max N] [--json]` — what changed between two
   pages, or a page and a saved baseline. Either side is an http(s) URL (plain
   HTTP, no browser) or a local file; lines are whitespace-normalised and blanks
