@@ -324,6 +324,19 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
         "Logging",
         &[("RUST_LOG", "log verbosity (webrain=info,tungstenite=warn)")],
     ),
+    (
+        "Chat runtime",
+        &[
+            (
+                "WEBRAIN_CHAT_DEBUG",
+                "mirror every raw session event to stderr (the provider's own error)",
+            ),
+            (
+                "WEBRAIN_CHAT_HOME",
+                "COPILOT_HOME for chat; ~/.copilot is deliberately not used",
+            ),
+        ],
+    ),
 ];
 /// Render the grouped environment listing (overview tail and `help env`).
 fn env_section() -> String {

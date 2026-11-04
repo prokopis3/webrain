@@ -58,3 +58,45 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  # The `chat` feature embeds a *per-platform* Copilot runtime at build time, so
+  # "it compiled on Linux" proves nothing about macOS or Windows: different
+  # runtime asset, different TLS backend (schannel / Security.framework / OS
+  # OpenSSL), different linker. Build it on each host before a release tag ever
+  # has to find out. Host triples only (linux-x64, macos-arm64, windows-x64);
+  # the release matrix still owns the cross targets.
+  chat-build:
+    name: chat build (${{ matrix.os }})
+    # Push-only on purpose: the `check` job already compiles `pdfium,chat` on
+    # Linux for every PR, and three more ~135 MB runtime downloads per PR is not
+    # worth the extra signal.
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      # `network-forwarding` links OS OpenSSL 3 on Linux and rejects a vendored
+      # copy; macOS and Windows use their platform TLS and need nothing extra.
+      - name: OS OpenSSL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev
+
+      - name: build with pdfium + chat
+        run: cargo build --release --features pdfium,chat --bin webrain
+
+      # Prove the runtime actually landed in the binary and the (offline) BYOK
+      # resolution chain runs. Unconfigured is exit 1 by design, hence `|| true`.
+      - name: smoke (chat compiled in, config chain works)
+        shell: bash
+        run: |
+          cargo run --release --quiet --features pdfium,chat --bin webrain -- \
+            chat --print-config > chat-config.json || true
+          cat chat-config.json
+          grep -q '"configured"' chat-config.json

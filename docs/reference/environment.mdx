@@ -109,6 +109,7 @@ model. First match wins: flags → `WEBRAIN_CHAT_*` → the ambient chain.
 | `COPILOT_CLI_EXTRACT_DIR` | where the bundled runtime is unpacked on first use | platform cache |
 | `BUNDLED_CLI_CACHE_DIR` | build-time cache of the runtime archives (CI) | — |
 | `WEBRAIN_CHAT_DEBUG` | mirror every raw session event to stderr — the only way to see the provider's own error when a turn returns no answer | off |
+| `WEBRAIN_CHAT_HOME` | the `COPILOT_HOME` the chat runtime is given: sessions, auth and config live here, and `~/.copilot` is deliberately **not** used (inheriting it loaded ~480 unrelated tools) | `webrain-copilot-home` under the temp dir |
 
 The ambient chain, in order, with each row's base url and default model:
 

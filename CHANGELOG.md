@@ -36,13 +36,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pdfium,chat` clippy job so the feature cannot rot between releases.
 - **docs**: new [chat guide](/guides/chat) plus the provider table and the
   `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
+- **ci**: a `chat-build` matrix job builds `--features pdfium,chat` on
+  `ubuntu-latest`, `macos-latest` and `windows-latest` on every push to `main`
+  (Linux stays on every PR through the existing clippy step). The feature embeds
+  a per-platform runtime — a Linux-only compile says nothing about the TLS
+  backend macOS (Security.framework) or Windows (schannel) has to link.
+- **build**: the container image takes `--build-arg FEATURES=…` (default
+  `pdfium`), so `FEATURES=pdfium,chat` builds a chat-capable image, and installs
+  `libssl-dev` for the OpenSSL 3 the runtime links.
 
 ### Changed
 
 - **build**: workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
-  (declared `rust-version = 1.94.0`, and resolver 3 is MSRV-aware, so the floor
+  (declared `rust-version = "1.94.0"`, and resolver 3 is MSRV-aware, so the floor
   applies even with the feature off). Released binaries are unaffected; only
-  from-source builds on 1.88–1.93 are.
+  from-source builds on 1.88–1.93 are. The container builder moves to
+  `rust:1.94-slim-bookworm` with it — cargo refuses a package below its declared
+  `rust-version`, so the old 1.88 base could no longer build the workspace at all.
+- **cli**: `chat` sends its own system prompt instead of inheriting the
+  runtime's coding-agent one: 8048 → **272** static tokens per turn (measured via
+  `session.usage_info`), and the agent is told it drives a browser rather than
+  that it is editing repositories.
+- **cli**: `chat` asks for **4096** output tokens by default rather than the
+  runtime's 64k. Some providers reserve the requested maximum against your
+  balance and refuse the whole request when it does not fit.
 
 ### Fixed
 
@@ -56,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **build**: `.gitattributes` pins `*.sh` to `text eol=lf`. A CRLF checkout
   committed from Windows would ship an installer that dies with
   `syntax error near unexpected token 'in'` the moment it is piped into `bash`.
+- **cli**: `chat` no longer inherits this machine's Copilot install. The runtime
+  now starts with `COPILOT_HOME` pointed at a scratch directory
+  (`WEBRAIN_CHAT_HOME`), because `~/.copilot` is discovered by the CLI before any
+  session option applies: a real turn loaded ~20 unrelated MCP servers
+  (`toolDefinitionsTokens: 137019` against `tokenLimit: 128000`) and died with
+  `compaction_static_context_blocked` before reaching the provider.
+  `enable_config_discovery = false` alone did not stop it.
+- **cli**: `chat` explains a rejected prompt instead of echoing the SDK's
+  catch-all. Both real causes are quotas, not the context window — a ~8.4k
+  tool-schema prompt against a per-minute input cap, or a reserved output budget
+  above the account balance — and the message now says which knob to turn and to
+  re-run with `WEBRAIN_CHAT_DEBUG=1`.
+- **cli**: the `chat` permission gate also denies permission categories the SDK
+  does not model instead of approving them by omission.
 
 ## [0.16.2] - 2026-11-03
 

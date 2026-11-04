@@ -21,7 +21,14 @@ pub struct Args {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub key_from: Option<String>,
+    /// Completion budget. `None` (the default) becomes 4096, not the runtime's
+    /// 64k: some providers reserve the requested maximum against your balance
+    /// and refuse the request outright when it exceeds what is left.
     pub max_output_tokens: Option<u32>,
+    /// Prompt budget handed to the provider. `None` (the default) lets the
+    /// runtime use the model's own advertised limit — forcing a value overrides
+    /// that knowledge and turns a small-context model into "prompt too long".
+    pub max_prompt_tokens: Option<i64>,
     pub timeout_secs: u64,
     pub yes: bool,
     pub json: bool,
@@ -70,6 +77,13 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 a.max_output_tokens = Some(
                     v.parse()
                         .map_err(|_| format!("--max-output-tokens {v}: not a number"))?,
+                );
+            }
+            "--max-prompt-tokens" => {
+                let v = value_of(argv, &mut i, name, inline)?;
+                a.max_prompt_tokens = Some(
+                    v.parse()
+                        .map_err(|_| format!("--max-prompt-tokens {v}: not a number"))?,
                 );
             }
             "--timeout" => {
@@ -206,10 +220,34 @@ fn turn(
         Err(e) => {
             // 1 = the turn failed; 2 stays reserved for "cannot start at all"
             // (no key, no runtime, bad flags) so a caller can tell them apart.
-            eprintln!("webrain chat: {e}");
+            eprintln!("webrain chat: {}", advise(&e.to_string()));
             std::process::exit(1);
         }
     }
+}
+
+/// The runtime reports every rejected request as "the prompt was too long", but
+/// the causes need opposite fixes and neither is the context window people
+/// assume. Measured, on this repo's own runs: Groq's free tier caps input at
+/// 7000 tokens/minute and a tool-enabled agent prompt is ~8.4k (mostly the tool
+/// schemas), and OpenRouter rejected a turn because the runtime asked to
+/// reserve 64000 output tokens against a nearly empty balance.
+#[cfg(feature = "chat")]
+fn advise(msg: &str) -> String {
+    let m = msg.to_ascii_lowercase();
+    let quota = m.contains("too long") || m.contains("too large") || m.contains("reduce context");
+    if !quota {
+        return msg.to_string();
+    }
+    format!(
+        "{msg}\n  \
+         That is the provider refusing the request, not a webrain failure. Usual causes:\n  \
+         - tokens-per-minute cap. Free tiers are small (Groq: 7000 input tokens/min) and the \
+         tool schemas alone are ~8k. Use a paid tier or another provider.\n  \
+         - credit balance below the reserved output budget. Lower --max-output-tokens \
+         (default 4096) or top up.\n  \
+         Re-run with WEBRAIN_CHAT_DEBUG=1 to see the provider's own status code and message."
+    )
 }
 
 #[cfg(not(feature = "chat"))]
