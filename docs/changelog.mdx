@@ -36,15 +36,21 @@ All notable changes, in reverse chronological order. The full version lives in
 - **`webrain diff <a> <b> [--max N] [--json]`** — what changed between two pages
   (URL or local file). Whitespace-normalised line multiset, not an LCS diff; exit
   1 when they differ so a cron job can act on it.
-- **build** — releases build `--features pdfium,chat` on the six targets that can
-  link OS OpenSSL 3 (the two static musl builds stay `pdfium`-only); a
-  `chat-build` matrix job builds the feature on Linux, macOS and Windows on every
-  push; the container image takes `--build-arg FEATURES=`.
+- **build** — releases build `--features pdfium,chat` on every target, the two
+  static musl builds included; a `chat-build` matrix job builds the feature on
+  Linux, macOS and Windows on every push, and the container image takes
+  `--build-arg FEATURES=`.
 - **docs** — a [chat guide](/guides/chat) with the provider table, plus the
   `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
 
 ### Changed
 
+- **build** — the two static **musl** targets carry `chat` too. The SDK is not
+  hostile to musl (its build script fetches `copilot-linuxmusl-x64`) and a
+  vendored OpenSSL 3 links fine: `webrain-cli` declares `openssl` with
+  `vendored` for `target_env = "musl"` only, so `musl-gcc` compiles OpenSSL from
+  source and the binary stays `static-pie linked`. A `chat-build-musl` CI job
+  guards it on every push.
 - **build** — workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
   (resolver 3 is MSRV-aware, so the floor applies even with the feature off). The
   container builder moves to `rust:1.94-slim-bookworm` with it.

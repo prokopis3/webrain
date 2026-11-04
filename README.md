@@ -93,7 +93,9 @@ cargo build --release --bin webrain --features pdfium   # what the release build
 `--features pdfium` enables `pdf_render` (it binds the system pdfium at runtime, so
 `webrain install pdfium` still supplies the library). Add `,chat` for
 [`webrain chat`](docs/guides/chat.mdx) — that pulls a ~135 MB Copilot runtime and
-needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+.
+needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+. On a **static musl**
+target the build vendors OpenSSL 3 and compiles it with `musl-gcc` (`musl-tools`,
+`perl`, `make`, `pkg-config`, `libssl-dev`), so the result stays static.
 
 ### Updating
 

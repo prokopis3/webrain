@@ -47,8 +47,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin: webrain
             asset: webrain-linux-x86_64
-            # `chat` needs the Copilot runtime, which links OS OpenSSL 3
-            # (static/vendored OpenSSL is rejected by the SDK).
+            # `chat` needs the Copilot runtime, which links OS OpenSSL 3.
             features: pdfium,chat
             apt: libssl-dev
           # arm64 Linux is built NATIVELY on GitHub's arm runner. The cross
@@ -62,23 +61,26 @@ jobs:
             asset: webrain-linux-aarch64
             features: pdfium,chat
             apt: libssl-dev
-          # The two musl rows are the only ones without `chat`: a static binary
-          # cannot link OS OpenSSL 3, and the SDK refuses a vendored copy.
-          # `webrain chat` there resolves the provider and says how to rebuild.
+          # The musl rows carry `chat` too: a static target has no OpenSSL to
+          # link, so `webrain-cli` vendors it for `target_env = "musl"` only and
+          # musl-gcc compiles OpenSSL 3 from source. `libssl-dev` here is for the
+          # build-HOST copy of openssl-sys (build scripts always run on the
+          # host), and perl/make drive the vendored build. Verified: the result
+          # is `static-pie linked` with the feature on.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             bin: webrain
             asset: webrain-linux-aarch64-musl
-            features: pdfium
-            apt: musl-tools
+            features: pdfium,chat
+            apt: musl-tools libssl-dev perl make
           # Static, so it runs on Alpine (the Docker image) and on distros older
           # than the runner's glibc.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             bin: webrain
             asset: webrain-linux-x86_64-musl
-            features: pdfium
-            apt: musl-tools
+            features: pdfium,chat
+            apt: musl-tools libssl-dev perl make
           # macos-latest is arm64; the Intel binary is cross-built (Apple's
           # linker handles both arches, and the Intel runner image is retired).
           - os: macos-latest
@@ -119,7 +121,7 @@ jobs:
         # one. The library itself is loaded at runtime (`webrain install pdfium`
         # puts it in the engine cache), so no extra link step is needed here.
         # --features chat: `webrain chat` + the bundled Copilot runtime, on every
-        # target that can link OS OpenSSL 3 (all but musl — see the matrix).
+        # target — musl vendors its own OpenSSL 3 (see the matrix).
         run: cargo build --release --features ${{ matrix.features }} --bin webrain --target ${{ matrix.target }}
 
       # Per-target output dirs, so every job emits the SAME asset name it

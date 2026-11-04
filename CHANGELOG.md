@@ -64,11 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli**: `webrain doctor` reports chat as a third state alongside engines and
   vault: `ready (provider/model)`, `no key (and which variables would work)`, or
   `resolved but this build has no runtime`.
-- **build**: the release matrix now builds `--features pdfium,chat` for the six
-  targets that can link OS OpenSSL 3 (linux gnu x64/arm64, macOS x64/arm64,
-  Windows x64/arm64); the two static musl builds stay `pdfium`-only, where
-  `webrain chat` explains how to rebuild. CI runs one cached `--features
-  pdfium,chat` clippy job so the feature cannot rot between releases.
+- **build**: the release matrix builds `--features pdfium,chat` for every target
+  (linux gnu x64/arm64, linux musl x64/arm64, macOS x64/arm64, Windows
+  x64/arm64); CI runs one cached `--features pdfium,chat` clippy job so the
+  feature cannot rot between releases.
 - **docs**: new [chat guide](/guides/chat) plus the provider table and the
   `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
 - **ci**: a `chat-build` matrix job builds `--features pdfium,chat` on
@@ -82,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **build**: the two static **musl** targets carry `chat` too, so no published
+  binary is without it. The claim that this was impossible was wrong on both
+  counts: the SDK is not hostile to musl — its build script fetches
+  `copilot-linuxmusl-x64` / `-arm64` — and a vendored OpenSSL 3 links fine, it
+  just has to be asked for. `webrain-cli` now declares `openssl` with the
+  `vendored` feature for `target_env = "musl"` only, so the musl rows compile
+  OpenSSL from source with `musl-gcc` and stay static (`file` says
+  `static-pie linked`). Verified by building
+  `--features pdfium,chat --target x86_64-unknown-linux-musl` in a Debian
+  container; a `chat-build-musl` CI job now guards it on every push so a release
+  tag is not the first to try. `libssl-dev` on those rows is for the build-host
+  copy of `openssl-sys`, and the SDK crate wants ~8 GB to compile.
 - **build**: workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
   (declared `rust-version = "1.94.0"`, and resolver 3 is MSRV-aware, so the floor
   applies even with the feature off). Released binaries are unaffected; only
