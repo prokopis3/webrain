@@ -1,6 +1,6 @@
 ---
 title: "webrain: MCP browser automation & web scraping server"
-description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 17 intent-based tools, any MCP client.
+description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping. One binary, three browser engines, 18 intent-based tools, any MCP client — plus `webrain chat` for a one-command agent turn on your own model key.
 sidebarTitle: Home
 mode: custom
 ---
@@ -15,7 +15,7 @@ mode: custom
       <div>
         <span className="eyebrow"><span className="dot" />Rust · open source</span>
         <h1>Browser automation <em className="grad">for AI agents.</em></h1>
-        <p className="lede">One Rust binary that gives any LLM a real browser. Scrape, clear bot gates, and transcribe videos, all on your machine.</p>
+        <p className="lede">One Rust binary that gives any LLM a real browser. Scrape, clear bot gates, transcribe videos, or hand it your own key and let it drive.</p>
         <div className="cta-row">
           <a className="btn btn-primary" href="/quickstart">Get started<span className="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg></span></a>
         </div>
@@ -238,7 +238,7 @@ mode: custom
     <div className="section" id="try-agent">
       <div className="section-head">
         <h2>Give the scraper LLM a try.</h2>
-        <p>This is the agent loop webrain runs: a plain-language prompt, seventeen intent-based tools, and structured JSON back. Presets show illustrative output, except the drone one: a real 1m43s run. Pick a demo or type your own prompt.</p>
+        <p>This is the agent loop webrain runs: a plain-language prompt, eighteen intent-based tools, and structured JSON back. Presets show illustrative output, except the drone one: a real 1m43s run. Pick a demo or type your own prompt.</p>
       </div>
       <div className="try">
         <div className="try-bar">
@@ -350,17 +350,17 @@ mode: custom
     <div className="section">
       <div className="section-head">
         <h2>Everything an agent needs to read the web.</h2>
-        <p>Seventeen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
+        <p>Eighteen intent-based tools cover the full job. No selectors to hand-write, no driver plumbing, no daemon.</p>
       </div>
 
       <div className="bento">
         <div className="shell card-2">
           <div className="core core-grad">
-            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>17 intent-based tools</h3>
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg></span>18 intent-based tools</h3>
             <p>One tool per intent, each with a <code>what</code>, <code>action</code>, <code>op</code>, or <code>mode</code> selector, and every legacy one-action alias still dispatches.</p>
             <div className="agent-mini" aria-hidden="true"><span className="am-seg">agent</span><span className="am-arrow">→</span><span className="am-seg">navigate</span><span className="am-arrow">→</span><span className="am-seg">observe</span><span className="am-arrow">→</span><span className="am-seg">extract</span><span className="am-arrow">→</span><span className="am-seg am-json">JSON</span><span className="am-cursor" /></div>
             <div className="tool-chips">
-              <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">serp</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">guide</a>
+              <a className="tool-chip" href="/reference/tools">navigate</a><a className="tool-chip" href="/reference/tools">observe</a><a className="tool-chip" href="/reference/tools">interact</a><a className="tool-chip" href="/reference/tools">extract</a><a className="tool-chip" href="/reference/tools">scrape</a><a className="tool-chip" href="/reference/tools">batch</a><a className="tool-chip" href="/reference/tools">crawl</a><a className="tool-chip" href="/reference/tools">search</a><a className="tool-chip" href="/reference/tools">serp</a><a className="tool-chip" href="/reference/tools">pdf</a><a className="tool-chip" href="/reference/tools">download</a><a className="tool-chip" href="/reference/tools">watch</a><a className="tool-chip" href="/reference/tools">session</a><a className="tool-chip" href="/reference/tools">vision</a><a className="tool-chip" href="/reference/tools">eval</a><a className="tool-chip" href="/reference/tools">eval_in_frame</a><a className="tool-chip" href="/reference/tools">stats</a><a className="tool-chip" href="/reference/tools">guide</a>
             </div>
           </div>
         </div>
@@ -426,9 +426,44 @@ mode: custom
             <div className="stat-row">
               <div className="stat"><b>1</b><span>static binary</span></div>
               <div className="stat"><b>3</b><span>browser engines</span></div>
-              <div className="stat"><b>17</b><span>MCP tools</span></div>
+              <div className="stat"><b>18</b><span>MCP tools</span></div>
               <div className="stat"><b>0</b><span>Node runtime</span></div>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {/* webrain chat — the loop without a client, added after the BYOK chat feature shipped */}
+  <div className="wrap">
+    <div className="section" id="chat">
+      <div className="section-head">
+        <h2>Or drop the client. <code>webrain chat</code> drives webrain itself.</h2>
+        <p>One command, one turn, your own model key. The session attaches these 18 tools and nothing else, so the model can only do what webrain can actually do.</p>
+      </div>
+      <div className="bento">
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" /></svg></span>One prompt, one turn</h3>
+            <p><code>webrain chat "compare these two listings"</code> runs the agent loop and prints the answer. Exit 0 completed, 1 the turn failed, 2 could not start, so it composes in a script.</p>
+            <p className="proven-note">The answer goes to stdout and the tool trail to stderr, so <code>| jq</code> and <code>&gt; file</code> stay clean.</p>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Bring your own key</h3>
+            <p>Seven provider rows resolved in order, the same variable names the vision chain already reads, plus any OpenAI-compatible endpoint including a keyless local server. <code>--print-config</code> resolves the chain offline and prints it with the key redacted.</p>
+            <div className="cap-tags"><span className="tool-chip">openrouter</span><span className="tool-chip">openai</span><span className="tool-chip">anthropic</span><span className="tool-chip">gemini</span><span className="tool-chip">fireworks</span><span className="tool-chip">dashscope</span><span className="tool-chip">groq</span><span className="tool-chip">local base url</span></div>
+          </div>
+        </div>
+
+        <div className="shell">
+          <div className="core">
+            <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg></span>Nothing of yours leaks in</h3>
+            <p>The runtime starts in the SDK's empty client mode with its own state directory, so your own MCP servers, skills, session store, memory and telemetry stay out of the turn. Reads and tool calls run; a shell command or file write needs <code>--yes</code>.</p>
+            <p className="proven-note">Built with <code>--features chat</code>. See the <a href="/guides/chat">chat guide</a> for the provider table and the musl caveat.</p>
           </div>
         </div>
       </div>
@@ -495,7 +530,7 @@ mode: custom
         <div className="bench-stat"><b data-count="407"><em className="num">407</em></b><span>unique products from a live store in ~17 tool calls, ~46K tokens</span></div>
         <div className="bench-stat"><b data-count="132"><em className="num">132</em></b><span>products in one parallel batch call, zero logins</span></div>
         <div className="bench-stat"><b data-count="3"><em className="num">3</em></b><span>browser engines behind one CDP backend, plus a no-browser HTTP path</span></div>
-        <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies. One ~22 MB Rust binary on macOS, Linux, and Windows</span></div>
+        <div className="bench-stat"><b data-count="0"><em className="num">0</em></b><span>runtime dependencies in the default build. ~22 MB with <code>pdfium</code>; adding <code>chat</code> embeds its runtime (~135 MB)</span></div>
       </div>
       <div className="bench-compare">
         <div className="bench-cmp">
@@ -539,14 +574,14 @@ mode: custom
   <div className="wrap">
     <div className="section">
       <div className="section-head">
-        <h2>Structured search. Five engines, one tool.</h2>
-        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo and bing answer over plain HTTP with no browser at all; google and brave render in the connected engine; auto fetches duckduckgo + bing in parallel over plain HTTP and merges them, relevance-filtered and deduped (google and brave join the merge when a CDP engine is attached).</p>
+        <h2>Structured search. Seven engines, one tool.</h2>
+        <p>Ask for results and get typed JSON: position, title, url, domain, snippet. duckduckgo, bing, yahoo, baidu and yandex answer over plain HTTP with no browser at all; google renders in a Chrome it launches with a persistent profile, brave uses its keyed API when one is set and the connected engine otherwise. auto fetches duckduckgo + bing in parallel and merges them, relevance-filtered and deduped.</p>
       </div>
       <div className="serp">
         <div className="serp-copy">
           <div className="serp-caps">
             <div className="serp-cap"><code>typed results</code><span>position, title, url, domain, snippet</span></div>
-            <div className="serp-cap"><code>five engines + auto</code><span>duckduckgo, bing, google, brave, auto</span></div>
+            <div className="serp-cap"><code>seven engines + auto</code><span>duckduckgo, bing, google, brave, yahoo, baidu, yandex</span></div>
             <div className="serp-cap"><code>fallback + dedupe</code><span>providers fall back, duplicate URLs dropped</span></div>
             <div className="serp-cap"><code>pagination + safe + region</code><span>page offsets, safe search, en-US market default</span></div>
             <div className="serp-cap"><code>proxy + keyed providers</code><span>route engines through HTTP(S)/SOCKS proxies; a Brave key and serpapi add browser-free providers</span></div>
@@ -586,8 +621,8 @@ mode: custom
               <pre>{'{ "position": 1, "title": "Rust Programming Language", "url": "https://rust-lang.org/", "domain": "rust-lang.org", "snippet": "…" }'}</pre>
             </div>
             <div className="serp-stats">
-              <div className="serp-stat"><b data-count="5"><em className="num">5</em></b><span>engines behind one tool</span></div>
-              <div className="serp-stat"><b data-count="2"><em className="num">2</em></b><span>browserless by default (duckduckgo · bing)</span></div>
+              <div className="serp-stat"><b data-count="7"><em className="num">7</em></b><span>engines behind one tool</span></div>
+              <div className="serp-stat"><b data-count="5"><em className="num">5</em></b><span>browserless (duckduckgo · bing · yahoo · baidu · yandex)</span></div>
               <div className="serp-stat"><b data-count="50"><em className="num">50</em></b><span>max results per call</span></div>
             </div>
           </div>
