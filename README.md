@@ -85,10 +85,15 @@ together with the Linux system libraries Chrome needs.
 ```bash
 git clone https://github.com/prokopis3/webrain
 cd webrain
-cargo build --release --bin webrain
+cargo build --release --bin webrain --features pdfium   # what the release builds
 ./target/release/webrain install   # Download Chrome (first time only)
 ./target/release/webrain mcp --http 9223
 ```
+
+`--features pdfium` enables `pdf_render` (it binds the system pdfium at runtime, so
+`webrain install pdfium` still supplies the library). Add `,chat` for
+[`webrain chat`](docs/guides/chat.mdx) — that pulls a ~135 MB Copilot runtime and
+needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+.
 
 ### Updating
 
