@@ -115,9 +115,38 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--timeout SECS` | per-turn wall clock, default 300 |
 | `--search` | turn on the provider's own web search, where it has one (see below) |
 | `--yes` | approve **every** tool call |
-| `--json` | emit `{provider, model, base_url, answer, tools, exit_code}` on stdout |
+| `--json` | emit `{provider, model, base_url, answer, tools, usage, exit_code}` on stdout |
 | `--no-stream` | print only the final answer instead of token deltas |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
+
+## What it cost
+
+The turn ends with three lines on stderr, so the answer on stdout stays
+pipeable:
+
+```
+· model · 8412 in / 312 out          ← one line per model call, as it happens
+tokens  8412 in / 312 out · 42.2 tok/s
+model   deepseek-flash · 1 request · 7.4 s API
+cost    n/a (BYOK: your provider bills the key)
+```
+
+Numbers come from the runtime's own accounting
+(`session.usage.getMetrics`), not from counting characters: `input_tokens` /
+`output_tokens` per model, request count, and the time actually spent in model
+API calls — which is what the `tok/s` figure divides by. `--json` carries the
+same numbers as `usage: {input_tokens, output_tokens, requests, api_ms,
+tokens_per_sec, nano_aiu}`.
+
+Two honest limits:
+
+- **Cost is `n/a` on a BYOK turn.** `nano_aiu` is GitHub's billing unit and the
+  runtime reports 0 because your key pays the provider, not GitHub. Piping
+  through OpenRouter removes even that (OpenRouter meters its own credits), so
+  the AIU line only means something with GitHub-authenticated models.
+- **Tokens are per model call, not per tool call.** A tool call consumes no
+  tokens by itself; each agent step that follows one does. That is why the live
+  line reads `· model ·` next to the `· tool ·` lines rather than on them.
 
 ## `--search`: live web results, three ways
 
