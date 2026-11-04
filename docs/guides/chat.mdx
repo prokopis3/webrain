@@ -87,11 +87,12 @@ First match wins:
 | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
 | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
+| `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` (`--model deepseek-v4-pro` for the larger one) |
 
 `--provider` accepts any alias stem: `openrouter`, `openai`, `anthropic`,
-`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`. A named
-provider uses **only its own** variables — naming `groq` while `OPENAI_API_KEY`
-is set is an error, not a silent mix-up.
+`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`,
+`deepseek`. A named provider uses **only its own** variables — naming `groq`
+while `OPENAI_API_KEY` is set is an error, not a silent mix-up.
 
 ### A local server needs no key
 
@@ -112,10 +113,35 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--base-url URL` | override the endpoint (also the keyless-local path) |
 | `--max-output-tokens N` | cap the reply (default **4096**, see below) |
 | `--timeout SECS` | per-turn wall clock, default 300 |
+| `--search` | turn on the provider's own web search, where it has one (see below) |
 | `--yes` | approve **every** tool call |
 | `--json` | emit `{provider, model, base_url, answer, tools, exit_code}` on stdout |
 | `--no-stream` | print only the final answer instead of token deltas |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
+
+## `--search`: the provider's own web search
+
+Two shapes exist, and the flag only works where one of them does:
+
+| Provider | What `--search` does |
+|---|---|
+| `openrouter` | rewrites the model to its `:online` slug. OpenRouter runs the `web` plugin: the vendor's **native** search for Anthropic, Google, OpenAI, Perplexity and xAI models, Exa for everything else. Results come back as citations, priced per search. |
+| `deepseek` | webrain calls DeepSeek's **Search API** (`POST https://api.deepseek.com/v1/tools/search` with the same key) *before* the turn, then hands the top 5 titles, urls and snippets to the model as context and tells it to cite them. Billed per successful search, not per token. |
+| anything else | refused with exit 2. Groq, Fireworks, DashScope, Gemini-direct and generic OpenAI-compatible endpoints sell no search product, and the Copilot SDK gives this CLI no request field to inject one into. |
+
+Why DeepSeek is a call rather than a switch: its search is a separate REST
+endpoint, not a chat-completions field, so there is nothing for
+`ProviderConfig` to carry. Doing the call ourselves is the only way the flag can
+mean anything there.
+
+If you just want grounded answers on a provider with no search product, drop the
+flag: the agent already has `webrain_search` and `webrain_serp` (seven engines,
+five of them browser-free) attached to every turn.
+
+```bash
+webrain chat "what changed in Rust 1.95" --provider deepseek --search
+webrain chat "what changed in Rust 1.95" --provider openrouter --search
+```
 
 ## Permissions
 

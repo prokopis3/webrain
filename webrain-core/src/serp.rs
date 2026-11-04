@@ -1619,6 +1619,103 @@ pub fn brave_api_ready() -> bool {
     brave_api_key().is_some()
 }
 
+/// DeepSeek's Search API (`POST {base}/v1/tools/search`), for
+/// `webrain chat --search`: DeepSeek sells search as its own endpoint rather
+/// than a chat field, so the only way to ground a turn on it is to call it here
+/// and put the results in the prompt. Blocking (ureq) — callers wrap it in
+/// `spawn_blocking`. Same bearer key as chat; billed per successful request.
+pub fn deepseek_search(
+    base_url: &str,
+    key: &str,
+    query: &str,
+    count: usize,
+) -> anyhow::Result<Vec<SerpResult>> {
+    let body = serde_json::json!({
+        "query": query,
+        "count": count.clamp(1, 50),
+        "need_content": false,
+    });
+    let resp = ureq::post(&deepseek_search_url(base_url))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Authorization", &format!("Bearer {key}"))
+        .send_json(body)
+        .map_err(|e| anyhow::anyhow!("deepseek search: {e}"))?;
+    let raw = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| anyhow::anyhow!("deepseek search: {e}"))?;
+    let data: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("deepseek search response was not JSON: {e}"))?;
+    Ok(deepseek_results(&data))
+}
+
+/// Base url → endpoint, tolerating a user who already put `/v1` on the base.
+fn deepseek_search_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/tools/search")
+    } else {
+        format!("{base}/v1/tools/search")
+    }
+}
+
+/// Pure: DeepSeek's `results[]` → ranked `SerpResult`s. Kept separate from the
+/// request so the mapping is testable without a key or a network call.
+fn deepseek_results(v: &serde_json::Value) -> Vec<SerpResult> {
+    v["results"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    let url = r["url"].as_str()?.to_string();
+                    let domain = Url::parse(&url)
+                        .ok()
+                        .and_then(|u| {
+                            u.host_str()
+                                .map(|h| h.trim_start_matches("www.").to_string())
+                        })
+                        .unwrap_or_default();
+                    // `snippet` is the short display line; `summary` is the
+                    // 600-800 char model-facing one. Prefer the longer when the
+                    // short one is missing.
+                    let snippet = r["snippet"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| r["summary"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Some(SerpResult {
+                        position: i + 1,
+                        title: r["title"].as_str().unwrap_or_default().to_string(),
+                        url,
+                        domain,
+                        snippet,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Render results as the context block prepended to a chat prompt.
+pub fn grounding_block(query: &str, results: &[SerpResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "Web search results for {query:?} (from DeepSeek Search, live). Use them and cite the urls:\n"
+    );
+    for r in results {
+        out.push_str(&format!(
+            "{}. {} — {}\n   {}\n",
+            r.position, r.title, r.url, r.snippet
+        ));
+    }
+    out
+}
+
 /// Brave's own API (`BRAVE_API_KEY`) — typed JSON over HTTP, so it needs NO
 /// browser where the HTML path does. `count` maxes at 20 and `offset` is a PAGE
 /// index, so a deep limit costs `⌈limit/20⌉` calls (sequential: the free tier is
@@ -2247,6 +2344,58 @@ pub async fn serp_search<B: BrowserBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deepseek_results_map_the_documented_shape() {
+        let payload = serde_json::json!({
+            "results": [
+                {
+                    "title": "DeepSeek V4 released",
+                    "url": "https://www.example.com/news",
+                    "snippet": "V4 is available.",
+                    "summary": "long summary",
+                    "rerank_score": 2.4
+                },
+                // No snippet: the longer `summary` is the fallback.
+                { "title": "Docs", "url": "https://docs.example.org/x", "summary": "the long one" }
+            ]
+        });
+        let rows = deepseek_results(&payload);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].position, 1);
+        assert_eq!(rows[0].domain, "example.com");
+        assert_eq!(rows[0].snippet, "V4 is available.");
+        assert_eq!(rows[1].snippet, "the long one");
+        assert_eq!(rows[1].domain, "docs.example.org");
+    }
+
+    #[test]
+    fn deepseek_results_tolerate_a_body_without_results() {
+        assert!(deepseek_results(&serde_json::json!({ "error": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn deepseek_endpoint_does_not_double_the_v1() {
+        assert_eq!(
+            deepseek_search_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/v1/tools/search"
+        );
+        assert_eq!(
+            deepseek_search_url("https://api.deepseek.com/v1/"),
+            "https://api.deepseek.com/v1/tools/search"
+        );
+    }
+
+    #[test]
+    fn grounding_block_names_sources_and_stays_empty_without_results() {
+        assert_eq!(grounding_block("q", &[]), "");
+        let rows = deepseek_results(&serde_json::json!({
+            "results": [{ "title": "T", "url": "https://a.test/p", "snippet": "S" }]
+        }));
+        let block = grounding_block("rust proxies", &rows);
+        assert!(block.contains("https://a.test/p"), "{block}");
+        assert!(block.contains("1. T"), "{block}");
+    }
 
     #[test]
     fn ddg_parse_typed_results() {

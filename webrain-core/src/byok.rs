@@ -15,7 +15,7 @@
 ///
 /// `provider_type` is derived from the row, not stored: only Anthropic speaks a
 /// non-OpenAI wire format, and every other row is an OpenAI-compatible gateway.
-pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 7] = [
+pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 8] = [
     (
         &["OPENROUTER_API_KEY"],
         "https://openrouter.ai/api/v1",
@@ -49,6 +49,16 @@ pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 7] = [
         // catalog lists 3.8 (live 2026-11-03).
         "qwen/qwen3.8-27b",
     ),
+    (
+        &["DEEPSEEK_API_KEY"],
+        // No `/v1`: DeepSeek's OpenAI base url is the host root and its own
+        // docs show `https://api.deepseek.com/chat/completions`.
+        "https://api.deepseek.com",
+        // `deepseek-flash` is the current name (served by V4.1-Flash); the
+        // legacy `deepseek-v4-flash` is still accepted. `deepseek-v4-pro` is
+        // the other catalog entry, reachable with --model.
+        "deepseek-flash",
+    ),
 ];
 
 /// The `Chat` group of `webrain help env`, defined here so the variables the
@@ -59,7 +69,7 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
     &[
         (
             "WEBRAIN_CHAT_PROVIDER",
-            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, dashscope/qwen, groq",
+            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, dashscope/qwen, groq, deepseek",
         ),
         ("WEBRAIN_CHAT_MODEL", "override the row's default model id"),
         (
@@ -79,6 +89,10 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
         ("FIREWORKS_API_KEY", "chat row 5"),
         ("DASHSCOPE_API_KEY / QWEN_API_KEY", "chat row 6 (Qwen)"),
         ("GROQ_API_KEY", "chat row 7"),
+        (
+            "DEEPSEEK_API_KEY",
+            "chat row 8 (deepseek-flash; --model deepseek-v4-pro)",
+        ),
         (
             "COPILOT_CLI_PATH",
             "use a Copilot runtime you already have instead of the bundled one",
@@ -109,11 +123,64 @@ pub struct ChatProvider {
     bearer: Option<String>,
 }
 
+/// How `--search` is served for a resolved provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// No `--search`, or the provider has no search at all.
+    Off,
+    /// The provider searches the web itself: OpenRouter's `:online` model
+    /// variant (native search where the vendor has it, Exa otherwise).
+    ModelVariant,
+    /// Search is a separate REST endpoint that must run before the turn:
+    /// DeepSeek's `POST /v1/tools/search`.
+    DeepSeekApi,
+}
+
 impl ChatProvider {
     /// The secret. Callers hand it to `ProviderConfig::bearer_token` and
     /// nothing else.
     pub fn bearer_token(&self) -> Option<&str> {
         self.bearer.as_deref()
+    }
+
+    /// Which search mechanism this provider has. Only the two shapes that
+    /// exist in the wild are modelled: a model variant (OpenRouter) and a
+    /// separate search endpoint (DeepSeek). Everything else has no search
+    /// product, and `with_search` says so instead of pretending.
+    pub fn search_mode(&self) -> SearchMode {
+        if self.base_url.contains("openrouter.ai") {
+            SearchMode::ModelVariant
+        } else if self.base_url.contains("api.deepseek.com") {
+            SearchMode::DeepSeekApi
+        } else {
+            SearchMode::Off
+        }
+    }
+
+    /// `--search`: turn on provider-native web search.
+    ///
+    /// OpenRouter is rewritten to its `:online` slug (a model id is the only
+    /// per-turn field this SDK lets us change). DeepSeek is left alone here
+    /// because its search is an endpoint the caller must hit — see
+    /// `search_mode`. Any other row has no search to switch on, and saying so
+    /// beats a flag that silently does nothing.
+    pub fn with_search(self, search: bool) -> Result<Self, String> {
+        if !search {
+            return Ok(self);
+        }
+        match self.search_mode() {
+            SearchMode::ModelVariant if self.model.ends_with(":online") => Ok(self),
+            SearchMode::ModelVariant => Ok(Self {
+                model: format!("{}:online", self.model),
+                ..self
+            }),
+            SearchMode::DeepSeekApi => Ok(self),
+            SearchMode::Off => Err(format!(
+                "--search needs a provider with a search product (openrouter's :online, or deepseek's /v1/tools/search). \
+                 {} has none. Drop --search, or let the agent call webrain_search / webrain_serp, which are always attached.",
+                self.key_env.as_deref().unwrap_or("This provider")
+            )),
+        }
     }
 }
 
@@ -465,5 +532,74 @@ mod tests {
         let p = resolve_from(&e, &ChatFlags::default()).unwrap().unwrap();
         assert!(p.base_url.contains("dashscope"), "{}", p.base_url);
         assert_eq!(p.model, "qwen-custom");
+    }
+
+    #[test]
+    fn deepseek_row_takes_both_catalog_models() {
+        let flags = ChatFlags {
+            provider: Some("deepseek"),
+            ..Default::default()
+        };
+        let p = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &flags)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.base_url, "https://api.deepseek.com");
+        assert_eq!(p.model, "deepseek-flash");
+        assert_eq!(p.provider_type, "openai");
+
+        let pro = ChatFlags {
+            model: Some("deepseek-v4-pro"),
+            ..flags
+        };
+        let p = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &pro)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.model, "deepseek-v4-pro");
+        assert_eq!(p.base_url, "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn search_appends_online_once_on_openrouter() {
+        let p = resolve_from(&env(&[("OPENROUTER_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        let plain = p.model.clone();
+        let searched = p.clone().with_search(true).unwrap();
+        assert_eq!(searched.model, "anthropic/claude-sonnet-4.5:online");
+        // Idempotent: `--search` twice (or a model the user already marked)
+        // must not become `:online:online`.
+        let again = searched.clone().with_search(true).unwrap();
+        assert_eq!(again.model, searched.model);
+        assert_eq!(p.with_search(false).unwrap().model, plain);
+    }
+
+    #[test]
+    fn search_errors_where_the_provider_has_no_search_product() {
+        // Groq has no search endpoint and no `:online` variant, so `--search`
+        // must refuse rather than quietly do nothing.
+        let p = resolve_from(&env(&[("GROQ_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        let err = p.with_search(true).unwrap_err();
+        assert!(err.contains("openrouter"), "{err}");
+        assert!(err.contains("GROQ_API_KEY"), "{err}");
+    }
+
+    #[test]
+    fn search_mode_matches_the_providers_shape() {
+        let ds = resolve_from(&env(&[("DEEPSEEK_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(ds.search_mode(), SearchMode::DeepSeekApi);
+        // DeepSeek's model id is untouched: the search runs as its own call.
+        assert_eq!(
+            ds.clone().with_search(true).unwrap().model,
+            "deepseek-flash"
+        );
+
+        let or = resolve_from(&env(&[("OPENROUTER_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(or.search_mode(), SearchMode::ModelVariant);
     }
 }

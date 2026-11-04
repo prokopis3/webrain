@@ -22,7 +22,7 @@ use github_copilot_sdk::types::{
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
 use super::chat::Args;
-use webrain_core::byok::ChatProvider;
+use webrain_core::byok::{ChatProvider, SearchMode};
 
 /// The session's system prompt, replacing the runtime's coding-agent default.
 ///
@@ -244,8 +244,31 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         }
     });
 
-    let wait =
-        MessageOptions::new(prompt).with_wait_timeout(Duration::from_secs(args.timeout_secs));
+    // `--search`: OpenRouter already searched (the `:online` slug did it), so
+    // only DeepSeek still needs work — its search is an endpoint, and the SDK's
+    // ProviderConfig cannot attach a call to the turn. Fetch first, then hand
+    // the results to the model as context.
+    let prompt = match provider.search_mode() {
+        SearchMode::DeepSeekApi if args.search => {
+            let key = provider.bearer_token().unwrap_or_default().to_string();
+            let base = provider.base_url.clone();
+            let q = prompt.to_string();
+            let hits = tokio::task::spawn_blocking(move || {
+                webrain_core::serp::deepseek_search(&base, &key, &q, 5)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("search task failed: {e}")))?;
+            let block = webrain_core::serp::grounding_block(prompt, &hits);
+            if !block.is_empty() {
+                eprintln!("· search · {} results", hits.len());
+            }
+            format!("{block}\nQuestion: {prompt}")
+        }
+        _ => prompt.to_string(),
+    };
+
+    let wait = MessageOptions::new(prompt.as_str())
+        .with_wait_timeout(Duration::from_secs(args.timeout_secs));
     let result = session.send_and_wait(wait).await;
 
     // disconnect() closes the subscription so the reader task ends on its own;
