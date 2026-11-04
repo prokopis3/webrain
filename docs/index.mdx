@@ -439,7 +439,7 @@ mode: custom
   <div className="wrap">
     <div className="section" id="chat">
       <div className="section-head">
-        <h2>Or drop the client. <code>webrain chat</code> drives webrain itself.</h2>
+        <h2>No client needed. <code>webrain chat</code> drives webrain itself.</h2>
         <p>One command, one turn, your own model key. The session attaches these 18 tools and nothing else, so the model can only do what webrain can actually do.</p>
       </div>
       <div className="bento">
@@ -747,15 +747,19 @@ mode: custom
         </div>
         <div className="faq-item">
           <h3>Does it cost money or need an API key?</h3>
-          <p>No. It is open source (MIT) and local-first. Cloud keys are optional and only for video transcriptions and vision; the bundled local whisper and Qwen3-VL-2B models work offline.</p>
+          <p>No. It is open source (MIT) and local-first. Cloud keys are optional: <code>webrain chat</code> brings your own model key (or points at a keyless local server), and vision and video transcription can use cloud providers instead of the bundled local whisper and Qwen3-VL-2B models.</p>
         </div>
         <div className="faq-item">
           <h3>Which AI clients does it work with?</h3>
-          <p>Any MCP client: Claude, Claude Code, Cursor, GitHub Copilot, Codex, Gemini, and more. Register it once in the client's MCP config and the model drives the browser itself.</p>
+          <p>Any MCP client: Claude, Claude Code, Cursor, GitHub Copilot, Codex, Gemini, and more. Register it once in the client's MCP config and the model drives the browser itself. Or use no client at all: <code>webrain chat</code> runs the loop in this binary.</p>
         </div>
         <div className="faq-item">
           <h3>How is this different from a scraping API?</h3>
           <p>webrain runs on your machine, sends no data to a third party, and gives the LLM a real browser with stealth and challenge bypass. For static pages it can be 10-100× faster than a full browser.</p>
+        </div>
+        <div className="faq-item">
+          <h3>Does <code>webrain chat</code> read my own Copilot setup?</h3>
+          <p>No. The runtime starts in the SDK's empty client mode with its own state directory, so your own MCP servers, skills, session store, memory and telemetry stay out of the turn, and the model sees webrain's 18 tools and nothing else. Reads and tool calls run; a shell command or a file write waits for <code>--yes</code>.</p>
         </div>
       </div>
     </div>

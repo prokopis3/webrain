@@ -67,7 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now says the default build, because a `chat` build embeds a ~135 MB runtime.
   New landing section for `webrain chat` — one command, your key, the same 18
   tools and nothing else — plus the same count fixes in `overview.mdx` and
-  `guides/agent-decision-guide.mdx`.
+  `guides/agent-decision-guide.mdx`. The FAQ's "no API key needed" answer now
+  admits that a chat turn does need one (or a keyless local server), and gains
+  an entry for what `webrain chat` does and does not read from your own Copilot
+  setup.
 
 ### Fixed
 
