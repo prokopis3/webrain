@@ -47,5 +47,14 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --features pdfium
 
+      # The `chat` feature is off by default (it pulls a ~135 MB bundled Copilot
+      # runtime at build time), so without this step it would only ever be
+      # compiled by a release tag — i.e. it would rot silently between releases.
+      # One Linux job, download and all, is the cheapest way to keep it honest.
+      - name: check chat feature
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev
+          cargo clippy -p webrain-cli --all-targets --features pdfium,chat
+
       - name: test
         run: cargo test --workspace

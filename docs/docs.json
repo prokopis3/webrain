@@ -62,7 +62,8 @@
               "guides/structured-extraction",
               "guides/scrape-at-scale",
               "guides/auth-and-login",
-              "guides/watch-videos"
+              "guides/watch-videos",
+              "guides/chat"
             ]
           },
           {

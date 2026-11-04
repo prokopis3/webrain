@@ -136,6 +136,18 @@ Add `--features pdfium` to that `cargo build` if you need `webrain_pdf`
 this OS/arch into the engine cache, which is loaded at runtime rather than linked
 in.
 
+Add `--features chat` for `webrain chat`. Two consequences worth knowing before
+you type it:
+
+- The build now needs **Rust 1.94+** (the `github-copilot-sdk` crate's floor,
+  enforced by Cargo's MSRV-aware resolver). The workspace declares `1.94`, so an
+  older toolchain fails on *any* `cargo build`, feature or not.
+- The binary embeds the Copilot CLI runtime (~135 MB per platform, downloaded
+  and SHA-256 verified at build time), so the artifact grows from ~37 MB to
+  roughly 170 MB. That is why the feature is off by default for source builds.
+- It links **OS OpenSSL 3** on Linux; a static/vendored OpenSSL is rejected by
+  the SDK, which is why the published musl builds ship without `chat`.
+
 ## Linux dependencies
 
 Chrome needs system libraries on Linux. Install them before first run:

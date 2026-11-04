@@ -11,6 +11,12 @@ use std::env;
 use webrain_core::CdpBackend;
 use webrain_core::browser::BrowserBackend;
 
+mod chat;
+// Only exists with `--features chat`: without it, `webrain chat` still resolves
+// and prints its config, then says how to build the runtime.
+#[cfg(feature = "chat")]
+mod chat_session;
+
 /// One row per subcommand: (name, usage, one-line about, extra notes).
 ///
 /// Help lives in ONE table used by both the overview and the per-command page, so
@@ -52,6 +58,12 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "webrain diff <a> <b> [--max N] [--json]",
         "What changed between two pages, or a page and a saved baseline. Exit 1 when they differ.",
         "Each side takes an http(s) URL or a local file. Lines are whitespace-normalised and blank\n  lines dropped, so re-indentation or re-minification is not reported as a change. Needs no\n  browser: both sides are fetched over plain HTTP.",
+    ),
+    (
+        "chat",
+        "webrain chat \"<prompt>\" [--provider P] [--model ID] [--key-from VAR] [--base-url URL]\n    [--max-output-tokens N] [--timeout SECS] [--yes] [--json] [--no-stream] [--print-config]",
+        "Run one Copilot agent turn on your own model key, with webrain's own MCP tools attached.",
+        "The agent's tools ARE this binary (`webrain mcp` over stdio), so it can navigate, extract\n  and screenshot. The key comes from --key-from, WEBRAIN_CHAT_API_KEY, or the ambient\n  OPENROUTER/OPENAI/ANTHROPIC/GEMINI/FIREWORKS/DASHSCOPE/GROQ variables — first hit wins, in\n  that order. --print-config resolves the chain, prints it with the key redacted and exits,\n  which is the offline way to see what would be used. Tool calls that write or click need\n  --yes; the default approves reads and navigation only. Needs a build made with\n  --features chat (the release binaries have it; musl builds do not).",
     ),
     (
         "upgrade",
@@ -305,12 +317,14 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    // Defined in webrain-core so the variables the resolver reads and the ones
+    // `help env` advertises cannot drift apart.
+    webrain_core::byok::CHAT_ENV_GROUP,
     (
         "Logging",
         &[("RUST_LOG", "log verbosity (webrain=info,tungstenite=warn)")],
     ),
 ];
-
 /// Render the grouped environment listing (overview tail and `help env`).
 fn env_section() -> String {
     let mut s = String::new();
@@ -1630,6 +1644,9 @@ fn main() -> anyhow::Result<()> {
         Some("diff") => {
             cmd_diff(&args)?;
         }
+        Some("chat") => {
+            chat::run(&args, &rt)?;
+        }
         Some("-v" | "--version" | "version") => {
             println!("webrain {}", env!("CARGO_PKG_VERSION"));
         }
@@ -2144,6 +2161,13 @@ fn big_stack<T: Send + 'static>(
         .unwrap_or_else(|_| Err(anyhow::anyhow!("MCP thread panicked")))
 }
 
+/// Does this build carry the Copilot runtime that `webrain chat` needs? The
+/// SDK embeds it (or extracts it on first use) only with `--features chat`.
+#[cfg(feature = "chat")]
+const CHAT_RUNTIME: bool = github_copilot_sdk::HAS_BUNDLED_CLI;
+#[cfg(not(feature = "chat"))]
+const CHAT_RUNTIME: bool = false;
+
 /// `webrain doctor` — diagnose the install: version, MCP server, CDP ports,
 /// engines (agent-browser-style discovery), encrypted vault.
 /// Exit 0 if a browser is reachable, 2 otherwise.
@@ -2211,6 +2235,37 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
             "⚠️ empty — `webrain vault set`"
         }
     );
+    // chat: provider resolution is pure, so doctor answers it without spawning
+    // anything. Both halves are reported — a key with no runtime, and a runtime
+    // with no key, are different fixes.
+    {
+        let owned: Vec<(String, String)> = std::env::vars().collect();
+        let env: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let who = match webrain_core::byok::resolve_from(&env, &Default::default()) {
+            Ok(Some(p)) => match (&p.key_env, CHAT_RUNTIME) {
+                (_, true) => format!(
+                    "✅ {}/{} ({})",
+                    p.provider_type,
+                    p.model,
+                    p.key_env.as_deref().unwrap_or("keyless")
+                ),
+                (Some(v), false) => format!(
+                    "⚠️ resolved via {v} but this build has no runtime — rebuild with `--features chat`"
+                ),
+                (None, false) => {
+                    "⚠️ keyless endpoint but this build has no runtime — `--features chat`".into()
+                }
+            },
+            Ok(None) => "⚠️ no key — OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, \
+                 GEMINI_API_KEY, FIREWORKS_API_KEY, DASHSCOPE_API_KEY or GROQ_API_KEY"
+                .to_string(),
+            Err(e) => format!("❌ {e}"),
+        };
+        println!("  chat              {who}");
+    }
     let rec = if rt.block_on(async { check_tcp("127.0.0.1", 9222).await }) {
         "chrome (9222)"
     } else if rt.block_on(async { check_tcp("127.0.0.1", 9224).await }) {

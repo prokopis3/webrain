@@ -12,6 +12,7 @@
 
 pub mod backends;
 pub mod browser;
+pub mod byok;
 pub mod captcha;
 pub mod engines;
 pub mod httpcache;

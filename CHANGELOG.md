@@ -16,6 +16,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they differ so a cron job can act on it. The comparison is a multiset line
   difference (O(n) on a 10k-line page) rather than an LCS — a monitor needs the
   added and removed lines, not hunk alignment.
+- **cli**: `webrain chat "<prompt>"` — one Copilot agent turn on your own model
+  key, with webrain's own MCP tools attached (the session spawns `webrain mcp`
+  over stdio, so the model gets the 18 `webrain_*` tools as `webrain-webrain_*`).
+  BYOK resolution is a 7-row table in `webrain-core::byok`, first match wins:
+  flags → `WEBRAIN_CHAT_*` → ambient `OPENROUTER` / `OPENAI` / `ANTHROPIC`
+  (`CLAUDE`) / `GEMINI` (`GOOGLE`) / `FIREWORKS` / `DASHSCOPE` (`QWEN`) / `GROQ`,
+  the same variable names the vision chain already uses. `--print-config`
+  resolves and prints the chain with the key redacted, offline, in builds without
+  the feature. `WEBRAIN_CHAT_BASE_URL` alone reaches a keyless local server.
+  Exit 0 completed, 1 turn failed, 2 could not start.
+- **cli**: `webrain doctor` reports chat as a third state alongside engines and
+  vault: `ready (provider/model)`, `no key (and which variables would work)`, or
+  `resolved but this build has no runtime`.
+- **build**: the release matrix now builds `--features pdfium,chat` for the six
+  targets that can link OS OpenSSL 3 (linux gnu x64/arm64, macOS x64/arm64,
+  Windows x64/arm64); the two static musl builds stay `pdfium`-only, where
+  `webrain chat` explains how to rebuild. CI runs one cached `--features
+  pdfium,chat` clippy job so the feature cannot rot between releases.
+- **docs**: new [chat guide](/guides/chat) plus the provider table and the
+  `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
+
+### Changed
+
+- **build**: workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
+  (declared `rust-version = 1.94.0`, and resolver 3 is MSRV-aware, so the floor
+  applies even with the feature off). Released binaries are unaffected; only
+  from-source builds on 1.88–1.93 are.
 
 ### Fixed
 
