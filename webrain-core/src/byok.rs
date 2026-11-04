@@ -126,7 +126,7 @@ pub struct ChatProvider {
 /// How `--search` is served for a resolved provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// No `--search`, or the provider has no search at all.
+    /// No `--search`, or nothing to search with.
     Off,
     /// The provider searches the web itself: OpenRouter's `:online` model
     /// variant (native search where the vendor has it, Exa otherwise).
@@ -134,6 +134,10 @@ pub enum SearchMode {
     /// Search is a separate REST endpoint that must run before the turn:
     /// DeepSeek's `POST /v1/tools/search`.
     DeepSeekApi,
+    /// No vendor search is reachable through the SDK, so webrain searches with
+    /// its own engines and grounds the turn on the results. Every provider can
+    /// get this, which is why `--search` never has to be refused.
+    WebrainSerp,
 }
 
 impl ChatProvider {
@@ -143,43 +147,36 @@ impl ChatProvider {
         self.bearer.as_deref()
     }
 
-    /// Which search mechanism this provider has. Only the two shapes that
-    /// exist in the wild are modelled: a model variant (OpenRouter) and a
-    /// separate search endpoint (DeepSeek). Everything else has no search
-    /// product, and `with_search` says so instead of pretending.
+    /// Which search mechanism this provider has: a model variant (OpenRouter),
+    /// its own search endpoint (DeepSeek), or our engines (everything else).
     pub fn search_mode(&self) -> SearchMode {
         if self.base_url.contains("openrouter.ai") {
             SearchMode::ModelVariant
         } else if self.base_url.contains("api.deepseek.com") {
             SearchMode::DeepSeekApi
         } else {
-            SearchMode::Off
+            SearchMode::WebrainSerp
         }
     }
 
-    /// `--search`: turn on provider-native web search.
+    /// `--search`: turn search on.
     ///
-    /// OpenRouter is rewritten to its `:online` slug (a model id is the only
-    /// per-turn field this SDK lets us change). DeepSeek is left alone here
-    /// because its search is an endpoint the caller must hit — see
-    /// `search_mode`. Any other row has no search to switch on, and saying so
-    /// beats a flag that silently does nothing.
-    pub fn with_search(self, search: bool) -> Result<Self, String> {
-        if !search {
-            return Ok(self);
+    /// Only OpenRouter is rewritten here, to its `:online` slug, because a
+    /// model id is the one per-turn field this SDK exposes. DeepSeek and
+    /// everyone else are grounded by a call the caller makes before the turn —
+    /// see `search_mode`. Nothing is uncertain enough to fail: a provider with
+    /// no search product still gets webrain's own results, which is not the
+    /// vendor searching but is still live web context.
+    pub fn with_search(self, search: bool) -> Self {
+        if !search || self.search_mode() != SearchMode::ModelVariant {
+            return self;
         }
-        match self.search_mode() {
-            SearchMode::ModelVariant if self.model.ends_with(":online") => Ok(self),
-            SearchMode::ModelVariant => Ok(Self {
-                model: format!("{}:online", self.model),
-                ..self
-            }),
-            SearchMode::DeepSeekApi => Ok(self),
-            SearchMode::Off => Err(format!(
-                "--search needs a provider with a search product (openrouter's :online, or deepseek's /v1/tools/search). \
-                 {} has none. Drop --search, or let the agent call webrain_search / webrain_serp, which are always attached.",
-                self.key_env.as_deref().unwrap_or("This provider")
-            )),
+        if self.model.ends_with(":online") {
+            return self;
+        }
+        Self {
+            model: format!("{}:online", self.model),
+            ..self
         }
     }
 }
@@ -564,25 +561,12 @@ mod tests {
             .unwrap()
             .unwrap();
         let plain = p.model.clone();
-        let searched = p.clone().with_search(true).unwrap();
+        let searched = p.clone().with_search(true);
         assert_eq!(searched.model, "anthropic/claude-sonnet-4.5:online");
         // Idempotent: `--search` twice (or a model the user already marked)
         // must not become `:online:online`.
-        let again = searched.clone().with_search(true).unwrap();
-        assert_eq!(again.model, searched.model);
-        assert_eq!(p.with_search(false).unwrap().model, plain);
-    }
-
-    #[test]
-    fn search_errors_where_the_provider_has_no_search_product() {
-        // Groq has no search endpoint and no `:online` variant, so `--search`
-        // must refuse rather than quietly do nothing.
-        let p = resolve_from(&env(&[("GROQ_API_KEY", "k")]), &ChatFlags::default())
-            .unwrap()
-            .unwrap();
-        let err = p.with_search(true).unwrap_err();
-        assert!(err.contains("openrouter"), "{err}");
-        assert!(err.contains("GROQ_API_KEY"), "{err}");
+        assert_eq!(searched.clone().with_search(true).model, searched.model);
+        assert_eq!(p.with_search(false).model, plain);
     }
 
     #[test]
@@ -592,14 +576,19 @@ mod tests {
             .unwrap();
         assert_eq!(ds.search_mode(), SearchMode::DeepSeekApi);
         // DeepSeek's model id is untouched: the search runs as its own call.
-        assert_eq!(
-            ds.clone().with_search(true).unwrap().model,
-            "deepseek-flash"
-        );
+        assert_eq!(ds.clone().with_search(true).model, "deepseek-flash");
 
         let or = resolve_from(&env(&[("OPENROUTER_API_KEY", "k")]), &ChatFlags::default())
             .unwrap()
             .unwrap();
         assert_eq!(or.search_mode(), SearchMode::ModelVariant);
+
+        // A provider with no search product still gets live context, from
+        // webrain's own engines, so the flag is never refused.
+        let groq = resolve_from(&env(&[("GROQ_API_KEY", "k")]), &ChatFlags::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(groq.search_mode(), SearchMode::WebrainSerp);
+        assert_eq!(groq.clone().with_search(true).model, groq.model);
     }
 }

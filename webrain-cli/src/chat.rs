@@ -162,18 +162,8 @@ pub fn run(argv: &[String], rt: &tokio::runtime::Runtime) -> anyhow::Result<()> 
         }
     };
     // Before `--print-config`, so what it prints is the model that will be
-    // sent. `--search` can refuse (provider has no search variant); that is an
-    // input error, hence exit 2.
-    let resolved = match resolved {
-        Some(p) => match p.with_search(args.search) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                eprintln!("webrain chat: {e}");
-                std::process::exit(2);
-            }
-        },
-        None => None,
-    };
+    // sent (`--search` rewrites `openrouter` models to their `:online` slug).
+    let resolved = resolved.map(|p| p.with_search(args.search));
 
     // --print-config is the whole resolution chain, offline and deterministic:
     // it works in a default build precisely so CI can assert it.

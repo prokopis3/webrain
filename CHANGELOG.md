@@ -9,14 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **cli**: `webrain chat --search` — the provider's own web search, for the two
-  vendors that sell one as something a chat turn can use. On `openrouter` it
-  rewrites the model to its `:online` slug (native search for Anthropic, Google,
-  OpenAI, Perplexity and xAI models, Exa otherwise). On `deepseek` webrain calls
-  the Search API itself (`POST /v1/tools/search`) before the turn and hands the
-  model the top 5 titles, urls and snippets to cite, because DeepSeek's search
-  is an endpoint rather than a request field. Any other row refuses with exit 2
-  and points at the always-attached `webrain_search`/`webrain_serp` instead.
+- **cli**: `webrain chat --search` — live web results in front of the turn,
+  whichever provider is in use. On `openrouter` it rewrites the model to its
+  `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
+  models, Exa otherwise). On `deepseek` webrain calls the Search API itself
+  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets.
+  Every other provider — Groq, OpenAI, Anthropic, Gemini, Fireworks, DashScope,
+  local servers — gets the same citation block built from webrain's own engines
+  (duckduckgo + bing over pooled HTTP, no browser), because the Copilot SDK
+  forwards a fixed provider config and cannot inject a vendor search field.
+  One line on stderr names the source and the count.
 - **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
   `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
   larger catalog entry). Its search endpoint is what `--search` calls.

@@ -119,29 +119,38 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--no-stream` | print only the final answer instead of token deltas |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
 
-## `--search`: the provider's own web search
+## `--search`: live web results, three ways
 
-Two shapes exist, and the flag only works where one of them does:
+The vendors do not sell the same thing, so the flag does whatever the provider
+actually supports instead of pretending they are interchangeable:
 
-| Provider | What `--search` does |
-|---|---|
-| `openrouter` | rewrites the model to its `:online` slug. OpenRouter runs the `web` plugin: the vendor's **native** search for Anthropic, Google, OpenAI, Perplexity and xAI models, Exa for everything else. Results come back as citations, priced per search. |
-| `deepseek` | webrain calls DeepSeek's **Search API** (`POST https://api.deepseek.com/v1/tools/search` with the same key) *before* the turn, then hands the top 5 titles, urls and snippets to the model as context and tells it to cite them. Billed per successful search, not per token. |
-| anything else | refused with exit 2. Groq, Fireworks, DashScope, Gemini-direct and generic OpenAI-compatible endpoints sell no search product, and the Copilot SDK gives this CLI no request field to inject one into. |
+| Provider | What `--search` does | Whose search |
+|---|---|---|
+| `openrouter` | rewrites the model to its `:online` slug: the `web` plugin uses the vendor's **native** search for Anthropic, Google, OpenAI, Perplexity and xAI models, Exa for everything else. Results arrive as citations. | the model's own |
+| `deepseek` | webrain calls DeepSeek's **Search API** (`POST https://api.deepseek.com/v1/tools/search`, same key) *before* the turn and prepends the top 5 titles, urls and snippets with an instruction to cite them | DeepSeek |
+| `groq`, `openai`, `anthropic`, `gemini`, `fireworks`, `dashscope`, local servers | webrain searches with its **own engines** (duckduckgo + bing over pooled HTTP, no browser) and prepends the same citation block | webrain's SERP |
 
-Why DeepSeek is a call rather than a switch: its search is a separate REST
-endpoint, not a chat-completions field, so there is nothing for
-`ProviderConfig` to carry. Doing the call ourselves is the only way the flag can
-mean anything there.
+Why the split: this CLI cannot inject a request field into the model call — the
+Copilot SDK forwards a fixed provider config, not arbitrary body parameters — so
+the only search it can switch on is one the vendor exposes as a *model variant*
+(OpenRouter) or as an *endpoint it can call itself* (DeepSeek, and ours).
 
-If you just want grounded answers on a provider with no search product, drop the
-flag: the agent already has `webrain_search` and `webrain_serp` (seven engines,
-five of them browser-free) attached to every turn.
+Every branch prints one line on stderr naming the source and the count:
+
+```
+· search · 5 results (auto)
+· search · 5 results (deepseek)
+```
 
 ```bash
 webrain chat "what changed in Rust 1.95" --provider deepseek --search
 webrain chat "what changed in Rust 1.95" --provider openrouter --search
+webrain chat "what changed in Rust 1.95" --provider groq --search
 ```
+
+`--search` adds one search per turn. The agent can also call `webrain_search` /
+`webrain_serp` itself, mid-turn, as many times as the question needs — that is
+what it does without the flag.
 
 ## Permissions
 

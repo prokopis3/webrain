@@ -1699,13 +1699,15 @@ fn deepseek_results(v: &serde_json::Value) -> Vec<SerpResult> {
         .unwrap_or_default()
 }
 
-/// Render results as the context block prepended to a chat prompt.
-pub fn grounding_block(query: &str, results: &[SerpResult]) -> String {
+/// Render results as the context block prepended to a chat prompt. `source`
+/// names where they came from, so a model (and a reader of the transcript) can
+/// tell DeepSeek's own search from webrain's engines.
+pub fn grounding_block(source: &str, query: &str, results: &[SerpResult]) -> String {
     if results.is_empty() {
         return String::new();
     }
     let mut out = format!(
-        "Web search results for {query:?} (from DeepSeek Search, live). Use them and cite the urls:\n"
+        "Web search results for {query:?} (from {source}, live). Use them and cite the urls:\n"
     );
     for r in results {
         out.push_str(&format!(
@@ -2388,13 +2390,14 @@ mod tests {
 
     #[test]
     fn grounding_block_names_sources_and_stays_empty_without_results() {
-        assert_eq!(grounding_block("q", &[]), "");
+        assert_eq!(grounding_block("webrain serp", "q", &[]), "");
         let rows = deepseek_results(&serde_json::json!({
             "results": [{ "title": "T", "url": "https://a.test/p", "snippet": "S" }]
         }));
-        let block = grounding_block("rust proxies", &rows);
+        let block = grounding_block("DeepSeek Search", "rust proxies", &rows);
         assert!(block.contains("https://a.test/p"), "{block}");
         assert!(block.contains("1. T"), "{block}");
+        assert!(block.contains("DeepSeek Search"), "{block}");
     }
 
     #[test]
