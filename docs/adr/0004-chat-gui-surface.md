@@ -1,6 +1,6 @@
 # ADR-004: a GUI for `webrain chat`
 
-- Status: Proposed
+- Status: Accepted — implemented in `webrain-cli/src/chat_server.rs`
 - Date: 2026-11-04
 - Related: ADR-001 (architecture), ADR-003 (chat over the Copilot SDK)
 

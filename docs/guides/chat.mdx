@@ -124,6 +124,7 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--timeout SECS` | per-turn wall clock, default 300 |
 | `--search` | turn on the provider's own web search, where it has one (see below) |
 | `--yes` | approve **every** tool call |
+| `--serve [--port N]` | same session, in a browser: the binary serves its own page on `127.0.0.1:8787` (see [In a browser](#in-a-browser)) |
 | `--json` | emit `{provider, model, base_url, answer, tools, usage, exit_code}` on stdout |
 | `--no-stream` | print only the final answer instead of token deltas |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
@@ -211,6 +212,48 @@ webrain chat "what changed in Rust 1.95" --provider groq --search
 `--search` adds one search per turn. The agent can also call `webrain_search` /
 `webrain_serp` itself, mid-turn, as many times as the question needs — that is
 what it does without the flag.
+
+## In a browser
+
+```bash
+webrain chat --serve                 # http://127.0.0.1:8787/
+webrain chat --serve --port 9000     # anywhere else on loopback
+```
+
+The same session, driven from a page instead of a pipe: transcript on the left,
+a tool card per `webrain_*` call, a token meter in the header, and a modal for
+every permission request. The page is compiled into the binary (`include_str!`),
+so there is no build step and no second process, and it is the only UI that
+opens — nothing is fetched from a CDN.
+
+Four routes, all on loopback:
+
+| Route | What it does |
+|---|---|
+| `GET /` | the page |
+| `GET /events` | SSE, one `data: {"type":…,"data":{…}}` frame per runtime event |
+| `POST /turn` | `{"prompt":"…"}` → `202`, or `409` while a turn is running |
+| `POST /permission` | `{"id":"…","allow":true}` — answers a pending modal |
+
+The event **names are the runtime's own** (`assistant.message_delta`,
+`tool.execution_start`, `session.usage_info`, `model.call_failure`, …) rather
+than a translated dialect: the page maps each one to an element, and a name it
+does not know is dropped instead of breaking the stream. One event is ours:
+`webrain.permission`, carrying the request id the modal answers.
+
+Two things that matter more than the layout:
+
+- **Nothing is invented.** If the runtime did not emit it, the pane stays empty.
+  The composer re-enables on `assistant.idle` — the only signal a turn is over.
+- **The modal is the security boundary.** Approving in the page is the same
+  authority as `--yes`, so it shows the exact request (the type of action, the
+  command or url) and waits. No answer within 120 s is a **deny**, and the turn
+  says so rather than hanging. `--serve` does not imply `--yes`.
+
+`--serve` is loopback-only on purpose: a listener that can approve a shell
+command must not be reachable from the LAN. Put a reverse proxy in front of it
+and add authentication if you need it elsewhere — the binary will not do that
+for you.
 
 ## Permissions
 

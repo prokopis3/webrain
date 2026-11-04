@@ -22,6 +22,9 @@ use github_copilot_sdk::types::{
 };
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
+use github_copilot_sdk::handler::PermissionHandler;
+use github_copilot_sdk::session::Session;
+
 use super::chat::Args;
 use webrain_core::backends::cdp::CdpBackend;
 use webrain_core::byok::{ChatProvider, SearchMode};
@@ -183,7 +186,15 @@ fn mode_label(mode: SearchMode) -> &'static str {
     }
 }
 
-pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
+/// Build the runtime client and the session in one place, so the one-shot turn
+/// (`run`) and `--serve` cannot drift apart: same provider config, same tool
+/// allowlist, same isolation. `permission` overrides the policy handler — the
+/// web UI answers prompts instead of the CLI's `not_destructive` policy.
+pub(crate) async fn connect(
+    args: &Args,
+    provider: &ChatProvider,
+    permission: Option<Arc<dyn PermissionHandler>>,
+) -> anyhow::Result<(Client, Session)> {
     let exe = std::env::current_exe()?;
 
     // Self-attach: server key `webrain`, so tools surface as
@@ -229,7 +240,9 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         // One-shot: no persistent workspace, no cross-session store, no
         // `~/.copilot/session-state/<id>` left behind for a command that exits.
         .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(false));
-    if args.yes {
+    if let Some(handler) = permission {
+        config = config.with_permission_handler(handler);
+    } else if args.yes {
         config = config.approve_all_permissions();
     } else {
         config = config.approve_permissions_if(not_destructive);
@@ -288,6 +301,11 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
         .create_session(config)
         .await
         .map_err(|e| anyhow::anyhow!("could not create the session: {e}"))?;
+    Ok((client, session))
+}
+
+pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
+    let (client, session) = connect(args, provider, None).await?;
 
     // Subscribe before sending: a create-time turn can emit deltas before a
     // late subscriber exists.

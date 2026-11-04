@@ -17,7 +17,7 @@ pdfium = ["webrain-mcp/pdfium"]
 # `webrain chat`: the Copilot agent loop + a bundled CLI runtime (~135 MB per
 # platform, downloaded and SHA-verified at build time). Off by default so
 # `cargo build` stays lean; the release matrix turns it on for every target.
-chat = ["dep:github-copilot-sdk", "dep:openssl"]
+chat = ["dep:github-copilot-sdk", "dep:openssl", "dep:async-trait"]
 
 [dependencies]
 webrain-core = { path = "../webrain-core" }
@@ -32,6 +32,8 @@ sha2 = "0.11"
 # Optional: `webrain chat`. Brings its own JSON-RPC client, permission
 # handlers and the bundled runtime; nothing else in the crate depends on it.
 github-copilot-sdk = { version = "1", optional = true }
+# `--serve` implements the SDK's async `PermissionHandler` trait.
+async-trait = { version = "0.1", optional = true }
 
 # `chat` reaches `native-tls` through the SDK's `network-forwarding`, which is
 # `openssl-sys` on Linux. A static musl target has no system OpenSSL to link, so

@@ -14,6 +14,14 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Added
 
+- **`webrain chat --serve`** — the same session in a browser: the binary serves
+  its own page (no build step, nothing from a CDN) plus `GET /`, `GET /events`
+  (SSE of the runtime's own events), `POST /turn` and `POST /permission`. Each
+  event becomes one element — a tool card, a token meter, an error card that
+  keeps the provider's message — and the composer re-enables on
+  `assistant.idle`. The permission modal is the security boundary: it shows the
+  exact request, answers once, denies after 120 s without an answer, and
+  `--serve` does not imply `--yes`. Loopback only.
 - **`webrain chat`** — one Copilot agent turn on your own model key, with the
   18 `webrain_*` tools attached over stdio. BYOK resolution is a table, first
   match wins: flags → `WEBRAIN_CHAT_*` → the ambient vendor variable, across
