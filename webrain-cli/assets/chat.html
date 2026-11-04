@@ -153,6 +153,23 @@
       .msg.err { border-left-color: var(--bad); }
       textarea { font-variant-ligatures: none; }
       :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      /* Empty state: the first thing a new user sees. Real prompts, because a
+         blank box makes "what can this do" the hardest question on the page. */
+      .empty { display: grid; gap: 0.6rem; max-width: 40rem; margin: 6vh auto; }
+      .empty h1 { font-size: 15px; margin: 0 0 0.2rem; font-weight: 600; }
+      .empty p { color: var(--dim); margin: 0 0 0.6rem; }
+      .starter {
+        text-align: left; background: var(--panel); color: var(--text);
+        border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.8rem;
+        font: inherit; font-weight: 400; cursor: pointer;
+      }
+      .starter:hover { border-color: #2f3b47; }
+      .starter b { display: block; color: var(--accent); font-weight: 600; margin-bottom: 2px; }
+      .copy {
+        float: right; background: none; border: 1px solid var(--line); color: var(--dim);
+        border-radius: 6px; padding: 0 0.4rem; font-size: 11px; font-weight: 400; cursor: pointer;
+      }
+      .copy:hover { color: var(--text); }
     </style>
   </head>
   <body>
@@ -220,14 +237,54 @@
         return n;
       };
       const scroll = () => (log.scrollTop = log.scrollHeight);
+      // Pinned = following the stream. Scrolling up un-pins, so a callback that
+      // produces a lot of text never yanks the user away from what they read.
+      let pinned = true;
+      log.addEventListener("scroll", () => {
+        pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+      });
+      const follow = () => {
+        if (pinned) scroll();
+      };
+
+      function emptyState() {
+        const box = el("div", "empty");
+        box.append(el("h1", "", "webrain chat"));
+        box.append(
+          el("p", "", "The agent has this binary's own tools: browse, extract, screenshot, PDF, batch."),
+        );
+        for (const [title, prompt] of [
+          ["scrape a listing", "scrape every product title and price from "],
+          ["compare pages", "open these two pages and tell me what changed between them: "],
+          ["research a question", "find out what changed in the latest Rust release and cite the sources"],
+        ]) {
+          const b = el("button", "starter");
+          b.append(el("b", "", title), el("span", "", prompt));
+          b.onclick = () => {
+            promptBox.value = prompt;
+            promptBox.focus();
+          };
+          box.append(b);
+        }
+        log.append(box);
+      }
 
       function message(role, text) {
         const box = el("div", `msg ${role}`);
         box.append(el("div", "who", role === "user" ? "you" : "webrain"));
         const body = el("div", "", text);
+        if (role === "assistant") {
+          const cp = el("button", "copy", "copy");
+          cp.onclick = () => {
+            navigator.clipboard?.writeText(body.textContent || "");
+            cp.textContent = "copied";
+            setTimeout(() => (cp.textContent = "copy"), 1200);
+          };
+          box.prepend(cp);
+        }
         box.append(body);
         log.append(box);
-        scroll();
+        follow();
         return body;
       }
 
@@ -239,7 +296,7 @@
           case "assistant.message_delta":
             if (!bubble) bubble = message("assistant", "");
             bubble.textContent += d.deltaContent || "";
-            return scroll();
+            return follow();
           case "assistant.message":
             // The streamed bubble is the same message: replace its text with the
             // final one (self-healing if a delta was dropped) instead of opening
@@ -397,6 +454,20 @@
           sendTurn();
         }
       });
+      // One-key focus and modal escape: a harness should be usable without
+      // reaching for the mouse mid-turn.
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && pending) answer(false);
+        if (e.key === "/" && document.activeElement !== promptBox) {
+          e.preventDefault();
+          promptBox.focus();
+        }
+      });
+      promptBox.addEventListener("input", () => {
+        promptBox.style.height = "auto";
+        promptBox.style.height = `${Math.min(promptBox.scrollHeight, 200)}px`;
+      });
+      emptyState();
 
       const stream = new EventSource("/events");
       stream.onmessage = (e) => {
