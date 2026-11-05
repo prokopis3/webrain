@@ -125,6 +125,14 @@ fn dir_or(override_dir: Option<std::ffi::OsString>) -> PathBuf {
 /// First `name:` inside the YAML frontmatter. `None` when the file has none —
 /// which is how a reference chapter is told apart from a skill.
 pub fn frontmatter_name(text: &str) -> Option<String> {
+    frontmatter(text, "name")
+}
+
+/// One scalar from the frontmatter — `name`, `description`. Only the first 40
+/// lines are read and only a single-line value is returned: a skill's own
+/// `name`/`description` are the only keys this project reads, and a folded
+/// multi-line description would need a real YAML parser for no gain.
+pub fn frontmatter(text: &str, key: &str) -> Option<String> {
     // A UTF-8 BOM would make the opening `---` invisible to `lines()`.
     let text = text.trim_start_matches('\u{feff}');
     let mut lines = text.lines();
@@ -136,7 +144,10 @@ pub fn frontmatter_name(text: &str) -> Option<String> {
         if line == "---" {
             break;
         }
-        if let Some(v) = line.strip_prefix("name:") {
+        if let Some(v) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
             let v = v.trim().trim_matches(['"', '\'']).trim();
             if !v.is_empty() {
                 return Some(v.to_string());

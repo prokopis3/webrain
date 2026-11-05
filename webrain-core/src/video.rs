@@ -501,9 +501,13 @@ fn parse_frame_paths(dir: &Path, stderr: &[u8]) -> Vec<Frame> {
 // Audio → Whisper
 // ---------------------------------------------------------------------------
 
-fn extract_audio(video: &str, dir: &Path) -> Result<String> {
-    // 16kHz mono s16le WAV: the format whisper-cli (whisper.cpp) requires, and
-    // the cloud Whisper APIs accept too — one audio file, both backends.
+/// Any ffmpeg-readable audio (or video) → 16 kHz mono s16le WAV, in `dir`.
+///
+/// 16 kHz mono is what both recognizers need — `whisper-cli` (whisper.cpp) and
+/// `transcribe-cli` (transcribe.cpp) — and what the cloud Whisper APIs accept,
+/// so one converted file serves every backend. `asr::transcribe_audio` reuses
+/// this for a dictated take; only the source format differs.
+pub fn extract_audio(video: &str, dir: &Path) -> Result<String> {
     let out_path = dir.join("audio.wav");
     let out = run(std::process::Command::new(tool_path("ffmpeg"))
         .args(["-hide_banner", "-loglevel", "error", "-y"])
