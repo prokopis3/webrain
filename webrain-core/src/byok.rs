@@ -15,7 +15,12 @@
 ///
 /// `provider_type` is derived from the row, not stored: only Anthropic speaks a
 /// non-OpenAI wire format, and every other row is an OpenAI-compatible gateway.
-pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 8] = [
+///
+/// Rows are appended, never reordered: the order is the ambient fallback, so
+/// moving one silently changes which key wins for someone who has two set.
+/// The first alias is also the page's provider id, which is why the friendly
+/// name (`QWEN`, `GROK`, `KIMI`) leads and the vendor's own variable follows it.
+pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 16] = [
     (
         &["OPENROUTER_API_KEY"],
         "https://openrouter.ai/api/v1",
@@ -38,7 +43,9 @@ pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 8] = [
         "accounts/fireworks/models/qwen3-235b-a22b",
     ),
     (
-        &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+        // Was the `dashscope` row: same endpoint, named for the model family
+        // people actually ask for. `DASHSCOPE_API_KEY` is still an alias.
+        &["QWEN_API_KEY", "DASHSCOPE_API_KEY"],
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "qwen3-max",
     ),
@@ -59,6 +66,53 @@ pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 8] = [
         // the other catalog entry, reachable with --model.
         "deepseek-flash",
     ),
+    (
+        // xAI's own API. `XAI_API_KEY` is the variable its docs name; the row's
+        // id is `grok` because that is the model the page is choosing between.
+        &["GROK_API_KEY", "XAI_API_KEY"],
+        "https://api.x.ai/v1",
+        "grok-4",
+    ),
+    (
+        // Moonshot AI, international host (.cn is the mainland one).
+        &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        "https://api.moonshot.ai/v1",
+        // `kimi-latest` follows the newest K-series model, so this row keeps
+        // working when Moonshot renames a dated preview.
+        "kimi-latest",
+    ),
+    (
+        // Z.ai (Zhipu) GLM, international host.
+        &["ZHIPU_API_KEY", "GLM_API_KEY"],
+        "https://api.z.ai/api/paas/v4",
+        "glm-4.6",
+    ),
+    (&["MINIMAX_API_KEY"], "https://api.minimax.io/v1", "MiniMax-M2"),
+    (
+        &["HUNYUAN_API_KEY", "TENCENT_API_KEY"],
+        "https://api.hunyuan.cloud.tencent.com/v1",
+        "hunyuan-turbos-latest",
+    ),
+    (
+        // Volcengine Ark. Model ids are dated releases; the international host
+        // is ark.ap-southeast.volces.com with the same path.
+        &["DOUBAO_API_KEY", "ARK_API_KEY", "VOLCENGINE_API_KEY"],
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "doubao-seed-1-6-250615",
+    ),
+    (
+        // Baidu Qianfan v2 (the OpenAI-compatible one; v1 used its own format).
+        &["QIANFAN_API_KEY", "BAIDU_API_KEY"],
+        "https://qianfan.baidubce.com/v2",
+        "ernie-4.5-turbo-128k",
+    ),
+    (
+        // An aggregator rather than a lab: one Chinese key for Qwen, GLM, Kimi
+        // and DeepSeek weights.
+        &["SILICONFLOW_API_KEY", "SILICONCLOUD_API_KEY"],
+        "https://api.siliconflow.com/v1",
+        "deepseek-ai/DeepSeek-V3",
+    ),
 ];
 
 /// The `Chat` group of `webrain help env`, defined here so the variables the
@@ -69,7 +123,9 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
     &[
         (
             "WEBRAIN_CHAT_PROVIDER",
-            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, dashscope/qwen, groq, deepseek",
+            "row to use: openrouter, openai, anthropic/claude, gemini/google, fireworks, \
+             qwen/dashscope, groq, deepseek, grok/xai, kimi/moonshot, zhipu/glm, minimax, \
+             hunyuan, doubao/ark, qianfan/baidu, siliconflow",
         ),
         ("WEBRAIN_CHAT_MODEL", "override the row's default model id"),
         (
@@ -87,12 +143,23 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
         ("ANTHROPIC_API_KEY / CLAUDE_API_KEY", "chat row 3 (Claude)"),
         ("GEMINI_API_KEY / GOOGLE_API_KEY", "chat row 4 (Gemini)"),
         ("FIREWORKS_API_KEY", "chat row 5"),
-        ("DASHSCOPE_API_KEY / QWEN_API_KEY", "chat row 6 (Qwen)"),
+        ("QWEN_API_KEY / DASHSCOPE_API_KEY", "chat row 6 (Qwen)"),
         ("GROQ_API_KEY", "chat row 7"),
         (
             "DEEPSEEK_API_KEY",
             "chat row 8 (deepseek-flash; --model deepseek-v4-pro)",
         ),
+        ("GROK_API_KEY / XAI_API_KEY", "chat row 9 (xAI)"),
+        ("KIMI_API_KEY / MOONSHOT_API_KEY", "chat row 10 (Moonshot)"),
+        ("ZHIPU_API_KEY / GLM_API_KEY", "chat row 11 (Z.ai GLM)"),
+        ("MINIMAX_API_KEY", "chat row 12"),
+        ("HUNYUAN_API_KEY / TENCENT_API_KEY", "chat row 13 (Tencent)"),
+        (
+            "DOUBAO_API_KEY / ARK_API_KEY / VOLCENGINE_API_KEY",
+            "chat row 14 (Volcengine Ark)",
+        ),
+        ("QIANFAN_API_KEY / BAIDU_API_KEY", "chat row 15 (Baidu ERNIE)"),
+        ("SILICONFLOW_API_KEY / SILICONCLOUD_API_KEY", "chat row 16"),
         (
             "COPILOT_CLI_PATH",
             "use a Copilot runtime you already have instead of the bundled one",
@@ -150,6 +217,25 @@ pub enum SearchMode {
 }
 
 impl ChatProvider {
+    /// Build one from parts. `--serve` needs this: the page resolves a row, reads
+    /// the key from the vault, and starts a session against it at runtime. The
+    /// secret can only enter here, which is why `bearer` stays private.
+    pub fn new(
+        provider_type: &'static str,
+        base_url: String,
+        model: String,
+        key_env: Option<String>,
+        bearer: Option<String>,
+    ) -> Self {
+        Self {
+            provider_type,
+            base_url,
+            model,
+            key_env,
+            bearer,
+        }
+    }
+
     /// The secret. Callers hand it to `ProviderConfig::bearer_token` and
     /// nothing else.
     pub fn bearer_token(&self) -> Option<&str> {
