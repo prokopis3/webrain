@@ -9,6 +9,764 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **chat (ui)**: a turn now ends with a **steps** strip — every tool that ran
+  since the prompt, in order, with its duration and its outcome (mint returned,
+  rose failed, gold `answer`) — so the *route* a turn took is readable in one
+  line, the way VS Code's chat shows it. Derived from the rows already on screen
+  (sliced at the last `user` message), not from a second event model.
+- **chat (ui)**: a picture in a reply renders as a figure — the image is the
+  click-through link and the alt text becomes the caption — a standalone URL
+  becomes a destination card (host in the accent, path muted), and a reply table
+  is wrapped in a capped scroller (24rem) instead of pushing the answer off
+  screen. Markdown tables had no scroll box of their own before this.
+
+### Changed
+
+- **chat (ui)**: a tool card's two halves are labelled `input` and `output` (was
+  `result`) and are told apart by colour as well as by label — the request's
+  label and left edge in the tertiary hue, the return's in the primary one, rose
+  when the call failed. A long card can now be read by its edges alone.
+
+- **chat (ui)**: Send and Dictate are now one pair — both a 46px circle with an
+  18px glyph and both centred on the field (`align-items: center` on the footer)
+  instead of a 46×70 pill and a 40px circle sitting on its bottom edge.
+- **chat (ui)**: the tools dialog's `builtin` group behaves like every server
+  group — it folds (caret, `aria-expanded`, remembered in the same
+  `toolsClosed` list under the key `builtin`) and has `all` / `none` — and the
+  footer count adds the builtins in: `9 of 27 preferred` where it used to say
+  `0 of 18` while nine boxes below it were ticked. The search field opens the
+  full width of the header instead of a 15rem stub.
+- **chat (ui)**: a session in the rail is a title and **one** round button now,
+  not two hover targets eating a third of the line. That button opens a small
+  menu underneath with the same two choices, icon and label each: `rename` and
+  `delete`. It opens downward and right-aligned to the trigger (152px, inside a
+  235px rail), flips above the trigger when the row sits closer than the menu's
+  height to the rail's bottom edge — the rail scrolls, so a downward menu there
+  was clipped by 114px on a 360px-tall window — and closes on a press anywhere
+  outside, on Escape, or on the trigger again. Role is `menu`/`menuitem` with
+  `aria-expanded` on the trigger.
+
+### Fixed
+
+- **chat (ui)**: "back to live" left the composer armed for the thread you had
+  been reading — `viewing` was never cleared, so the live conversation's own mode,
+  effort and tool picks were neither restored on screen nor re-saved, and the
+  next prompt ran in the other thread's mode. Leaving history (and `/clear`) now
+  restores the live conversation's setup and re-keys the saved record on it.
+- **chat (ui)**: the `[attached: …]` receipt was matched only as a whole line, so
+  an attachment whose receipt the caret ran into ("…spider.png]what is in this
+  image?") kept its raw `C:\…\Temp\…` path on screen next to the picture. The
+  matcher is no longer anchored — a receipt is a receipt wherever it sits — and
+  "remove all" uses the same one instead of a `startsWith` line test.
+- **chat**: the instruments panel was live-only. `assistant.usage` fed a page-side
+  ledger, nothing wrote it down, so opening any saved conversation showed
+  `— / —` tok, `—` tok/s, `tools 0`, `sources 0` and "no turns yet" — a full
+  column of blanks where the numbers had actually been measured. Each finished
+  turn is now POSTed to `/ledger` (`{n, turn}`), stored in a `turns(convo, n,
+  body)` table upserted by turn number, and replayed by `GET /sessions/id` next
+  to the transcript. `DELETE /sessions/id` drops the ledger with the messages.
+  The live ledger is also re-seeded on load, so a reload no longer restarts the
+  numbering at 1 and overwrites a row already on disk. `tools` and `sources` ride
+  along as running totals in the turn row, which is what lets a saved
+  conversation still report them with no tool rows to count.
+- **chat (ui)**: with nothing measured, the header printed `— / — tok — tok/s`
+  and the panel printed six em-dashes, which reads as "these numbers are zero"
+  when the truth is "nothing has run". Both are now one muted line — "nothing
+  measured yet — the numbers land with the first answer" — and the panel heading
+  says `last turn` rather than `this turn` when you are reading history.
+- **chat (ui)**: the rename and delete buttons in the session rail were two
+  38 px filled circles that were invisible until hover and still took their width
+  out of every row. `.mini` was defined twice — once for the rail's 1.6 rem ghost
+  icon, once for the composer's mid-turn circle — and the later rule won both
+  lives, so each thread title lost 77 px to controls nobody could see (measured:
+  title 154 px in a 235 px row). The rail rule is now scoped to `.row` and the
+  composer's to `#composer`, the buttons are 25.6 px ghost icons that take a
+  `--surface-container-high` circle on hover, and the title measures 180 px. A
+  `@media (hover: none)` block keeps them visible where there is no hover to
+  reveal them.
+- **chat (ui)**: an MCP tool result arrived as `{ content, detailedContent }` and
+  the page printed the envelope, so the same payload appeared twice in the
+  disclosure. The inner text is the result now; the wrapper is unwrapped before
+  it is shown or scanned for links.
+- **chat (ui)**: the rails stopped short of the bottom of the window and the
+  composer was only kept in the middle column by two `:has()` padding hacks that
+  had to be repeated at every breakpoint. `#app` reserved a third grid row for the
+  field, so the deck — and both rails with it — ended where the composer started.
+  The field is now absolutely placed against the transcript column (`left`/`right`
+  follow `--rail-w` and `--inst-w`, the same two numbers the grid uses) and the
+  deck takes the whole remaining height: at 1400×820 the rail and the instruments
+  both measure 44→820 px, and the field measures 672→820 px. The transcript is
+  padded by the field's *measured* height (`--composer-h`, published by a
+  `ResizeObserver`, not a guessed constant), so at full scroll the last message
+  ends 14 px above the field instead of behind it. On a phone the drawer stops
+  above the field for the same reason.
+- **chat (ui)**: clicking a provider tab stopped working the moment the row was
+  made draggable. `setPointerCapture` on the container retargets the `pointerup`
+  — and the `click` derived from it — to the capturing element, so the tab button
+  under the cursor never received a click at all. The drag now listens on
+  `window` for the move and the release instead, which leaves the click where it
+  belongs; a press that travelled more than 4 px still swallows its click, so
+  dragging the row never selects a provider.
+- **chat (ui)**: a dialog taller than the window lost its bottom actions.
+  `#modal` centred with `place-items: center`, which clips an over-tall child at
+  both ends and leaves nothing to scroll — measured on a 700 px window, the card
+  was 880 px with the Close/apply row at 829–906 px and `overflow: visible`. The
+  backdrop is now a flex scroller and the card centres with `margin: auto`: it
+  stays centred while it fits and the dialog scrolls when it does not (checked at
+  380 px, where the scroll is 425 px and the actions land at 277–315 px).
+- **chat (ui)**: the streaming reply re-parsed its whole markdown on every token.
+
+- **chat (ui)**: collapsing the session rail squashed the transcript instead of
+  widening it. The `≤1100px` breakpoint reserved `16rem` for the rail column
+  unconditionally, but `.deck:not(.open)` hides the rail — so `main` landed in the
+  sidebar's column and the `1fr` sat empty. Measured at 1000px: 256px wide before,
+  full width after. The column is now reserved only while the rail is shown.
+- **chat (ui)**: the ripple never animated. The rule lived in the component's
+  scoped `<style>`, so `.rip` compiled to `.rip.svelte-<hash>` and a span created
+  at run time could never match it — every press drew an invisible, unpainted
+  element. The span and its motion are now built in `ripple()` and driven by
+  `Element.animate`, ported from deepscrape's `RippleDirective`: radius to the
+  furthest corner, 500 ms linear, `scale(0) → scale(1.5)` with the fill fading.
+- **chat (ui)**: the tools dialog sat at the left edge with no scrim, because
+  `#tools-modal` was missing from the one dialog rule `#modal` had — which also
+  meant its click-outside handler could never fire (the container was not
+  full-bleed, so a stray click landed on the page behind it).
+- **chat (ui)**: the tools search field rendered as the browser's white input (no
+  colour or fill was set) and popped in with no transition.
+- **chat**: the menu offered `evals`, `prompts`, `references` and `workflows` as
+  skills. They are folder names — `skills::list` names every `.md` after the
+  folder holding it, and those folders hold reference chapters, so picking one
+  resolved to an arbitrary file. A row now has to carry the frontmatter `name:`
+  that already separates a skill from a reference chapter.
+
+### Added
+
+- **chat (ui)**: the settings dialog is a real settings surface, not three
+  read-only fact sheets. **Instructions** (critical): standing instructions and a
+  reply language, persisted in the browser and sent with every turn as an
+  `[instructions]` / `[language]` preamble — the same lever as the effort hint,
+  capped at 8 KiB, and byte-identical to the old prompt when both are empty.
+  **Chat** (medium): default agent mode, thinking effort, palette, and whether a
+  turn ends with suggested next steps. **Connection** / **Storage** carry live
+  numbers (tools preferred, conversations) instead of a static line. **About**
+  (low) gains the keyboard shortcuts and a *reset every setting* that sweeps the
+  `webrain-chat-*` keys and reloads.
+- **chat (ui)**: the header and dock round buttons carry the same 18px glyph as
+  Send and Dictate — at 15px they read as a second, smaller icon set beside them.
+- **chat (ui)**: a thinking block is now rendered by the answer's own markdown
+  renderer instead of a `<pre>`, so a numbered plan arrives as a numbered list
+  and nested bullets indent themselves, dimmed and clamped to 18 rem with a left
+  rule: reasoning is context, not the answer, and must never push the answer off
+  the screen. JSON tool output is token-coloured in the same pass (keys
+  `--primary`, strings `--on-surface-variant`, numbers `--tertiary`, literals
+  `--error`), one regex over the escaped text, so a 200-line payload has a shape
+  to scan. Nested lists inside markdown also stopped floating: `li > ul/ol` gets
+  its own top margin.
+- **chat**: the page `chat --serve` serves is no longer `include_str!`'d into the
+  binary. `build.rs` hashes the four files (`chat.html`, `chat.css`, `chat.js`,
+  `chunk-markdown.js`) into a manifest, the server reads them from a directory at
+  startup and verifies every one against that manifest before serving a byte, and
+  a mismatch is refused by name with both digests — the page can approve a shell
+  command, so a `chat.js` edited after the build must fail closed rather than be
+  served. The directory is found at `WEBRAIN_CHAT_UI`, then the engine cache
+  (`webrain install chat-ui`), then `webrain-chat-ui/` beside the binary, then
+  `webrain-cli/assets/` in a checkout, so `cargo run -- chat --serve` still needs
+  no install. New: `webrain install chat-ui [--from <url|file>]` (unpacks to a
+  staging dir, verifies, then swaps — a bad archive leaves the working install
+  alone) and the release now carries `webrain-chat-ui.tar.gz` next to the
+  binaries. Sizes, measured: release binary 47 211 008 → **46 932 480** bytes
+  (−272 KB, −0.6 %); the four files are 285 015 raw and 87 677 as the archive.
+  See `docs/adr/0005-chat-ui-as-a-verified-asset.md` for why the mechanism
+  changed and why the security property is not weaker for it.
+- **chat**: eight more provider rows — `grok` (xAI), `kimi` (Moonshot), `zhipu`
+  (Z.ai GLM), `minimax`, `hunyuan` (Tencent), `doubao` (Volcengine Ark),
+  `qianfan` (Baidu ERNIE) and `siliconflow` — each with its real brand mark in
+  the provider strip (Simple Icons where it has one, LobeHub otherwise) and its
+  own env variables. The row's id is the friendly name and the vendor's own
+  variable is an alias (`GROK_API_KEY` / `XAI_API_KEY`, `KIMI_API_KEY` /
+  `MOONSHOT_API_KEY`, `GLM_API_KEY`, `ARK_API_KEY`, `VOLCENGINE_API_KEY`,
+  `BAIDU_API_KEY`, `TENCENT_API_KEY`, `SILICONCLOUD_API_KEY`). Rows are appended,
+  never reordered, because the order **is** the ambient key chain. `/switch` and
+  `--provider` now accept any alias of a row, not just its first, so `xai`,
+  `moonshot`, `glm`, `ark` and `baidu` all resolve. Three hard-coded copies of
+  the provider list (chat's no-key hint, `webrain help` and `doctor`) now read the
+  table, which is why they had been missing `DEEPSEEK`.
+- **chat**: the `dashscope` row is now `qwen` — same endpoint, named after the
+  model family people ask for, with `DASHSCOPE_API_KEY` still an alias and the
+  vault still reading a key saved under the old id, so an upgrade does not drop
+  it.
+- **chat (ui)**: four colour palettes — `webrain` (the mint scheme, still the
+  default because it is the identity), `dark` (VS Code Dark+ greys and blue),
+  `monokai` (charcoal, lime, pink) and `light` (VS Code Light+). A palette is one
+  override of the M3 role map, so no component knows a theme exists; the button
+  sits at the right of the header, the choice is remembered
+  (`webrain-chat-theme`) and applied to `<html>` before the first paint, so a
+  saved light theme does not flash dark on load. Measured in all four: body text
+  ≥11.2:1, primary-on-surface ≥6.4:1, on-primary-on-primary ≥6.4:1, and zero
+  leaves under 3:1 anywhere on the page with a conversation, the tool cards and
+  the tools dialog open. The scrollbar thumb became a token — it was hardcoded
+  dark, which a light theme cannot inherit — and the dead `--scroll-thumb`
+  variable is now the one that paints it.
+- **chat**: `/` is now the whole surface, not two hand-written commands. The
+  menu is one flat list from `GET /catalog` (37 rows here) where every row carries
+  its own `kind` and `hint`: the two page commands, all 8 skills with their own
+  `description:` line, all 18 MCP tools with the first sentence of their own
+  description, and the 9 runtime tools. `@` stays skills-only and `#` tools-only,
+  but `/` no longer makes you know which sigil something lives behind — `/pdf`
+  finds `@pdf-extraction` **and** `#webrain_pdf`, which is the pair the old menu
+  could not tell apart. The header counts what matched and says how many are
+  shown (`27 · 14 shown`) rather than presenting the slice as the list, and the
+  arrow keys wrap over the visible rows.
+- **chat (cli)**: `@name` in a prompt now means something. When `name` is an
+  installed skill, that skill's text is attached to the turn inside a
+  `<skill name="…">` block (32 KiB per turn, named-first wins). Before this a
+  mention was inert: the model read the literal `@pdf-extraction` and had to go
+  fetch the skill itself — which it cannot do in ask mode, where the tools are
+  off — so it described the tools from their contracts and said plainly that it
+  had never opened the skill. A mention that is not a skill leaves the prompt
+  untouched.
+- **chat (ui)**: the tools dialog now has drawn checkboxes instead of the OS
+  widget, the preferred count lives beside Save instead of over the list, the
+  search field grows out of its icon, results animate in as you type, `agent` /
+  `plan` / `ask` carry a bolt / a written plan / a question instead of three
+  fills of one diamond, and the mode menu dismisses on a press outside it. Small
+  screens get one column of boxes and a stacked dock.
+- **chat (ui)**: both rails resize. A handle sits on the seam either side of the
+  transcript — drag it, or focus it and use ←/→ — and the width is remembered
+  (`webrain-chat-rail-w` / `webrain-chat-inst-w`, clamped to 160–480 px). The
+  number lives in a CSS var on `:root` so the grid, the composer's own
+  `padding-left`/`right` and the handle read the same one: measured, dragging the
+  rail to 336 px moved the composer's padding to 336 px in the same frame. The
+  handles disappear wherever the panel does — instruments ≤1100 px, the drawer
+  ≤860 px, and the rail while it is closed.
+- **chat (ui)**: the built-in tools are a choice now, not a locked row. They are
+  ticked by default and unticking one sends `tools_off` with the turn, which the
+  server renders as `[tools: avoid] Do not call these unless the user asks for
+  them by name` — the same soft lever the preferred-tools list already uses,
+  because the runtime's tool set is fixed when the session starts. The selection
+  is remembered (`webrain-chat-tools-builtin-off`) and stored as the *off* names,
+  so a tool added to the binary later arrives available instead of hidden.
+- **chat (ui)**: the provider row in the model dialog scrolls sideways with no
+  scrollbar: drag it, or use the two edge buttons, each of which only exists
+  while there is something that way, over a gradient shadow of the dialog's own
+  fill. The tab for the provider this session runs carries a filled check circle
+  instead of a second key dot — "has a key" and "is running now" are different
+  facts.
+
+- **cli**: a tool the runtime owns is marked in the turn log. `· bash (builtin)`
+  instead of a bare name that looks like one of ours — a built-in has no path
+  fence, so the row says so. `webrain-webrain_serp` still prints as
+  `webrain_serp` and the local tools stay bare.
+
+- **chat**: the runtime's whole built-in tool namespace is back in the session.
+  The allowlist only ever carried `mcp:` and `custom:` entries, so `builtin:` was
+  filtered out wholesale — which left the `WebInput` handler that `--serve`
+  installs with nothing able to call it, registered skill directories with no
+  tool to read one, and none of the `bash` / `str_replace_editor` / `grep` surface
+  a coding agent expects. Now a single `builtin:*` covers them: naming tools one
+  by one is how `ask_user` and `skill` went missing, and would go stale the first
+  time the runtime adds another. `ask_user` is excluded only for a one-shot turn,
+  where no handler exists to answer it and the question would stall until
+  timeout. The permission handler is still the gate — `not_destructive` refuses a
+  shell or a file write without `--yes`, and `--serve` asks the page — but the
+  path fence `chat_tools` builds is now advisory: a built-in `bash` runs anywhere
+  the process can, so the prompt tells the model to prefer the fenced tools.
+
+- **chat**: `ask_user` and `skill` are reachable again. The session allowlist
+  carried only `mcp:` and `custom:` entries, so the runtime's own built-ins were
+  filtered out — which left the `WebInput` handler that `--serve` installs with
+  nothing able to call it, and a registered skills directory with no tool to
+  open a skill. Both are in the SDK's `BUILTIN_TOOLS_ISOLATED` (no host state,
+  no network), so they are safe under `ClientMode::Empty`. `ask_user` is offered
+  only when a handler exists: a one-shot `webrain chat` has nobody to answer.
+  The host-facing built-ins (`bash`, `str_replace_editor`, `grep`, `glob`,
+  `web_fetch`) stay excluded on purpose — they work outside the path fence.
+
+- **chat**: a terminal that stays alive, like the one a coding assistant has.
+  `terminal` takes `op: start | send | read | stop`: `start` spawns the platform
+  shell (or a given program) with its pipes read into one buffer, `send` types a
+  line and answers with what it printed, `read` returns only new output, `stop`
+  kills it. `run_shell` stays the one-shot form — it returns when the command
+  does, so it can never answer a `Continue? (y/n)` or read a dev server's log.
+  State is process-wide and keyed by id; omitting `id` means the newest
+  terminal. Twenty-five lines of `webrain_scrape` already cover `fetch_webpage`,
+  so no second HTTP fetch was added.
+
+- **chat**: two more built-in tools, and all of them listed in the page. `edit_file`
+  replaces one exact string in a file and refuses a pattern that matches nothing
+  or more than one place, so a blind replace cannot hit the wrong line;
+  `search_files` walks the working directory with a regex and answers
+  `path:line: text`, skipping `.git`, `target` and `node_modules`. The page's
+  tools dialog gains a **builtin** group with every entry ticked and locked —
+  they are installed on the session by the binary, so a box that could be
+  unticked would promise a switch the page does not have.
+
+- **cli**: `webrain install copilot` — the runtime `webrain chat` drives, now that
+  it is no longer embedded in the binary. Downloads the official
+  `github/copilot-cli` asset for this platform (zip on Windows, tar.gz elsewhere),
+  checks it against the SHA-256 that `github-copilot-sdk`'s own build script pins,
+  and unpacks it into the engine cache (`copilot/<version>/`). That artifact is a
+  single self-contained executable (`copilot.exe`, ~165 MB unpacked), not the
+  `copilot-runtime` + `runtime.node` pair — the SDK derives that pair from this
+  binary, and spawns this one directly when given its path. `webrain chat` points
+  the SDK at it with `CliProgram::Path`, so no environment variable is needed;
+  `COPILOT_CLI_PATH` still overrides. The version is pinned (`1.0.105`) because
+  the runtime's JSON-RPC surface is coupled to the SDK, so `latest` is not
+  interchangeable.
+
+- **mcp**: `WEBRAIN_MCP_TOOLS=serp,scrape` advertises only the named tools. The
+  full set is ~8,080 tokens of schema before any prompt — over Groq's free
+  7,000 tokens/minute cap — so a small tier could not run the agent at all until
+  the surface was trimmed (`available_tools` cannot help: the schemas come from
+  the server's `tools/list`). Names are accepted with or without the
+  `webrain_` prefix, and an unmatched list falls back to the full surface rather
+  than leaving the agent with no tools. Listed in `webrain help env`, the
+  environment reference, the README, the agent decision guide and the shipped
+  skill.
+
+- **chat**: the agent has a disk and a shell. `webrain chat` installs four
+  client-side tools on the session — `read_file`, `write_file`, `list_dir`,
+  `run_shell` — so it can work on the directory it was started in, which is what
+  a coding assistant needs and a scraper does not. They are deliberately *not*
+  MCP tools: `webrain mcp` stays a browser server any LLM can drive, and only
+  this mode can touch files. Three fences, because a file tool that writes
+  anywhere is a prompt-injection target with a filesystem: every path resolves
+  against the starting directory and is refused if it escapes it (lexically
+  first, then through symlinks), `run_shell` is killed after 120 s, and all four
+  ship with `skip_permission: false` so the page's approval modal — the same one
+  an MCP call that changes state gets — is the gate before anything runs.
+  `available_tools` carries them as `custom:` entries; without that, the
+  allowlist that keeps the agent off the runtime's built-in tools would hide
+  them as surely as never registering them.
+
+- **chat**: dictation. The record button beside Send transcribes instead of
+  attaching: `MediaRecorder` → `POST /transcribe` → **NVIDIA Nemotron 3.5 ASR**
+  (`nemotron-3.5-asr-streaming-0.6b`; 0.6B cache-aware FastConformer-RNNT,
+  40 language-locales, punctuation built in) through the `nemo-speech` CLI, with
+  ffmpeg turning the browser's webm/ogg into the 16 kHz mono WAV it reads.
+  `webrain install nemotron` puts three things in the webrain cache — the runtime
+  (~8 MB, prebuilt per platform, CPU), the 742 MB q8_0 GGUF, and ffmpeg — so the
+  whole path is offline: no Python, no ONNX Runtime, no sidecar process. The take
+  is converted, transcribed and its temp directory deleted; the language comes
+  from `navigator.language` (`auto` accepted). Without the install,
+  `POST /transcribe` answers `503` with the command and the page falls back to
+  attaching the recording — what the control did before, still useful.
+
+- **chat**: the composer answers a running turn instead of going dead. Send
+  becomes **Stop** (`POST /stop`, the runtime's own abort) and two icon buttons
+  appear beside it for the runtime's two delivery modes: queue (`Alt+Enter`,
+  `DeliveryMode::Enqueue`) and steer (`Enter`, `DeliveryMode::Immediate`).
+  `POST /turn` now takes `delivery`; only a plain new turn is refused with `409`
+  while one runs, because two answers interleaving in one transcript is what a
+  single composer cannot show.
+
+- **core**: the `asr` module and `install nemotron`, plus `video::extract_audio`
+  made public so dictation and `watch` share one ffmpeg conversion. The recognizer
+  is `WEBRAIN_ASR_BIN` or the bundled `tools/nemo-speech/`, and the model is
+  `WEBRAIN_ASR_MODEL` or the largest GGUF in the cache.
+
+- **chat**: the approval dialog is built from the runtime's structured request
+  instead of `format!("{data:?}")`, which is why it read as one grey paragraph.
+  `webrain.permission` now carries `server`, `tool`, `title`, `args`, `read_only`
+  and `kind`; the dialog titles itself with the tool (`webrain-webrain_pdf` →
+  `pdf`), adds a read-only / changes-state pill, lays the arguments out as a
+  key/value panel, and says in one sentence what approving means.
+
+- **chat**: real cost. `GET /price?provider=…&model=…` returns the provider's own
+  published per-token price for that model — carried through from the catalogue
+  (`pricing` on OpenRouter's `/models`) and cached with it — and the page turns it
+  into money for the live call and for each row of the turn ledger. A provider
+  that publishes no price still shows `n/a`, because the SDK's `nano_aiu` is 0 on
+  BYOK turns where the key pays the vendor. Measured against OpenRouter:
+  `anthropic/claude-sonnet-4.5` → `0.000003` in / `0.000015` out per token.
+
+- **chat**: a context meter in the instruments rail, fed by the
+  `session.usage_info` event the runtime already emits (`currentTokens` /
+  `tokenLimit`) — the one number that says a conversation is about to be
+  compacted.
+
+- **chat**: `ask_user` is answered instead of timing out. `--serve` installs a
+  `UserInputHandler`, which also switches the runtime's `requestUserInput` flag on;
+  the question, its choices and whether free text is allowed arrive as
+  `webrain.ask`, and `POST /answer` returns the reply (300 s, because a person has
+  to read it). The page renders a prompt with one button per choice plus a text
+  field. The skills directory the `@` menu reads is now passed as
+  `skillDirectories`, so a skill named in the composer can actually be loaded
+  rather than just mentioned.
+
+- **chat**: the page grew the controls the session needs. A mode chip row above
+  the composer (`agent` / `plan` / `ask` — prompt-level instructions, since the
+  runtime's tool set is fixed at session creation), a model button that opens a
+  provider-tab modal fed by `GET /providers` with a `+` tab for adding one
+  (`POST /providers` keeps a base url, a model and the *name* of the key's env
+  var — never the key), rename and delete on every session row
+  (`PATCH`/`DELETE /sessions/<id>`, backed by a `titles` table so a renamed
+  conversation survives a restart), a settings modal with left tabs, and a ripple
+  on every rounded button.
+
+- **chat**: every capability the runtime can express now has a place. Tool cards
+  carry the **result** the tool returned alongside its arguments, with each
+  `http(s)` url in that result lifted into a source strip; a reasoning/thinking
+  stream collects into a collapsed `thinking` block; `◉` dictates through the
+  browser's speech recognition; `↻ retry` re-sends the last prompt.
+
+- **chat**: a dropped event stream no longer pins the page to `error`. The
+  `EventSource` reconnects by itself, so the badge now clears on `open` instead of
+  staying wrong until the next turn ends. The permission modal also takes focus,
+  keeps Tab inside itself, and hands focus back to whatever opened it.
+
+- **chat**: `POST /fork` and a `fork` action on every user message. It copies the
+  thread up to that message into a new conversation (`Store::fork`, one
+  `INSERT … SELECT`, covered by a test). A fork is a *transcript* operation: the
+  runtime keeps one linear context, so the tooltip says it is a clean place to
+  carry on from rather than a rewind of what the model remembers.
+
+- **chat**: the model dialog shows every provider the binary can talk to — the
+  eight `CHAT_PROVIDERS` rows plus the running session and any saved row — with a
+  real `key_present` per row and `active` derived from the base url the session
+  was started against. Opening a tab fetches that provider's **live** catalogue
+  through the new `GET /models?provider=…` (`{base}/models`; Anthropic via
+  `x-api-key`), cached per base url for five minutes, capped at 400, filterable,
+  and reporting the vendor's error rather than an empty list. Measured against
+  OpenRouter: 400 models, second call 8 ms from cache. Thinking effort is now
+  `off · low · medium · high · max`, still a prompt directive because the runtime
+  fixes effort when the session is created.
+
+- **chat**: the approval dialog gained *always allow this kind*, remembered by the
+  page rather than the runtime — the same request is then answered without a modal
+  for the rest of the tab. Recording shows an elapsed timer and a stop square.
+
+### Performance
+
+- **chat**: `--serve` now turns on the SDK's infinite sessions. A one-shot command
+  should not leave session state behind, but a long browser conversation hitting
+  the context limit mid-answer is exactly the failure that switch exists to
+  prevent; compaction arrives as `session.compaction_*`, which the page already
+  reports in its `runtime` row.
+
+- **chat**: `marked` + DOMPurify moved out of the entry bundle into a lazy chunk
+  (`chunk-markdown.js`, imported on idle and awaited before the first render,
+  with plain-text fallback). `chat.js` drops from 166 KB to 88 KB, so first paint
+  parses half the script; the server does not compress (loopback, one client), so
+  the raw number is the honest one and Vite's gzip figure (57 → 31 KB) only
+  applies if a proxy is in front. The new `GET /chunk-markdown.js`
+  serves the chunk from the binary; names are deterministic because every asset is
+  embedded by name. CSS stays one file deliberately: 37 KB raw, 6 KB gzipped if
+  compressed, and splitting it would cost an extra request per chunk from
+  localhost.
+
+### Changed
+
+- **build**: `--features chat` no longer embeds the Copilot runtime. The SDK's
+  default `bundled-cli` feature `include_bytes!`d two gzipped archives into the
+  release binary — `copilot_cli.archive` (107.4 MB) and
+  `copilot_runtime.archive` (58.8 MB) — which is why every target shipped at
+  ~211 MB instead of ~35 MB. `github-copilot-sdk` now builds with
+  `default-features = false, features = ["runtime", "network-forwarding"]`, and
+  the runtime is resolved at run time (the SDK's build-time cache, or
+  `COPILOT_CLI_PATH`). `webrain doctor`
+  reports a missing runtime, and a failed start says how to supply one. A new
+  opt-in `chat-bundled` feature restores the single self-contained binary for
+  anyone who wants it. Measured on `x86_64-pc-windows-msvc`: 34.7 MB without the
+  runtime, 211.7 MB with it embedded.
+- **chat**: the model dialog stages its pick and saves on purpose, and answers the
+  one question that needed asking — does this provider have a key? Choosing a
+  model used to switch the session on click, so browsing a catalogue was the same
+  as committing to it; the row now marks the staged model and a footer applies it,
+  stating what Save will do first: the model, its context window, its in/out price
+  per million tokens, and whether it keeps this session's context or starts a new
+  one. The key row reads its own state instead of a placeholder — `key saved in
+  the vault` / `key saved in $VAR` with a glyph, and a warning when there is none,
+  with the action relabelled `replace` once a key exists. The tab strip says
+  `key in the environment` / `key in the vault` / `no key yet` per provider.
+
+- **chat**: every row in a transcript now carries the glyph of what it did, not a
+  dot that only said "something happened": a terminal for a shell command, a page
+  for `navigate`, a table for `extract`, a stack for `batch`, a spark for guidance
+  and thinking, a pulse for the collapsed runtime row, coloured by outcome, and a
+  slowly turning spark beside `webrain working…` while a turn runs. The composer
+  rule is now uniform: everything the page sets (mode, effort, tools, model) and
+  the half-written **draft** survive a reload; the conversation is the server's to
+  keep, and the runtime's own context is not restorable by anything, so the page
+  does not pretend it is.
+
+- **chat**: every icon in the page is a real SVG and every provider tab carries
+  its vendor's mark. The controls were font characters (`⚙`, `ⓘ`, `✎`, `✕`,
+  `▸`, `⛁`, `◍`), which is not a style choice but a bug: glyph coverage differs
+  per OS, and where a font lacks one the control renders as tofu with no clue
+  what it does — a chevron that is missing is indistinguishable from a button
+  that is broken. `.gi` is now the one icon box every control wraps its
+  `{@html ICON.*}` in, the three `<details>` chevrons are a CSS `mask` on one
+  data-URI path (`--chev`, rotated 90° when open) so the fold arrows survive a
+  font that has no triangles, and `src/logos/<provider>.svg` holds a single-path
+  `currentColor` mark per provider, imported raw through `import.meta.glob` and
+  inlined — one colour per state, no extra request, and nothing to transcribe by
+  hand (the files came from Simple Icons, CC0, and LobeHub, MIT; the marks
+  themselves remain the vendors' trademarks). Providers with no mark of their own
+  (`env`, an unendorsed `base_url`) fall back to a neutral glyph.
+
+- **chat**: the composer remembers what you last chose and the choosers got the
+  room they needed. Agent / plan / ask was three buttons eating a third of the
+  dock for one decision — it is now one control that opens a menu where each mode
+  says what it permits. Tools became a dialog instead of a strip of chips: a fold
+  per MCP server with `all` / `none`, a search field that opens from its button
+  (and closes with its clear icon), a live `Save · n` and a `Close` that drops the
+  drafts — staged, so a stray click cannot rewrite the turn's instruction. Mode,
+  effort, preferred tools and the model are written to `localStorage` as you set
+  them; on the next load the three cheap ones come back immediately and the model
+  — the one thing the runtime does not keep — is restored with a real `/switch`,
+  read before the persist effect can overwrite it with the boot default. `/`
+  commands, `@` skills and `#` tools each colour their sigil, and an attachment
+  chip carries a coloured edge by kind (image, audio, data, code, document) so
+  you can see what you are about to hand the agent.
+
+- **chat**: the reply sanitizer says what it forbids instead of relying on
+  DOMPurify's defaults. `<style>`, `<script>`, `<iframe>`, `<object>`, `<embed>`,
+  `<form>`, `<base>`, `<link>` and `<meta>` are dropped already — naming them is
+  what stops a dependency bump from quietly widening the page — and the `style`
+  *attribute*, which is **not** dropped by default, is now forbidden too: this
+  page can approve shell commands, and `position:fixed;inset:0;z-index:9999` in a
+  reply is enough to paint a fake approval dialog over the real one. Measured on
+  the shipped bundle before and after: style-tag text, `<script>`, `onerror`,
+  `javascript:` hrefs and `<iframe>` were already removed; the overlay attribute
+  was not, and now is. `<style>` going with its CSS is also why a reply needs no
+  shadow root: allow styled markdown and the scoping becomes mandatory.
+
+- **chat**: cost now covers the vendors that publish their rates in their docs
+  rather than in their catalogue, and it is summed the way the invoice is.
+  DeepSeek sells no `pricing` field in `/models`, so `GET /price` falls back to
+  the figures on the page its own off-peak block already cites — $0.30 / $1.20
+  per 1M for `deepseek-flash`, $1.32 / $3.96 for `deepseek-v4-pro` — and sends an
+  `as_of` with them, which the modal prints beside the figure, because a price
+  nobody re-reads is a price nobody should trust. The sum uses three rates now:
+  cached input at the vendor's cache-hit price, fresh input, and output. The
+  runtime reports `cacheReadTokens`; it is forwarded as `cached` in
+  `webrain.usage`, priced at $0.006/1M against $0.30/1M fresh, and a turn's cost
+  says in its tooltip how many of its input tokens hit — which is why a long
+  conversation costs a fraction of its first turn instead of reading as if every
+  token were fresh. A vendor whose list price is its peak rate is charged half
+  outside its window, using the `off_peak` rule the page already has. The model
+  list shows the same figures per row, so `deepseek-flash` reads
+  `1.0M tokens · $0.30/$1.20 per 1M` before you pick it: `list_models` now
+  price-joins every row that has no price of its own through `doc_price` and then
+  OpenRouter's catalogue, matched on the model name after the last `/`. Rows keep
+  `price_from`, so the dialog can say which of the three the number came from.
+
+- **chat**: the rail says which context budget you are actually on. The meter is
+  the runtime's, not the model's — a 1M-token model behind a 128k session budget
+  compacts at 128k — so the figure now carries `1.0M tokens model · 128k tokens
+  session` underneath the percentage, with the reason in its tooltip, instead of
+  leaving the two numbers to be confused for each other. Provider tabs answer the
+  question you ask before choosing one: a dot when a key is already stored
+  (filled for the environment or the vault, hollow for none — and the same words
+  in the tab's tooltip), and the model row this session runs is tagged `running`,
+  so a pick is confirmed where it was made rather than in a note behind the
+  dialog. Agent mode and thinking effort now survive a reload through
+  `localStorage`; the transcript was never at risk (the server keeps its threads)
+  and the runtime's own context is not restorable, so nothing pretends it is.
+
+- **chat**: providers are configurable from the page, and the session follows.
+  `POST /keys` writes a pasted key to the encrypted vault
+  (`webrain-chat-provider/<id>`), never to the chat database and never back to the
+  browser; `provider_target` reads the environment first, `WEBRAIN_CHAT_API_KEY`
+  second, the vault last, so an export still wins. `POST /switch` is the one
+  action behind both pickers: a model on the endpoint the session already talks to
+  is `Session::set_model` (context kept, `reasoning_effort` sent for real instead
+  of a prompt hint), and a model on another provider's tab rebuilds the session —
+  the transcript survives, the model's context does not, and the page says so.
+  Both are refused with `409` while a turn runs. Provider tabs carry a mark each,
+  a dot on the row that is live, and a description, a published per-million price
+  and the model's context window; DeepSeek's tab and the effort dialog also state
+  its off-peak window (peak 01:00–04:00 and 06:00–10:00 UTC, Mon–Fri; half price
+  otherwise) with the current UTC clock, which is the one thing a user choosing
+  DeepSeek at 02:00 most needs to know.
+
+- **chat**: the page is drawn one size larger. The spacing ramp moved from
+  `4/8/12/16/22/28` to `5/10/14/20/26/32` px, body text from 14 px to 15 px on a
+  1.65 line, prose to 16 px, buttons and fields to a ≥2.1 rem hit target, and the
+  send control to 2.9 rem — so the deck reads as a document instead of a form. The
+  transcript column keeps its width: `.dock` wraps and the field carries
+  `min-width: 0`, which fixes a latent min-content overflow that made the composer
+  1340 px wide inside a 1148 px window and clipped the instruments rail.
+
+- **chat**: search is a field at the top of the rail instead of a modal on top of
+  the page. Typing replaces the thread list in place, picking a match opens that
+  conversation and restores the list, and `Ctrl-K` opens the rail and focuses the
+  field — one place a query can go. The send action carries the paper-plane icon
+  in `currentColor`, so it keeps the button's dark-on-mint ink rather than a fixed
+  light grey.
+
+- **chat**: two CSS collisions that made the page render wrong are fixed. The
+  drawer's open state used the class `rail`, which matched the rail's own `.rail`
+  rules — the whole deck inherited `display: flex; order: -1` and the layout
+  collapsed. The dialog action row used an unscoped `.row button`, which painted
+  every thread in the rail with the primary fill. Both are renamed/scoped now.
+
+- **chat**: the composer now shrinks with the transcript column when the rail is
+  open instead of staying full width and sliding out of alignment, and the phone
+  drawer runs the full height of the page rather than stopping above the field.
+  The ripple also fires on disclosure rows and source chips, which are not
+  buttons and were the only dead targets left.
+
+- **chat**: the page is rebuilt around a three-column deck instead of a header
+  full of numbers. `.topbar` is one 44 px strip (wordmark, state pill, two live
+  meters); the left rail is threads with `settings`/`about` pinned to its foot;
+  the new right rail is instrumentation — model, tokens, tok/s, cost, tool and
+  source counts, and the per-turn ledger — so the meters no longer reflow the
+  transcript when they change. The transcript hangs off a single hairline **spine**
+  and every row puts a tick on it (role colour for a message, state colour for a
+  tool, grey for reasoning), which is the element that identifies the page with
+  the wordmark covered. Type is three roles with no webfonts — serif wordmark and
+  empty state, the OS UI face for prose, monospace for every label, number and
+  tool name — because the page still makes zero network requests. Two motion
+  families and the ripple, and nothing else moves.
+
+- **chat**: tool results render by **shape**, not by tool name. An array of
+  objects becomes a table (six columns, fifty rows), a flat object a
+  label/value grid, anything else stays preformatted — an unfamiliar payload
+  degrades instead of breaking, and no renderer knows any specific tool. Under
+  each turn a **sources** list collects every `http(s)` url the tools returned,
+  deduplicated with the tool that found it, and **next** offers up to three
+  prompts derived from what the turn actually did (the host that came back, the
+  tool that failed, the capture that was taken) — derived, never model-generated.
+
+- **chat**: the composer's controls moved into a dock under the field they shape,
+  in the order a turn is built — attach, record, mode, thinking effort, preferred
+  tools — with the model pushed to the right because it is the environment rather
+  than the turn. `settings` and a new `about` entry are pinned to the foot of the
+  session rail instead of riding the end of a scrolling list, and on a phone the
+  drawer now stops just above the composer so it can never cover the field you are
+  about to type into. `POST /turn` accepts `{effort, tools}`; both become prompt
+  instructions through the same lever as a mode, because the runtime's reasoning
+  effort and tool set are fixed when the session is created — the panel says so
+  instead of implying a switch. `◉` (speech recognition) is gone: the record
+  control captures through `MediaRecorder` and attaches the bytes as
+  `voice-<ts>.webm`, which is a file the agent can read; cancelling drops the
+  in-memory blob, so no temp file is ever written, and `webm/wav/mp3/ogg/m4a`
+  joined the upload allowlist.
+
+- **chat**: the page is themed as a Material 3 dark scheme seeded from webrain's
+  mint rather than M3's default violet. Surfaces are tonal roles
+  (`surface-container-low` … `-highest`) instead of grey boxes, elevation is a
+  tone, interaction is a state layer, shapes come from one scale
+  (4/8/12/16/24/full) and motion from two durations. Tabs, settings rails, list
+  items and text fields follow their M3 components; every component rule now reads
+  a token, so no hex value survives outside `:root`.
+
+- **chat**: the transcript is a ledger now, not a thread of bubbles. Each message
+  sits on a hairline rule with a monospace index in its own gutter, the role label
+  is tracked caps, the wordmark is set in spaced caps with the meters beneath it,
+  and the composer is a bare command line under a single rule rather than a boxed
+  input. Corners dropped from 6/10 px to 2/3 px across the board; a second,
+  quieter `--rule` colour carries structure so borders can recede. No webfonts and
+  no images — the page still makes zero network requests beyond its own bundle.
+
+### Fixed
+
+- **chat**: the context meter measured the wrong window. A session was created
+  without `max_prompt_tokens`, so the runtime applied its own Copilot-sized 128k —
+  measured on DeepSeek, a 1.0M-token model read `7% · 8.4k of 128k`, and infinite
+  sessions would have compacted at an eighth of the size the model actually
+  accepts. `spawn_live` now sets the budget from the model's own catalogue row,
+  falling back to the figure the provider's docs publish, and leaves
+  `--max-prompt-tokens` as the override for anything nobody publishes a window
+  for. The rail still prints both numbers when they disagree, so the page never
+  claims a window the session does not have.
+
+- **chat**: `reasoning_effort` was only ever sent on a model switch, so the effort
+  chosen in the dock did nothing until you happened to open the model dialog: a
+  fresh session is created before the page can switch anything. The turn handler
+  now applies it before the first turn (and whenever it changes), skipped while a
+  turn runs so a queued message cannot retune the model mid-answer. `off` still
+  sends nothing — the field's absence is the only way to ask for the model's own
+  default.
+
+- **chat**: the transcript drowned in its own telemetry. A turn emits a dozen
+  lifecycle events (`pending_messages.modified`, `session.mcp_server_status_changed`,
+  `model.call_start`, …) before the first token, and the page gave each one a row —
+  thirteen disclosures between the question and the answer. They now collapse into
+  a single `runtime · N events` row that keeps the last 200 lines in one
+  disclosure, so nothing is dropped and nothing shouts.
+
+- **chat**: long unbreakable tokens (a scraped tool name, a url) pushed the whole
+  transcript into horizontal scroll. `overflow-wrap: anywhere` on prose, list items
+  and inline code; verified on a real six-message thread, which also confirms the
+  lazy markdown chunk renders real content.
+
+- **chat**: your own turn is now a block with a tonal fill, the answer stays on the
+  page — VS Code's own changelog records readers being unable to tell the two apart,
+  and the same was true here. The negative margin keeps both on one left edge so the
+  spine still lines up.
+
+- **chat**: `--stream` never streamed. The delta handler looked for a `delta`
+  field, but the runtime sends `deltaContent`, so every token was dropped and the
+  answer appeared in one piece at the end. Verified against a live turn: 52
+  `assistant.message_delta` events, each carrying `deltaContent`.
+  `--serve` now turns streaming on by itself — the page paints deltas, so a server
+  session without them shows nothing until the turn is over.
+
+### Added
+
+- **chat**: `--serve` now ships a real client — Svelte 5 built by bun from
+  `webrain-cli/ui`, emitted as two committed assets (`chat.js`, `chat.css`) that
+  `cargo build` embeds with `include_str!`, so building the binary still needs no
+  JavaScript toolchain. Replies render as sanitised markdown, tool calls become
+  expandable cards keyed by `toolCallId`, runtime events the page does not model
+  (`session.usage_info`, `session.compaction_*`, reasoning, progress) land in
+  collapsed activity rows instead of being dropped, and streaming no longer
+  re-renders the transcript per token.
+
+- **chat**: conversation history in SQLite (`%APPDATA%\webrain\chat.db`, override
+  with `WEBRAIN_CHAT_DB`), served as `GET /sessions` and `GET /sessions/<id>` and
+  browsable from the page's session menu. History is optional at runtime: no
+  store, no menu, the chat still runs.
+
+- **chat**: the composer completes what this build actually has — `/` for the
+  commands the page runs, `@` for the shipped skills, `#` for the MCP tools, and
+  a `+` button for the same list without a trigger. Both lists come from the new
+  `GET /catalog` (skills from `webrain_core::skills`, tools from
+  `webrain_mcp::tool_names`), so a menu can never name a tool the runtime does
+  not expose.
+
+- **chat**: history search. `GET /search?q=` scans every stored message (escaping
+  `%` and `_`, so they stay literal) and `Ctrl-K` opens a modal that queries it as
+  you type, then jumps to the conversation a hit belongs to. Search is a `LIKE`
+  scan, not embeddings — the FTS5/vector step is noted as the upgrade once that
+  becomes measurable.
+
+- **chat**: the page works on a phone. The session panel is a column on a desktop
+  and an overlay drawer under 760 px (with a `«`/`»` toggle in the header), the
+  token/cost rail hides under 900 px, and the composer, palette and modals scale
+  their padding instead of overflowing.
+
+- **chat**: `+` attaches a file and a long paste becomes one. `POST /attach`
+  takes raw bytes, accepts only images and plain text up to 8 MB, renames what it
+  receives (one basename, 48 characters, no path components) and writes it under
+  `%TEMP%\webrain-chat\<conversation>\`; the prompt gets the resulting path, never
+  the contents. A paste over 600 characters or 8 lines is stored the same way and
+  leaves a single `[pasted text #n · N lines → path]` line.
+
+- **chat**: transcript polish. Fenced code becomes a card with its language and
+  its own copy button (one delegated listener), model-written links open in a new
+  tab with `rel="noopener noreferrer"`, and a `↓ latest` pill appears when you
+  scroll away from the bottom.
+
+- **chat**: the page now reads the runtime's real event catalogue. `assistant.usage`
+  drives the header rail while a call is in flight (exact input/output tokens,
+  cache reads, duration → tok/s) instead of only the 900 ms sample;
+  `assistant.turn_end` clears it; `session.shutdown` says the runtime is gone
+  instead of looking hung; and a tool name loses its `webrain-` server prefix so
+  cards read `webrain_serp`, not `webrain-webrain_serp`.
+
+- **chat**: permission requests queue instead of overwriting each other. Two asks
+  arriving before the first modal is answered used to leave the second unanswered,
+  which the server then denied after its 120 s timeout; the modal now shows one at
+  a time with a "N more queued" count.
+
+- **chat**: history search ranks a hit in a conversation's opening message (the
+  text the menu shows as its title) above one buried mid-thread, with recency
+  breaking the tie.
+
 - **docs**: ADR-004, the GUI decision for `webrain chat`. The runtime already
   emits streamed deltas, tool calls, permission requests and context/cost meters;
   the CLI flattens them into stderr lines, which is right for a pipe and wrong
