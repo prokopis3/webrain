@@ -120,8 +120,12 @@ jobs:
         # --features pdfium: op=render is a released feature, not a source-only
         # one. The library itself is loaded at runtime (`webrain install pdfium`
         # puts it in the engine cache), so no extra link step is needed here.
-        # --features chat: `webrain chat` + the bundled Copilot runtime, on every
-        # target — musl vendors its own OpenSSL 3 (see the matrix).
+        # --features chat: the agent loop only. The Copilot runtime is NOT
+        # embedded — that was `github-copilot-sdk`'s default `bundled-cli`, worth
+        # ~166 MB per artifact; users fetch it with `webrain install copilot`.
+        # Never add `chat-bundled` to this matrix: it re-embeds the runtime and
+        # every download grows from ~45 MB to ~211 MB. musl vendors its own
+        # OpenSSL 3 either way (see the matrix).
         run: cargo build --release --features ${{ matrix.features }} --bin webrain --target ${{ matrix.target }}
 
       # Per-target output dirs, so every job emits the SAME asset name it
@@ -212,6 +216,16 @@ jobs:
       # Publish a checksums.txt alongside the binaries so installers and
       # `webrain self-update` can verify downloads (supply-chain integrity).
       # `*` so adding a target to the matrix needs no change here.
+      - name: Package the chat UI
+        # The page `chat --serve` serves is NOT embedded in the binaries (~285 KB
+        # of JS/CSS/HTML in every platform download). It ships once, here, and
+        # the binary verifies the four files against digests compiled into it —
+        # so this archive has to be the one built from the same commit's assets.
+        run: |
+          mkdir -p dist
+          tar -czf dist/webrain-chat-ui.tar.gz -C webrain-cli/assets \
+            chat.html chat.css chat.js chunk-markdown.js
+
       - name: Generate checksums
         run: |
           cd dist

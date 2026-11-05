@@ -29,3 +29,17 @@ base64 = "0.23"
 tiktoken-rs = "0.12.0"
 rpassword = "7"
 url = "2"
+
+# `target/debug` reached 78 GB: ~36 GB was dependency debuginfo and ~41 GB was
+# rustc's incremental cache. `package."*"` still gives our own three crates full
+# debuginfo — only the 500-odd deps drop it.
+[profile.dev.package."*"]
+debug = false
+
+# No `target/debug/incremental` at all. Iterative rebuilds of a single crate are
+# slower; disk no longer accumulates a session dir per feature combination.
+[profile.dev]
+incremental = false
+
+[profile.release]
+strip = true

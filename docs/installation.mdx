@@ -146,9 +146,11 @@ you type it:
 - The build now needs **Rust 1.94+** (the `github-copilot-sdk` crate's floor,
   enforced by Cargo's MSRV-aware resolver). The workspace declares `1.94`, so an
   older toolchain fails on *any* `cargo build`, feature or not.
-- The binary embeds the Copilot CLI runtime (~135 MB per platform, downloaded
-  and SHA-256 verified at build time), so the artifact grows from ~37 MB to
-  roughly 170 MB. That is why the feature is off by default for source builds.
+- The binary does **not** embed the Copilot runtime: `chat` keeps the artifact at
+  ~45 MB, and `webrain install copilot` downloads the official runtime for this
+  platform (SHA-256 verified) so `webrain chat` can start it. Use
+  `--features chat-bundled` to embed it in the binary instead (~166 MB of
+  archives per platform, which produces the ~211 MB build).
 - It links **OS OpenSSL 3** on Linux. A static musl target has none, so there the
   build **vendors** OpenSSL 3 (`openssl`'s `vendored` feature, compiled by
   `musl-gcc`) and the published musl builds carry `chat` like every other target.
