@@ -12,12 +12,20 @@ use webrain_core::CdpBackend;
 use webrain_core::browser::BrowserBackend;
 
 mod chat;
+// The browser page `chat --serve` serves: found on disk and digest-verified, so
+// it is not embedded. Not behind `chat` — `webrain install chat-ui` must work in
+// a build that has no chat feature at all.
+mod chat_ui;
 // Only exists with `--features chat`: without it, `webrain chat` still resolves
 // and prints its config, then says how to build the runtime.
 #[cfg(feature = "chat")]
 mod chat_server;
 #[cfg(feature = "chat")]
 mod chat_session;
+#[cfg(feature = "chat")]
+mod chat_store;
+#[cfg(feature = "chat")]
+mod chat_tools;
 
 /// One row per subcommand: (name, usage, one-line about, extra notes).
 ///
@@ -33,9 +41,9 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "install",
-        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install vision [--model ID] [--model-update]\n    webrain install skills [--force]",
-        "Download a browser engine, or the local AI stack (ffmpeg, yt-dlp, whisper, Qwen3-VL) or the bundled operator skills.",
-        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  `install skills` is offline — the bundle is compiled into the binary — and\n  keeps any skill file you already edited unless --force is passed.",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install nemotron\n    webrain install vision [--model ID] [--model-update]\n    webrain install copilot\n    webrain install chat-ui [--from <url|file>]\n    webrain install skills [--force]",
+        "Download a browser engine, the local AI stack (ffmpeg, yt-dlp, whisper, Nemotron 3.5 ASR dictation, Qwen3-VL), the Copilot runtime `webrain chat` drives, the browser UI `chat --serve` serves, or the bundled operator skills.",
+        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  `install copilot` is what makes `webrain chat` work in a release binary — it\n  is not embedded there. `install chat-ui` does the same for the page: the four\n  files\n  are verified against digests compiled into the binary, so one from a\n  different version is refused. `install skills` is offline — the bundle is\n  compiled into the binary — and keeps any skill file you already edited unless\n  --force is passed.",
     ),
     (
         "skills",
@@ -65,7 +73,7 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "chat",
         "webrain chat \"<prompt>\" [--provider P] [--model ID] [--key-from VAR] [--base-url URL]\n    [--search] [--max-output-tokens N] [--timeout SECS] [--yes] [--json] [--no-stream]\n    [--print-config]",
         "Run one Copilot agent turn on your own model key, with webrain's own MCP tools attached.",
-        "The agent's tools ARE this binary (`webrain mcp` over stdio), so it can navigate, extract\n  and screenshot. The key comes from --key-from, WEBRAIN_CHAT_API_KEY, or the ambient\n  OPENROUTER/OPENAI/ANTHROPIC/GEMINI/FIREWORKS/DASHSCOPE/GROQ/DEEPSEEK variables — first hit\n  wins, in that order. --print-config resolves the chain, prints it with the key redacted and\n  exits, which is the offline way to see what would be used. --search grounds the turn on live\n  web results first, using the vendor's own search where it sells one (openrouter `:online`,\n  deepseek /v1/tools/search, openai `web_search`, anthropic `web_search_20250305`, gemini\n  `google_search`) and webrain's own engines otherwise. Every model call prints its tokens and\n  the turn ends with totals, tok/s and cost. Tool calls that write or click need --yes; the\n  default approves reads and navigation only. Needs a build made with --features chat (the\n  release binaries have it; musl builds do not).",
+        "The agent's tools ARE this binary (`webrain mcp` over stdio), so it can navigate, extract\n  and screenshot. The key comes from --key-from, WEBRAIN_CHAT_API_KEY, or the ambient\n  keys of any row in `webrain help env` (Chat) — first hit wins, in table order.\n  --print-config resolves the chain, prints it with the key redacted and\n  exits, which is the offline way to see what would be used. --search grounds the turn on live\n  web results first, using the vendor's own search where it sells one (openrouter `:online`,\n  deepseek /v1/tools/search, openai `web_search`, anthropic `web_search_20250305`, gemini\n  `google_search`) and webrain's own engines otherwise. Every model call prints its tokens and\n  the turn ends with totals, tok/s and cost. Tool calls that write or click need --yes; the\n  default approves reads and navigation only. Needs a build made with --features chat (the\n  release binaries have it; musl builds do not).",
     ),
     (
         "upgrade",
@@ -262,10 +270,16 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "Agent",
-        &[(
-            "WEBRAIN_SKILLS_DIR",
-            "skills read by webrain_guide (default: <engine cache>/skills, filled by `webrain install skills`)",
-        )],
+        &[
+            (
+                "WEBRAIN_SKILLS_DIR",
+                "skills read by webrain_guide (default: <engine cache>/skills, filled by `webrain install skills`)",
+            ),
+            (
+                "WEBRAIN_MCP_TOOLS",
+                "advertise only these MCP tools (`serp,scrape`) — the full schema set is ~8k tokens, over a small tier's tokens-per-minute cap",
+            ),
+        ],
     ),
     (
         "Local AI (watch & vision)",
@@ -284,6 +298,14 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
             ),
             ("WEBRAIN_WHISPER_BIN", "local whisper-cli binary path"),
             ("WEBRAIN_WHISPER_MODEL", "local whisper GGUF model path"),
+            (
+                "WEBRAIN_ASR_BIN",
+                "local transcribe-cli binary for chat dictation (`install nemotron`)",
+            ),
+            (
+                "WEBRAIN_ASR_MODEL",
+                "Nemotron 3.5 ASR GGUF path (else the largest installed)",
+            ),
             (
                 "WEBRAIN_STT_MODEL",
                 "cloud STT model override (e.g. whisper-large-v3)",
@@ -1165,6 +1187,29 @@ fn main() -> anyhow::Result<()> {
                     let lib = webrain_core::install::install_pdfium(force)?;
                     println!("render ready: pdfium at {}", lib.display());
                 }
+                "copilot" => {
+                    // webrain install copilot [--force]
+                    // The runtime `webrain chat` drives. Not embedded in the
+                    // released binary (that was 166 MB of archives per
+                    // platform), so this is the step that makes chat work.
+                    webrain_core::install::install_copilot(force)?;
+                    println!("  try it: `webrain chat \"hello\"`");
+                }
+                "chat-ui" => {
+                    // webrain install chat-ui [--from <url|file>] [--force]
+                    // The browser page `chat --serve` serves. Verified against
+                    // the digests compiled into this binary, so an archive from
+                    // a different version is refused instead of served.
+                    let from = args
+                        .iter()
+                        .position(|a| a == "--from")
+                        .and_then(|i| args.get(i + 1))
+                        .map(String::as_str);
+                    let dir = chat_ui::install(force, from)?;
+                    println!("chat UI ready: {}", dir.display());
+                    println!("  it is verified against this build every time");
+                    println!("  `chat --serve` starts");
+                }
                 "chrome" => {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());
@@ -1199,6 +1244,18 @@ fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "small.en".to_string());
                     let status = webrain_core::install::install_watch(force, &model)?;
                     println!("{}", serde_json::to_string_pretty(&status)?);
+                }
+                "nemotron" => {
+                    // webrain install nemotron [--force]
+                    // Dictation for `webrain chat --serve`: NeMo-Speech.cpp's
+                    // nemo-speech CLI, NVIDIA's Nemotron 3.5 ASR GGUF, and
+                    // ffmpeg. Fully local — a dictated take never leaves the
+                    // machine.
+                    let status = webrain_core::install::install_nemotron(force)?;
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                    println!(
+                        "\n  dictate: the record button beside Send in `webrain chat --serve`"
+                    );
                 }
                 "vision" => {
                     // webrain install vision [--model ID] [--model-update]
@@ -1245,7 +1302,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 other => {
                     anyhow::bail!(
-                        "unknown engine `{other}` — try chrome, obscura, lightpanda, whisper, vision, watch, or skills"
+                        "unknown engine `{other}` — try chrome, obscura, lightpanda, whisper, nemotron, vision, watch, or skills"
                     )
                 }
             }
@@ -2176,12 +2233,18 @@ fn big_stack<T: Send + 'static>(
         .unwrap_or_else(|_| Err(anyhow::anyhow!("MCP thread panicked")))
 }
 
-/// Does this build carry the Copilot runtime that `webrain chat` needs? The
-/// SDK embeds it (or extracts it on first use) only with `--features chat`.
+/// Can `webrain chat` start a Copilot runtime? Either this build embeds one
+/// (`--features chat-bundled`) or the user supplies one via `COPILOT_CLI_PATH`.
+/// A plain `chat` build carries no runtime on purpose: it is the ~35 MB default
+/// instead of the ~211 MB one.
 #[cfg(feature = "chat")]
-const CHAT_RUNTIME: bool = github_copilot_sdk::HAS_BUNDLED_CLI;
+fn chat_runtime() -> bool {
+    github_copilot_sdk::HAS_BUNDLED_CLI || webrain_core::install::find_copilot().is_some()
+}
 #[cfg(not(feature = "chat"))]
-const CHAT_RUNTIME: bool = false;
+fn chat_runtime() -> bool {
+    false
+}
 
 /// `webrain doctor` — diagnose the install: version, MCP server, CDP ports,
 /// engines (agent-browser-style discovery), encrypted vault.
@@ -2260,7 +2323,7 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let who = match webrain_core::byok::resolve_from(&env, &Default::default()) {
-            Ok(Some(p)) => match (&p.key_env, CHAT_RUNTIME) {
+            Ok(Some(p)) => match (&p.key_env, chat_runtime()) {
                 (_, true) => format!(
                     "✅ {}/{} ({})",
                     p.provider_type,
@@ -2268,15 +2331,22 @@ fn run_doctor(rt: &tokio::runtime::Runtime) -> i32 {
                     p.key_env.as_deref().unwrap_or("keyless")
                 ),
                 (Some(v), false) => format!(
-                    "⚠️ resolved via {v} but this build has no runtime — rebuild with `--features chat`"
+                    "⚠️ resolved via {v} but no Copilot runtime — run `webrain install copilot` \
+                     (or set COPILOT_CLI_PATH)"
                 ),
                 (None, false) => {
-                    "⚠️ keyless endpoint but this build has no runtime — `--features chat`".into()
+                    "⚠️ keyless endpoint but no Copilot runtime — run `webrain install copilot` \
+                     (or set COPILOT_CLI_PATH)"
+                        .into()
                 }
             },
-            Ok(None) => "⚠️ no key — OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, \
-                 GEMINI_API_KEY, FIREWORKS_API_KEY, DASHSCOPE_API_KEY or GROQ_API_KEY"
-                .to_string(),
+            Ok(None) => {
+                let rows: Vec<&str> = webrain_core::byok::CHAT_PROVIDERS
+                    .iter()
+                    .map(|r| r.0[0])
+                    .collect();
+                format!("⚠️ no key — set any of {}", rows.join(", "))
+            }
             Err(e) => format!("❌ {e}"),
         };
         println!("  chat              {who}");
