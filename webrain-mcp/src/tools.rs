@@ -347,6 +347,9 @@ ENVIRONMENT — read at PROCESS START, a tool call cannot change them
     and never rotates.
   - WEBRAIN_SKILLS_DIR — operator .md skills, read here via topic="skills" or
     topic="skill:<name>". Unset means the feature is off.
+  - WEBRAIN_MCP_TOOLS — advertise only the named tools (`serp,scrape`). The
+    full schema set is ~8k tokens before the prompt; on a small-per-minute tier
+    that alone is a rejection, so trimming is the fix, not a workaround.
   - WEBRAIN_BROWSERS_DIR / WEBRAIN_CHROME / WEBRAIN_LIGHTPANDA / WEBRAIN_OBSCURA
     — engine discovery. "engine not found" means one of these is wrong or
     nothing is installed (`webrain install --engine obscura|lightpanda`).
@@ -453,6 +456,13 @@ fn read_skill(p: &std::path::Path) -> Option<String> {
     Some(buf)
 }
 
+/// The text of one installed skill. Shared by `webrain_guide(topic="skill:<n>")`
+/// and by the CLI's `@name` mention expansion, so a mention and a guide read are
+/// guaranteed to be the same bytes.
+pub fn skill_text(name: &str) -> Option<String> {
+    skill_path(&skills_dir(), name.trim()).and_then(|p| read_skill(&p))
+}
+
 /// `webrain_guide` body. Default is an INDEX plus the tool list; `topic` reads one
 /// section; `topic="all"` returns the whole guide; `skills` / `skill:<name>` read
 /// operator files.
@@ -518,8 +528,7 @@ pub fn guide_from_args(args: &Value) -> Value {
     if let Some(name) = topic.strip_prefix("skill:") {
         let name = name.trim();
         let dir = skills_dir();
-        let text = skill_path(&dir, name).and_then(|p| read_skill(&p));
-        return match text {
+        return match skill_text(name) {
             Some(t) => json!({"status": "ok", "skill": name, "guide": t}),
             None => json!({
                 "status": "error",
@@ -986,12 +995,66 @@ pub fn list_tools() -> Vec<Value> {
             });
         }
     }
-    tools
+    keep_tools(tools)
+}
+
+/// `WEBRAIN_MCP_TOOLS=serp,scrape` advertises only those. The full set is ~8k
+/// tokens of schema on its own, which is over Groq's free 7k tokens/minute cap,
+/// so trimming the surface is the only way that tier runs an agent at all.
+/// Names are accepted with or without the `webrain_` prefix.
+fn keep_tools(tools: Vec<Value>) -> Vec<Value> {
+    match std::env::var("WEBRAIN_MCP_TOOLS") {
+        Ok(want) => keep_tools_for(tools, &want),
+        Err(_) => tools,
+    }
+}
+
+fn keep_tools_for(tools: Vec<Value>, want: &str) -> Vec<Value> {
+    let keep: Vec<String> = want
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.starts_with("webrain_") {
+                s.to_string()
+            } else {
+                format!("webrain_{s}")
+            }
+        })
+        .collect();
+    if keep.is_empty() {
+        return tools;
+    }
+    let kept: Vec<Value> = tools
+        .iter()
+        .filter(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| keep.iter().any(|k| k == n))
+        })
+        .cloned()
+        .collect();
+    // A typo must not silently leave the agent with no tools at all: an
+    // unmatched list falls back to the full surface, which still works.
+    if kept.is_empty() { tools } else { kept }
 }
 
 #[cfg(test)]
 mod session_arg_tests {
     use super::*;
+
+    /// `WEBRAIN_MCP_TOOLS` is what makes a 7k-tokens/minute tier usable, so a
+    /// typo must degrade to the full surface, not to an agent with no tools.
+    #[test]
+    fn tool_filter_narrows_and_fails_open() {
+        let all = list_tools();
+        assert!(all.len() > 5);
+        let two = keep_tools_for(all.clone(), "serp, webrain_scrape");
+        assert_eq!(two.len(), 2, "{:?}", two);
+        assert!(two.iter().any(|t| t["name"] == "webrain_serp"));
+        assert_eq!(keep_tools_for(all.clone(), "nope").len(), all.len());
+        assert_eq!(keep_tools_for(all.clone(), "").len(), all.len());
+    }
 
     /// Every page tool advertises `session_id`, and the HTTP-only tools do not:
     /// the router keys on the argument, so a tool missing from this list would
