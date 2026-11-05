@@ -655,9 +655,36 @@ pub fn host_stats() -> Value {
     })
 }
 
+/// Concurrency a batch really had: the tabs it measured, never the number it
+/// asked for. 0 when every row failed — `effective_concurrency: 4` next to
+/// `ok: 0` was the contradiction the guest-mode Chrome exposed.
+fn effective_tabs(tabs_seen: usize, errs: usize, single: Option<bool>, asked: usize) -> usize {
+    if tabs_seen > 0 {
+        tabs_seen
+    } else if errs > 0 {
+        0
+    } else if single == Some(true) {
+        1
+    } else {
+        asked
+    }
+}
+
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+
+    #[test]
+    fn effective_tabs_never_claims_a_tab_that_failed() {
+        // Measured beats asked.
+        assert_eq!(effective_tabs(3, 0, Some(false), 4), 3);
+        // Nothing ran: 0, even though 4 were requested.
+        assert_eq!(effective_tabs(0, 3, Some(true), 4), 0);
+        // Single-target engine that did run: one tab.
+        assert_eq!(effective_tabs(0, 0, Some(true), 4), 1);
+        // No measurement available: the request is the best guess.
+        assert_eq!(effective_tabs(0, 0, None, 4), 4);
+    }
 
     #[test]
     fn parses_the_two_proc_files() {
@@ -2498,15 +2525,20 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         .get("url")
                         .and_then(|v| v.as_str())
                         .unwrap_or("about:blank");
-                    // open_tab now starts blank (one load per URL in batch paths);
-                    // here we navigate explicitly to keep "new tab at url" semantics.
-                    match backend.open_tab("about:blank").await {
-                        Ok(id) => match backend.navigate(url).await {
-                            Ok(_) => json!({
-                                "status": "ok", "tab": id,
-                                "tabs": backend.list_tabs().await.unwrap_or(json!([]))
-                            }),
+                    // A new tab when the browser can make one, the live tab when it
+                    // cannot (a one-window or wedged Chrome answers -32000): asking
+                    // for a tab should not fail the whole call, and the reply says
+                    // which one it used.
+                    match backend.tab_or_existing().await {
+                        Ok((id, reused)) => match backend.activate_tab(&id).await {
                             Err(e) => err(e),
+                            Ok(_) => match backend.navigate(url).await {
+                                Ok(_) => json!({
+                                    "status": "ok", "tab": id, "reused": reused,
+                                    "tabs": backend.list_tabs().await.unwrap_or(json!([]))
+                                }),
+                                Err(e) => err(e),
+                            },
                         },
                         Err(e) => err(e),
                     }
@@ -2771,17 +2803,37 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 opts: &webrain_core::backends::cdp::NavOpts,
                 per_backend_concurrency: usize,
                 errs: &mut Vec<BatchResult>,
-            ) -> Vec<BatchResult> {
-                let mut backends = Vec::new();
+            ) -> (Vec<BatchResult>, usize, Option<bool>) {
+                // Connects are independent WebSocket handshakes: run them at the
+                // same time. Serially, four backends cost four round-trips of wall
+                // time before the first URL is even queued. Spawn order is kept,
+                // so the round-robin mapping below is unchanged.
+                let mut conns = Vec::with_capacity(cdp_urls.len());
                 for u in cdp_urls {
-                    match CdpBackend::connect_with_url(u).await {
-                        Ok(b) => backends.push(b),
-                        Err(e) => errs.push(BatchResult {
-                            url: u.clone(),
+                    let u = u.clone();
+                    conns.push(tokio::spawn(async move {
+                        let r = CdpBackend::connect_with_url(&u).await;
+                        (u, r)
+                    }));
+                }
+                let mut backends = Vec::new();
+                for h in conns {
+                    match h.await {
+                        Ok((_, Ok(b))) => backends.push(b),
+                        Ok((u, Err(e))) => errs.push(BatchResult {
+                            url: u,
                             title: String::new(),
                             text: String::new(),
                             data: None,
                             error: Some(format!("cdp connect failed: {e}")),
+                            ms: 0,
+                        }),
+                        Err(join) => errs.push(BatchResult {
+                            url: String::new(),
+                            title: String::new(),
+                            text: String::new(),
+                            data: None,
+                            error: Some(format!("cdp connect task failed: {join}")),
                             ms: 0,
                         }),
                     }
@@ -2808,13 +2860,27 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     handles.push((
                         bi,
                         tokio::spawn(async move {
-                            run_batch(&b, &op, &share, &args, &opts, per_backend_concurrency).await
+                            let v =
+                                run_batch(&b, &op, &share, &args, &opts, per_backend_concurrency)
+                                    .await;
+                            (v, b.batch_tabs().unwrap_or(0), b.single_target_known())
                         }),
                     ));
                 }
+                // Measured facts come back from the clones — the outer backend
+                // never sees them, which is why `single_target` used to be null
+                // and `effective_concurrency` an assumption on this path.
+                // Tabs are SUMMED: `requested_concurrency` here is
+                // per_backend_concurrency × backends, so a max would compare two
+                // different quantities (measured 4 requested, 2 reported, for
+                // two backends that each really held two tabs).
+                let mut tabs = 0usize;
+                let mut single: Option<bool> = None;
                 for (bi, h) in handles {
-                    if let Ok(v) = h.await {
+                    if let Ok((v, t, s)) = h.await {
                         slots[bi] = Some(v);
+                        tabs += t;
+                        single = single.or(s);
                     }
                 }
                 // Round-robin decides placement (url[i] -> backend i % n, ascending
@@ -2839,19 +2905,28 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             }),
                     );
                 }
-                out
+                (out, tabs, single)
             }
 
             let mut ordered: Vec<Option<BatchResult>> = (0..urls.len()).map(|_| None).collect();
             let mut connect_errs: Vec<BatchResult> = Vec::new();
+            // Measured across groups: the widest fan-out this call achieved, and
+            // whatever the engines said about their own tab capability.
+            let mut tabs_seen = 0usize;
+            let mut single_seen: Option<bool> = None;
             for (gi, (sel, idxs)) in groups.into_iter().enumerate() {
                 let sub: Vec<String> = idxs.iter().map(|i| urls[*i].clone()).collect();
                 let mut o = opts.clone();
                 if !sel.is_empty() {
                     o.wait_selector = Some(sel);
                 }
-                let got = if cdp_urls.is_empty() {
-                    run_batch(backend, op, &sub, args, &o, concurrency).await
+                let (got, tabs, single) = if cdp_urls.is_empty() {
+                    let v = run_batch(backend, op, &sub, args, &o, concurrency).await;
+                    (
+                        v,
+                        backend.batch_tabs().unwrap_or(0),
+                        backend.single_target_known(),
+                    )
                 } else if gi == 0 {
                     fan_out(
                         &cdp_urls,
@@ -2878,6 +2953,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     )
                     .await
                 };
+                tabs_seen = tabs_seen.max(tabs);
+                single_seen = single_seen.or(single);
                 for r in got {
                     let slot = idxs
                         .iter()
@@ -2924,18 +3001,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 // whatever `concurrency` asked for (its 2nd createTarget errors
                 // TargetAlreadyLoaded). Report that instead of letting the caller
                 // tune concurrency against an engine that ignores it.
-                let single = backend.single_target_known();
-                // cdp_urls first: each entry is its own browser, so the tab
-                // ceiling there is per-backend tabs × backends — a single-target
-                // engine still gets a tab per container.
-                let effective = if !cdp_urls.is_empty() {
-                    per_backend_concurrency * cdp_urls.len().max(1)
-                } else if single == Some(true) {
-                    1
-                } else {
+                //
+                // `effective_concurrency` is the number of tabs the batch REALLY
+                // opened (`batch_tabs`), not the number it was asked for: a run whose
+                // workers never got a tab used to report 4 while `ms_total` was 0.
+                let single = single_seen;
+                let asked = if cdp_urls.is_empty() {
                     // The pool never runs more workers than there are URLs.
                     concurrency.min(urls.len()).max(1)
+                } else {
+                    per_backend_concurrency * cdp_urls.len().max(1)
                 };
+                let effective = effective_tabs(tabs_seen, errs, single, asked);
                 payload["stats"] = json!({
                     "total": res.len(),
                     "ok": ok,

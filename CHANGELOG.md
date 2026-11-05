@@ -48,6 +48,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core (batch)**: `effective_concurrency` was an intention, not a measurement —
+  a batch of 3 URLs asked for 4 workers, all four `Target.createTarget` calls
+  failed on a Chrome that refused new tabs, and the report still claimed
+  `requested_concurrency: 4` while the tabs did not exist. `batch_map` now counts
+  the tabs it actually obtained (`CdpBackend::set_batch_tabs`) and the report
+  reads that number, so parallelism is what happened, not what was asked for.
+  `single_target` is likewise reported from the connection instead of staying
+  `null` when `cdp_urls` is set, and the recycle step no longer opens and closes
+  a tab for a worker whose queue is already drained. A batch that dies as a
+  whole now answers **once per URL** instead of a single row (three URLs used to
+  come back as `total: 1`), and `effective_concurrency` is `0` when every row
+  failed — it used to report the requested number next to `ok: 0`. With
+  `cdp_urls` the tab counts are **summed** across backends — `requested_concurrency`
+  is `per_backend_concurrency × backends`, so the old `max` compared two different
+  quantities (measured 4 requested, 2 reported, for two backends each holding
+  two tabs) — and the per-backend connects now run **concurrently** instead of
+  paying one WebSocket handshake after another before the first URL is queued.
+- **core (cdp)**: a browser that answers `-32000 "Failed to open a new tab"`
+  (measured on Chrome 156: version/list/attach all fine, only target creation
+  refused) is now classified as single-target — the same meaning as lightpanda's
+  `TargetAlreadyLoaded` — so the batch reuses the one tab instead of fanning out
+  workers that cannot run. Any other createTarget failure surfaces as an error
+  instead of being cached as "multi-target" for the life of the connection, and
+  a successful `open_tab` clears the cached answer, so a browser that recovers
+  is not stuck serial. A fan-out that obtains **no** tab at all now reruns the
+  queue on the one tab that exists (`batch_serial`) instead of reporting every
+  URL as failed — the case where the probe's answer changed under it — so a
+  reconnect is no longer needed. `existing_tab()` (and with it `tab_or_existing`)
+  now falls back to attaching the browser's **own first page** via
+  `Target.getTargets`, which is what every page command already did: on a
+  cold connection to a tab-refusing Chrome (guest mode) the batch used to answer
+  `ok: 0, errors: 3` and now runs all three URLs on that page, reporting
+  `effective_concurrency: 1, single_target: true`. `tab(action:"new")` falls back
+  to the existing tab and reports `reused: true` rather than failing.
+- **core (serp)**: the `brave` engine never fell back — the arm was matched
+  before `specific_engine`, so an empty or blocked Brave result set returned
+  empty. It now falls through the provider chain like the HTTP engines, with the
+  backend withheld so the chain cannot re-render Brave at the end (22.7 s of
+  the same wall it just failed on). Brave's snippet selector is a class name
+  that changes between builds; when it is absent the snippet is the container's
+  text minus the title, instead of an empty field.
 - **core (engines)**: async-path cleanups. `webrain_fetch_http` now runs its
   blocking `ureq` fetch and DOM parse on `spawn_blocking` — a 30 s URL used to
   park a Tokio worker and stall every other tool call. `save_checkpoint` no
