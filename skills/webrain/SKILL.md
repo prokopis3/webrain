@@ -235,6 +235,7 @@ the old one and the change looks ignored.
 | `WEBRAIN_PROFILES_DIR` / `WEBRAIN_VAULT_DIR` | Persistent profiles + encrypted vault — what keeps a challenge solved. A changed root reads as "logged out". |
 | `WEBRAIN_BROWSERS_DIR` / `WEBRAIN_CHROME` / `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Engine discovery; `engine not found` means install it or point the path. |
 | `WEBRAIN_SKILLS_DIR` | Operator skills readable via `webrain_guide(topic="skill:<name>")`. |
+| `WEBRAIN_MCP_TOOLS` | Advertise only these tools (`serp,scrape`). The full schema set is ~8k tokens before the prompt, which is over a small tokens-per-minute tier — trimming it is the fix, not a workaround. |
 
 Full table with defaults: `docs/reference/environment.mdx`. The same list ships in
 the binary as `webrain_guide(topic="env")`.

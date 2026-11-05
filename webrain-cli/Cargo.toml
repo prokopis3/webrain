@@ -14,10 +14,27 @@ path = "src/main.rs"
 # ponytail: forward pdfium through webrain-mcp (its lib.rs gates the
 # render arm on its own feature, which in turn enables webrain-core/pdfium).
 pdfium = ["webrain-mcp/pdfium"]
-# `webrain chat`: the Copilot agent loop + a bundled CLI runtime (~135 MB per
-# platform, downloaded and SHA-verified at build time). Off by default so
-# `cargo build` stays lean; the release matrix turns it on for every target.
-chat = ["dep:github-copilot-sdk", "dep:openssl", "dep:async-trait"]
+
+# `webrain chat`: the Copilot agent loop. The runtime it drives is **not**
+# embedded (see the `github-copilot-sdk` dependency below) — it is resolved at
+# run time, which keeps this feature at ~45 MB instead of ~211 MB. Measured on
+# x86_64-pc-windows-msvc: 34.7 MB without `chat`, 45.2 MB with it, 211.7 MB with
+# the SDK's default `bundled-cli` (`copilot_cli.archive` 107.4 MB +
+# `copilot_runtime.archive` 58.8 MB, `include_bytes!`d by
+# `github-copilot-sdk/build/in_process.rs`). `chat-bundled` brings that back for
+# anyone who wants a single-file binary.
+chat = [
+    "dep:github-copilot-sdk",
+    "dep:openssl",
+    "dep:async-trait",
+    "dep:rusqlite",
+    "dep:ureq",
+    "dep:regex",
+]
+# Opt-in: bake the ~166 MB Copilot runtime into the binary (the SDK's
+# `bundled-cli` default) so `webrain chat` needs no separate install. Off by
+# default — see the block comment above for the measured cost.
+chat-bundled = ["chat", "github-copilot-sdk/bundled-cli"]
 
 [dependencies]
 webrain-core = { path = "../webrain-core" }
@@ -29,11 +46,29 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 rpassword = { workspace = true }
 sha2 = "0.11"
-# Optional: `webrain chat`. Brings its own JSON-RPC client, permission
-# handlers and the bundled runtime; nothing else in the crate depends on it.
-github-copilot-sdk = { version = "1", optional = true }
+# Optional: `webrain chat`. Brings its own JSON-RPC client and permission
+# handlers; nothing else in the crate depends on it.
+#
+# `default-features = false` drops the SDK's `bundled-cli` default, which is the
+# only thing that `include_bytes!`s the Copilot runtime into the binary. `runtime`
+# keeps managed `Client::start`; `network-forwarding` is the HTTP/TLS/WS handler
+# that `bundled-cli` used to pull in. The runtime is then resolved at run time
+# from `COPILOT_CLI_PATH` (or an explicit `CliProgram::Path`).
+github-copilot-sdk = { version = "1", optional = true, default-features = false, features = [
+    "runtime",
+    "network-forwarding",
+] }
 # `--serve` implements the SDK's async `PermissionHandler` trait.
 async-trait = { version = "0.1", optional = true }
+# `--serve` keeps the conversation in a local SQLite file so the history menu
+# survives a restart. Bundled: no system libsqlite3 to find on any target.
+rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
+# `GET /models` live-lists a provider's catalogue. ureq is already in the tree
+# through webrain-core, so this adds no build cost.
+ureq = { version = "3", optional = true }
+# `search_files` matches a regex per line. Already in the tree through
+# webrain-core's extraction layer, so this adds no build cost either.
+regex = { version = "1", optional = true }
 
 # `chat` reaches `native-tls` through the SDK's `network-forwarding`, which is
 # `openssl-sys` on Linux. A static musl target has no system OpenSSL to link, so
@@ -42,3 +77,9 @@ async-trait = { version = "0.1", optional = true }
 # only place the crate is declared, so nothing else ever builds it.
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 openssl = { version = "0.10", optional = true, features = ["vendored"] }
+
+# `build.rs` hashes the chat UI in `assets/` so the digests can never drift from
+# the files this build actually used — the binary serves those files from disk,
+# not from itself, and refuses anything that does not match.
+[build-dependencies]
+sha2 = "0.11"

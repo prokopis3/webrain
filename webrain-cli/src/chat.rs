@@ -14,7 +14,9 @@ use webrain_core::byok::{ChatFlags, ChatProvider, chat_env_keys, resolve_from};
 
 /// What the user asked for. Every field is optional except the prompt, and the
 /// prompt is optional because `--print-config` is a legitimate use on its own.
-#[derive(Debug, Default)]
+/// `Clone` is what lets `--serve` rebuild a session when the page switches
+/// provider: the new session must be configured exactly like the first one.
+#[derive(Debug, Default, Clone)]
 pub struct Args {
     pub prompt: Option<String>,
     pub provider: Option<String>,
@@ -235,10 +237,17 @@ pub fn run(argv: &[String], rt: &tokio::runtime::Runtime) -> anyhow::Result<()> 
 fn no_key_hint() -> String {
     let have = chat_env_keys();
     if have.is_empty() {
-        "no chat provider configured: set OPENROUTER_API_KEY, OPENAI_API_KEY, \
-         ANTHROPIC_API_KEY, GEMINI_API_KEY, FIREWORKS_API_KEY, DASHSCOPE_API_KEY or \
-         GROQ_API_KEY, or WEBRAIN_CHAT_BASE_URL for a local server"
-            .to_string()
+        // From the table, not a copy of it: this list has drifted behind every
+        // row added since it was written, and the table is right there.
+        let rows: Vec<&str> = webrain_core::byok::CHAT_PROVIDERS
+            .iter()
+            .map(|r| r.0[0])
+            .collect();
+        format!(
+            "no chat provider configured: set any of {} (aliases work), \
+             or WEBRAIN_CHAT_BASE_URL for a local server",
+            rows.join(", ")
+        )
     } else {
         // Keys exist but nothing resolved: the only way here is a provider name
         // that does not match, and the resolver already said which.
@@ -281,7 +290,8 @@ fn advise(msg: &str) -> String {
         "{msg}\n  \
          That is the provider refusing the request, not a webrain failure. Usual causes:\n  \
          - tokens-per-minute cap. Free tiers are small (Groq: 7000 input tokens/min) and the \
-         tool schemas alone are ~8k. Use a paid tier or another provider.\n  \
+         tool schemas alone are ~8k. Trim the surface with WEBRAIN_MCP_TOOLS=serp,scrape \
+         (comma list, `serp` or `webrain_serp`), or use a paid tier or another provider.\n  \
          - credit balance below the reserved output budget. Lower --max-output-tokens \
          (default 4096) or top up.\n  \
          Re-run with WEBRAIN_CHAT_DEBUG=1 to see the provider's own status code and message."

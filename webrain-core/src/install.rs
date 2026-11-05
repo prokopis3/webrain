@@ -118,6 +118,13 @@ pub fn browsers_dir() -> PathBuf {
     PathBuf::from("webrain/browsers")
 }
 
+/// Where `webrain install chat-ui` unpacks the browser UI. The binary verifies
+/// the four files against digests compiled into it, so the directory is not
+/// itself trusted — it only has to be a place both sides agree on.
+pub fn chat_ui_dir() -> PathBuf {
+    browsers_dir().join("chat-ui")
+}
+
 /// Chrome-for-Testing platform key, e.g. "win64", "mac-arm64", "linux64".
 pub fn platform_key() -> &'static str {
     let os = if cfg!(target_os = "windows") {
@@ -454,6 +461,132 @@ pub fn install_pdfium(force: bool) -> Result<PathBuf> {
     Ok(lib)
 }
 
+/// The Copilot CLI release `github-copilot-sdk` is built against. The SDK pins
+/// this exact tag and its JSON-RPC surface is version-coupled, so `latest` is
+/// not interchangeable — bump this only together with the SDK.
+const COPILOT_VERSION: &str = "1.0.105";
+
+/// Official runtime asset for this target, with the SHA-256 its own release
+/// publishes. These are the values `github-copilot-sdk`'s build script pins, so
+/// a re-cut or tampered asset fails closed instead of being executed.
+fn copilot_asset() -> Option<(&'static str, &'static str)> {
+    let arm = cfg!(target_arch = "aarch64");
+    if cfg!(target_os = "windows") {
+        Some(if arm {
+            (
+                "copilot-win32-arm64.zip",
+                "647876bca9ca6ea77f5a28d002e1d135d1bb899c12bcd3f2eb1e860d6199ed90",
+            )
+        } else {
+            (
+                "copilot-win32-x64.zip",
+                "34e16e9cf47de0e1534920171d6f39fa246638bddbb6ece820870b382bcc061a",
+            )
+        })
+    } else if cfg!(target_os = "macos") {
+        Some(if arm {
+            (
+                "copilot-darwin-arm64.tar.gz",
+                "34aacd03fb478d47e4b3cfc5ca045c37278c5d8d86239466521a16ea54ac84aa",
+            )
+        } else {
+            (
+                "copilot-darwin-x64.tar.gz",
+                "de5684eeb118ad1e54f9a01f4535cf74e121b8226d26473550b01a7565ce54f5",
+            )
+        })
+    } else if cfg!(target_os = "linux") {
+        let musl = cfg!(target_env = "musl");
+        Some(match (musl, arm) {
+            (true, true) => (
+                "copilot-linuxmusl-arm64.tar.gz",
+                "bdd80a5384d6e6e04ab35473e66ad87dcca98994a4dae2c1b5728a0088524606",
+            ),
+            (true, false) => (
+                "copilot-linuxmusl-x64.tar.gz",
+                "58a541c095736ffb24a239905dd46370d176e26ef73459d6abd95ef27425ed67",
+            ),
+            (false, true) => (
+                "copilot-linux-arm64.tar.gz",
+                "e7b488cc04ac3e2ed800e1bf0aace33ada42dcf167529b3d2f48a61e1535a847",
+            ),
+            (false, false) => (
+                "copilot-linux-x64.tar.gz",
+                "aba1f06f27bc0447656647f76e0a4cf58b4b2a341c75ff04a750982b6aeb6bd2",
+            ),
+        })
+    } else {
+        None
+    }
+}
+
+fn copilot_dir() -> PathBuf {
+    browsers_dir().join("copilot").join(COPILOT_VERSION)
+}
+
+/// The official artifact is one Node SEA executable, not the `copilot-runtime`
+/// + `runtime.node` pair — that pair is something the SDK's own build script
+/// derives from this binary. Verified: the SDK spawns this directly when
+/// `CliProgram::Path` / `COPILOT_CLI_PATH` names it.
+fn copilot_bin_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "copilot.exe"
+    } else {
+        "copilot"
+    }
+}
+
+/// A Copilot runtime `webrain chat` can start: `COPILOT_CLI_PATH` when it names
+/// a real file, otherwise what `webrain install copilot` put in the engine cache.
+pub fn find_copilot() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("COPILOT_CLI_PATH").map(PathBuf::from)
+        && p.is_file()
+    {
+        return Some(p);
+    }
+    find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4)
+}
+
+/// `webrain install copilot` — the runtime `webrain chat` drives.
+///
+/// The released binary does not embed it (166 MB of archives in every platform
+/// download), so this is the install step. The official asset is the GitHub
+/// Copilot CLI itself: one self-contained executable, SHA-256 verified against
+/// the digest the SDK pins before it is ever spawned.
+pub fn install_copilot(force: bool) -> Result<PathBuf> {
+    if !force {
+        if let Some(bin) = find_copilot() {
+            println!("copilot runtime already installed: {}", bin.display());
+            return Ok(bin);
+        }
+    }
+    let (asset, sha) = copilot_asset().context("no official Copilot runtime for this target")?;
+    let url = format!(
+        "https://github.com/github/copilot-cli/releases/download/v{COPILOT_VERSION}/{asset}"
+    );
+    println!("Downloading Copilot runtime {COPILOT_VERSION} ({asset})...");
+    let bytes = download_bytes(&url)?;
+    let got = sha256_hex(&bytes);
+    if !got.eq_ignore_ascii_case(sha) {
+        anyhow::bail!("copilot runtime checksum mismatch: expected {sha}, got {got}");
+    }
+    let dest = copilot_dir();
+    let _ = std::fs::remove_dir_all(&dest);
+    extract_archive(&bytes, &dest, asset)?;
+    let bin = find_named(&dest, copilot_bin_name(), 4)
+        .with_context(|| format!("{} not found in {}", copilot_bin_name(), dest.display()))?;
+    println!("copilot runtime ready: {}", bin.display());
+    println!("  `webrain chat` finds it automatically (engine cache)");
+    Ok(bin)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// lightpanda asset suffix, e.g. "x86_64-linux". lightpanda ships NO Windows
 /// build — on Windows there is nothing to download (use the Docker image
 /// lightpanda/browser:nightly instead).
@@ -578,11 +711,138 @@ pub fn install_whisper_model(model: &str, force: bool) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// NeMo-Speech.cpp release the runtime archives below are pinned to.
+const NEMO_SPEECH_VER: &str = "0.3.0";
+const NEMO_SPEECH_BASE: &str = "https://github.com/NVIDIA/NeMo-Speech.cpp/releases";
+
+/// Nemotron 3.5 ASR: `nvidia/nemotron-3.5-asr-streaming-0.6b` — 0.6B
+/// FastConformer-RNNT, 40 language-locales, prompt-conditioned, in the single
+/// q8_0 GGUF NVIDIA publishes for it (742 MB, measured). One quant means no
+/// `--model` flag: there is no trade-off here to dress up as a choice.
+const NEMOTRON_BASE: &str =
+    "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/main";
+const NEMOTRON_FILE: &str = "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf";
+
+/// Download the Nemotron 3.5 ASR GGUF into `<browsers_dir>/nemotron/`.
+///
+/// No sha256 check: the `ETag` a HEAD through Hugging Face's CDN redirect
+/// returns is NOT this file's sha256 — compared against a file that transcribes
+/// correctly, it does not match — so checking it would fail a good install.
+/// What `download_to_file` does prove is that every chunk completed and the file
+/// is the size the server reported, which is the claim this can actually back.
+pub fn install_nemotron_model(force: bool) -> Result<PathBuf> {
+    let dir = browsers_dir().join("nemotron");
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join(NEMOTRON_FILE);
+    if !force && dest.exists() {
+        println!("nemotron model already installed: {}", dest.display());
+        return Ok(dest);
+    }
+    let url = format!("{NEMOTRON_BASE}/{NEMOTRON_FILE}");
+    println!("Downloading Nemotron 3.5 ASR (q8_0, ~708 MB)...");
+    // Straight to the destination: `download_bytes` would hold all 708 MB in
+    // memory, and this is the largest file webrain ever fetches.
+    download_to_file(&url, &dest)?;
+    println!("nemotron model ready: {}", dest.display());
+    Ok(dest)
+}
+
+/// Unpack NeMo-Speech.cpp's `nemo-speech` into `tools/nemo-speech/`. The
+/// archive that ships the CLI is per platform and per backend; CPU builds only,
+/// because one dictated take is a sub-second 0.6B decode and CUDA/Vulkan
+/// archives are 20-500 MB bigger for nothing here.
+fn install_nemo_speech(force: bool) -> Result<PathBuf> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let (asset, ext) = match (os, arch) {
+        ("windows", "x86_64") => ("windows-x86_64-cpu", "zip"),
+        ("linux", "aarch64") => ("linux-aarch64-cpu", "tar.gz"),
+        ("linux", _) => ("linux-x86_64-cpu", "tar.gz"),
+        ("macos", "aarch64") => ("macos-aarch64-cpu", "tar.gz"),
+        ("macos", _) => ("macos-x86_64-cpu", "tar.gz"),
+        _ => anyhow::bail!(
+            "NeMo-Speech.cpp ships no {os}/{arch} CPU archive — build it and point WEBRAIN_ASR_BIN at nemo-speech"
+        ),
+    };
+    let dir = browsers_dir().join("tools").join("nemo-speech");
+    let dest = dir.join(bin_name("nemo-speech"));
+    if !force && dest.exists() {
+        println!("nemo-speech already installed: {}", dest.display());
+        return Ok(dest);
+    }
+    let fname = format!("nemo-speech-{NEMO_SPEECH_VER}-{asset}.{ext}");
+    println!("Downloading nemo-speech ({fname})...");
+    let bytes = download_bytes(&format!(
+        "{NEMO_SPEECH_BASE}/download/v{NEMO_SPEECH_VER}/{fname}"
+    ))?;
+    let work = dir.join("_extract");
+    let _ = std::fs::remove_dir_all(&work);
+    extract_archive(&bytes, &work, &fname)?;
+    let src = find_named(&work, &bin_name("nemo-speech"), 4)
+        .with_context(|| "nemo-speech not found after extract")?;
+    // Copy the release dir flat: the binary loads its ggml/onnx siblings from
+    // its OWN directory, exactly like whisper-cli.
+    let src_dir = src
+        .parent()
+        .context("nemo-speech extract dir")?
+        .to_path_buf();
+    std::fs::create_dir_all(&dir)?;
+    for e in std::fs::read_dir(&src_dir)? {
+        let e = e?;
+        let p = e.path();
+        if p.is_file() {
+            // Propagate: a missing DLL would leave an install that reports ok
+            // and cannot run.
+            std::fs::copy(&p, dir.join(p.file_name().unwrap()))?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    make_executable(&dest);
+    println!("nemo-speech ready: {}", dest.display());
+    Ok(dest)
+}
+
+/// `webrain install nemotron`: everything chat dictation needs, offline — the
+/// recognizer, its GGUF, and ffmpeg to turn the browser's webm/ogg into the
+/// 16 kHz mono WAV the recognizer wants.
+pub fn install_nemotron(force: bool) -> Result<Value> {
+    // One line per part, the shape `install_watch` already has: a step that
+    // fails says why and the rest still runs, so a re-run only fixes the gap.
+    fn state<T>(r: &Result<T>) -> String {
+        match r {
+            Ok(_) => "ok".to_string(),
+            Err(e) => format!("skip: {e}"),
+        }
+    }
+    let ffmpeg = install_ffmpeg(force);
+    let bin = install_nemo_speech(force);
+    let model = install_nemotron_model(force);
+    let mut out = serde_json::Map::new();
+    out.insert("ffmpeg".into(), json!(state(&ffmpeg)));
+    out.insert("nemo-speech".into(), json!(state(&bin)));
+    out.insert("model".into(), json!(state(&model)));
+    let mut warnings: Vec<String> = Vec::new();
+    if bin.is_err() || model.is_err() {
+        warnings.push(
+            "dictation needs both the runtime and the GGUF — `webrain install nemotron` again, or set WEBRAIN_ASR_BIN / WEBRAIN_ASR_MODEL".to_string(),
+        );
+    }
+    if ffmpeg.is_err() {
+        warnings.push(
+            "no ffmpeg: the browser records webm/ogg, and the recognizer reads 16 kHz WAV — put ffmpeg on PATH or install it".to_string(),
+        );
+    }
+    out.insert("warnings".into(), json!(warnings));
+    Ok(Value::Object(out))
+}
+
 /// Download `url` into memory via the parallel chunked `download_to_file` (so
 /// every `install_*` — obscura, chrome, ffmpeg, whisper, yt-dlp — gets the same
 /// animated progress bar + honest per-chunk completion as the vision model).
 /// Streams to a temp file in the cache dir, reads it back, removes it.
-fn download_bytes(url: &str) -> Result<Vec<u8>> {
+///
+/// Public because `webrain install chat-ui` downloads an archive and hands the
+/// bytes to the CLI, which is where the digest manifest lives.
+pub fn download_bytes(url: &str) -> Result<Vec<u8>> {
     // Unique per-call temp name (pid + monotonic nonce): concurrent installs in
     // one process no longer collide, a stale sidecar from a *different* URL can't
     // be resumed, and a predictable PID-only path can't be symlink-attacked.
@@ -637,7 +897,8 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
 }
 
 /// .zip via the zip crate; .tar.gz / .tar.xz via system `tar` (ships on all OS).
-fn extract_archive(bytes: &[u8], dest: &Path, fname: &str) -> Result<()> {
+/// Public for the same reason as `download_bytes`: the chat UI archive.
+pub fn extract_archive(bytes: &[u8], dest: &Path, fname: &str) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     if fname.ends_with(".zip") {
         return extract_zip(bytes, dest);

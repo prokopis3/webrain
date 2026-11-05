@@ -10,6 +10,7 @@
 // churn, not clarity. Revisit as a standalone cleanup, not inside a security fix.
 #![allow(clippy::collapsible_if)]
 
+pub mod asr;
 pub mod backends;
 pub mod browser;
 pub mod byok;

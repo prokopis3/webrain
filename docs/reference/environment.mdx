@@ -28,6 +28,7 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `SERPAPI_API_KEY` | serpapi.com paid Google SERP provider — used by `webrain_serp` when `limit > 10` | — |
 | `BRAVE_API_KEY` | Brave Search API (`api.search.brave.com`, 20/page) — makes `engine=brave` work **without a browser**, and `auto` uses it for `limit > 20` before any browser render | — |
 | `WEBRAIN_SKILLS_DIR` | Directory of operator skill files readable via `webrain_guide(topic="skill:<name>")` — ship house rules to the agent without recompiling. Unset means `<engine cache>/skills`, which `webrain install skills` fills and `webrain skills add <url>` extends; an empty directory serves nothing | — (empty) |
+| `WEBRAIN_MCP_TOOLS` | Advertise only these MCP tools — `serp,scrape`, with or without the `webrain_` prefix. The full set is ~8,080 tokens of schema before any prompt, which is over Groq's free 7,000 tokens/minute cap, so trimming the surface is what makes a small tier work at all. An unmatched list falls back to the full surface | all tools |
 | `WEBRAIN_NO_STEALTH` | Set `1` to skip the injected stealth JS + UA override (e.g. the `webrain serp` google flow). `serp` sets it **for itself** — if it leaks into the shell that starts `mcp`, the server boots with all stealth off and every later result is measured against a different identity | off |
 | `WEBRAIN_STEALTH_NOISE` | Set `0` to disable the canvas/audio/`Object.defineProperty` fingerprint-noise block. **This is the fix when a page renders but never mounts.** Verified on `ab.gr/storelocator` (real Chrome): the NOISE block made Next.js abort with `Cannot read properties of undefined (reading 'getInitialProps')`, and the same browser mounted cleanly with it off. Read at attach — restart the server, then open a **fresh tab**; injected scripts live for the tab's lifetime, so re-navigating the same tab keeps the old one and the change looks ignored | on |
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
@@ -101,12 +102,13 @@ model. First match wins: flags → `WEBRAIN_CHAT_*` → the ambient chain.
 
 | Variable | Description | Default |
 |---|---|---|
-| `WEBRAIN_CHAT_PROVIDER` | row to use: `openrouter`, `openai`, `anthropic`/`claude`, `gemini`/`google`, `fireworks`, `dashscope`/`qwen`, `groq`, `deepseek` | ambient order |
+| `WEBRAIN_CHAT_PROVIDER` | row to use: `openrouter`, `openai`, `anthropic`/`claude`, `gemini`/`google`, `fireworks`, `qwen`/`dashscope`, `groq`, `deepseek`, `grok`/`xai`, `kimi`/`moonshot`, `zhipu`/`glm`, `minimax`, `hunyuan`, `doubao`/`ark`, `qianfan`/`baidu`, `siliconflow` | ambient order |
 | `WEBRAIN_CHAT_MODEL` | override the row's default model id | row default |
 | `WEBRAIN_CHAT_BASE_URL` | override the row's base url. Any OpenAI-compatible endpoint; **a key is then optional**, which is how a local Ollama/vLLM server is reached | row default |
 | `WEBRAIN_CHAT_API_KEY` | the key itself, for one variable instead of a vendor-named one | — |
-| `COPILOT_CLI_PATH` | use a Copilot runtime you already have instead of the bundled one | bundled |
-| `COPILOT_CLI_EXTRACT_DIR` | where the bundled runtime is unpacked on first use | platform cache |
+| `COPILOT_CLI_PATH` | point `webrain chat` at a Copilot runtime you supply instead of the one `webrain install copilot` puts in the engine cache | installed runtime |
+| `WEBRAIN_CHAT_UI` | a directory holding the four `chat --serve` files, checked against digests compiled into the binary. Overrides the engine cache and the copy next to the binary | engine cache |
+| `COPILOT_CLI_EXTRACT_DIR` | where the embedded runtime is unpacked on first use (only with `chat-bundled`) | platform cache |
 | `BUNDLED_CLI_CACHE_DIR` | build-time cache of the runtime archives (CI) | — |
 | `WEBRAIN_CHAT_DEBUG` | mirror every raw session event to stderr — the only way to see the provider's own error when a turn returns no answer | off |
 | `WEBRAIN_CHAT_HOME` | the `COPILOT_HOME` the chat runtime is given: sessions, auth and config live here, and `~/.copilot` is deliberately **not** used (inheriting it loaded ~480 unrelated tools) | `webrain-copilot-home` under the temp dir |
@@ -120,8 +122,17 @@ The ambient chain, in order, with each row's base url and default model:
 | `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | `https://api.anthropic.com/v1` | `claude-sonnet-4-5` |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
 | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
-| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
+| `QWEN_API_KEY` / `DASHSCOPE_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
 | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
+| `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` |
+| `GROK_API_KEY` / `XAI_API_KEY` | `https://api.x.ai/v1` | `grok-4` |
+| `KIMI_API_KEY` / `MOONSHOT_API_KEY` | `https://api.moonshot.ai/v1` | `kimi-latest` |
+| `ZHIPU_API_KEY` / `GLM_API_KEY` | `https://api.z.ai/api/paas/v4` | `glm-4.6` |
+| `MINIMAX_API_KEY` | `https://api.minimax.io/v1` | `MiniMax-M2` |
+| `HUNYUAN_API_KEY` / `TENCENT_API_KEY` | `https://api.hunyuan.cloud.tencent.com/v1` | `hunyuan-turbos-latest` |
+| `DOUBAO_API_KEY` / `ARK_API_KEY` / `VOLCENGINE_API_KEY` | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-250615` |
+| `QIANFAN_API_KEY` / `BAIDU_API_KEY` | `https://qianfan.baidubce.com/v2` | `ernie-4.5-turbo-128k` |
+| `SILICONFLOW_API_KEY` / `SILICONCLOUD_API_KEY` | `https://api.siliconflow.com/v1` | `deepseek-ai/DeepSeek-V3` |
 
 A **named** provider uses only its own variables: `--provider groq` with just
 `OPENAI_API_KEY` set is an error rather than a key sent to the wrong vendor.

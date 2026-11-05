@@ -1,6 +1,8 @@
 # ADR-004: a GUI for `webrain chat`
 
-- Status: Accepted — implemented in `webrain-cli/src/chat_server.rs`
+- Status: Accepted — implemented in `webrain-cli/src/chat_server.rs`.
+  Superseded in part by [ADR-005](/adr/0005-chat-ui-as-a-verified-asset): the
+  page is served from a digest-verified directory instead of `include_str!`'d.
 - Date: 2026-11-04
 - Related: ADR-001 (architecture), ADR-003 (chat over the Copilot SDK)
 

@@ -27,6 +27,32 @@ pub fn tool_names() -> Vec<String> {
         .collect()
 }
 
+/// `(name, hint)` per tool, for a menu that has to fit on one row. The hint is
+/// the first sentence of the description — `webrain_pdf` and `webrain_vision`
+/// read alike as names and nothing alike as sentences. A first sentence too
+/// short to say anything ("PDF work.") is not a hint, so the cut skips it.
+pub fn tool_briefs() -> Vec<(String, String)> {
+    tools::list_tools()
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name")?.as_str()?;
+            let d = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let cut = d
+                .find(". ")
+                .map(|i| i + 1)
+                .filter(|&i| i >= 40)
+                .unwrap_or(d.len());
+            Some((name.to_string(), d[..cut].chars().take(96).collect()))
+        })
+        .collect()
+}
+
+/// The text of one installed skill, for `@name` mention expansion and for the
+/// composer's skill hints. `None` when this binary cannot find that skill.
+pub fn skill_text(name: &str) -> Option<String> {
+    tools::skill_text(name)
+}
+
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::sync::Arc;

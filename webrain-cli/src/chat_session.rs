@@ -22,12 +22,25 @@ use github_copilot_sdk::types::{
 };
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
-use github_copilot_sdk::handler::PermissionHandler;
+use github_copilot_sdk::handler::{PermissionHandler, UserInputHandler};
 use github_copilot_sdk::session::Session;
 
 use super::chat::Args;
+use super::chat_tools;
 use webrain_core::backends::cdp::CdpBackend;
 use webrain_core::byok::{ChatProvider, SearchMode};
+
+/// A missing runtime is a setup step, not a crash: this build embeds one only
+/// with `--features chat-bundled`. The SDK's own error names the artifact it
+/// looked for, so append the two ways to supply it.
+fn runtime_hint() -> &'static str {
+    if github_copilot_sdk::HAS_BUNDLED_CLI {
+        ""
+    } else {
+        "\n\nthis build does not embed the Copilot runtime. Run `webrain install copilot` \
+         to fetch it (or set COPILOT_CLI_PATH to a bundle you already have)."
+    }
+}
 
 /// The session's system prompt, replacing the runtime's coding-agent default.
 ///
@@ -39,6 +52,12 @@ use webrain_core::byok::{ChatProvider, SearchMode};
 fn system_prompt() -> String {
     let mut names: Vec<String> = webrain_mcp::tool_names();
     names.sort_unstable();
+    // Spelled from `NAMES`, so a tool added to the list is described here too.
+    let local = chat_tools::NAMES
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "You are webrain, a browser-automation and web-scraping agent. You answer \
          questions by driving a real browser through one tool server, `webrain`, \
@@ -50,6 +69,19 @@ fn system_prompt() -> String {
          - Discover selectors with `webrain_observe`/`webrain_autoschema`; never guess them.\n\
          - Report only what a tool actually returned, and name the URL you read it from. \
          If a tool failed, say what failed. Never invent page content or prices.\n\
+         - You also have local tools on this machine — {local} — rooted at the \
+         directory `webrain chat` was started in. Use them when the user asks about \
+         their own files or asks you to run something; a path outside that directory \
+         is refused, and each one asks for permission before it runs. `run_shell` \
+         is one-shot; `terminal` keeps a shell alive, so use it for anything \
+         interactive or long-running.\n\
+         - If the request is genuinely ambiguous and guessing would waste the turn, \
+         ask one short question with `ask_user` (when that tool is available) \
+         instead of guessing.\n\
+         - The runtime's own tools (`bash`, `str_replace_editor`, `grep`, …) are \
+         enabled too. Prefer the `webrain_*` and local tools above where they \
+         apply: they carry the fences, a shell does not, and a built-in fetch \
+         skips the proxy and the HTTP cache.\n\
          - Do not write files or edit the user's code unless they ask for it.\n\
          - Answer in prose, briefly, with the numbers and titles you found.",
         names.join(", ")
@@ -75,6 +107,10 @@ pub(crate) struct Totals {
     pub(crate) requests: i64,
     pub(crate) api_ms: i64,
     pub(crate) nano_aiu: f64,
+    /// The part of `input` that came from the prompt cache. Vendors bill it at a
+    /// fraction of a fresh token, so a page that prices every input token at the
+    /// cache-miss rate would overstate the cost of a long conversation badly.
+    pub(crate) cached: i64,
 }
 
 impl Totals {
@@ -97,16 +133,40 @@ pub(crate) fn totals_of(m: &UsageGetMetricsResult) -> Totals {
     for metric in m.model_metrics.values() {
         t.input += metric.usage.input_tokens;
         t.output += metric.usage.output_tokens;
+        t.cached += metric.usage.cache_read_tokens;
         t.requests += metric.requests.count;
     }
     t
 }
 
+/// One row of the CLI tool log. The runtime names an MCP tool
+/// `webrain-webrain_serp` (the server prefix is noise in a log that is already
+/// ours), our own tools arrive bare, and anything else bare is a built-in the
+/// runtime ships — worth saying, because a built-in has no path fence.
+fn tool_label(name: &str) -> String {
+    let bare = name.trim_start_matches("webrain-");
+    if bare.starts_with("webrain_") || chat_tools::NAMES.contains(&bare) {
+        bare.to_string()
+    } else {
+        format!("{bare} (builtin)")
+    }
+}
+
 /// The closing block: what it cost, how fast it ran. Written to stderr so the
 /// answer on stdout stays pipeable.
-fn render_usage(t: Totals, model: &str) -> String {
+fn render_usage(t: Totals, base: &str, model: &str) -> String {
     let cost = if t.nano_aiu > 0.0 {
         format!("{:.6} AIU", t.nano_aiu / 1e9)
+    } else if let Some(usd) =
+        super::chat_server::turn_cost(base, model, t.input, t.output, t.cached)
+    {
+        // The same table `/price` serves the page, so a turn reads one number in
+        // both places instead of the page having money and the CLI saying n/a.
+        if usd < 0.01 {
+            format!("${usd:.5}")
+        } else {
+            format!("${usd:.3}")
+        }
     } else {
         "n/a (BYOK: your provider bills the key)".to_string()
     };
@@ -186,6 +246,44 @@ fn mode_label(mode: SearchMode) -> &'static str {
     }
 }
 
+/// The allowlist the session is created with, in the runtime's wire form
+/// (`builtin:` / `mcp:` / `custom:`). Pure, so its shape is testable without
+/// starting a runtime.
+///
+/// `builtin:*` is the whole point. The namespace existed all along and was never
+/// referenced, so the runtime's own tools were filtered out of every session:
+/// `ask_user` (nothing could reach the `WebInput` handler `--serve` installs),
+/// `skill` (the registered skill directories had no reader), and the host-side
+/// tools a coding agent expects — `bash`, `str_replace_editor`, `grep`, and the
+/// rest of `BUILTIN_TOOLS_ISOLATED`. Naming them one by one would go stale the
+/// first time the runtime adds a tool, which is exactly how `ask_user` and
+/// `skill` went missing; the wildcard cannot.
+///
+/// The safety gate is not this list. Every built-in still raises a permission
+/// request: `not_destructive` refuses a shell or a file write unless `--yes`,
+/// and `--serve` asks the page. What the wildcard does cost is the path fence
+/// `chat_tools` builds — a built-in `bash` runs anywhere the process can — so
+/// the prompt tells the model to prefer the fenced tools.
+fn tool_filter() -> Vec<String> {
+    let mut allowed = webrain_mcp::tool_names()
+        .iter()
+        .fold(ToolSet::new(), |set, n| {
+            set.add_mcp(&format!("webrain-{n}"))
+                .expect("tool_names() are runtime-valid names")
+        });
+    // The agent's own tools are not MCP tools: without their names here the
+    // allowlist hides them from the model as surely as never registering them.
+    for name in chat_tools::NAMES {
+        allowed = allowed
+            .add_custom(name)
+            .expect("chat_tools::NAMES are runtime-valid names");
+    }
+    allowed
+        .add_builtin("*")
+        .expect("\"*\" matches every built-in")
+        .into_vec()
+}
+
 /// Build the runtime client and the session in one place, so the one-shot turn
 /// (`run`) and `--serve` cannot drift apart: same provider config, same tool
 /// allowlist, same isolation. `permission` overrides the policy handler — the
@@ -194,6 +292,9 @@ pub(crate) async fn connect(
     args: &Args,
     provider: &ChatProvider,
     permission: Option<Arc<dyn PermissionHandler>>,
+    // `ask_user`: without a handler the runtime puts `requestUserInput: false`
+    // on the wire and a turn that asks a question just blocks until its timeout.
+    user_input: Option<Arc<dyn UserInputHandler>>,
 ) -> anyhow::Result<(Client, Session)> {
     let exe = std::env::current_exe()?;
 
@@ -237,9 +338,11 @@ pub(crate) async fn connect(
                 .with_mode("replace")
                 .with_content(system_prompt()),
         )
-        // One-shot: no persistent workspace, no cross-session store, no
-        // `~/.copilot/session-state/<id>` left behind for a command that exits.
-        .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(false));
+        // A one-shot command must not leave session state behind, but `--serve`
+        // is the opposite: a long conversation, where hitting the context limit
+        // mid-answer is the failure this switch exists to prevent. Compaction is
+        // reported as `session.compaction_*` and already lands in the page.
+        .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(args.serve));
     if let Some(handler) = permission {
         config = config.with_permission_handler(handler);
     } else if args.yes {
@@ -247,7 +350,23 @@ pub(crate) async fn connect(
     } else {
         config = config.approve_permissions_if(not_destructive);
     }
-    config.streaming = Some(args.stream);
+    // Read before the handler is moved into the config: whether a question can
+    // be answered decides whether the tool is offered at all.
+    let ask = user_input.is_some();
+    if let Some(handler) = user_input {
+        config = config.with_user_input_handler(handler);
+    }
+    // The same directory the page's `@` menu lists, so a skill named there can
+    // actually be loaded. Discovery-only: the runtime reads a skill when the
+    // model asks for it, it is not inlined into every prompt.
+    let skills = webrain_core::skills::dir();
+    if skills.is_dir() {
+        config = config.with_skill_directories([skills]);
+    }
+    // `--serve` always streams: the page paints deltas, and without them a turn
+    // shows nothing until it is over. The CLI keeps `--stream` opt-in because
+    // there stdout *is* the answer, not a progress bar.
+    config.streaming = Some(args.stream || args.serve);
     config.enable_session_store = Some(false);
     // One turn, no memory writes: the runtime's memory feature is on by default
     // in CLI mode and would accumulate state a one-shot command never reads.
@@ -264,15 +383,13 @@ pub(crate) async fn connect(
     // `ToolSet` rather than raw strings: it validates each name at build time
     // and emits the runtime's documented `mcp:<server>-<tool>` form.
     config.enable_config_discovery = Some(false);
-    config.available_tools = Some(
-        webrain_mcp::tool_names()
-            .iter()
-            .fold(ToolSet::new(), |set, n| {
-                set.add_mcp(&format!("webrain-{n}"))
-                    .expect("tool_names() are runtime-valid names")
-            })
-            .into_vec(),
-    );
+    config.available_tools = Some(tool_filter());
+    // `ask_user` is in the wildcard, but a one-shot turn has no handler to answer
+    // it: the runtime would send the question nowhere and the turn would sit
+    // until it timed out, so it is the one built-in worth hiding there.
+    if !ask {
+        config.excluded_tools = Some(vec!["builtin:ask_user".to_string()]);
+    }
 
     // A process that exits must not leave the runtime holding a session: reap
     // it server-side instead of relying on the disconnect being enough.
@@ -290,22 +407,42 @@ pub(crate) async fn connect(
         .unwrap_or_else(|| std::env::temp_dir().join("webrain-copilot-home"));
     let mut options = ClientOptions::default()
         .with_mode(ClientMode::Empty)
-        .with_session_idle_timeout_seconds(60)
         .with_base_directory(home);
+    // The released binary does not embed a runtime, so point the SDK at the one
+    // `webrain install copilot` put in the engine cache (or COPILOT_CLI_PATH).
+    // Without this the SDK falls back to its own build-machine cache, which a
+    // user who only downloaded the binary does not have.
+    if let Some(bin) = webrain_core::install::find_copilot() {
+        options = options.with_program(github_copilot_sdk::CliProgram::Path(bin));
+    }
+    // One-shot: the process is about to exit, so a runtime left holding a session
+    // is a leak and 60 s of grace is plenty. `--serve` is the opposite — measured,
+    // a minute of reading the answer and the runtime cleans the session up, which
+    // reads as "the runtime shut down" on a page nobody closed. It lives until the
+    // process does.
+    if !args.serve {
+        options = options.with_session_idle_timeout_seconds(60);
+    }
     options.working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let client = Client::start(options)
-        .await
-        .map_err(|e| anyhow::anyhow!("could not start the Copilot runtime: {e}"))?;
+    let client = Client::start(options).await.map_err(|e| {
+        anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint())
+    })?;
     let session = client
         .create_session(config)
         .await
         .map_err(|e| anyhow::anyhow!("could not create the session: {e}"))?;
+    // The disk and a shell, for the one mode that should have them. Installed on
+    // the session rather than only configured, so a resumed one gets them too.
+    session
+        .set_tools(chat_tools::workspace_tools())
+        .await
+        .map_err(|e| anyhow::anyhow!("could not install the local tools: {e}"))?;
     Ok((client, session))
 }
 
 pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
-    let (client, session) = connect(args, provider, None).await?;
+    let (client, session) = connect(args, provider, None, None).await?;
 
     // Subscribe before sending: a create-time turn can emit deltas before a
     // late subscriber exists.
@@ -325,7 +462,9 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
             }
             match ev.event_type.as_str() {
                 "assistant.message_delta" => {
-                    if let Some(d) = first_str(&ev.data, &["delta", "text"]) {
+                    // `deltaContent` is the field the SDK documents; `delta` and
+                    // `text` are what other builds have sent.
+                    if let Some(d) = first_str(&ev.data, &["deltaContent", "delta", "text"]) {
                         if streaming {
                             print!("{d}");
                             use std::io::Write;
@@ -347,7 +486,7 @@ pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::
                     if let Some(n) = first_str(&ev.data, &["toolName", "tool_name", "name"]) {
                         // stderr: the answer owns stdout, so `| jq` and `> file`
                         // stay clean even while tools are running.
-                        eprintln!("· {n}");
+                        eprintln!("· {}", tool_label(n));
                         if let Ok(mut c) = reader_sink.lock() {
                             c.tools.push(n.to_string());
                         }
@@ -482,7 +621,10 @@ Use it and cite the urls it names.\n\n{answer}\n\nQuestion: {prompt}"
     // Nothing to report if no request ever reached the model (bad key, refused
     // prompt): zeros would read as "it was free" instead of "it did not run".
     if !args.json && totals.requests > 0 {
-        eprintln!("{}", render_usage(totals, &provider.model));
+        eprintln!(
+            "{}",
+            render_usage(totals, &provider.base_url, &provider.model)
+        );
     }
     if !args.stream && !answer.is_empty() {
         println!("{answer}");
@@ -561,8 +703,9 @@ mod tests {
             requests: 1,
             api_ms: 7400,
             nano_aiu: 0.0,
+            ..Default::default()
         };
-        let out = render_usage(t, "deepseek-flash");
+        let out = render_usage(t, "", "deepseek-flash");
         assert!(out.contains("8412 in / 312 out"), "{out}");
         assert!(out.contains("42.2 tok/s"), "{out}");
         assert!(out.contains("1 request ·"), "{out}");
@@ -573,7 +716,22 @@ mod tests {
             nano_aiu: 1_500_000.0,
             ..t
         };
-        assert!(render_usage(paid, "m").contains("0.001500 AIU"));
+        assert!(render_usage(paid, "", "m").contains("0.001500 AIU"));
+    }
+
+    #[test]
+    fn a_vendor_with_a_published_rate_reports_money_not_n_a() {
+        let t = Totals {
+            input: 1_000_000,
+            output: 1_000_000,
+            requests: 1,
+            api_ms: 1000,
+            nano_aiu: 0.0,
+            cached: 0,
+        };
+        let out = render_usage(t, "https://api.deepseek.com", "deepseek-flash");
+        // 1M in at $0.30 + 1M out at $1.20, halved when the clock is off-peak.
+        assert!(out.contains("$1.500") || out.contains("$0.750"), "{out}");
     }
 
     #[test]
@@ -584,10 +742,35 @@ mod tests {
             requests: 2,
             api_ms: 3000,
             nano_aiu: 0.0,
+            ..Default::default()
         };
         let v = usage_json(t);
         assert_eq!(v["tokens_per_sec"], 33.3);
         assert_eq!(v["input_tokens"], 10);
         assert_eq!(v["requests"], 2);
+    }
+
+    #[test]
+    fn the_log_marks_a_runtime_builtin_and_leaves_our_tools_plain() {
+        // MCP tool of ours: the server prefix is stripped, nothing else added.
+        assert_eq!(tool_label("webrain-webrain_serp"), "webrain_serp");
+        assert_eq!(tool_label("terminal"), "terminal");
+        assert_eq!(tool_label("bash"), "bash (builtin)");
+        assert_eq!(tool_label("ask_user"), "ask_user (builtin)");
+    }
+
+    #[test]
+    fn the_allowlist_keeps_the_whole_builtin_namespace() {
+        let served = tool_filter();
+        // The wildcard, not a list of names: the names went stale once already.
+        assert!(served.contains(&"builtin:*".to_string()), "{served:?}");
+        assert!(
+            served.contains(&"custom:terminal".to_string()),
+            "{served:?}"
+        );
+        assert!(
+            served.iter().any(|f| f.starts_with("mcp:webrain-")),
+            "{served:?}"
+        );
     }
 }
