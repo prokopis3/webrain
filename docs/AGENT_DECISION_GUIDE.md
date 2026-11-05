@@ -620,6 +620,7 @@ on a machine with no repo checkout.
 | `WEBRAIN_PROFILES_DIR`, `WEBRAIN_VAULT_DIR` | Where persistent profiles and the encrypted vault live. A moved profile root behaves exactly like "logged out". |
 | `WEBRAIN_BROWSERS_DIR`, `WEBRAIN_CHROME`, `WEBRAIN_LIGHTPANDA`, `WEBRAIN_OBSCURA` | Engine discovery. `engine not found` = wrong path or nothing installed (`webrain install --engine …`). |
 | `WEBRAIN_SKILLS_DIR` | Operator `.md` skills served through `webrain_guide(topic="skill:<name>")`. |
+| `WEBRAIN_MCP_TOOLS` | Advertise only the named tools (`serp,scrape`). The full schema set is ~8k tokens before the prompt, so a small per-minute tier (Groq free: 7k tokens/min) rejects every request until you trim it. |
 | `BRAVE_API_KEY`, `SERPAPI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `FIREWORKS_API_KEY`, `OPENROUTER_API_KEY`, `EMBED_*` | Provider tiers. Unset only means a cheaper tier or the bundled local model — never a reason to claim a scrape is impossible. |
 
 ### 8b. Relaunching the MCP server without changing its identity

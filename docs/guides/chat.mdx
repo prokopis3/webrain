@@ -28,8 +28,26 @@ engine cache, so it drives whatever browser the CLI would.
 cargo build --release --features chat
 ```
 
-Expect a large binary: the feature embeds the Copilot CLI runtime
-(~135 MB per platform, downloaded and SHA-256 verified at build time).
+Expect a small binary: `chat` alone does **not** embed the Copilot runtime, so
+the artifact stays at ~45 MB. Install the runtime once:
+
+```bash
+webrain install copilot
+```
+
+That downloads the official runtime for this platform from `github/copilot-cli`
+(SHA-256 verified) into the engine cache, and `webrain chat` picks it up — no
+environment variable needed. `COPILOT_CLI_PATH` still wins if you already have a
+bundle of your own. To bake the runtime into the binary instead:
+
+```bash
+cargo build --release --features chat,pdfium          # ~45 MB, runtime installed separately
+cargo build --release --features chat-bundled,pdfium  # ~211 MB, runtime embedded
+```
+
+`chat-bundled` embeds ~166 MB of archives per platform
+(`copilot_cli.archive` 107.4 MB + `copilot_runtime.archive` 58.8 MB),
+downloaded and SHA-256 verified at build time.
 
 ### What each build target carries
 
@@ -94,14 +112,28 @@ First match wins:
 | `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | `https://api.anthropic.com/v1` | `claude-sonnet-4-5` |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
 | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/qwen3-235b-a22b` |
-| `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
+| `QWEN_API_KEY` / `DASHSCOPE_API_KEY` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3-max` |
 | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` |
 | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` (`--model deepseek-v4-pro` for the larger one) |
+| `GROK_API_KEY` / `XAI_API_KEY` | `https://api.x.ai/v1` | `grok-4` |
+| `KIMI_API_KEY` / `MOONSHOT_API_KEY` | `https://api.moonshot.ai/v1` | `kimi-latest` |
+| `ZHIPU_API_KEY` / `GLM_API_KEY` | `https://api.z.ai/api/paas/v4` | `glm-4.6` |
+| `MINIMAX_API_KEY` | `https://api.minimax.io/v1` | `MiniMax-M2` |
+| `HUNYUAN_API_KEY` / `TENCENT_API_KEY` | `https://api.hunyuan.cloud.tencent.com/v1` | `hunyuan-turbos-latest` |
+| `DOUBAO_API_KEY` / `ARK_API_KEY` / `VOLCENGINE_API_KEY` | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-250615` |
+| `QIANFAN_API_KEY` / `BAIDU_API_KEY` | `https://qianfan.baidubce.com/v2` | `ernie-4.5-turbo-128k` |
+| `SILICONFLOW_API_KEY` / `SILICONCLOUD_API_KEY` | `https://api.siliconflow.com/v1` | `deepseek-ai/DeepSeek-V3` |
 
 `--provider` accepts any alias stem: `openrouter`, `openai`, `anthropic`,
-`claude`, `gemini`, `google`, `fireworks`, `dashscope`, `qwen`, `groq`,
-`deepseek`. A named provider uses **only its own** variables — naming `groq`
-while `OPENAI_API_KEY` is set is an error, not a silent mix-up.
+`claude`, `gemini`, `google`, `fireworks`, `qwen`, `dashscope`, `groq`,
+`deepseek`, `grok`, `xai`, `kimi`, `moonshot`, `zhipu`, `glm`, `minimax`,
+`hunyuan`, `tencent`, `doubao`, `ark`, `volcengine`, `qianfan`, `baidu`,
+`siliconflow`, `siliconcloud`. A named provider uses **only its own**
+variables — naming `groq` while `OPENAI_API_KEY` is set is an error, not a
+silent mix-up.
+
+Every row's default model is a default, not a promise: vendor ids are dated
+releases and get renamed, so `--model` is the escape hatch when one retires.
 
 ### A local server needs no key
 
@@ -220,26 +252,352 @@ webrain chat --serve                 # http://127.0.0.1:8787/
 webrain chat --serve --port 9000     # anywhere else on loopback
 ```
 
-The same session, driven from a page instead of a pipe: transcript on the left,
-a tool card per `webrain_*` call, a token meter in the header, and a modal for
-every permission request. The page is compiled into the binary (`include_str!`),
-so there is no build step and no second process, and it is the only UI that
-opens — nothing is fetched from a CDN.
+The same session, driven from a page instead of a pipe: transcript on the left, a
+tool card per `webrain_*` call, a token meter in the header, a session menu on
+the right and a modal for every permission request. There is no second process
+and no CDN — the page, its CSS and its two bundles are the only files it loads.
 
-Four routes, all on loopback:
+The four files are **not embedded in the binary**. They live in a directory the
+server reads at startup and hashes against digests compiled in by `build.rs`:
+
+| Where, in order | |
+|---|---|
+| `WEBRAIN_CHAT_UI` | an explicit directory |
+| the engine cache | what `webrain install chat-ui` unpacks |
+| `webrain-chat-ui/` next to the binary | portable layouts |
+| `webrain-cli/assets/` in a checkout | so `cargo run` needs no install |
+
+A file that does not match is refused, not served — this page is what asks a
+human to allow a shell command, so a `chat.js` edited after the fact has to fail
+closed. A release download therefore needs one extra step, the same as the
+Copilot runtime:
+
+```bash
+webrain install chat-ui              # the v<this build>'s archive, verified
+webrain install chat-ui --from ./webrain-chat-ui.tar.gz
+```
+
+A checkout does not: `cargo build` hashed the assets it found, so
+`cargo run -- chat --serve` just works.
+
+The gear in the session rail opens settings, in five tabs:
+
+| Tab | What it holds |
+|---|---|
+| Instructions | standing instructions and a reply language — sent as a `[instructions]` / `[language]` preamble before every message, the same honest lever as the effort hint. Kept in the browser; the server stores nothing. Capped at 8 KiB per turn. |
+| Chat | default agent mode, thinking effort, palette, and whether a turn ends with suggested next steps |
+| Connection | the provider this session runs, its base url and model, and how many tools are preferred |
+| Storage | conversation count, where the SQLite file lives, where attachments land |
+| About | the route list, the keyboard shortcuts, and **reset every setting** (a `webrain-chat-*` sweep in localStorage, then a reload — the transcript is the server's and survives) |
+
+Seven routes, all on loopback:
 
 | Route | What it does |
 |---|---|
 | `GET /` | the page |
+| `GET /chat.js`, `GET /chat.css` | the page's bundle, read from the verified directory |
 | `GET /events` | SSE, one `data: {"type":…,"data":{…}}` frame per runtime event |
-| `POST /turn` | `{"prompt":"…"}` → `202`, or `409` while a turn is running |
+| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu |
+| `GET /sessions/<id>` | that conversation's messages, oldest first |
+| `PATCH /sessions/<id>` | `{"title":"…"}` → rename it in the menu |
+| `DELETE /sessions/<id>` | forget the conversation and everything in it |
+| `GET /providers` | provider *targets*: base url, model, where the key lives, a one-line description, and the context size its docs publish |
+| `POST /providers` | `{"id","base_url","model","key_env"}` → a target row in the local database (`key_env` may be empty) |
+| `POST /keys` | `{"provider":"deepseek","key":"…"}` → the key is written to the encrypted vault; nothing is echoed back |
+| `POST /switch` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes |
+| `GET /catalog` | the skills this binary ships and the MCP tools it exposes |
+| `GET /search?q=…` | substring hits across every stored message, newest first |
+| `POST /attach` | raw bytes + `x-name` → a file under the temp upload dir |
+| `POST /turn` | `{"prompt":"…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while busy and `delivery` is `turn` |
+| `POST /stop` | abort the turn that is running |
+| `POST /transcribe` | raw audio + `x-name` / `x-lang` → `{"text":…}`, transcribed locally |
 | `POST /permission` | `{"id":"…","allow":true}` — answers a pending modal |
+| `POST /answer` | `{"id":"…","answer":"…","freeform":true}` — answers `ask_user` |
+| `POST /fork` | `{"convo":"…","upto":N}` — a new conversation holding the first N messages |
+| `GET /models?provider=…` | that provider's live catalogue, cached five minutes |
+| `GET /chunk-markdown.js` | the lazy half of the bundle (`marked` + DOMPurify) |
+
+One dock sits under the field, and it is ordered the way a turn is built:
+`+` attach, the mode chips (`agent` / `plan` / `ask`), the thinking-effort button
+(`off` / `low` / `medium` / `high` / `max`) and the tools filter, with the model
+pushed to the far right because it is the environment rather than this turn. The
+record button does not live here: dictation sits in the footer beside Send, with
+the other things that act on the message rather than shape it.
+
+The effort button opens a dialog rather than cycling a value, because it now has
+something to explain: the level is sent to the runtime as `reasoning_effort`, and
+`off` sends nothing at all (the only honest way to ask for the model's own
+default — this page cannot turn a model's thinking off from outside the request it
+does not build). The field only travels on a model set, so the session keeps the
+level it was last given and the first turn of a new session applies yours before
+it runs: a fresh session is created before the page can switch anything, and an
+effort that only applied after you opened the model dialog was an effort nobody
+had set. The dialog also states, for the model that is
+actually running, the provider's own description, its published price per million
+tokens, and the context window — from that model's catalogue entry when the vendor
+lists one, from the vendor's docs when only a docs page has it, and as “not
+published by this provider” when neither does. For DeepSeek it adds the off-peak
+window from DeepSeek's own pricing page: peak is 01:00–04:00 and 06:00–10:00 UTC,
+Monday to Friday, everything else bills at half price, and the dialog says which
+side of that line the current UTC clock is on.
+
+Modes and the tools filter are still **instructions, not switches**: the runtime's
+tool set is fixed when the session is created, so a mode prepends a directive —
+`plan` asks for a plan before acting, `ask` says not to call tools — and `tools`
+prepends one line naming the tools to prefer. The filter panel states this rather
+than implying it can hot-swap the tool set.
+
+Each turn shows its own evidence: a tool card carries the arguments **and the
+result the tool actually returned**, with every `http(s)` url in that result
+lifted into a source strip — the page never invents a citation, so an empty strip
+means the tool returned no links. A reasoning/thinking stream, when the runtime
+sends one, collects into a collapsed `thinking` block above the answer. The record
+control beside Send dictates: it records through `MediaRecorder`, sends the take
+to `POST /transcribe`, and puts the **text** in the field — see
+[Dictation](#dictation). `↻ retry` re-sends the last prompt.
+
+### Send, stop, queue, steer
+
+The send button is one seat with two occupants: **Send** when nothing is running,
+**Stop** (`POST /stop`, the runtime's own abort) when something is. While a turn
+runs, two small icon buttons appear beside it, and they are exactly the two
+delivery modes the runtime has that a plain send is not:
+
+| Action | How | What the runtime does |
+|---|---|---|
+| stop and send | Stop, then Send | aborts this turn, then sends the message as a new one |
+| add to queue | `Alt+Enter`, or the queue icon | `DeliveryMode::Enqueue` — the message waits, the current answer finishes uninterrupted |
+| steer with message | `Enter`, or the steer icon | `DeliveryMode::Immediate` — the current turn yields, this message runs now |
+
+A plain `Enter` with nothing running sends a new turn, and that is the only
+delivery refused while a turn runs: two answers interleaving in one transcript is
+what a single composer cannot show.
+
+Provider rows are names, never secrets. A key can arrive two ways: an exported
+variable, or a key pasted into the model dialog, which goes to the **encrypted
+vault** under `webrain-chat-provider/<id>` — not to the chat database, not to the
+environment, and never back out to the page. An exported variable still wins over
+a stored key, so `--key-from`-style workflows keep working; `webrain vault list`
+shows which keys exist without printing one.
+
+Picking a model **stages** it; `Save` applies it. Browsing a catalogue should not
+be able to switch the session by accident, so the dialog keeps a draft exactly the
+way the tools chooser does, marks the staged row, and the footer states what Save
+will do before you press it: the model, its context window, its in/out price per
+million tokens, and whether it lands on the endpoint the session already talks to
+or on another one.
+
+On the same endpoint that is `Session::set_model`, so the conversation continues
+with its context intact and the staged effort takes effect with it. Another
+provider is a different operation, because it has to be: the provider is fixed
+when a session is created, so the server starts a new session against the new
+endpoint and the page says what that costs — the transcript stays on screen and in
+history, but the model's own context starts empty. Both are refused with `409`
+while a turn is running, since swapping the runtime under a running turn would
+strand it.
+
+### The context window is the model's, not Copilot's
+
+Every session is created with `max_prompt_tokens` set to the window the model
+actually has, read from the vendor's own catalogue row and falling back to the
+figure the provider's docs publish. Without it the runtime applies its own idea of
+a window — 128k, because it is a Copilot runtime — so a 1M-token model was
+measured as *7% of 128k* and would have compacted at an eighth of its real size.
+The rail prints both numbers when they disagree (`1.0M tokens model · 128k tokens
+session`) rather than quietly showing the smaller one, and `--max-prompt-tokens`
+still overrides the lookup for a model nobody publishes a window for.
+
+In the composer, `/` lists the commands the page itself runs (`/clear`,
+`/tools`), `@` lists the shipped skills and `#` lists the MCP tools — both read
+from `GET /catalog`, so neither menu can offer something this build does not
+have. `+` attaches a file. A pick inserts `@name` / `#name` into the prompt;
+nothing is sent for you.
+
+### The deck: rail, transcript, instruments
+
+The page is three columns and only the middle one scrolls. The left rail is
+navigation (threads), the right rail is instrumentation (model, tokens, tok/s,
+cost, tool count, source count, and the per-turn ledger), and the transcript
+hangs off a single hairline — the **spine**. Every row puts a tick on it: a
+message tick is the role's colour, a tool tick is its state (amber running,
+mint complete, red failed), and reasoning is grey. The spine is the one element
+that survives removing the wordmark, which is the point of having it.
+
+Type is three roles and no webfonts, because the page still makes zero network
+requests: a serif for the wordmark and the empty state, the OS UI face for
+prose, and monospace for every label, number, tool name and timestamp.
+
+The scale is deliberate: a `5/10/14/20/26/32` px spacing ramp, 15 px body text on
+a 1.65 line, 16 px prose, and hit targets of at least 2.1 rem (2.9 rem for send).
+It is sized to be read across a desk, not to fit the most controls in a row — the
+composer's dock wraps rather than compressing, and the field carries
+`min-width: 0` so a long model name cannot widen the column past the viewport.
+
+### Generative UI: the result picks its own view
+
+A tool result is data, so the page renders it by **shape** rather than by tool
+name — an array of objects becomes a table (first six columns, fifty rows), a
+flat object becomes a label/value grid, and anything else stays preformatted,
+which is always correct. No renderer knows any tool, so an unfamiliar payload
+degrades instead of breaking.
+
+A tool card is a report with two halves, and each is labelled and coloured:
+**input** is the request the model sent (tertiary hue), **output** is what came
+back (primary hue, rose when the call failed), and each has its own copy button
+— the request is evidence too, and it is the half people forget to quote. A turn
+closes with a **steps** strip: every tool that ran since the prompt, in order,
+with its duration and its outcome, so the route a turn took is readable without
+opening a single card.
+
+Markdown in a reply is rendered, not escaped: a picture becomes a figure (the
+image is the click-through link, the alt text the caption), a URL standing on
+its own becomes a destination card with the host read apart from the path, and a
+table is capped at 24 rem and scrolls inside its own box. Everything is
+sanitised on every render — `<style>` elements and `style` attributes are
+dropped by name, because this page can approve shell commands and
+`position:fixed;inset:0` in a reply would be enough to paint a fake dialog over
+the real one.
+
+Under each turn, **sources** collects every `http(s)` url the tools returned,
+deduplicated, with the tool that found it; **next** offers up to three prompts
+derived from what the turn actually did — the host that came back, the tool that
+failed, the screenshot that was taken. Both are derived from the transcript, not
+generated by a model, so a suggestion you cannot trace back to a tool result
+never appears.
+
+Branching is `fork` on any user message: `POST /fork` copies the thread up to
+that message into a new conversation. It is a transcript operation — the runtime
+keeps one linear context, so a fork is a clean place to carry on from, not a
+rewind of what the model remembers, and the button's tooltip says so.
+
+Approval is a dialog with three answers: deny, approve once, or *always allow
+this kind*. The third is remembered by the page, not the runtime — the same
+request is answered without a modal for the rest of the tab's life.
+
+### Bundle: one eager file, one lazy chunk
+
+`chat.js` is the only script the page parses at first paint; `marked` and
+DOMPurify live in `chunk-markdown.js` and are imported dynamically — warmed when
+the browser is idle, awaited before the first render, and shown as plain text if
+they are not there yet. Chunk names are deterministic (`chunk-[name].js`) because
+the binary embeds every file by name, so a hashed name would be a 404.
+
+The server sends the assets uncompressed: loopback, one client, and a proxy is
+the only thing that would make gzip worth the code.
+
+CSS stays one file on purpose: 44 KB raw, and splitting it would mean one extra
+request per chunk against a local server — the wrong trade.
+
+### Dictation
+
+The record button beside Send dictates instead of attaching: it records with
+`MediaRecorder`, posts the bytes to `POST /transcribe`, and the recognizer's text
+lands in the field — editable, not sent. `Esc` while recording discards the take.
+
+Everything in that path is local:
+
+```bash
+webrain install nemotron        # ~8 MB runtime + ~708 MB model, once
+```
+
+That command installs three things into the webrain cache (never into PATH):
+
+| Part | What it is |
+|---|---|
+| `tools/nemo-speech/` | NVIDIA **NeMo-Speech.cpp** — a native GGML CLI, prebuilt per platform; CPU builds only, because one dictated take is a sub-second 0.6B decode |
+| `nemotron/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf` | NVIDIA **Nemotron 3.5 ASR**: 0.6B cache-aware FastConformer-RNNT, 40 language-locales, punctuation and capitalisation built in, 742 MB |
+| `tools/ffmpeg/` | turns the browser's webm/ogg into the 16 kHz mono WAV the recognizer reads |
+
+The recognizer is prompt-conditioned on the spoken language: the page sends
+`navigator.language` as `x-lang` (`en-US`, `de-DE`, …), so a dictated turn is
+transcribed in the language the page is set to rather than whatever the model
+would guess. `auto` is also accepted and lets the model detect and tag it.
+
+Two honest limits. Nothing about the audio is stored: it is written to a temp
+file, converted, transcribed, and the temp directory is deleted — but that also
+means dictation has no history to re-run. And without `webrain install nemotron`
+the button does not fail silently: `POST /transcribe` answers `503` with the
+install command, and the page falls back to attaching the recording as a file,
+which is what the control did before and is still useful for the agent.
+
+`WEBRAIN_ASR_BIN` / `WEBRAIN_ASR_MODEL` point at a runtime and model you built or
+downloaded yourself; the cache is then not consulted.
+
+### Providers: the whole table, and their live catalogues
+
+The model dialog lists every provider this build can talk to — all eight in
+`CHAT_PROVIDERS`, plus the session's own endpoint when the table does not claim
+it, plus anything saved. Each tab is an icon and a name; the dot marks the row
+this session is actually using, which is also the row `/turn` bills. The icon is
+the vendor's own mark, inlined from `webrain-cli/ui/src/logos/<id>.svg` as a
+single `currentColor` path (Simple Icons, CC0, and LobeHub, MIT — the marks stay
+the vendors' trademarks), so it takes the tab's colour and costs no request; a
+provider with no mark of its own gets a neutral glyph rather than someone else's
+logo. Every tab
+says *where* the key is — an exported variable, the vault, or nowhere — so an
+unconfigured provider is visible instead of hidden, and a key can be pasted
+straight into the tab.
+
+Opening a tab fetches that provider's **live** catalogue through
+`GET /models?provider=…` (`{base}/models`, Anthropic with `x-api-key`, everyone
+else with a bearer token). The server caches the answer per base url for five
+minutes, the list is capped at 400 and filterable in the page, and a catalogue
+that cannot be read reports the vendor's error instead of an empty list. Each row
+carries the model's context window when the vendor publishes one
+(`context_length`, `context_window`, `max_input_tokens` or `max_context_tokens`).
+Clicking a model switches to it — see the live-switch paragraph above for what
+that does and does not preserve.
+
+Attachments are deliberately narrow: **8 MB**, and only images (`png`, `jpg`,
+`jpeg`, `gif`, `webp`) or plain text (`txt`, `md`, `json`, `csv`, `log`, `yml`,
+`yaml`, `toml`, `rs`, `js`, `ts`, `py`, `css`, `xml`). The server renames what it
+receives — one basename, `[A-Za-z0-9._-]`, 48 characters — and writes it under
+`%TEMP%\webrain-chat\<conversation>\`, so the name in a request never decides
+where bytes land and `../../etc/passwd` is refused rather than resolved. The
+prompt gets a line naming that path; the file is never inlined. A paste longer
+than 600 characters or 8 lines takes the same route, leaving one
+`[pasted text #n · N lines · X KB → path]` line instead of the whole dump.
+
+`Ctrl-K` (or the ⌕ in the header) searches the stored history — every message
+body, ranking a hit in a conversation's opening message first and then newest —
+and opens the conversation a hit belongs to. It is a `LIKE` scan over one table,
+not embeddings: instant for a personal history, and the place to move to FTS5 or
+a vector index is when that scan becomes measurable.
+
+Permission requests **queue**. The runtime can ask more than once before you have
+answered, and `--serve` shows them one at a time, with the rest counted rather
+than dropped — an unanswered request is a deny after 120 s, so losing one changes
+the outcome of the turn.
+
+`ask_user` is wired too: the runtime hands over the question, its optional
+choices and whether free text is allowed, the page renders a prompt, and
+`POST /answer` returns the reply. That matters because a turn that asks and gets
+nothing does not fail fast — it waits out its own timeout. `--serve` answers as
+`UserInputHandler`; the skills directory the `@` menu lists is passed as
+`skillDirectories`, so naming a skill there can actually load it.
+
+The session panel is a column on a desktop and a drawer on a phone; the `«` / `»`
+button in the header collapses it either way.
+
+`--serve` answers in deltas (`streaming: true`), so the transcript grows token by
+token instead of appearing all at once; `--stream` does the same for a pipe.
+
+The page is a Svelte 5 app built from `webrain-cli/ui` with bun
+(`bun install && bun run build` → `webrain-cli/assets/chat.{js,css}`). The four
+files are committed, so `cargo build` needs no JavaScript toolchain — bun is
+only for editing the UI — and `build.rs` hashes them into the binary's manifest.
+
+History is a local SQLite file (`%APPDATA%\webrain\chat.db` on Windows,
+`~/.config/webrain/chat.db` elsewhere; `WEBRAIN_CHAT_DB` overrides it). It is a
+convenience: a database that cannot be opened means no menu, not a dead server.
 
 The event **names are the runtime's own** (`assistant.message_delta`,
 `tool.execution_start`, `session.usage_info`, `model.call_failure`, …) rather
 than a translated dialect: the page maps each one to an element, and a name it
-does not know is dropped instead of breaking the stream. One event is ours:
-`webrain.permission`, carrying the request id the modal answers.
+does not know becomes a collapsed activity row rather than breaking the stream.
+One event is ours: `webrain.permission`, carrying the request id the modal
+answers; `webrain.usage` and `webrain.model` are the token/cost samples read
+from `session.usage.getMetrics`.
 
 Two things that matter more than the layout:
 
@@ -345,6 +703,6 @@ No GUI either. The runtime already emits everything a conversation window needs
 (streamed deltas, tool calls, permission requests, context and cost meters) and
 the CLI flattens all of it into stderr lines; [ADR-004](/adr/0004-chat-gui-surface)
 maps each event to the element it should become and specifies `webrain chat
---serve` as the smallest interface that keeps the binary self-contained —
-including which SDK handler slots a UI has to fill, because today they are
-policy, not a person.
+--serve` as the smallest interface that keeps the binary self-contained — the
+page excepted, since it is the one part that is a file rather than a process,
+and it is verified by digest wherever it lives.

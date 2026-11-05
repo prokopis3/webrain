@@ -302,6 +302,7 @@ The complete list, with defaults and the allow/deny rules, is in
 | `WEBRAIN_PROFILES_DIR` | Persistent browser-profile root. Profiles are what keeps a login or a solved challenge across calls; pointing this somewhere new looks exactly like being logged out | `%APPDATA%\webrain\profiles` / `~/.local/share/webrain/profiles` |
 | `WEBRAIN_PROXIES` | Proxy rotation pool (comma/newline list) for the HTTP engines and the google/brave guest Chrome; a per-call `proxy` overrides it | unset |
 | `WEBRAIN_SKILLS_DIR` | Directory of operator `*.md` skills the agent reads through `webrain_guide(topic="skill:<name>")` | `<engine cache>/skills` (filled by `webrain install skills`) |
+| `WEBRAIN_MCP_TOOLS` | Advertise only the named MCP tools (`serp,scrape`). The 18 schemas are ~8,080 tokens before your prompt — over Groq's free 7,000 tokens/minute cap, so trimming is what makes that tier run | all tools |
 | `BRAVE_API_KEY` | Enables the keyed Brave SERP provider — `--engine brave` then needs no browser | unset |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Optional cloud STT and vision; the bundled local stack needs no keys | unset |
 | `RUST_LOG` | Log verbosity, e.g. `webrain=info,tungstenite=warn` | — |
