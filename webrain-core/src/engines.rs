@@ -739,26 +739,40 @@ impl SpiderEngine {
         visited: &std::collections::HashSet<String>,
         results: &[SpiderResult],
     ) {
-        let Some(path) = self.checkpoint_path() else {
-            return;
-        };
+        if let Some(json) = self.checkpoint_json(queue, visited, results) {
+            self.write_checkpoint(&json);
+        }
+    }
+
+    /// Serialize the crawl state. Pure in-memory work, so it can run while the
+    /// crawl lock is held; the disk write is `write_checkpoint` and must not.
+    fn checkpoint_json(
+        &self,
+        queue: &std::collections::VecDeque<(String, usize)>,
+        visited: &std::collections::HashSet<String>,
+        results: &[SpiderResult],
+    ) -> Option<String> {
+        self.checkpoint_path()?;
         let q: Vec<Value> = queue.iter().map(|(u, d)| json!([u, d])).collect();
-        let seen: Vec<String> = visited.iter().cloned().collect();
-        let res: Vec<Value> = results
-            .iter()
-            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-            .collect();
         let saved_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let data = json!({"queue": q, "seen": seen, "results": res, "saved_at": saved_at});
-        if let Ok(s) = serde_json::to_string(&data) {
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, s).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        // No `visited` clone: serde serializes the set directly.
+        let data = json!({"queue": q, "seen": visited, "results": results, "saved_at": saved_at});
+        serde_json::to_string(&data).ok()
+    }
+
+    /// Atomic write. Blocking I/O — call it outside the crawl lock and off the
+    /// async executor, or every worker stalls for the duration of the write.
+    fn write_checkpoint(&self, json: &str) {
+        let Some(path) = self.checkpoint_path() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 
@@ -1256,7 +1270,10 @@ impl SpiderEngine {
                 }
             }
         }
-        shared.lock().await.results.clone()
+        // Every worker is joined, so the results can be moved out instead of
+        // cloned — a clone would duplicate every page body at peak memory.
+        let mut sh = shared.lock().await;
+        std::mem::take(&mut sh.results)
     }
 
     /// Fetch one page on a given tab session (concurrent path). Mirrors
@@ -1491,7 +1508,7 @@ impl SpiderEngine {
                 );
             }
 
-            {
+            let pending_checkpoint = {
                 let mut sh = shared.lock().await;
                 sh.results.push(SpiderResult {
                     page,
@@ -1500,21 +1517,30 @@ impl SpiderEngine {
                 });
                 sh.inflight -= 1;
                 if depth < engine.max_depth {
-                    for link in &links {
-                        if !sh.visited.contains(link)
-                            && engine.domain_ok(link, &sh.seed_host)
-                            && engine.url_ok(link)
-                            && engine.robots_ok(&sh.disallowed, link)
+                    // Consume `links`: the result above already owns its copy.
+                    for link in links {
+                        if !sh.visited.contains(&link)
+                            && engine.domain_ok(&link, &sh.seed_host)
+                            && engine.url_ok(&link)
+                            && engine.robots_ok(&sh.disallowed, &link)
                         {
                             sh.visited.insert(link.clone());
-                            engine.push_link(&mut sh.queue, link.clone(), depth + 1);
+                            engine.push_link(&mut sh.queue, link, depth + 1);
                         }
                     }
                 }
                 if engine.crawldir.is_some() && sh.results.len() >= sh.next_checkpoint {
                     sh.next_checkpoint = sh.results.len() + engine.checkpoint_every;
-                    engine.save_checkpoint(&sh.queue, &sh.visited, &sh.results);
+                    engine.checkpoint_json(&sh.queue, &sh.visited, &sh.results)
+                } else {
+                    None
                 }
+            };
+            if let Some(json) = pending_checkpoint {
+                // Lock released above. The write blocks, so keep it off the
+                // executor as well — otherwise one disk hiccup parks a worker.
+                let e = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || e.write_checkpoint(&json)).await;
             }
         }
 
@@ -2194,11 +2220,13 @@ where
     // an attach and then REFUSES Target.createTarget (single tab by design), so
     // "no tab available" alone reads like a dead browser when it is a live one.
     let no_tab: std::sync::Arc<tokio::sync::Mutex<Option<String>>> = Default::default();
+    // One shared copy of the URL list — per-worker `to_vec()` was O(workers × urls).
+    let urls_arc = std::sync::Arc::new(urls.to_vec());
     for _ in 0..workers {
         let b = browser.clone();
         let next = next.clone();
         let done = done.clone();
-        let urls = urls.to_vec();
+        let urls = urls_arc.clone();
         let opts = opts.clone();
         let per_url = per_url.clone();
         let no_tab = no_tab.clone();
@@ -2749,11 +2777,10 @@ fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
     let Some(p) = proxy else {
         return Ok(browser_agent());
     };
-    if let Some(a) = proxy_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(p)
-    {
+    // One lock for lookup-or-insert. Building an agent is in-memory work, and
+    // two separate locks let two callers both build an agent for the same proxy.
+    let mut agents = proxy_agents().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(a) = agents.get(p) {
         return Ok(a.clone());
     }
     let parsed = ureq::Proxy::new(p)?;
@@ -2763,10 +2790,7 @@ fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
             .proxy(Some(parsed))
             .build(),
     );
-    proxy_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(p.to_string(), agent.clone());
+    agents.insert(p.to_string(), agent.clone());
     Ok(agent)
 }
 

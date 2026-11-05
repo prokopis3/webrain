@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core (engines)**: async-path cleanups. `webrain_fetch_http` now runs its
+  blocking `ureq` fetch and DOM parse on `spawn_blocking` — a 30 s URL used to
+  park a Tokio worker and stall every other tool call. `save_checkpoint` no
+  longer writes to disk while holding the crawl lock (the JSON is built under
+  the lock, the write happens after it and off the executor) and serializes the
+  seen-set directly instead of cloning it. The final crawl result, the per-worker
+  URL list, and each accepted link are no longer cloned.
+- **core (cdp)**: `send_cmd_with` releases the connection lock after allocating
+  the command id instead of holding it across the bounded writer `send().await`
+  (64 slots). A backpressured socket used to park every other tab's command
+  behind it, which is the stall the reader task exists to prevent.
 - **chat (ui)**: "back to live" left the composer armed for the thread you had
   been reading — `viewing` was never cleared, so the live conversation's own mode,
   effort and tool picks were neither restored on screen nor re-saved, and the

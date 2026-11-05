@@ -2287,7 +2287,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
-        "webrain_fetch_http" => fetch_http_from_args(args),
+        "webrain_fetch_http" => {
+            // ureq blocks for up to 30s and the DOM parse is pure CPU: both must
+            // stay off the executor's threads or one slow URL stalls every other
+            // tool call. lib.rs's short-circuit already does this.
+            let a = args.clone();
+            match tokio::task::spawn_blocking(move || fetch_http_from_args(&a)).await {
+                Ok(v) => v,
+                Err(e) => json!({"status": "error", "message": e.to_string()}),
+            }
+        }
         "webrain_bm25" => {
             // browsemind BM25 filter / crawl4ai ContentRelevanceFilter: rank text
             // items by query relevance, keep top_k. Zero LLM.
