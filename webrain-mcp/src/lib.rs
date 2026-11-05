@@ -37,7 +37,11 @@ pub fn tool_briefs() -> Vec<(String, String)> {
         .filter_map(|t| {
             let name = t.get("name")?.as_str()?;
             let d = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let cut = d.find(". ").map(|i| i + 1).filter(|&i| i >= 40).unwrap_or(d.len());
+            let cut = d
+                .find(". ")
+                .map(|i| i + 1)
+                .filter(|&i| i >= 40)
+                .unwrap_or(d.len());
             Some((name.to_string(), d[..cut].chars().take(96).collect()))
         })
         .collect()

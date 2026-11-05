@@ -745,7 +745,11 @@ mod tests {
     // run cannot leave a modified `Cargo.toml` behind.
     #[test]
     fn an_edit_refuses_an_empty_missing_or_ambiguous_pattern() {
-        assert!(edit("Cargo.toml", "", "x", false).unwrap_err().contains("empty"));
+        assert!(
+            edit("Cargo.toml", "", "x", false)
+                .unwrap_err()
+                .contains("empty")
+        );
         assert!(
             edit("Cargo.toml", "zzzz-not-in-this-file", "x", false)
                 .unwrap_err()

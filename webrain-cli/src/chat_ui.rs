@@ -46,10 +46,7 @@ fn read_verified(dir: &Path) -> Result<[String; 4], String> {
         let path = dir.join(name);
         let bytes = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
         if bytes.len() as u64 != *len {
-            return Err(format!(
-                "{name}: {} bytes, expected {len}",
-                bytes.len()
-            ));
+            return Err(format!("{name}: {} bytes, expected {len}", bytes.len()));
         }
         let got = sha256_hex(&bytes);
         if !got.eq_ignore_ascii_case(sha) {
@@ -74,7 +71,10 @@ fn candidates() -> Vec<PathBuf> {
     }
     // A checkout: `cargo run -- chat --serve` with no install step. Verified like
     // every other candidate, so this is convenience, not a hole.
-    out.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets")));
+    out.push(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets"
+    )));
     out
 }
 
@@ -86,7 +86,14 @@ pub fn load() -> Result<Ui, String> {
             continue;
         }
         match read_verified(&dir) {
-            Ok([html, css, js, markdown]) => return Ok(Ui { html, css, js, markdown }),
+            Ok([html, css, js, markdown]) => {
+                return Ok(Ui {
+                    html,
+                    css,
+                    js,
+                    markdown,
+                });
+            }
             Err(e) => tried.push(format!("{}: {e}", dir.display())),
         }
     }
@@ -135,11 +142,12 @@ pub fn install(force: bool, from: Option<&str>) -> anyhow::Result<PathBuf> {
     // leave the working install alone instead of replacing it with nothing.
     let staging = dir.with_extension(format!("tmp{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
-    let checked = webrain_core::install::extract_archive(&bytes, &staging, "webrain-chat-ui.tar.gz")
-        .and_then(|()| {
-            read_verified(&staging)
-                .map_err(|e| anyhow::anyhow!("the unpacked UI is not this build's: {e}"))
-        });
+    let checked =
+        webrain_core::install::extract_archive(&bytes, &staging, "webrain-chat-ui.tar.gz")
+            .and_then(|()| {
+                read_verified(&staging)
+                    .map_err(|e| anyhow::anyhow!("the unpacked UI is not this build's: {e}"))
+            });
     if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&staging);
         anyhow::bail!("{e} — nothing was installed from it");
@@ -170,7 +178,8 @@ mod tests {
     fn one_changed_byte_is_refused() {
         // The security gate: a page that can approve a shell command must not be
         // served from a file somebody edited.
-        let dir = std::env::temp_dir().join(format!("webrain-chat-ui-tamper-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("webrain-chat-ui-tamper-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, _, _) in MANIFEST.iter() {

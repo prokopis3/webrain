@@ -157,7 +157,8 @@ fn tool_label(name: &str) -> String {
 fn render_usage(t: Totals, base: &str, model: &str) -> String {
     let cost = if t.nano_aiu > 0.0 {
         format!("{:.6} AIU", t.nano_aiu / 1e9)
-    } else if let Some(usd) = super::chat_server::turn_cost(base, model, t.input, t.output, t.cached)
+    } else if let Some(usd) =
+        super::chat_server::turn_cost(base, model, t.input, t.output, t.cached)
     {
         // The same table `/price` serves the page, so a turn reads one number in
         // both places instead of the page having money and the CLI saying n/a.
@@ -424,9 +425,9 @@ pub(crate) async fn connect(
     }
     options.working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let client = Client::start(options)
-        .await
-        .map_err(|e| anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint()))?;
+    let client = Client::start(options).await.map_err(|e| {
+        anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint())
+    })?;
     let session = client
         .create_session(config)
         .await
@@ -719,7 +720,8 @@ mod tests {
     }
 
     #[test]
-    fn a_vendor_with_a_published_rate_reports_money_not_n_a() {        let t = Totals {
+    fn a_vendor_with_a_published_rate_reports_money_not_n_a() {
+        let t = Totals {
             input: 1_000_000,
             output: 1_000_000,
             requests: 1,
@@ -762,7 +764,10 @@ mod tests {
         let served = tool_filter();
         // The wildcard, not a list of names: the names went stale once already.
         assert!(served.contains(&"builtin:*".to_string()), "{served:?}");
-        assert!(served.contains(&"custom:terminal".to_string()), "{served:?}");
+        assert!(
+            served.contains(&"custom:terminal".to_string()),
+            "{served:?}"
+        );
         assert!(
             served.iter().any(|f| f.starts_with("mcp:webrain-")),
             "{served:?}"

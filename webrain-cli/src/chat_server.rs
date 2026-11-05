@@ -422,7 +422,13 @@ fn peak_now() -> bool {
 /// report the same number instead of the page having money and the CLI saying
 /// `n/a`. Cached input bills at its own rate, and DeepSeek's off-peak discount
 /// (the 0.5 in `off_peak`) is applied here too. `None` = no published rate.
-pub(crate) fn turn_cost(base: &str, model: &str, input: i64, output: i64, cached: i64) -> Option<f64> {
+pub(crate) fn turn_cost(
+    base: &str,
+    model: &str,
+    input: i64,
+    output: i64,
+    cached: i64,
+) -> Option<f64> {
     let p = doc_price(base, model);
     let num = |k: &str| p.get(k).and_then(Value::as_f64);
     let (pin, pout) = (num("prompt")?, num("completion")?);
@@ -734,11 +740,15 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
     match (method, path) {
-        ("GET", "/") => {
-            respond(&mut stream, 200, "text/html; charset=utf-8", &state.ui.html).await
-        }
+        ("GET", "/") => respond(&mut stream, 200, "text/html; charset=utf-8", &state.ui.html).await,
         ("GET", "/chat.js") => {
-            respond(&mut stream, 200, "text/javascript; charset=utf-8", &state.ui.js).await
+            respond(
+                &mut stream,
+                200,
+                "text/javascript; charset=utf-8",
+                &state.ui.js,
+            )
+            .await
         }
         ("GET", "/chat.css") => {
             respond(&mut stream, 200, "text/css; charset=utf-8", &state.ui.css).await
@@ -747,7 +757,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // first paint never parses `marked` or DOMPurify; the page warms it when
         // the browser is idle.
         ("GET", "/chunk-markdown.js") => {
-            respond(&mut stream, 200, "text/javascript; charset=utf-8", &state.ui.markdown).await
+            respond(
+                &mut stream,
+                200,
+                "text/javascript; charset=utf-8",
+                &state.ui.markdown,
+            )
+            .await
         }
         ("GET", "/events") => stream_events(&mut stream, state.bus.subscribe()).await,
         ("POST", "/turn") => {
@@ -1373,7 +1389,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .map(|n| n.to_string())
                 .chain(["ask_user".to_string(), "skill".to_string()])
             {
-                items.push(json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}));
+                items.push(
+                    json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}),
+                );
             }
             let body = json!({ "items": items }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
@@ -1444,11 +1462,23 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                         "inline"
                     };
                     let cd = format!("{disp}; filename=\"{file}\"");
-                    respond_bytes(&mut stream, 200, mime_of(&path), &[(&"Content-Disposition", &cd)], &bytes)
-                        .await
+                    respond_bytes(
+                        &mut stream,
+                        200,
+                        mime_of(&path),
+                        &[(&"Content-Disposition", &cd)],
+                        &bytes,
+                    )
+                    .await
                 }
                 _ => {
-                    respond(&mut stream, 404, "application/json", r#"{"error":"not found"}"#).await
+                    respond(
+                        &mut stream,
+                        404,
+                        "application/json",
+                        r#"{"error":"not found"}"#,
+                    )
+                    .await
                 }
             }
         }
@@ -1962,7 +1992,8 @@ fn mentions(prompt: &str) -> Vec<&str> {
         let Some(name) = tok.strip_prefix('@') else {
             continue;
         };
-        let name = name.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        let name =
+            name.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
         if !name.is_empty() && !out.contains(&name) {
             out.push(name);
         }
@@ -2106,8 +2137,14 @@ mod tests {
 
     #[test]
     fn mentions_are_names_not_prose() {
-        assert_eq!(mentions("@pdf-extraction and @page-tiles."), ["pdf-extraction", "page-tiles"]);
-        assert_eq!(mentions("@pdf-extraction @pdf-extraction"), ["pdf-extraction"]);
+        assert_eq!(
+            mentions("@pdf-extraction and @page-tiles."),
+            ["pdf-extraction", "page-tiles"]
+        );
+        assert_eq!(
+            mentions("@pdf-extraction @pdf-extraction"),
+            ["pdf-extraction"]
+        );
         // An address is not a mention, and neither is a bare `@`.
         assert!(mentions("mail me at foo@bar.com").is_empty());
         assert!(mentions("@ and @@ not either").is_empty());
@@ -2133,7 +2170,10 @@ mod tests {
         let notes = user_notes("answer in bullets", "Greek");
         let out = with_controls("hi", "low", &[], &[], &notes);
         assert!(out.starts_with("[effort: low]"), "{out}");
-        assert!(out.contains("[instructions]") && out.contains("answer in bullets"), "{out}");
+        assert!(
+            out.contains("[instructions]") && out.contains("answer in bullets"),
+            "{out}"
+        );
         assert!(out.contains("[language] Reply in Greek."), "{out}");
         assert!(out.ends_with("hi"), "{out}");
         // Over-long input is capped rather than refused: a page cannot upload.
@@ -2168,12 +2208,12 @@ mod tests {
         assert_eq!(stored_segment(".hidden", true), None);
         assert_eq!(stored_segment(&"a".repeat(120), true), None);
         // A type the browser cannot show is served as text, never guessed.
-        assert_eq!(
-            mime_of(std::path::Path::new("1700-shot.PNG")),
-            "image/png"
-        );
+        assert_eq!(mime_of(std::path::Path::new("1700-shot.PNG")), "image/png");
         assert_eq!(mime_of(std::path::Path::new("1700-a.webp")), "image/webp");
-        assert_eq!(mime_of(std::path::Path::new("1700-a.md")), "text/plain; charset=utf-8");
+        assert_eq!(
+            mime_of(std::path::Path::new("1700-a.md")),
+            "text/plain; charset=utf-8"
+        );
     }
 
     #[test]

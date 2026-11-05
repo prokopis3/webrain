@@ -87,7 +87,11 @@ pub const CHAT_PROVIDERS: [(&[&str], &str, &str); 16] = [
         "https://api.z.ai/api/paas/v4",
         "glm-4.6",
     ),
-    (&["MINIMAX_API_KEY"], "https://api.minimax.io/v1", "MiniMax-M2"),
+    (
+        &["MINIMAX_API_KEY"],
+        "https://api.minimax.io/v1",
+        "MiniMax-M2",
+    ),
     (
         &["HUNYUAN_API_KEY", "TENCENT_API_KEY"],
         "https://api.hunyuan.cloud.tencent.com/v1",
@@ -158,7 +162,10 @@ pub const CHAT_ENV_GROUP: (&str, &[(&str, &str)]) = (
             "DOUBAO_API_KEY / ARK_API_KEY / VOLCENGINE_API_KEY",
             "chat row 14 (Volcengine Ark)",
         ),
-        ("QIANFAN_API_KEY / BAIDU_API_KEY", "chat row 15 (Baidu ERNIE)"),
+        (
+            "QIANFAN_API_KEY / BAIDU_API_KEY",
+            "chat row 15 (Baidu ERNIE)",
+        ),
         ("SILICONFLOW_API_KEY / SILICONCLOUD_API_KEY", "chat row 16"),
         (
             "COPILOT_CLI_PATH",
