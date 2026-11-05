@@ -8,8 +8,15 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
+// Escapes for text **and** attribute position. The quotes matter: a renderer
+// builds markup by hand, so a `"` left in a url closes the `href` it sits in
+// before DOMPurify ever sees the string — the sanitiser is the second gate, not
+// the first, and it cannot repair an attribute that no longer exists.
 const esc = (s) =>
-  String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
 
 marked.setOptions({ gfm: true, breaks: true });
 
