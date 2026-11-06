@@ -12,6 +12,14 @@ All notable changes, in reverse chronological order. The full version lives in
 
 <p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
 
+### Fixed
+
+- **core (batch)**: `wait_selector_state: "visible"` is satisfied by **any**
+  match, not only the first in DOM order. An SPA list renders the cards twice
+  (hidden mobile copy first), so the poll waited on the hidden one and `visible`
+  never arrived: 27 URLs took **159.4 s** with 94 % of `ms_total` in pure wait;
+  `attached` + 6 s gives **10.1 s** and identical rows.
+
 ## v0.17.1
 
 <p className="text-[#888] text-sm">2026-11-06 — <code>chat --serve</code> accepts the UI that ships beside it on Windows</p>

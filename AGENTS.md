@@ -113,6 +113,18 @@ menu items `option`, segmented controls `radio`/`tab`. If `role=X` returns [],
 drop the role filter and `filter` on the label text instead (`filter` matches
 name, value, and css_path).
 
+### Waits (`wait_selector`)
+The state is satisfied by **any** match (fixed in this build); before the fix only
+the first DOM match counted, and an SPA list renders the cards twice (hidden
+mobile container first), so `visible` never arrived. Measured on masoutis.gr, 27
+search URLs, `concurrency: 6`: `visible` + 30 s = **159 s** (810 s of `ms_total`
+was pure timeout), `attached` + 6 s = **10 s**, identical rows.
+- Use `wait_selector_state: "attached"` with `wait_timeout_secs: 6` on lists.
+- Anchor on the repeated card (`div.product`), not on a shell element that exists
+  before the cards (`#ProductsClass` answered in 0.2-2.4 s with `found: 0`).
+- A "no results" page never matches the card selector, so it pays the full
+  timeout — keep it short.
+
 ### Extraction
 Prefer `webrain_extract` (`mode=json` with a schema discovered by
 `mode=autoschema` plus `webrain_eval`), `webrain_batch` for pagination 1..N,

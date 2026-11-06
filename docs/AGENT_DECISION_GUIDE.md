@@ -229,6 +229,40 @@ buying Cloudflare coverage is exactly what costs SPA compatibility.
 
 ---
 
+## 2d. `wait_selector`: wait on the list, not on the first card
+
+`webrain_batch` polls `wait_selector` until `wait_selector_state` is reached.
+The state is satisfied by **any** match — before the fix only the first match in
+DOM order counted.
+
+Why it matters: an SPA list page usually renders the same cards **twice** — a
+hidden mobile container first, the visible desktop copy second — so a
+`querySelector`-based waiter locked onto the hidden copy and `visible` never
+arrived. Measured on `masoutis.gr` (27 search URLs, `wait_selector: "div.product"`,
+`concurrency: 6`, 2026-11-06):
+
+| setting | wall | result |
+|---|---|---|
+| `visible`, 30 s timeout (before the fix) | **159.4 s** | 27/27 ok |
+| `attached`, 30 s timeout | 33.6 s | 27/27, same `found` counts |
+| `attached`, **6 s** timeout | **10.1 s** | 27/27, identical data |
+
+`ms_total` was 858 s, of which 27 × 30 s = **810 s (94 %) was pure wait**; real
+page work was ~1.8 s/URL. The site itself was fast (`domContentLoaded` 367-485 ms,
+`load` 637-648 ms).
+
+Rules that follow:
+
+- Prefer `wait_selector_state: "attached"` with `wait_timeout_secs: 6` on a list
+  that may legitimately be empty (a "no results" search never matches
+  `div.product`, so that row pays the whole timeout either way).
+- Anchor on the **repeated card**, not on a shell element that exists before the
+  cards (`#ProductsClass` answered in 0.2-2.4 s with `found: 0` everywhere).
+- Read `ms_wall` vs `ms_total`: they within a few ms of each other means serial,
+  and a `ms_total` far above the sum of page work is wait, not scraping.
+
+---
+
 ## 3. Extraction tool decision matrix (webrain tools)
 
 | Task says / page is | Tool | Notes |

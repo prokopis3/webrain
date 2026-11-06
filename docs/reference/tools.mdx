@@ -378,6 +378,8 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdow
 
 `cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate.
 
+`wait_selector` + `wait_selector_state` (`attached\|visible\|hidden\|detached`, default `visible`) poll after navigate. The state is satisfied by **any** match — an SPA list page renders the cards twice (hidden mobile copy first), so `visible` on the first match used to stall the whole `wait_timeout_secs`. Prefer `attached` with `wait_timeout_secs: 6` on a list: measured 27 URLs in **10 s** versus **159 s**, identical rows.
+
 Every reply ends with `stats`, and the concurrency numbers are **measured, not assumed**:
 
 | field | meaning |

@@ -189,6 +189,21 @@ not a challenge and not a broken site.
 - If a hand-opened tab of the same URL works while yours does not, the difference
   is OUR injection, not the site. Never report the site as frozen.
 
+WAIT ON THE LIST, NOT ON THE FIRST CARD
+`wait_selector` is satisfied by ANY match reaching the state (fixed in this build) — but
+the state is still worth choosing:
+- SPA list pages (masoutis.gr, most Greek e-shops) render the SAME cards twice:
+  a hidden mobile container first, the visible desktop one second. Waiting for
+  `visible` used to lock onto the hidden copy; on 2026-11-06 that cost 30 s per
+  URL (159 s for 27 URLs, `ms_total` 858 s of which 810 s was the timeout). Now
+  the waiter scans every match; the same batch runs in ~10 s.
+- Prefer `wait_selector_state:"attached"` with `wait_timeout_secs:6` when the
+  page may legitimately have zero results (`div.product` never appears on a "no
+  results" search): that row pays the whole timeout, so a big timeout only buys
+  latency. `attached` + 6 s gave byte-identical results to `visible` + 30 s.
+- Do not anchor on a shell element that exists before the cards (`#ProductsClass`
+  returned in 0.2-2.4 s with found=0 everywhere). Anchor on the repeated card.
+
 EXTRACTION MATRIX
 - structured list, schema known    -> extract(mode=schema, base_selector, fields)
 - schema unknown                   -> extract(mode=autoschema) + eval, then mode=schema
@@ -882,10 +897,10 @@ pub fn list_tools() -> Vec<Value> {
                 "disable_resources": {"type": "boolean", "default": false},
                 "block_trackers": {"type": "boolean", "default": false},
                 "network_idle": {"type": "boolean", "default": false},
-                "wait_selector": {"type": "string"},
+                "wait_selector": {"type": "string", "description": "Poll this CSS selector after navigate; `visible` is satisfied by ANY match, so a hidden mobile copy of a list (common in SPAs) does not stall the wait"},
                 "wait_selectors": {"type": "array", "items": {"type": "string"}, "description": "per-URL wait selector, index-parallel to urls (empty string = no selector). Use when one batch spans HOSTS that render differently; overrides wait_selector per URL."},
                 "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
-                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL"}
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL. A page with no match at all pays this in full — set 6-8s on a list that may legitimately be empty"}
             }, "required": ["op", "urls"]}
         }),
         json!({
