@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-cli"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4287,7 +4287,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-core"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "webrain-mcp"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

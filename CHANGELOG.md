@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-06
+
 ### Added
 
 - **chat (ui)**: a turn now ends with a **steps** strip — every tool that ran
@@ -20,188 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is wrapped in a capped scroller (24rem) instead of pushing the answer off
   screen. Markdown tables had no scroll box of their own before this.
 
-### Changed
-
-- **docs**: guest-mode Chrome is documented for what it is — a **purpose tool**, not
-  a scraping engine. It exists for the JS-gated SERP engines (`webrain_serp`
-  google/brave) and for solving an interactive CAPTCHA/Turnstile, and its profile
-  (`serp/<profile>`, persisted unless `--fresh`) is what carries the clearance to the
-  next call. It refuses new targets (`PUT /json/new` → 500 vs 200 on a normal Chrome;
-  `Target.createTarget` → `-32000 "Failed to open a new tab"`), so a batch there runs
-  one serial tab: measured 8 URLs in 5.65 s on guest Chrome vs 1.46 s on 9222 with
-  `concurrency: 4`. Corrected in `AGENTS.md`, `docs/AGENT_DECISION_GUIDE.md`,
-  `skills/webrain/SKILL.md`, `skills/webrain/references/browser-selection.md` and the
-  `webrain_guide` text shipped in the binary.
-- **chat (ui)**: a tool card's two halves are labelled `input` and `output` (was
-  `result`) and are told apart by colour as well as by label — the request's
-  label and left edge in the tertiary hue, the return's in the primary one, rose
-  when the call failed. A long card can now be read by its edges alone.
-
-- **chat (ui)**: Send and Dictate are now one pair — both a 46px circle with an
-  18px glyph and both centred on the field (`align-items: center` on the footer)
-  instead of a 46×70 pill and a 40px circle sitting on its bottom edge.
-- **chat (ui)**: the tools dialog's `builtin` group behaves like every server
-  group — it folds (caret, `aria-expanded`, remembered in the same
-  `toolsClosed` list under the key `builtin`) and has `all` / `none` — and the
-  footer count adds the builtins in: `9 of 27 preferred` where it used to say
-  `0 of 18` while nine boxes below it were ticked. The search field opens the
-  full width of the header instead of a 15rem stub.
-- **chat (ui)**: a session in the rail is a title and **one** round button now,
-  not two hover targets eating a third of the line. That button opens a small
-  menu underneath with the same two choices, icon and label each: `rename` and
-  `delete`. It opens downward and right-aligned to the trigger (152px, inside a
-  235px rail), flips above the trigger when the row sits closer than the menu's
-  height to the rail's bottom edge — the rail scrolls, so a downward menu there
-  was clipped by 114px on a 360px-tall window — and closes on a press anywhere
-  outside, on Escape, or on the trigger again. Role is `menu`/`menuitem` with
-  `aria-expanded` on the trigger.
-
-### Fixed
-
-- **core (batch)**: `effective_concurrency` was an intention, not a measurement —
-  a batch of 3 URLs asked for 4 workers, all four `Target.createTarget` calls
-  failed on a Chrome that refused new tabs, and the report still claimed
-  `requested_concurrency: 4` while the tabs did not exist. `batch_map` now counts
-  the tabs it actually obtained (`CdpBackend::set_batch_tabs`) and the report
-  reads that number, so parallelism is what happened, not what was asked for.
-  `single_target` is likewise reported from the connection instead of staying
-  `null` when `cdp_urls` is set, and the recycle step no longer opens and closes
-  a tab for a worker whose queue is already drained. A batch that dies as a
-  whole now answers **once per URL** instead of a single row (three URLs used to
-  come back as `total: 1`), and `effective_concurrency` is `0` when every row
-  failed — it used to report the requested number next to `ok: 0`. With
-  `cdp_urls` the tab counts are **summed** across backends — `requested_concurrency`
-  is `per_backend_concurrency × backends`, so the old `max` compared two different
-  quantities (measured 4 requested, 2 reported, for two backends each holding
-  two tabs) — and the per-backend connects now run **concurrently** instead of
-  paying one WebSocket handshake after another before the first URL is queued.
-- **core (cdp)**: a browser that answers `-32000 "Failed to open a new tab"`
-  (measured on Chrome 156: version/list/attach all fine, only target creation
-  refused) is now classified as single-target — the same meaning as lightpanda's
-  `TargetAlreadyLoaded` — so the batch reuses the one tab instead of fanning out
-  workers that cannot run. Any other createTarget failure surfaces as an error
-  instead of being cached as "multi-target" for the life of the connection, and
-  a successful `open_tab` clears the cached answer, so a browser that recovers
-  is not stuck serial. A fan-out that obtains **no** tab at all now reruns the
-  queue on the one tab that exists (`batch_serial`) instead of reporting every
-  URL as failed — the case where the probe's answer changed under it — so a
-  reconnect is no longer needed. `existing_tab()` (and with it `tab_or_existing`)
-  now falls back to attaching the browser's **own first page** via
-  `Target.getTargets`, which is what every page command already did: on a
-  cold connection to a tab-refusing Chrome (guest mode) the batch used to answer
-  `ok: 0, errors: 3` and now runs all three URLs on that page, reporting
-  `effective_concurrency: 1, single_target: true`. `tab(action:"new")` falls back
-  to the existing tab and reports `reused: true` rather than failing.
-- **core (serp)**: the `brave` engine never fell back — the arm was matched
-  before `specific_engine`, so an empty or blocked Brave result set returned
-  empty. It now falls through the provider chain like the HTTP engines, with the
-  backend withheld so the chain cannot re-render Brave at the end (22.7 s of
-  the same wall it just failed on). Brave's snippet selector is a class name
-  that changes between builds; when it is absent the snippet is the container's
-  text minus the title, instead of an empty field.
-- **core (engines)**: async-path cleanups. `webrain_fetch_http` now runs its
-  blocking `ureq` fetch and DOM parse on `spawn_blocking` — a 30 s URL used to
-  park a Tokio worker and stall every other tool call. `save_checkpoint` no
-  longer writes to disk while holding the crawl lock (the JSON is built under
-  the lock, the write happens after it and off the executor) and serializes the
-  seen-set directly instead of cloning it. The final crawl result, the per-worker
-  URL list, and each accepted link are no longer cloned.
-- **core (cdp)**: `send_cmd_with` releases the connection lock after allocating
-  the command id instead of holding it across the bounded writer `send().await`
-  (64 slots). A backpressured socket used to park every other tab's command
-  behind it, which is the stall the reader task exists to prevent.
-- **chat (ui)**: "back to live" left the composer armed for the thread you had
-  been reading — `viewing` was never cleared, so the live conversation's own mode,
-  effort and tool picks were neither restored on screen nor re-saved, and the
-  next prompt ran in the other thread's mode. Leaving history (and `/clear`) now
-  restores the live conversation's setup and re-keys the saved record on it.
-- **chat (ui)**: the `[attached: …]` receipt was matched only as a whole line, so
-  an attachment whose receipt the caret ran into ("…spider.png]what is in this
-  image?") kept its raw `C:\…\Temp\…` path on screen next to the picture. The
-  matcher is no longer anchored — a receipt is a receipt wherever it sits — and
-  "remove all" uses the same one instead of a `startsWith` line test.
-- **chat**: the instruments panel was live-only. `assistant.usage` fed a page-side
-  ledger, nothing wrote it down, so opening any saved conversation showed
-  `— / —` tok, `—` tok/s, `tools 0`, `sources 0` and "no turns yet" — a full
-  column of blanks where the numbers had actually been measured. Each finished
-  turn is now POSTed to `/ledger` (`{n, turn}`), stored in a `turns(convo, n,
-  body)` table upserted by turn number, and replayed by `GET /sessions/id` next
-  to the transcript. `DELETE /sessions/id` drops the ledger with the messages.
-  The live ledger is also re-seeded on load, so a reload no longer restarts the
-  numbering at 1 and overwrites a row already on disk. `tools` and `sources` ride
-  along as running totals in the turn row, which is what lets a saved
-  conversation still report them with no tool rows to count.
-- **chat (ui)**: with nothing measured, the header printed `— / — tok — tok/s`
-  and the panel printed six em-dashes, which reads as "these numbers are zero"
-  when the truth is "nothing has run". Both are now one muted line — "nothing
-  measured yet — the numbers land with the first answer" — and the panel heading
-  says `last turn` rather than `this turn` when you are reading history.
-- **chat (ui)**: the rename and delete buttons in the session rail were two
-  38 px filled circles that were invisible until hover and still took their width
-  out of every row. `.mini` was defined twice — once for the rail's 1.6 rem ghost
-  icon, once for the composer's mid-turn circle — and the later rule won both
-  lives, so each thread title lost 77 px to controls nobody could see (measured:
-  title 154 px in a 235 px row). The rail rule is now scoped to `.row` and the
-  composer's to `#composer`, the buttons are 25.6 px ghost icons that take a
-  `--surface-container-high` circle on hover, and the title measures 180 px. A
-  `@media (hover: none)` block keeps them visible where there is no hover to
-  reveal them.
-- **chat (ui)**: an MCP tool result arrived as `{ content, detailedContent }` and
-  the page printed the envelope, so the same payload appeared twice in the
-  disclosure. The inner text is the result now; the wrapper is unwrapped before
-  it is shown or scanned for links.
-- **chat (ui)**: the rails stopped short of the bottom of the window and the
-  composer was only kept in the middle column by two `:has()` padding hacks that
-  had to be repeated at every breakpoint. `#app` reserved a third grid row for the
-  field, so the deck — and both rails with it — ended where the composer started.
-  The field is now absolutely placed against the transcript column (`left`/`right`
-  follow `--rail-w` and `--inst-w`, the same two numbers the grid uses) and the
-  deck takes the whole remaining height: at 1400×820 the rail and the instruments
-  both measure 44→820 px, and the field measures 672→820 px. The transcript is
-  padded by the field's *measured* height (`--composer-h`, published by a
-  `ResizeObserver`, not a guessed constant), so at full scroll the last message
-  ends 14 px above the field instead of behind it. On a phone the drawer stops
-  above the field for the same reason.
-- **chat (ui)**: clicking a provider tab stopped working the moment the row was
-  made draggable. `setPointerCapture` on the container retargets the `pointerup`
-  — and the `click` derived from it — to the capturing element, so the tab button
-  under the cursor never received a click at all. The drag now listens on
-  `window` for the move and the release instead, which leaves the click where it
-  belongs; a press that travelled more than 4 px still swallows its click, so
-  dragging the row never selects a provider.
-- **chat (ui)**: a dialog taller than the window lost its bottom actions.
-  `#modal` centred with `place-items: center`, which clips an over-tall child at
-  both ends and leaves nothing to scroll — measured on a 700 px window, the card
-  was 880 px with the Close/apply row at 829–906 px and `overflow: visible`. The
-  backdrop is now a flex scroller and the card centres with `margin: auto`: it
-  stays centred while it fits and the dialog scrolls when it does not (checked at
-  380 px, where the scroll is 425 px and the actions land at 277–315 px).
-- **chat (ui)**: the streaming reply re-parsed its whole markdown on every token.
-
-- **chat (ui)**: collapsing the session rail squashed the transcript instead of
-  widening it. The `≤1100px` breakpoint reserved `16rem` for the rail column
-  unconditionally, but `.deck:not(.open)` hides the rail — so `main` landed in the
-  sidebar's column and the `1fr` sat empty. Measured at 1000px: 256px wide before,
-  full width after. The column is now reserved only while the rail is shown.
-- **chat (ui)**: the ripple never animated. The rule lived in the component's
-  scoped `<style>`, so `.rip` compiled to `.rip.svelte-<hash>` and a span created
-  at run time could never match it — every press drew an invisible, unpainted
-  element. The span and its motion are now built in `ripple()` and driven by
-  `Element.animate`, ported from deepscrape's `RippleDirective`: radius to the
-  furthest corner, 500 ms linear, `scale(0) → scale(1.5)` with the fill fading.
-- **chat (ui)**: the tools dialog sat at the left edge with no scrim, because
-  `#tools-modal` was missing from the one dialog rule `#modal` had — which also
-  meant its click-outside handler could never fire (the container was not
-  full-bleed, so a stray click landed on the page behind it).
-- **chat (ui)**: the tools search field rendered as the browser's white input (no
-  colour or fill was set) and popped in with no transition.
-- **chat**: the menu offered `evals`, `prompts`, `references` and `workflows` as
-  skills. They are folder names — `skills::list` names every `.md` after the
-  folder holding it, and those folders hold reference chapters, so picking one
-  resolved to an arbitrary file. A row now has to carry the frontmatter `name:`
-  that already separates a skill from a reference chapter.
-
-### Added
 
 - **chat (ui)**: the settings dialog is a real settings surface, not three
   read-only fact sheets. **Instructions** (critical): standing instructions and a
@@ -498,26 +318,188 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page rather than the runtime — the same request is then answered without a modal
   for the rest of the tab. Recording shows an elapsed timer and a stop square.
 
-### Performance
 
-- **chat**: `--serve` now turns on the SDK's infinite sessions. A one-shot command
-  should not leave session state behind, but a long browser conversation hitting
-  the context limit mid-answer is exactly the failure that switch exists to
-  prevent; compaction arrives as `session.compaction_*`, which the page already
-  reports in its `runtime` row.
+- **chat**: `--serve` now ships a real client — Svelte 5 built by bun from
+  `webrain-cli/ui`, emitted as two committed assets (`chat.js`, `chat.css`) that
+  `cargo build` embeds with `include_str!`, so building the binary still needs no
+  JavaScript toolchain. Replies render as sanitised markdown, tool calls become
+  expandable cards keyed by `toolCallId`, runtime events the page does not model
+  (`session.usage_info`, `session.compaction_*`, reasoning, progress) land in
+  collapsed activity rows instead of being dropped, and streaming no longer
+  re-renders the transcript per token.
 
-- **chat**: `marked` + DOMPurify moved out of the entry bundle into a lazy chunk
-  (`chunk-markdown.js`, imported on idle and awaited before the first render,
-  with plain-text fallback). `chat.js` drops from 166 KB to 88 KB, so first paint
-  parses half the script; the server does not compress (loopback, one client), so
-  the raw number is the honest one and Vite's gzip figure (57 → 31 KB) only
-  applies if a proxy is in front. The new `GET /chunk-markdown.js`
-  serves the chunk from the binary; names are deterministic because every asset is
-  embedded by name. CSS stays one file deliberately: 37 KB raw, 6 KB gzipped if
-  compressed, and splitting it would cost an extra request per chunk from
-  localhost.
+- **chat**: conversation history in SQLite (`%APPDATA%\webrain\chat.db`, override
+  with `WEBRAIN_CHAT_DB`), served as `GET /sessions` and `GET /sessions/<id>` and
+  browsable from the page's session menu. History is optional at runtime: no
+  store, no menu, the chat still runs.
+
+- **chat**: the composer completes what this build actually has — `/` for the
+  commands the page runs, `@` for the shipped skills, `#` for the MCP tools, and
+  a `+` button for the same list without a trigger. Both lists come from the new
+  `GET /catalog` (skills from `webrain_core::skills`, tools from
+  `webrain_mcp::tool_names`), so a menu can never name a tool the runtime does
+  not expose.
+
+- **chat**: history search. `GET /search?q=` scans every stored message (escaping
+  `%` and `_`, so they stay literal) and `Ctrl-K` opens a modal that queries it as
+  you type, then jumps to the conversation a hit belongs to. Search is a `LIKE`
+  scan, not embeddings — the FTS5/vector step is noted as the upgrade once that
+  becomes measurable.
+
+- **chat**: the page works on a phone. The session panel is a column on a desktop
+  and an overlay drawer under 760 px (with a `«`/`»` toggle in the header), the
+  token/cost rail hides under 900 px, and the composer, palette and modals scale
+  their padding instead of overflowing.
+
+- **chat**: `+` attaches a file and a long paste becomes one. `POST /attach`
+  takes raw bytes, accepts only images and plain text up to 8 MB, renames what it
+  receives (one basename, 48 characters, no path components) and writes it under
+  `%TEMP%\webrain-chat\<conversation>\`; the prompt gets the resulting path, never
+  the contents. A paste over 600 characters or 8 lines is stored the same way and
+  leaves a single `[pasted text #n · N lines → path]` line.
+
+- **chat**: transcript polish. Fenced code becomes a card with its language and
+  its own copy button (one delegated listener), model-written links open in a new
+  tab with `rel="noopener noreferrer"`, and a `↓ latest` pill appears when you
+  scroll away from the bottom.
+
+- **chat**: the page now reads the runtime's real event catalogue. `assistant.usage`
+  drives the header rail while a call is in flight (exact input/output tokens,
+  cache reads, duration → tok/s) instead of only the 900 ms sample;
+  `assistant.turn_end` clears it; `session.shutdown` says the runtime is gone
+  instead of looking hung; and a tool name loses its `webrain-` server prefix so
+  cards read `webrain_serp`, not `webrain-webrain_serp`.
+
+- **chat**: permission requests queue instead of overwriting each other. Two asks
+  arriving before the first modal is answered used to leave the second unanswered,
+  which the server then denied after its 120 s timeout; the modal now shows one at
+  a time with a "N more queued" count.
+
+- **chat**: history search ranks a hit in a conversation's opening message (the
+  text the menu shows as its title) above one buried mid-thread, with recency
+  breaking the tie.
+
+- **docs**: ADR-004, the GUI decision for `webrain chat`. The runtime already
+  emits streamed deltas, tool calls, permission requests and context/cost meters;
+  the CLI flattens them into stderr lines, which is right for a pipe and wrong
+  for a conversation window. The ADR maps every event to the element it should
+  become, names the three SDK handler slots a UI must fill (`PermissionHandler`,
+  `UserInputHandler`, `ElicitationHandler` — today they are policy, not a person),
+  and picks `webrain chat --serve` (raw TCP like `run_http`, one `include_str!`'d
+  page, SSE events) over a TUI, an OpenAI-compatible proxy, or a desktop app.
+
+- **cli**: `webrain chat --search` — live web results in front of the turn,
+  whichever provider is in use. On `openrouter` it rewrites the model to its
+  `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
+  models, Exa otherwise). On `deepseek` webrain calls the Search API itself
+  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets. On
+  `openai` it calls the Responses API with `tools: [{"type":"web_search"}]`, on
+  `anthropic` the Messages API with the `web_search_20250305` server tool, and on
+  `gemini` the Interactions API with `tools: [{"type":"google_search"}]` — each
+  with the same key, each prepending the vendor's grounded, cited answer. Groq,
+  Fireworks, DashScope and local servers get the same citation block built from
+  webrain's own engines (duckduckgo + bing over pooled HTTP, no browser), because
+  the Copilot SDK forwards a fixed provider config and cannot inject a vendor
+  search field into the turn. A vendor call that fails prints why and falls back
+  to webrain's engines rather than failing the turn. One line on stderr names the
+  source and what it found.
+- **cli**: `webrain chat --serve [--port N]` — the same session in a browser. The
+  binary serves its own page (`include_str!`, no build step, nothing fetched from
+  a CDN) plus four loopback routes: `GET /`, `GET /events` (SSE), `POST /turn`,
+  `POST /permission`. Each runtime event becomes one element — a delta appends to
+  the assistant bubble, `tool.execution_*` opens and closes a card,
+  `session.usage_info` drives the token meter, `model.call_failure` is an error
+  card carrying the provider's own message — and the composer re-enables on
+  `assistant.idle`, the only signal that a turn is over. Event names stay the
+  runtime's own rather than a translated dialect; the one addition is
+  `webrain.permission`, which carries the id the modal answers.
+- **cli**: the browser UI answers permission prompts itself, so `--serve` does
+  **not** imply `--yes`: the modal shows the exact request, approving there is
+  the same authority as `--yes`, and no answer within 120 s is a deny (the turn
+  reports it instead of hanging). The listener is `127.0.0.1` only — a port that
+  can approve a shell command must not be on the LAN.
+- **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
+  `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
+  larger catalog entry). Its search endpoint is what `--search` calls.
+- **cli**: `webrain chat` reports what the turn cost. Every model call prints
+  `· model · N in / M out` as it happens, and the turn ends with a stderr block
+  giving totals, `tok/s` (output tokens over real API time, not wall clock),
+  request count and cost. The numbers come from the runtime's own accounting
+  (`session.usage.getMetrics`: `lastCallInputTokens`, per-model `usage` and
+  `requests`, `totalApiDurationMs`, `totalNanoAiu`), so `--json` gains a `usage`
+  object with the same fields. Cost is `n/a` on BYOK turns — `nano_aiu` is
+  GitHub's billing unit and is 0 when your own key pays the provider.
+- **cli**: `webrain diff <a> <b> [--max N] [--json]` — what changed between two
+  pages, or a page and a saved baseline. Either side is an http(s) URL (plain
+  HTTP, no browser) or a local file; lines are whitespace-normalised and blanks
+  dropped so re-indentation is not reported as drift, and the exit code is 1 when
+  they differ so a cron job can act on it. The comparison is a multiset line
+  difference (O(n) on a 10k-line page) rather than an LCS — a monitor needs the
+  added and removed lines, not hunk alignment.
+- **cli**: `webrain chat "<prompt>"` — one Copilot agent turn on your own model
+  key, with webrain's own MCP tools attached (the session spawns `webrain mcp`
+  over stdio, so the model gets the 18 `webrain_*` tools as `webrain-webrain_*`).
+  BYOK resolution is a 7-row table in `webrain-core::byok`, first match wins:
+  flags → `WEBRAIN_CHAT_*` → ambient `OPENROUTER` / `OPENAI` / `ANTHROPIC`
+  (`CLAUDE`) / `GEMINI` (`GOOGLE`) / `FIREWORKS` / `DASHSCOPE` (`QWEN`) / `GROQ`,
+  the same variable names the vision chain already uses. `--print-config`
+  resolves and prints the chain with the key redacted, offline, in builds without
+  the feature. `WEBRAIN_CHAT_BASE_URL` alone reaches a keyless local server.
+  Exit 0 completed, 1 turn failed, 2 could not start.
+- **cli**: `webrain doctor` reports chat as a third state alongside engines and
+  vault: `ready (provider/model)`, `no key (and which variables would work)`, or
+  `resolved but this build has no runtime`.
+- **build**: the release matrix builds `--features pdfium,chat` for every target
+  (linux gnu x64/arm64, linux musl x64/arm64, macOS x64/arm64, Windows
+  x64/arm64); CI runs one cached `--features pdfium,chat` clippy job so the
+  feature cannot rot between releases.
+- **docs**: new [chat guide](/guides/chat) plus the provider table and the
+  `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
+- **ci**: a `chat-build` matrix job builds `--features pdfium,chat` on
+  `ubuntu-latest`, `macos-latest` and `windows-latest` on every push to `main`
+  (Linux stays on every PR through the existing clippy step). The feature embeds
+  a per-platform runtime — a Linux-only compile says nothing about the TLS
+  backend macOS (Security.framework) or Windows (schannel) has to link.
+- **build**: the container image takes `--build-arg FEATURES=…` (default
+  `pdfium`), so `FEATURES=pdfium,chat` builds a chat-capable image, and installs
+  `libssl-dev` for the OpenSSL 3 the runtime links.
 
 ### Changed
+
+- **docs**: guest-mode Chrome is documented for what it is — a **purpose tool**, not
+  a scraping engine. It exists for the JS-gated SERP engines (`webrain_serp`
+  google/brave) and for solving an interactive CAPTCHA/Turnstile, and its profile
+  (`serp/<profile>`, persisted unless `--fresh`) is what carries the clearance to the
+  next call. It refuses new targets (`PUT /json/new` → 500 vs 200 on a normal Chrome;
+  `Target.createTarget` → `-32000 "Failed to open a new tab"`), so a batch there runs
+  one serial tab: measured 8 URLs in 5.65 s on guest Chrome vs 1.46 s on 9222 with
+  `concurrency: 4`. Corrected in `AGENTS.md`, `docs/AGENT_DECISION_GUIDE.md`,
+  `skills/webrain/SKILL.md`, `skills/webrain/references/browser-selection.md` and the
+  `webrain_guide` text shipped in the binary.
+- **chat (ui)**: a tool card's two halves are labelled `input` and `output` (was
+  `result`) and are told apart by colour as well as by label — the request's
+  label and left edge in the tertiary hue, the return's in the primary one, rose
+  when the call failed. A long card can now be read by its edges alone.
+
+- **chat (ui)**: Send and Dictate are now one pair — both a 46px circle with an
+  18px glyph and both centred on the field (`align-items: center` on the footer)
+  instead of a 46×70 pill and a 40px circle sitting on its bottom edge.
+- **chat (ui)**: the tools dialog's `builtin` group behaves like every server
+  group — it folds (caret, `aria-expanded`, remembered in the same
+  `toolsClosed` list under the key `builtin`) and has `all` / `none` — and the
+  footer count adds the builtins in: `9 of 27 preferred` where it used to say
+  `0 of 18` while nine boxes below it were ticked. The search field opens the
+  full width of the header instead of a 15rem stub.
+- **chat (ui)**: a session in the rail is a title and **one** round button now,
+  not two hover targets eating a third of the line. That button opens a small
+  menu underneath with the same two choices, icon and label each: `rename` and
+  `delete`. It opens downward and right-aligned to the trigger (152px, inside a
+  235px rail), flips above the trigger when the row sits closer than the menu's
+  height to the rail's bottom edge — the rail scrolls, so a downward menu there
+  was clipped by 114px on a 360px-tall window — and closes on a press anywhere
+  outside, on Escape, or on the trigger again. Role is `menu`/`menuitem` with
+  `aria-expanded` on the trigger.
+
 
 - **build**: `--features chat` no longer embeds the Copilot runtime. The SDK's
   default `bundled-cli` feature `include_bytes!`d two gzipped archives into the
@@ -723,7 +705,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quieter `--rule` colour carries structure so borders can recede. No webfonts and
   no images — the page still makes zero network requests beyond its own bundle.
 
+
+- **build**: the two static **musl** targets carry `chat` too, so no published
+  binary is without it. The claim that this was impossible was wrong on both
+  counts: the SDK is not hostile to musl — its build script fetches
+  `copilot-linuxmusl-x64` / `-arm64` — and a vendored OpenSSL 3 links fine, it
+  just has to be asked for. `webrain-cli` now declares `openssl` with the
+  `vendored` feature for `target_env = "musl"` only, so the musl rows compile
+  OpenSSL from source with `musl-gcc` and stay static (`file` says
+  `static-pie linked`). Verified by building
+  `--features pdfium,chat --target x86_64-unknown-linux-musl` in a Debian
+  container; a `chat-build-musl` CI job now guards it on every push so a release
+  tag is not the first to try. `libssl-dev` on those rows is for the build-host
+  copy of `openssl-sys`, and the SDK crate wants ~8 GB to compile.
+- **build**: workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
+  (declared `rust-version = "1.94.0"`, and resolver 3 is MSRV-aware, so the floor
+  applies even with the feature off). Released binaries are unaffected; only
+  from-source builds on 1.88–1.93 are. The container builder moves to
+  `rust:1.94-slim-bookworm` with it — cargo refuses a package below its declared
+  `rust-version`, so the old 1.88 base could no longer build the workspace at all.
+- **cli**: `chat` sends its own system prompt instead of inheriting the
+  runtime's coding-agent one: 8048 → **272** static tokens per turn (measured via
+  `session.usage_info`), and the agent is told it drives a browser rather than
+  that it is editing repositories.
+- **cli**: `chat` asks for **4096** output tokens by default rather than the
+  runtime's 64k. Some providers reserve the requested maximum against your
+  balance and refuse the whole request when it does not fit.
+- **docs**: the landing page and overview now state what the binary actually
+  ships. Three claims were wrong: **18** intent-based tools (said 17), **seven**
+  SERP engines (said five; `yahoo`, `baidu` and `yandex` were missing from a
+  surface that has shipped for releases), and "~22 MB, 0 runtime dependencies"
+  now says the default build, because a `chat` build embeds a ~135 MB runtime.
+  New landing section for `webrain chat` — one command, your key, the same 18
+  tools and nothing else — plus the same count fixes in `overview.mdx` and
+  `guides/agent-decision-guide.mdx`. The FAQ's "no API key needed" answer now
+  admits that a chat turn does need one (or a keyless local server), and gains
+  an entry for what `webrain chat` does and does not read from your own Copilot
+  setup.
+
 ### Fixed
+
+- **core (batch)**: `effective_concurrency` was an intention, not a measurement —
+  a batch of 3 URLs asked for 4 workers, all four `Target.createTarget` calls
+  failed on a Chrome that refused new tabs, and the report still claimed
+  `requested_concurrency: 4` while the tabs did not exist. `batch_map` now counts
+  the tabs it actually obtained (`CdpBackend::set_batch_tabs`) and the report
+  reads that number, so parallelism is what happened, not what was asked for.
+  `single_target` is likewise reported from the connection instead of staying
+  `null` when `cdp_urls` is set, and the recycle step no longer opens and closes
+  a tab for a worker whose queue is already drained. A batch that dies as a
+  whole now answers **once per URL** instead of a single row (three URLs used to
+  come back as `total: 1`), and `effective_concurrency` is `0` when every row
+  failed — it used to report the requested number next to `ok: 0`. With
+  `cdp_urls` the tab counts are **summed** across backends — `requested_concurrency`
+  is `per_backend_concurrency × backends`, so the old `max` compared two different
+  quantities (measured 4 requested, 2 reported, for two backends each holding
+  two tabs) — and the per-backend connects now run **concurrently** instead of
+  paying one WebSocket handshake after another before the first URL is queued.
+- **core (cdp)**: a browser that answers `-32000 "Failed to open a new tab"`
+  (measured on Chrome 156: version/list/attach all fine, only target creation
+  refused) is now classified as single-target — the same meaning as lightpanda's
+  `TargetAlreadyLoaded` — so the batch reuses the one tab instead of fanning out
+  workers that cannot run. Any other createTarget failure surfaces as an error
+  instead of being cached as "multi-target" for the life of the connection, and
+  a successful `open_tab` clears the cached answer, so a browser that recovers
+  is not stuck serial. A fan-out that obtains **no** tab at all now reruns the
+  queue on the one tab that exists (`batch_serial`) instead of reporting every
+  URL as failed — the case where the probe's answer changed under it — so a
+  reconnect is no longer needed. `existing_tab()` (and with it `tab_or_existing`)
+  now falls back to attaching the browser's **own first page** via
+  `Target.getTargets`, which is what every page command already did: on a
+  cold connection to a tab-refusing Chrome (guest mode) the batch used to answer
+  `ok: 0, errors: 3` and now runs all three URLs on that page, reporting
+  `effective_concurrency: 1, single_target: true`. `tab(action:"new")` falls back
+  to the existing tab and reports `reused: true` rather than failing.
+- **core (serp)**: the `brave` engine never fell back — the arm was matched
+  before `specific_engine`, so an empty or blocked Brave result set returned
+  empty. It now falls through the provider chain like the HTTP engines, with the
+  backend withheld so the chain cannot re-render Brave at the end (22.7 s of
+  the same wall it just failed on). Brave's snippet selector is a class name
+  that changes between builds; when it is absent the snippet is the container's
+  text minus the title, instead of an empty field.
+- **core (engines)**: async-path cleanups. `webrain_fetch_http` now runs its
+  blocking `ureq` fetch and DOM parse on `spawn_blocking` — a 30 s URL used to
+  park a Tokio worker and stall every other tool call. `save_checkpoint` no
+  longer writes to disk while holding the crawl lock (the JSON is built under
+  the lock, the write happens after it and off the executor) and serializes the
+  seen-set directly instead of cloning it. The final crawl result, the per-worker
+  URL list, and each accepted link are no longer cloned.
+- **core (cdp)**: `send_cmd_with` releases the connection lock after allocating
+  the command id instead of holding it across the bounded writer `send().await`
+  (64 slots). A backpressured socket used to park every other tab's command
+  behind it, which is the stall the reader task exists to prevent.
+- **chat (ui)**: "back to live" left the composer armed for the thread you had
+  been reading — `viewing` was never cleared, so the live conversation's own mode,
+  effort and tool picks were neither restored on screen nor re-saved, and the
+  next prompt ran in the other thread's mode. Leaving history (and `/clear`) now
+  restores the live conversation's setup and re-keys the saved record on it.
+- **chat (ui)**: the `[attached: …]` receipt was matched only as a whole line, so
+  an attachment whose receipt the caret ran into ("…spider.png]what is in this
+  image?") kept its raw `C:\…\Temp\…` path on screen next to the picture. The
+  matcher is no longer anchored — a receipt is a receipt wherever it sits — and
+  "remove all" uses the same one instead of a `startsWith` line test.
+- **chat**: the instruments panel was live-only. `assistant.usage` fed a page-side
+  ledger, nothing wrote it down, so opening any saved conversation showed
+  `— / —` tok, `—` tok/s, `tools 0`, `sources 0` and "no turns yet" — a full
+  column of blanks where the numbers had actually been measured. Each finished
+  turn is now POSTed to `/ledger` (`{n, turn}`), stored in a `turns(convo, n,
+  body)` table upserted by turn number, and replayed by `GET /sessions/id` next
+  to the transcript. `DELETE /sessions/id` drops the ledger with the messages.
+  The live ledger is also re-seeded on load, so a reload no longer restarts the
+  numbering at 1 and overwrites a row already on disk. `tools` and `sources` ride
+  along as running totals in the turn row, which is what lets a saved
+  conversation still report them with no tool rows to count.
+- **chat (ui)**: with nothing measured, the header printed `— / — tok — tok/s`
+  and the panel printed six em-dashes, which reads as "these numbers are zero"
+  when the truth is "nothing has run". Both are now one muted line — "nothing
+  measured yet — the numbers land with the first answer" — and the panel heading
+  says `last turn` rather than `this turn` when you are reading history.
+- **chat (ui)**: the rename and delete buttons in the session rail were two
+  38 px filled circles that were invisible until hover and still took their width
+  out of every row. `.mini` was defined twice — once for the rail's 1.6 rem ghost
+  icon, once for the composer's mid-turn circle — and the later rule won both
+  lives, so each thread title lost 77 px to controls nobody could see (measured:
+  title 154 px in a 235 px row). The rail rule is now scoped to `.row` and the
+  composer's to `#composer`, the buttons are 25.6 px ghost icons that take a
+  `--surface-container-high` circle on hover, and the title measures 180 px. A
+  `@media (hover: none)` block keeps them visible where there is no hover to
+  reveal them.
+- **chat (ui)**: an MCP tool result arrived as `{ content, detailedContent }` and
+  the page printed the envelope, so the same payload appeared twice in the
+  disclosure. The inner text is the result now; the wrapper is unwrapped before
+  it is shown or scanned for links.
+- **chat (ui)**: the rails stopped short of the bottom of the window and the
+  composer was only kept in the middle column by two `:has()` padding hacks that
+  had to be repeated at every breakpoint. `#app` reserved a third grid row for the
+  field, so the deck — and both rails with it — ended where the composer started.
+  The field is now absolutely placed against the transcript column (`left`/`right`
+  follow `--rail-w` and `--inst-w`, the same two numbers the grid uses) and the
+  deck takes the whole remaining height: at 1400×820 the rail and the instruments
+  both measure 44→820 px, and the field measures 672→820 px. The transcript is
+  padded by the field's *measured* height (`--composer-h`, published by a
+  `ResizeObserver`, not a guessed constant), so at full scroll the last message
+  ends 14 px above the field instead of behind it. On a phone the drawer stops
+  above the field for the same reason.
+- **chat (ui)**: clicking a provider tab stopped working the moment the row was
+  made draggable. `setPointerCapture` on the container retargets the `pointerup`
+  — and the `click` derived from it — to the capturing element, so the tab button
+  under the cursor never received a click at all. The drag now listens on
+  `window` for the move and the release instead, which leaves the click where it
+  belongs; a press that travelled more than 4 px still swallows its click, so
+  dragging the row never selects a provider.
+- **chat (ui)**: a dialog taller than the window lost its bottom actions.
+  `#modal` centred with `place-items: center`, which clips an over-tall child at
+  both ends and leaves nothing to scroll — measured on a 700 px window, the card
+  was 880 px with the Close/apply row at 829–906 px and `overflow: visible`. The
+  backdrop is now a flex scroller and the card centres with `margin: auto`: it
+  stays centred while it fits and the dialog scrolls when it does not (checked at
+  380 px, where the scroll is 425 px and the actions land at 277–315 px).
+- **chat (ui)**: the streaming reply re-parsed its whole markdown on every token.
+
+- **chat (ui)**: collapsing the session rail squashed the transcript instead of
+  widening it. The `≤1100px` breakpoint reserved `16rem` for the rail column
+  unconditionally, but `.deck:not(.open)` hides the rail — so `main` landed in the
+  sidebar's column and the `1fr` sat empty. Measured at 1000px: 256px wide before,
+  full width after. The column is now reserved only while the rail is shown.
+- **chat (ui)**: the ripple never animated. The rule lived in the component's
+  scoped `<style>`, so `.rip` compiled to `.rip.svelte-<hash>` and a span created
+  at run time could never match it — every press drew an invisible, unpainted
+  element. The span and its motion are now built in `ripple()` and driven by
+  `Element.animate`, ported from deepscrape's `RippleDirective`: radius to the
+  furthest corner, 500 ms linear, `scale(0) → scale(1.5)` with the fill fading.
+- **chat (ui)**: the tools dialog sat at the left edge with no scrim, because
+  `#tools-modal` was missing from the one dialog rule `#modal` had — which also
+  meant its click-outside handler could never fire (the container was not
+  full-bleed, so a stray click landed on the page behind it).
+- **chat (ui)**: the tools search field rendered as the browser's white input (no
+  colour or fill was set) and popped in with no transition.
+- **chat**: the menu offered `evals`, `prompts`, `references` and `workflows` as
+  skills. They are folder names — `skills::list` names every `.md` after the
+  folder holding it, and those folders hold reference chapters, so picking one
+  resolved to an arbitrary file. A row now has to carry the frontmatter `name:`
+  that already separates a skill from a reference chapter.
+
 
 - **chat**: the context meter measured the wrong window. A session was created
   without `max_prompt_tokens`, so the runtime applied its own Copilot-sized 128k —
@@ -767,193 +931,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--serve` now turns streaming on by itself — the page paints deltas, so a server
   session without them shows nothing until the turn is over.
 
-### Added
-
-- **chat**: `--serve` now ships a real client — Svelte 5 built by bun from
-  `webrain-cli/ui`, emitted as two committed assets (`chat.js`, `chat.css`) that
-  `cargo build` embeds with `include_str!`, so building the binary still needs no
-  JavaScript toolchain. Replies render as sanitised markdown, tool calls become
-  expandable cards keyed by `toolCallId`, runtime events the page does not model
-  (`session.usage_info`, `session.compaction_*`, reasoning, progress) land in
-  collapsed activity rows instead of being dropped, and streaming no longer
-  re-renders the transcript per token.
-
-- **chat**: conversation history in SQLite (`%APPDATA%\webrain\chat.db`, override
-  with `WEBRAIN_CHAT_DB`), served as `GET /sessions` and `GET /sessions/<id>` and
-  browsable from the page's session menu. History is optional at runtime: no
-  store, no menu, the chat still runs.
-
-- **chat**: the composer completes what this build actually has — `/` for the
-  commands the page runs, `@` for the shipped skills, `#` for the MCP tools, and
-  a `+` button for the same list without a trigger. Both lists come from the new
-  `GET /catalog` (skills from `webrain_core::skills`, tools from
-  `webrain_mcp::tool_names`), so a menu can never name a tool the runtime does
-  not expose.
-
-- **chat**: history search. `GET /search?q=` scans every stored message (escaping
-  `%` and `_`, so they stay literal) and `Ctrl-K` opens a modal that queries it as
-  you type, then jumps to the conversation a hit belongs to. Search is a `LIKE`
-  scan, not embeddings — the FTS5/vector step is noted as the upgrade once that
-  becomes measurable.
-
-- **chat**: the page works on a phone. The session panel is a column on a desktop
-  and an overlay drawer under 760 px (with a `«`/`»` toggle in the header), the
-  token/cost rail hides under 900 px, and the composer, palette and modals scale
-  their padding instead of overflowing.
-
-- **chat**: `+` attaches a file and a long paste becomes one. `POST /attach`
-  takes raw bytes, accepts only images and plain text up to 8 MB, renames what it
-  receives (one basename, 48 characters, no path components) and writes it under
-  `%TEMP%\webrain-chat\<conversation>\`; the prompt gets the resulting path, never
-  the contents. A paste over 600 characters or 8 lines is stored the same way and
-  leaves a single `[pasted text #n · N lines → path]` line.
-
-- **chat**: transcript polish. Fenced code becomes a card with its language and
-  its own copy button (one delegated listener), model-written links open in a new
-  tab with `rel="noopener noreferrer"`, and a `↓ latest` pill appears when you
-  scroll away from the bottom.
-
-- **chat**: the page now reads the runtime's real event catalogue. `assistant.usage`
-  drives the header rail while a call is in flight (exact input/output tokens,
-  cache reads, duration → tok/s) instead of only the 900 ms sample;
-  `assistant.turn_end` clears it; `session.shutdown` says the runtime is gone
-  instead of looking hung; and a tool name loses its `webrain-` server prefix so
-  cards read `webrain_serp`, not `webrain-webrain_serp`.
-
-- **chat**: permission requests queue instead of overwriting each other. Two asks
-  arriving before the first modal is answered used to leave the second unanswered,
-  which the server then denied after its 120 s timeout; the modal now shows one at
-  a time with a "N more queued" count.
-
-- **chat**: history search ranks a hit in a conversation's opening message (the
-  text the menu shows as its title) above one buried mid-thread, with recency
-  breaking the tie.
-
-- **docs**: ADR-004, the GUI decision for `webrain chat`. The runtime already
-  emits streamed deltas, tool calls, permission requests and context/cost meters;
-  the CLI flattens them into stderr lines, which is right for a pipe and wrong
-  for a conversation window. The ADR maps every event to the element it should
-  become, names the three SDK handler slots a UI must fill (`PermissionHandler`,
-  `UserInputHandler`, `ElicitationHandler` — today they are policy, not a person),
-  and picks `webrain chat --serve` (raw TCP like `run_http`, one `include_str!`'d
-  page, SSE events) over a TUI, an OpenAI-compatible proxy, or a desktop app.
-
-- **cli**: `webrain chat --search` — live web results in front of the turn,
-  whichever provider is in use. On `openrouter` it rewrites the model to its
-  `:online` slug (native search for Anthropic, Google, OpenAI, Perplexity and xAI
-  models, Exa otherwise). On `deepseek` webrain calls the Search API itself
-  (`POST /v1/tools/search`) and prepends the top 5 titles, urls and snippets. On
-  `openai` it calls the Responses API with `tools: [{"type":"web_search"}]`, on
-  `anthropic` the Messages API with the `web_search_20250305` server tool, and on
-  `gemini` the Interactions API with `tools: [{"type":"google_search"}]` — each
-  with the same key, each prepending the vendor's grounded, cited answer. Groq,
-  Fireworks, DashScope and local servers get the same citation block built from
-  webrain's own engines (duckduckgo + bing over pooled HTTP, no browser), because
-  the Copilot SDK forwards a fixed provider config and cannot inject a vendor
-  search field into the turn. A vendor call that fails prints why and falls back
-  to webrain's engines rather than failing the turn. One line on stderr names the
-  source and what it found.
-- **cli**: `webrain chat --serve [--port N]` — the same session in a browser. The
-  binary serves its own page (`include_str!`, no build step, nothing fetched from
-  a CDN) plus four loopback routes: `GET /`, `GET /events` (SSE), `POST /turn`,
-  `POST /permission`. Each runtime event becomes one element — a delta appends to
-  the assistant bubble, `tool.execution_*` opens and closes a card,
-  `session.usage_info` drives the token meter, `model.call_failure` is an error
-  card carrying the provider's own message — and the composer re-enables on
-  `assistant.idle`, the only signal that a turn is over. Event names stay the
-  runtime's own rather than a translated dialect; the one addition is
-  `webrain.permission`, which carries the id the modal answers.
-- **cli**: the browser UI answers permission prompts itself, so `--serve` does
-  **not** imply `--yes`: the modal shows the exact request, approving there is
-  the same authority as `--yes`, and no answer within 120 s is a deny (the turn
-  reports it instead of hanging). The listener is `127.0.0.1` only — a port that
-  can approve a shell command must not be on the LAN.
-- **cli**: `deepseek` chat provider row (`DEEPSEEK_API_KEY`,
-  `https://api.deepseek.com`, `deepseek-flash`; `--model deepseek-v4-pro` for the
-  larger catalog entry). Its search endpoint is what `--search` calls.
-- **cli**: `webrain chat` reports what the turn cost. Every model call prints
-  `· model · N in / M out` as it happens, and the turn ends with a stderr block
-  giving totals, `tok/s` (output tokens over real API time, not wall clock),
-  request count and cost. The numbers come from the runtime's own accounting
-  (`session.usage.getMetrics`: `lastCallInputTokens`, per-model `usage` and
-  `requests`, `totalApiDurationMs`, `totalNanoAiu`), so `--json` gains a `usage`
-  object with the same fields. Cost is `n/a` on BYOK turns — `nano_aiu` is
-  GitHub's billing unit and is 0 when your own key pays the provider.
-- **cli**: `webrain diff <a> <b> [--max N] [--json]` — what changed between two
-  pages, or a page and a saved baseline. Either side is an http(s) URL (plain
-  HTTP, no browser) or a local file; lines are whitespace-normalised and blanks
-  dropped so re-indentation is not reported as drift, and the exit code is 1 when
-  they differ so a cron job can act on it. The comparison is a multiset line
-  difference (O(n) on a 10k-line page) rather than an LCS — a monitor needs the
-  added and removed lines, not hunk alignment.
-- **cli**: `webrain chat "<prompt>"` — one Copilot agent turn on your own model
-  key, with webrain's own MCP tools attached (the session spawns `webrain mcp`
-  over stdio, so the model gets the 18 `webrain_*` tools as `webrain-webrain_*`).
-  BYOK resolution is a 7-row table in `webrain-core::byok`, first match wins:
-  flags → `WEBRAIN_CHAT_*` → ambient `OPENROUTER` / `OPENAI` / `ANTHROPIC`
-  (`CLAUDE`) / `GEMINI` (`GOOGLE`) / `FIREWORKS` / `DASHSCOPE` (`QWEN`) / `GROQ`,
-  the same variable names the vision chain already uses. `--print-config`
-  resolves and prints the chain with the key redacted, offline, in builds without
-  the feature. `WEBRAIN_CHAT_BASE_URL` alone reaches a keyless local server.
-  Exit 0 completed, 1 turn failed, 2 could not start.
-- **cli**: `webrain doctor` reports chat as a third state alongside engines and
-  vault: `ready (provider/model)`, `no key (and which variables would work)`, or
-  `resolved but this build has no runtime`.
-- **build**: the release matrix builds `--features pdfium,chat` for every target
-  (linux gnu x64/arm64, linux musl x64/arm64, macOS x64/arm64, Windows
-  x64/arm64); CI runs one cached `--features pdfium,chat` clippy job so the
-  feature cannot rot between releases.
-- **docs**: new [chat guide](/guides/chat) plus the provider table and the
-  `WEBRAIN_CHAT_*` / `COPILOT_*` variables in the environment reference.
-- **ci**: a `chat-build` matrix job builds `--features pdfium,chat` on
-  `ubuntu-latest`, `macos-latest` and `windows-latest` on every push to `main`
-  (Linux stays on every PR through the existing clippy step). The feature embeds
-  a per-platform runtime — a Linux-only compile says nothing about the TLS
-  backend macOS (Security.framework) or Windows (schannel) has to link.
-- **build**: the container image takes `--build-arg FEATURES=…` (default
-  `pdfium`), so `FEATURES=pdfium,chat` builds a chat-capable image, and installs
-  `libssl-dev` for the OpenSSL 3 the runtime links.
-
-### Changed
-
-- **build**: the two static **musl** targets carry `chat` too, so no published
-  binary is without it. The claim that this was impossible was wrong on both
-  counts: the SDK is not hostile to musl — its build script fetches
-  `copilot-linuxmusl-x64` / `-arm64` — and a vendored OpenSSL 3 links fine, it
-  just has to be asked for. `webrain-cli` now declares `openssl` with the
-  `vendored` feature for `target_env = "musl"` only, so the musl rows compile
-  OpenSSL from source with `musl-gcc` and stay static (`file` says
-  `static-pie linked`). Verified by building
-  `--features pdfium,chat --target x86_64-unknown-linux-musl` in a Debian
-  container; a `chat-build-musl` CI job now guards it on every push so a release
-  tag is not the first to try. `libssl-dev` on those rows is for the build-host
-  copy of `openssl-sys`, and the SDK crate wants ~8 GB to compile.
-- **build**: workspace MSRV 1.88 → **1.94**, forced by `github-copilot-sdk`
-  (declared `rust-version = "1.94.0"`, and resolver 3 is MSRV-aware, so the floor
-  applies even with the feature off). Released binaries are unaffected; only
-  from-source builds on 1.88–1.93 are. The container builder moves to
-  `rust:1.94-slim-bookworm` with it — cargo refuses a package below its declared
-  `rust-version`, so the old 1.88 base could no longer build the workspace at all.
-- **cli**: `chat` sends its own system prompt instead of inheriting the
-  runtime's coding-agent one: 8048 → **272** static tokens per turn (measured via
-  `session.usage_info`), and the agent is told it drives a browser rather than
-  that it is editing repositories.
-- **cli**: `chat` asks for **4096** output tokens by default rather than the
-  runtime's 64k. Some providers reserve the requested maximum against your
-  balance and refuse the whole request when it does not fit.
-- **docs**: the landing page and overview now state what the binary actually
-  ships. Three claims were wrong: **18** intent-based tools (said 17), **seven**
-  SERP engines (said five; `yahoo`, `baidu` and `yandex` were missing from a
-  surface that has shipped for releases), and "~22 MB, 0 runtime dependencies"
-  now says the default build, because a `chat` build embeds a ~135 MB runtime.
-  New landing section for `webrain chat` — one command, your key, the same 18
-  tools and nothing else — plus the same count fixes in `overview.mdx` and
-  `guides/agent-decision-guide.mdx`. The FAQ's "no API key needed" answer now
-  admits that a chat turn does need one (or a keyless local server), and gains
-  an entry for what `webrain chat` does and does not read from your own Copilot
-  setup.
-
-### Fixed
 - **cli**: the `--serve` page is a harness, not a chat window: evidence column
   plus a **turn ledger** rail that keeps each turn's input/output tokens, tok/s,
   API seconds and cost after the transcript has scrolled them away.
@@ -1003,6 +980,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-run with `WEBRAIN_CHAT_DEBUG=1`.
 - **cli**: the `chat` permission gate also denies permission categories the SDK
   does not model instead of approving them by omission.
+
+### Performance
+
+- **chat**: `--serve` now turns on the SDK's infinite sessions. A one-shot command
+  should not leave session state behind, but a long browser conversation hitting
+  the context limit mid-answer is exactly the failure that switch exists to
+  prevent; compaction arrives as `session.compaction_*`, which the page already
+  reports in its `runtime` row.
+
+- **chat**: `marked` + DOMPurify moved out of the entry bundle into a lazy chunk
+  (`chunk-markdown.js`, imported on idle and awaited before the first render,
+  with plain-text fallback). `chat.js` drops from 166 KB to 88 KB, so first paint
+  parses half the script; the server does not compress (loopback, one client), so
+  the raw number is the honest one and Vite's gzip figure (57 → 31 KB) only
+  applies if a proxy is in front. The new `GET /chunk-markdown.js`
+  serves the chunk from the binary; names are deterministic because every asset is
+  embedded by name. CSS stays one file deliberately: 37 KB raw, 6 KB gzipped if
+  compressed, and splitting it would cost an extra request per chunk from
+  localhost.
 
 ## [0.16.2] - 2026-11-03
 

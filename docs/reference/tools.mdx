@@ -377,6 +377,18 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdow
 ```
 
 `cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate.
+
+Every reply ends with `stats`, and the concurrency numbers are **measured, not assumed**:
+
+| field | meaning |
+|---|---|
+| `total` / `ok` / `errors` | rows returned, succeeded, failed — `total` always equals the number of URLs, even when the whole batch dies (one row per URL, not one row for the batch) |
+| `requested_concurrency` | what you asked for on this connection |
+| `effective_concurrency` | tabs the batch **really obtained**; summed across `cdp_urls`; `0` when every row failed, `1` on a single-target engine |
+| `single_target` | `true` when the connection holds one tab (lightpanda, guest Chrome): the batch runs serially and no `concurrency` value changes that |
+| `ms_total` / `ms_wall` | summed per-URL time vs the wall clock — far apart means real parallelism |
+
+A browser that refuses new targets is **not** an error: `webrain_batch` attaches the page that browser already has and runs the queue there, so `single_target: true, effective_concurrency: 1` with `ok: total` is a pass (guest Chrome measured 8 URLs in 5.65 s vs 1.46 s on a real Chrome with `concurrency: 4`). Guest Chrome is for SERP + CAPTCHA, not batch — see the [agent decision guide](../guides/agent-decision-guide.mdx).
 </Accordion>
 
 <Accordion title="webrain_spider">

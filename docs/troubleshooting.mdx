@@ -38,6 +38,8 @@ ports (9222/9224/9225), and vault. Exit **0** healthy,
 | `challenge: cloudflare_challenge` / `blocked` | `webrain launch <service> <profile> <url>` then `webrain login <service> <profile>`, or re-attach an authenticated Chrome via `CDP_URL=http://127.0.0.1:9222` |
 | Chrome won't launch / port busy | `webrain doctor`; check `port_blocklist.ps1` on Windows |
 | Batch returns nothing on lightpanda | Expected — single context. Use obscura for parallelism |
+| `effective_concurrency: 1` / `single_target: true` on a batch | The connection holds one tab (lightpanda, guest Chrome, a browser refusing new targets). It is **measured**, not a bug: the queue ran serially. Repeat the endpoint in `cdp_urls`, or batch on a real Chrome |
+| Batch row says `Failed to open a new tab` / `total` < URLs sent | Fixed in 0.17.0 — upgrade. That browser refused `Target.createTarget` over the whole batch; older builds reported no usable row at all |
 | Google Flights / Material controls don't open | Real Chrome only, never obscura/lightpanda |
 | Wrong prices on Google Flights | Read from result **cards** (`li.pIav2d`), never bare `$` text nodes (spurious price grid) |
 | Auth lost after batch | `webrain_setcookies` then `webrain_batch` WITHOUT `cdp_urls` (obscura isolates per-connection cookie jars) |
