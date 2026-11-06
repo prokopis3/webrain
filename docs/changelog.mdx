@@ -12,6 +12,20 @@ All notable changes, in reverse chronological order. The full version lives in
 
 <p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
 
+## v0.17.1
+
+<p className="text-[#888] text-sm">2026-11-06 — <code>chat --serve</code> accepts the UI that ships beside it on Windows</p>
+
+### Fixed
+
+- **cli**: the chat UI digest was a line-ending fact. Git converts line endings
+  on a Windows checkout, so a Windows build hashed CRLF (408-byte `chat.html`)
+  while the release archive is packed on Linux from an LF checkout (394 bytes) —
+  and every `webrain install chat-ui` then failed with `394 bytes, expected 408`
+  on the same version. The digest and the served text are taken over CRLF→LF
+  normalized bytes now, so an LF archive, a CRLF checkout and a
+  `WEBRAIN_CHAT_UI` directory all verify; a tampered file is still refused.
+
 ## v0.17.0
 
 <p className="text-[#888] text-sm">2026-11-06 — <code>webrain chat</code> and <code>chat --serve</code>, 16 BYOK providers, dictation, an honest batch report</p>
