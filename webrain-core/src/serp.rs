@@ -726,7 +726,14 @@ fn parse_brave(html: &str, limit: usize) -> Vec<SerpResult> {
             .select(&snip_sel)
             .next()
             .map(|n| clean(&n.text().collect::<Vec<_>>().join(" ")))
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty())
+            // Brave renames that class between builds (`.snippet-description`,
+            // `.snippet-content`, then a bare paragraph), so the container's own
+            // text minus the title is the fallback — no class name guessed.
+            .unwrap_or_else(|| {
+                let all = clean(&el.text().collect::<Vec<_>>().join(" "));
+                clean(&all.replacen(&title, "", 1))
+            });
         out.push(SerpResult {
             position: out.len() + 1,
             title,
@@ -2266,26 +2273,54 @@ pub async fn serp_search<B: BrowserBackend>(
             // returns typed JSON, so a BRAVE_API_KEY makes brave work headless.
             let mut rs = brave_api_search(opts).await.unwrap_or_default();
             if rs.is_empty() {
-                let b = backend.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "engine 'brave' requires a connected browser (set CDP_URL or start Chrome \
-                         with --remote-debugging-port=9222) or a BRAVE_API_KEY; \
-                         duckduckgo|bing|google|auto work without either"
-                    )
-                })?;
-                rs = browser_search(b, "brave", opts).await?;
+                match backend {
+                    Some(b) => rs = browser_search(b, "brave", opts).await?,
+                    // Nothing can run brave (no key, no browser). With fallback on,
+                    // answer the query from another engine instead of erroring —
+                    // that is what `fallback: true` promises.
+                    None if opts.fallback => {}
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "engine 'brave' requires a connected browser (set CDP_URL or start Chrome \
+                             with --remote-debugging-port=9222) or a BRAVE_API_KEY; \
+                             duckduckgo|bing|google|auto work without either"
+                        ));
+                    }
+                }
             }
+            // Brave is the one engine that NEVER reached the shared fallback: an
+            // empty render returned `skipped: []` and `status: empty` even with
+            // `fallback: true`, so a walled or zero-result brave page ended the
+            // search. It walks the chain like every other engine now.
+            //
+            // `backend` is withheld on purpose: brave's own browser render just
+            // failed, and the chain's last step is exactly that render again (the
+            // 22 s walled attempt in the log was followed by another one).
+            let (rs, skipped, source) = if rs.is_empty() && opts.fallback {
+                fallback_chain::<B>("brave", opts, None).await
+            } else {
+                (rs, Vec::new(), "brave".to_string())
+            };
             let count = rs.len();
-            (
-                rs,
-                Vec::new(),
-                vec![SerpEngineReport {
-                    engine: "brave".to_string(),
-                    status: if count > 0 { "ok" } else { "empty" }.to_string(),
-                    count,
-                }],
-                "brave".to_string(),
-            )
+            let mut per_engine = vec![SerpEngineReport {
+                engine: if count > 0 {
+                    source.clone()
+                } else {
+                    "brave".to_string()
+                },
+                status: if count > 0 { "ok" } else { "empty" }.to_string(),
+                count,
+            }];
+            for s in &skipped {
+                if s != &source {
+                    per_engine.push(SerpEngineReport {
+                        engine: s.clone(),
+                        status: "skipped".to_string(),
+                        count: 0,
+                    });
+                }
+            }
+            (rs, skipped, per_engine, source)
         }
         e if HTTP_ENGINES.contains(&e) => {
             let (results, skipped, source) = specific_engine(e, opts, backend).await?;
@@ -2346,6 +2381,32 @@ pub async fn serp_search<B: BrowserBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brave ships its description under a class name it renames between builds;
+    /// when neither `.snippet-description` nor `.snippet-content` is present the
+    /// snippet must still come out (container text minus the title), never "".
+    #[test]
+    fn a_brave_result_without_the_description_class_still_has_a_snippet() {
+        let html = r#"
+          <div class="snippet svelte-1x">
+            <a href="https://example.com/a" class="l1"><div class="title">Rust 1.94 is out</div></a>
+            <p>The release notes list the new borrow rules.</p>
+          </div>"#;
+        let rows = parse_brave(html, 5);
+        assert_eq!(rows.len(), 1, "one result: {rows:?}");
+        assert_eq!(rows[0].title, "Rust 1.94 is out");
+        assert_eq!(rows[0].url, "https://example.com/a");
+        assert!(
+            rows[0].snippet.contains("borrow rules"),
+            "snippet fell back wrongly: {:?}",
+            rows[0].snippet
+        );
+        assert!(
+            !rows[0].snippet.contains("Rust 1.94 is out"),
+            "the title must not be repeated inside its own snippet: {:?}",
+            rows[0].snippet
+        );
+    }
 
     #[test]
     fn deepseek_results_map_the_documented_shape() {

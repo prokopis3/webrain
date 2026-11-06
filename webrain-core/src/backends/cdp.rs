@@ -12,9 +12,21 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
+
+/// Does this `Target.createTarget` failure mean the browser has **one** tab and
+/// the caller must reuse it rather than fan out?
+///
+/// lightpanda says it with `TargetAlreadyLoaded` (one browser context by design).
+/// A Chrome in a single-window / wedged state says `-32000 "Failed to open a new
+/// tab"` instead — measured on Chrome 156: `/json/version`, `/json/list` and
+/// attach all worked, only target creation failed, and `newWindow: true` failed
+/// the same way. Both mean "one tab, reuse it", not "multi-target with a hiccup".
+fn one_tab_only(msg: &str) -> bool {
+    msg.contains("TargetAlreadyLoaded") || msg.contains("Failed to open a new tab")
+}
 
 /// Anti-bot JS injected before page scripts run (Page.addScriptToEvaluateOnNewDocument).
 /// Self-destructing by design: everything lives inside the IIFE, so no `window.setXxx`
@@ -420,7 +432,15 @@ pub struct CdpBackend {
     /// obscura accept many. That is a property of the binary, not of the call, so
     /// the probe runs once per connection instead of costing two scratch targets
     /// on every batch.
-    single_target: Arc<std::sync::OnceLock<bool>>,
+    ///
+    /// A counter rather than an `OnceLock`: a *state* can change (a wedged browser
+    /// recovers, a single-window browser gets a tab strip back), so a later
+    /// successful `Target.createTarget` clears it. 0 = not probed yet.
+    single_target: Arc<AtomicU8>,
+    /// Tabs the last `batch_map` actually opened — `None` until one has run.
+    /// `effective_concurrency` reads this instead of assuming the requested
+    /// number was achieved.
+    batch_tabs: Arc<AtomicUsize>,
 }
 
 /// A single attached page target (one browser tab).
@@ -576,7 +596,8 @@ impl CdpBackend {
             no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
             dead: Arc::new(AtomicBool::new(false)),
-            single_target: Arc::new(std::sync::OnceLock::new()),
+            single_target: Arc::new(AtomicU8::new(0)),
+            batch_tabs: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -693,7 +714,8 @@ impl CdpBackend {
             no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
             dead: Arc::new(AtomicBool::new(false)),
-            single_target: Arc::new(std::sync::OnceLock::new()),
+            single_target: Arc::new(AtomicU8::new(0)),
+            batch_tabs: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -770,30 +792,33 @@ impl CdpBackend {
         if self.dead.load(Ordering::Relaxed) {
             anyhow::bail!("CDP connection closed (transport already dead)");
         }
-        let (id, rx) = {
+        // Take the writer handle and an id, then let the lock go. `send()` on a
+        // bounded channel (64 slots) can suspend, and holding `inner` across it
+        // parks every other tab's command behind one slow socket.
+        let (id, write) = {
             let mut conn = self.inner.lock().await;
             let id = conn.cmd_id;
             conn.cmd_id += 1;
+            (id, conn.write.clone())
+        };
 
-            let mut msg = json!({"id": id, "method": method, "params": params});
-            if let Some(sid) = session {
-                msg["sessionId"] = json!(sid);
-            }
-            let text = serde_json::to_string(&msg)?;
+        let mut msg = json!({"id": id, "method": method, "params": params});
+        if let Some(sid) = session {
+            msg["sessionId"] = json!(sid);
+        }
+        let text = serde_json::to_string(&msg)?;
 
-            // Register before writing: the reply can land before send() returns.
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.pending.lock().await.insert(id, tx);
-            if let Err(e) = conn.write.send(text).await {
-                // Writer task exited => out_rx dropped => this channel is closed
-                // for good. Latch it so the very next command short-circuits
-                // above rather than inventing a fresh error wording.
-                self.dead.store(true, Ordering::Relaxed);
-                self.pending.lock().await.remove(&id);
-                anyhow::bail!("CDP connection closed (CDP write failed: {e})");
-            }
-            (id, rx)
-        }; // connection lock released here — nothing else waits on this command
+        // Register before writing: the reply can land before send() returns.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        if let Err(e) = write.send(text).await {
+            // Writer task exited => out_rx dropped => this channel is closed
+            // for good. Latch it so the very next command short-circuits
+            // above rather than inventing a fresh error wording.
+            self.dead.store(true, Ordering::Relaxed);
+            self.pending.lock().await.remove(&id);
+            anyhow::bail!("CDP connection closed (CDP write failed: {e})");
+        }
 
         // 30s response cap: an unanswered command (renderer paused on a dialog,
         // tab crash, half-open socket) must fail fast. Only this command's slot
@@ -1173,8 +1198,33 @@ impl CdpBackend {
     }
 
     /// Id of the first registered tab, if any (single-target reuse).
+    ///
+    /// Falls back to attaching the browser's own first page: a browser that
+    /// refuses `Target.createTarget` (guest mode, one window) still HAS a page,
+    /// and reporting "no tab" is what made `batch` fail on a browser that
+    /// `navigate` handled fine.
     pub async fn existing_tab(&self) -> Option<String> {
+        let id = self.tabs.lock().await.keys().next().cloned();
+        if id.is_some() {
+            return id;
+        }
+        self.ensure_page_attached().await.ok()?;
         self.tabs.lock().await.keys().next().cloned()
+    }
+
+    /// A tab to work in, preferring a fresh one: `(id, reused_existing)`.
+    ///
+    /// A browser that refuses `Target.createTarget` but still has a live tab (one
+    /// window, or a wedged UI thread) has to stay drivable — failing the call
+    /// outright is what left the agent hand-rolling PowerShell.
+    pub async fn tab_or_existing(&self) -> anyhow::Result<(String, bool)> {
+        match self.open_tab("about:blank").await {
+            Ok(id) => Ok((id, false)),
+            Err(e) => match self.existing_tab().await {
+                Some(id) => Ok((id, true)),
+                None => Err(e),
+            },
+        }
     }
 
     /// Detect single-target mode (lightpanda serve) by probing
@@ -1185,20 +1235,39 @@ impl CdpBackend {
     ///
     /// Cached: the answer is a property of the engine binary, so the probe runs
     /// once per connection. A transient error is NOT cached, so a flaky first
-    /// call can still be retried.
+    /// call can still be retried — and a successful `open_tab` clears the cache,
+    /// so a browser that recovers its ability to make tabs is not stuck serial.
     pub async fn single_target_probe(&self) -> anyhow::Result<bool> {
-        if let Some(v) = self.single_target.get() {
-            return Ok(*v);
+        if let Some(v) = self.single_target_known() {
+            return Ok(v);
         }
         let v = self.single_target_probe_uncached().await?;
-        let _ = self.single_target.set(v);
+        self.single_target
+            .store(if v { 2 } else { 1 }, Ordering::Relaxed);
         Ok(v)
     }
 
     /// Already-known answer, without triggering a probe. Lets batch stats report
     /// `single_target` even when no probe was needed this call.
     pub fn single_target_known(&self) -> Option<bool> {
-        self.single_target.get().copied()
+        match self.single_target.load(Ordering::Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// How many tabs the last batch actually obtained, `None` before one ran.
+    pub fn batch_tabs(&self) -> Option<usize> {
+        match self.batch_tabs.load(Ordering::Relaxed) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    /// Recorded by `batch_map`, read by the batch report.
+    pub fn set_batch_tabs(&self, n: usize) {
+        self.batch_tabs.store(n, Ordering::Relaxed);
     }
 
     async fn single_target_probe_uncached(&self) -> anyhow::Result<bool> {
@@ -1211,7 +1280,13 @@ impl CdpBackend {
         };
         if let Some(e) = first_err {
             // A target already exists (e.g. from a prior navigate) → single-target.
-            return Ok(e.to_string().contains("TargetAlreadyLoaded"));
+            // Anything else unrecognised is an ERROR, not "multi-target": mapping
+            // it to `Ok(false)` claimed concurrency the browser does not have and
+            // cached that lie for the life of the connection.
+            if one_tab_only(&e.to_string()) {
+                return Ok(true);
+            }
+            return Err(e);
         }
         match self
             .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
@@ -1236,7 +1311,7 @@ impl CdpBackend {
                         .send_cmd_with(None, "Target.closeTarget", json!({"targetId": tid}))
                         .await;
                 }
-                if e.to_string().contains("TargetAlreadyLoaded") {
+                if one_tab_only(&e.to_string()) {
                     Ok(true)
                 } else {
                     Err(e)
@@ -1249,9 +1324,27 @@ impl CdpBackend {
     /// ponytail: blank tab so the caller's `navigate(url)` is the ONE load — the
     /// old pre-load here made every batch op fetch each URL twice.
     pub async fn open_tab(&self, url: &str) -> anyhow::Result<String> {
-        let r = self
+        let r = match self
             .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Remember a refusal that means "one tab only": the probe cached
+                // `multi` a moment ago, and without this the NEXT batch fans out
+                // again and fails the same way. A successful create below clears
+                // it, so a recovered browser goes back to parallel by itself.
+                if one_tab_only(&e.to_string()) {
+                    self.single_target.store(2, Ordering::Relaxed);
+                }
+                return Err(e);
+            }
+        };
+        // It just made a target, so a cached "one tab only" is stale — that is
+        // what un-sticks a browser that recovered without reconnecting.
+        if self.single_target.load(Ordering::Relaxed) == 2 {
+            self.single_target.store(0, Ordering::Relaxed);
+        }
         let target_id = r["targetId"]
             .as_str()
             .context("No targetId from createTarget")?
@@ -3398,8 +3491,23 @@ fn css_escape(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::human_path;
+    use super::one_tab_only;
     use super::{build_dom_paths, collect_shadow_root_ids};
     use serde_json::json;
+
+    /// Chrome reporting "Failed to open a new tab" must be classified as
+    /// single-target. Treating it as multi-target made `batch_map` fan out N
+    /// workers that all failed to open a tab (measured: 4 workers, 0 tabs).
+    #[test]
+    fn a_browser_that_refuses_tabs_is_single_target_not_multi() {
+        assert!(one_tab_only(
+            "Send failed: {\"code\":-32000,\"message\":\"Failed to open a new tab\"}"
+        ));
+        assert!(one_tab_only("TargetAlreadyLoaded: one context only"));
+        // A transient transport error is neither: it must surface as an error
+        // instead of being cached as "multi-target".
+        assert!(!one_tab_only("Websocket closed unexpectedly"));
+    }
 
     /// A closed shadow root is reachable only through the pierced tree, and the
     /// printed css path must be the root-scoped shape `resolve_css_node` queries

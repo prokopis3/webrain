@@ -186,6 +186,18 @@ mod tests {
         assert_eq!(super::base64_encode(b"ab"), "YWI=");
     }
 
+    /// A batch that cannot open a tab must still answer once per URL: one row for
+    /// three URLs reads as "one URL was batched" and loses two silently.
+    #[test]
+    fn a_failed_batch_answers_once_per_url() {
+        let urls: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let rows = super::batch_all_err(&urls, "Failed to open a new tab");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].url, "c");
+        assert_eq!(rows[2].error.as_deref(), Some("Failed to open a new tab"));
+        assert!(super::batch_all_err(&[], "x").is_empty());
+    }
+
     // ponytail: one check for the tile grid + local crop — the whole point of
     // capturing once is that these rects land on the same pixels as N clips.
     #[test]
@@ -739,26 +751,40 @@ impl SpiderEngine {
         visited: &std::collections::HashSet<String>,
         results: &[SpiderResult],
     ) {
-        let Some(path) = self.checkpoint_path() else {
-            return;
-        };
+        if let Some(json) = self.checkpoint_json(queue, visited, results) {
+            self.write_checkpoint(&json);
+        }
+    }
+
+    /// Serialize the crawl state. Pure in-memory work, so it can run while the
+    /// crawl lock is held; the disk write is `write_checkpoint` and must not.
+    fn checkpoint_json(
+        &self,
+        queue: &std::collections::VecDeque<(String, usize)>,
+        visited: &std::collections::HashSet<String>,
+        results: &[SpiderResult],
+    ) -> Option<String> {
+        self.checkpoint_path()?;
         let q: Vec<Value> = queue.iter().map(|(u, d)| json!([u, d])).collect();
-        let seen: Vec<String> = visited.iter().cloned().collect();
-        let res: Vec<Value> = results
-            .iter()
-            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-            .collect();
         let saved_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let data = json!({"queue": q, "seen": seen, "results": res, "saved_at": saved_at});
-        if let Ok(s) = serde_json::to_string(&data) {
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, s).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        // No `visited` clone: serde serializes the set directly.
+        let data = json!({"queue": q, "seen": visited, "results": results, "saved_at": saved_at});
+        serde_json::to_string(&data).ok()
+    }
+
+    /// Atomic write. Blocking I/O — call it outside the crawl lock and off the
+    /// async executor, or every worker stalls for the duration of the write.
+    fn write_checkpoint(&self, json: &str) {
+        let Some(path) = self.checkpoint_path() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 
@@ -1256,7 +1282,10 @@ impl SpiderEngine {
                 }
             }
         }
-        shared.lock().await.results.clone()
+        // Every worker is joined, so the results can be moved out instead of
+        // cloned — a clone would duplicate every page body at peak memory.
+        let mut sh = shared.lock().await;
+        std::mem::take(&mut sh.results)
     }
 
     /// Fetch one page on a given tab session (concurrent path). Mirrors
@@ -1491,7 +1520,7 @@ impl SpiderEngine {
                 );
             }
 
-            {
+            let pending_checkpoint = {
                 let mut sh = shared.lock().await;
                 sh.results.push(SpiderResult {
                     page,
@@ -1500,21 +1529,30 @@ impl SpiderEngine {
                 });
                 sh.inflight -= 1;
                 if depth < engine.max_depth {
-                    for link in &links {
-                        if !sh.visited.contains(link)
-                            && engine.domain_ok(link, &sh.seed_host)
-                            && engine.url_ok(link)
-                            && engine.robots_ok(&sh.disallowed, link)
+                    // Consume `links`: the result above already owns its copy.
+                    for link in links {
+                        if !sh.visited.contains(&link)
+                            && engine.domain_ok(&link, &sh.seed_host)
+                            && engine.url_ok(&link)
+                            && engine.robots_ok(&sh.disallowed, &link)
                         {
                             sh.visited.insert(link.clone());
-                            engine.push_link(&mut sh.queue, link.clone(), depth + 1);
+                            engine.push_link(&mut sh.queue, link, depth + 1);
                         }
                     }
                 }
                 if engine.crawldir.is_some() && sh.results.len() >= sh.next_checkpoint {
                     sh.next_checkpoint = sh.results.len() + engine.checkpoint_every;
-                    engine.save_checkpoint(&sh.queue, &sh.visited, &sh.results);
+                    engine.checkpoint_json(&sh.queue, &sh.visited, &sh.results)
+                } else {
+                    None
                 }
+            };
+            if let Some(json) = pending_checkpoint {
+                // Lock released above. The write blocks, so keep it off the
+                // executor as well — otherwise one disk hiccup parks a worker.
+                let e = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || e.write_checkpoint(&json)).await;
             }
         }
 
@@ -2074,6 +2112,14 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
     }
 }
 
+/// A failure that kills the whole batch, as one row per URL. A single row for
+/// three URLs reads as "one URL was batched" — the caller cannot tell it lost two.
+fn batch_all_err(urls: &[String], msg: &str) -> Vec<BatchResult> {
+    urls.iter()
+        .map(|u| batch_err(u, anyhow::anyhow!("{msg}")))
+        .collect()
+}
+
 /// Run one URL on a given (already-open) tab: navigate its session, run
 /// `per_url`, return the BatchResult with wall-clock ms. Shared by the parallel
 /// path (each URL's own tab) and the single-target sequential fallback (one
@@ -2147,33 +2193,11 @@ where
     // any 2nd createTarget → sequential reuse; obscura/Chrome → parallel.
     let single = match browser.single_target_probe().await {
         Ok(s) => s,
-        Err(e) => return vec![batch_err(&urls[0], e)],
+        Err(e) => return batch_all_err(urls, &e.to_string()),
     };
 
     if single {
-        // lightpanda: reuse one tab for every URL, strictly sequential. Prefer
-        // an already-registered tab (e.g. from a prior navigate), else open one.
-        let id = match browser.existing_tab().await {
-            Some(id) => id,
-            None => match browser.open_tab("about:blank").await {
-                Ok(id) => id,
-                Err(e) => return vec![batch_err(&urls[0], e)],
-            },
-        };
-        let mut out = Vec::with_capacity(urls.len());
-        for url in urls {
-            out.push(
-                run_on_tab(
-                    browser,
-                    id.clone(),
-                    url.clone(),
-                    opts.clone(),
-                    per_url.clone(),
-                )
-                .await,
-            );
-        }
-        return out;
+        return batch_serial(browser, urls, opts, per_url).await;
     }
 
     // Multi-target: a FIXED pool of `concurrency` tabs, each draining a shared
@@ -2194,14 +2218,20 @@ where
     // an attach and then REFUSES Target.createTarget (single tab by design), so
     // "no tab available" alone reads like a dead browser when it is a live one.
     let no_tab: std::sync::Arc<tokio::sync::Mutex<Option<String>>> = Default::default();
+    // Tabs this batch really obtained — the report reads it instead of assuming
+    // `concurrency` was achieved (a worker that never got a tab claimed nothing).
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // One shared copy of the URL list — per-worker `to_vec()` was O(workers × urls).
+    let urls_arc = std::sync::Arc::new(urls.to_vec());
     for _ in 0..workers {
         let b = browser.clone();
         let next = next.clone();
         let done = done.clone();
-        let urls = urls.to_vec();
+        let urls = urls_arc.clone();
         let opts = opts.clone();
         let per_url = per_url.clone();
         let no_tab = no_tab.clone();
+        let opened = opened.clone();
         handles.push(tokio::spawn(async move {
             // No tab → this worker retires; `next` was never touched, so the
             // remaining workers still claim every URL.
@@ -2212,6 +2242,7 @@ where
                     return;
                 }
             };
+            opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if i >= urls.len() {
@@ -2229,12 +2260,16 @@ where
                 r.ms = t0.elapsed().as_millis() as u64;
                 // A failed URL can leave the tab wedged (renderer crash, hung
                 // navigation). Recycle it so one bad URL costs one tab instead of
-                // poisoning the rest of this worker's queue.
+                // poisoning the rest of this worker's queue — but not when the
+                // queue is already drained: that tab would be created and closed
+                // for nothing, one createTarget + attach per worker per batch.
                 if r.error.is_some() {
                     let _ = b.close_tab(&id).await;
-                    match b.open_tab("about:blank").await {
-                        Ok(fresh) => id = fresh,
-                        Err(_) => break,
+                    if next.load(std::sync::atomic::Ordering::Relaxed) < urls.len() {
+                        match b.open_tab("about:blank").await {
+                            Ok(fresh) => id = fresh,
+                            Err(_) => break,
+                        }
                     }
                 }
                 done.lock().await.push((i, r));
@@ -2245,6 +2280,14 @@ where
     for h in handles {
         let _ = h.await;
     }
+    // Not one tab, although the probe answered "multi-target" a moment earlier:
+    // the browser's answer changed under us (guest-mode Chrome, a wedged one).
+    // Run the queue on the single tab that does exist rather than failing every
+    // URL — this is what makes a reconnect unnecessary.
+    if opened.load(std::sync::atomic::Ordering::Relaxed) == 0 && no_tab.lock().await.is_some() {
+        return batch_serial(browser, urls, opts, per_url).await;
+    }
+    browser.set_batch_tabs(opened.load(std::sync::atomic::Ordering::Relaxed));
     // Workers finish out of order; sort by claimed index to keep URL order.
     let mut pairs: Vec<(usize, BatchResult)> = {
         let mut g = done.lock().await;
@@ -2272,6 +2315,53 @@ where
                 anyhow::anyhow!("batch worker could not get a tab: {why}"),
             )
         }));
+    }
+    out
+}
+
+/// One tab, one URL at a time. The single-target path (lightpanda, a guest-mode
+/// Chrome) — and the fallback when a fan-out could not obtain a single tab, so a
+/// browser whose answer changed under the probe degrades to serial instead of
+/// reporting every URL as failed.
+async fn batch_serial<F, Fut>(
+    browser: &CdpBackend,
+    urls: &[String],
+    opts: &crate::backends::cdp::NavOpts,
+    per_url: F,
+) -> Vec<BatchResult>
+where
+    F: Fn(CdpBackend, String, String) -> Fut + Clone + Sync + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, String, Option<Value>)>>
+        + Send
+        + 'static,
+{
+    if urls.is_empty() {
+        return Vec::new();
+    }
+    // Prefer an already-registered tab (e.g. from a prior navigate), else open one.
+    let id = match browser.existing_tab().await {
+        Some(id) => id,
+        None => match browser.open_tab("about:blank").await {
+            Ok(id) => id,
+            Err(e) => {
+                browser.set_batch_tabs(0);
+                return batch_all_err(urls, &e.to_string());
+            }
+        },
+    };
+    browser.set_batch_tabs(1);
+    let mut out = Vec::with_capacity(urls.len());
+    for url in urls {
+        out.push(
+            run_on_tab(
+                browser,
+                id.clone(),
+                url.clone(),
+                opts.clone(),
+                per_url.clone(),
+            )
+            .await,
+        );
     }
     out
 }
@@ -2749,11 +2839,10 @@ fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
     let Some(p) = proxy else {
         return Ok(browser_agent());
     };
-    if let Some(a) = proxy_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(p)
-    {
+    // One lock for lookup-or-insert. Building an agent is in-memory work, and
+    // two separate locks let two callers both build an agent for the same proxy.
+    let mut agents = proxy_agents().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(a) = agents.get(p) {
         return Ok(a.clone());
     }
     let parsed = ureq::Proxy::new(p)?;
@@ -2763,10 +2852,7 @@ fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
             .proxy(Some(parsed))
             .build(),
     );
-    proxy_agents()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(p.to_string(), agent.clone());
+    agents.insert(p.to_string(), agent.clone());
     Ok(agent)
 }
 

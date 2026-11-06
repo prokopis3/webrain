@@ -40,6 +40,7 @@ Cursor, …). Follow `docs/AGENT_DECISION_GUIDE.md` — or just call the
 |---|---|
 | Material / interactive SPA (Google Flights, dropdowns, calendars) — **never obscura/lightpanda** | real Chrome via `cdp_urls:["http://127.0.0.1:9222"]` |
 | Protected / authenticated / Cloudflare / CAPTCHA / Turnstile challenges, real screenshots, rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain login`) |
+| **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **guest Chrome** (`--guest`) — a *purpose tool*: its profile (`serp/<profile>`, persisted unless `--fresh`) carries the solved clearance to the next call. It refuses new targets (`PUT /json/new` → 500; `Target.createTarget` → `-32000 "Failed to open a new tab"`), so a batch there is one serial tab (`single_target: true, effective_concurrency: 1`; 8 URLs 5.65 s vs 1.46 s on 9222). Never route bulk work to it |
 | Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — v0.2.0+ render builds screenshot/PDF; no-render builds have no paint engine; no interactive Material |
 | Lightweight / minimal, want real a11y, no rendering needed | lightpanda — real AX tree, but screenshot = fake placeholder PNG |
 | Static HTML, no JS/auth | `webrain_fetch_http` |

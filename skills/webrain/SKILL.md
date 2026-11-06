@@ -128,6 +128,14 @@ Cookie transfer moves **login state, not bot clearance**: `cf_clearance` is boun
 the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the Chrome
 that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
 For an obscura/lightpanda identity, start the binary with `--storage-dir`.
+
+**Guest Chrome (`--guest`) is a purpose tool**: `webrain_serp` engine=google|brave and
+interactive CAPTCHA/Turnstile — its profile (`serp/<profile>`, persisted unless
+`--fresh`) is what keeps the clearance for the next call; a fresh profile gets
+re-captcha'd every launch. It refuses new targets (`PUT /json/new` → 500; `-32000
+"Failed to open a new tab"`), so batch/crawl there run ONE serial tab
+(`single_target: true`; 8 URLs 5.65 s vs 1.46 s on 9222 with `concurrency: 4`).
+Bulk work goes to real Chrome / obscura / lightpanda — never to guest Chrome.
 Do not re-read the Rust source to learn any of this — it is documented here and in
 `webrain_guide`; read source only to change behavior.
 

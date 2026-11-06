@@ -22,7 +22,25 @@ state. Never pick an engine from memory — read the `challenge` field after eve
 | real Chrome | ✅ | ✅ | ✅ | ✅ | ✅ (native login) | ✅ parallel tabs |
 | obscura | ✅ | ❌ (not full layout parity) | ✅ v0.2.0+ render builds (+ PDF) | partial | ❌ | ✅ parallel tabs |
 | lightpanda | ✅ | ❌ | ❌ (fake placeholder PNG) | ✅ real AX tree | ❌ | sequential (single target) |
+| guest Chrome (`--guest`) | ✅ | ✅ | ✅ | ✅ | ✅ — that is its job | ❌ one serial tab (refuses `Target.createTarget`) |
 | `fetch_http` | ❌ | ❌ | ❌ | ❌ | ❌ | N/A |
+
+## Guest Chrome is a purpose tool, not an engine
+
+`--guest` Chrome exists for two jobs: the JS-gated SERP engines (`webrain_serp`
+`engine=google|brave`) and solving an interactive CAPTCHA/Turnstile. Its profile is
+the point — a persistent `serp/<profile>` unless `--fresh`, which is what keeps the
+solved clearance for the next call (a fresh profile gets re-captcha'd every launch).
+
+It cannot open a second target. Verified 2026-11-06 on Chrome 156: `PUT /json/new`
+→ **500** (200 on a normal Chrome) and `Target.createTarget` → `-32000 "Failed to
+open a new tab"`. A batch there runs **one serial tab** — `single_target: true`,
+`effective_concurrency: 1`, 8 URLs in 5.65 s vs 1.46 s on 9222 with `concurrency: 4`
+— because the batch attaches the page the browser already has instead of fanning out.
+
+So: guest Chrome for SERP + challenges, **real Chrome / obscura / lightpanda for
+`webrain_batch`, `webrain_crawl` and general navigation**. "It completes" on guest
+Chrome is not a reason to route work there.
 
 ## Golden rule
 Don't guess the browser. `webrain_navigate` returns `challenge` — read it, then

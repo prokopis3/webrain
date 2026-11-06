@@ -24,7 +24,18 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 | JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material (not full layout parity). |
 | Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target per CONNECTION** — a batch on one endpoint serializes (probe detects it, `single_target: true`), but the process serves many connections: repeat the endpoint in `cdp_urls` for parallel pages, up to `--cdp-max-connections` (16). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10-100× faster than a browser, zero memory. |
+| **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **guest Chrome** (`--guest`, what the SERP path launches) | Purpose tool, not an engine: it is the profile that carries the solved clearance to the next call. It **refuses** new targets — verified 2026-11-06 on Chrome 156: `PUT /json/new` → 500 (200 on a normal Chrome), `Target.createTarget` → `-32000 "Failed to open a new tab"`. Every batch there runs **one serial tab** (`single_target: true, effective_concurrency: 1`; 8 URLs 5.65 s vs **1.46 s** on 9222 with 4 tabs). Never route bulk work to it. |
 
+> **Guest Chrome (`--guest`) is a purpose tool.** Two jobs only: the JS-gated SERP
+> engines (google, brave) and interactive CAPTCHA/Turnstile. Its profile is the
+> point — a persistent `serp/<profile>` unless `--fresh`, which is why the second
+> baidu call passes where a fresh profile is walled. Do **not** reuse it for `webrain_batch`, `webrain_crawl`
+> or general navigation: it cannot open a second target, so the whole batch
+> collapses onto one tab (`single_target: true`, measured 8 URLs 5.65 s wall vs
+> 1.46 s on real Chrome with `concurrency: 4`). A webrain build since 2026-11-06
+> still *completes* such a batch — it attaches the page the browser already has
+> and runs it serially — so "it works" there is not a reason to use it.
+>
 > **Batch parallelism is per CONNECTION, not per process — this is the rule.**
 > Real Chrome and obscura open N parallel tabs on one connection, so
 > `concurrency` is the lever there. **lightpanda is single-target per CDP
