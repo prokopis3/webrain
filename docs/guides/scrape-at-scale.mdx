@@ -61,6 +61,31 @@ Every reply carries `stats`, and the numbers there are **measured**:
 - A batch that dies as a whole answers **once per URL**, with the same error in
   each row — `total` always equals the number of URLs you sent.
 
+### Wait on the list, not on the first card
+
+`wait_selector_state` is satisfied by **any** match. Before the fix only the
+first DOM match counted, and an SPA list page renders the same cards twice —
+a hidden mobile container first, the visible desktop copy second — so `visible`
+never arrived and each page burned the whole `wait_timeout_secs`. Measured on
+`masoutis.gr` (27 search URLs, `wait_selector: "div.product"`, `concurrency: 6`,
+2026-11-06):
+
+| setting | wall | rows |
+|---|---|---|
+| `visible`, 30 s timeout (before the fix) | **159.4 s** | 27/27 ok |
+| `attached`, 30 s timeout | 33.6 s | 27/27, same `found` |
+| `attached`, **6 s** timeout | **10.1 s** | 27/27, identical data |
+
+`ms_total` was 858 s, of which 27 × 30 s = **810 s (94 %)** was pure wait; real
+page work was ~1.8 s/URL. So before blaming `concurrency` or the site, compare
+`ms_total` with the page times.
+
+- `wait_selector_state: "attached"` + `wait_timeout_secs: 6` on a list.
+- Anchor on the **repeated card**. A shell element that exists before the cards
+  (`#ProductsClass`) returns in 0.2-2.4 s with `found: 0` on every page.
+- A "no results" search never matches the card selector, so that row pays the
+  full timeout either way.
+
 <Warning>
   **Guest Chrome is a purpose tool, not a batch engine.** It exists for
   `webrain_serp` (`engine=google|brave`) and for solving an interactive

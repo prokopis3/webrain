@@ -157,6 +157,24 @@ consent pages as target content · write sequential loops when `webrain_batch` e
 - Everything is slow → `webrain_stats` before blaming the site: it reports load,
   memory and the live browser-process count, which separates "this page is heavy"
   from "the machine is out of memory".
+- A batch is slow per URL → check `ms_total` against the real page work before
+  touching `concurrency`: 27 URLs took **159 s** because 27 × 30 s of
+  `wait_selector` timeout was 94 % of the run. `attached` + `wait_timeout_secs: 6`
+  on the same URLs: **10 s**, identical rows.
+
+### Wait on the list, not on the first card
+
+`wait_selector_state: "visible"` is satisfied by **any** match (before the fix
+only the first DOM match counted), and an SPA list page renders the cards
+twice — hidden mobile container first, visible desktop copy second — so `visible`
+never arrived and the poll burned the whole timeout.
+
+- Prefer `wait_selector_state: "attached"` with `wait_timeout_secs: 6`.
+- Anchor on the **repeated card** (`div.product`), never on a shell element that
+exists before the cards: `#ProductsClass` answered in 0.2-2.4 s with `found: 0`
+on every page.
+- A "no results" page never matches the card selector, so that row pays the full
+timeout either way — keep it short.
 
 ### Rendered but never interactive (hydration check — do this first)
 

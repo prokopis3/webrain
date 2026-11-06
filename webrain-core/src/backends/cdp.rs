@@ -28,6 +28,29 @@ fn one_tab_only(msg: &str) -> bool {
     msg.contains("TargetAlreadyLoaded") || msg.contains("Failed to open a new tab")
 }
 
+/// State of a `wait_selector`: `detached` | `visible` | `hidden`.
+///
+/// **Any** match decides, not the first one: an SPA commonly renders a hidden
+/// copy of the list (mobile) before the visible one, and `querySelector` returns
+/// the hidden copy — so `visible` never arrived and the poll burned the whole
+/// `wait_timeout_secs` on a page that was ready in under a second (measured on
+/// masoutis.gr: 31.2 s per URL, 159 s for 27 URLs, both trimmed to ~1/30th).
+/// `getClientRects()` is the right box test: it is non-empty for `position:fixed`
+/// (where `offsetParent` is null) and empty for `display:none`.
+fn wait_state_js(sel: &str) -> String {
+    format!(
+        r#"(function() {{
+            const all = document.querySelectorAll({sel:?});
+            if (!all.length) return 'detached';
+            for (const el of all) {{
+                if (el.getClientRects().length > 0) return 'visible';
+            }}
+            return 'hidden';
+        }})()"#,
+        sel = sel
+    )
+}
+
 /// Anti-bot JS injected before page scripts run (Page.addScriptToEvaluateOnNewDocument).
 /// Self-destructing by design: everything lives inside the IIFE, so no `window.setXxx`
 /// helper survives for page scripts to detect (camoufox addInitScript pattern).
@@ -1503,15 +1526,11 @@ impl CdpBackend {
             } else {
                 &opts.wait_selector_state
             };
-            let js = format!(
-                r#"(function() {{
-                    const el = document.querySelector({sel:?});
-                    if (!el) return 'detached';
-                    if (el.offsetParent !== null) return 'visible';
-                    return 'hidden';
-                }})()"#,
-                sel = sel
-            );
+            // ANY match, not the first: an SPA often renders a hidden copy
+            // (mobile) before the visible one, and `querySelector` returns the
+            // hidden one — which stalled the whole `wait_timeout_secs` on pages
+            // that were ready in under a second (measured: 159 s → 10 s).
+            let js = wait_state_js(sel);
             let start = std::time::Instant::now();
             loop {
                 let got: String = self
@@ -3492,6 +3511,7 @@ fn css_escape(id: &str) -> String {
 mod tests {
     use super::human_path;
     use super::one_tab_only;
+    use super::wait_state_js;
     use super::{build_dom_paths, collect_shadow_root_ids};
     use serde_json::json;
 
@@ -3507,6 +3527,17 @@ mod tests {
         // A transient transport error is neither: it must surface as an error
         // instead of being cached as "multi-target".
         assert!(!one_tab_only("Websocket closed unexpectedly"));
+    }
+
+    /// The wait must consider every match: a hidden mobile copy of the list is
+    /// usually first in the DOM, and `querySelector` alone stalled 30 s per page.
+    #[test]
+    fn the_wait_looks_at_every_match_not_only_the_first() {
+        let js = wait_state_js("div.product");
+        assert!(js.contains("querySelectorAll"), "{js}");
+        assert!(js.contains("getClientRects"), "{js}");
+        assert!(!js.contains("offsetParent"), "{js}");
+        assert!(js.contains("\"div.product\""), "selector is quoted: {js}");
     }
 
     /// A closed shadow root is reachable only through the pierced tree, and the

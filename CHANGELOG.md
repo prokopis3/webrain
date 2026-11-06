@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **core (batch)**: `wait_selector_state: "visible"` is now satisfied by **any**
+  match instead of only the first one in DOM order. An SPA list page usually
+  renders the same cards twice — a hidden mobile container first, the visible
+  desktop copy second — so the poll locked onto the hidden copy and `visible`
+  never arrived, burning the whole `wait_timeout_secs` on a page that was ready
+  in under a second. Measured on masoutis.gr, 27 search URLs, `concurrency: 6`:
+  `visible` + 30 s = **159.4 s** (`ms_total` 858 s, of which 27 × 30 s = **810 s,
+  94 %,** was pure wait); `attached` + 6 s = **10.1 s** with identical rows. The
+  box test is `getClientRects()`, so `position: fixed` counts as visible and
+  `display: none` does not. Regression test:
+  `the_wait_looks_at_every_match_not_only_the_first`. Docs, the shipped skill and
+  `webrain_guide` now carry the rule (`attached` + 6 s on the repeated card, never
+  on a shell element that exists before the cards).
+
 ## [0.17.1] - 2026-11-06
 
 ### Fixed
