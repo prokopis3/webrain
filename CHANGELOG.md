@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **docs**: guest-mode Chrome is documented for what it is — a **purpose tool**, not
+  a scraping engine. It exists for the JS-gated SERP engines (`webrain_serp`
+  google/brave) and for solving an interactive CAPTCHA/Turnstile, and its profile
+  (`serp/<profile>`, persisted unless `--fresh`) is what carries the clearance to the
+  next call. It refuses new targets (`PUT /json/new` → 500 vs 200 on a normal Chrome;
+  `Target.createTarget` → `-32000 "Failed to open a new tab"`), so a batch there runs
+  one serial tab: measured 8 URLs in 5.65 s on guest Chrome vs 1.46 s on 9222 with
+  `concurrency: 4`. Corrected in `AGENTS.md`, `docs/AGENT_DECISION_GUIDE.md`,
+  `skills/webrain/SKILL.md`, `skills/webrain/references/browser-selection.md` and the
+  `webrain_guide` text shipped in the binary.
 - **chat (ui)**: a tool card's two halves are labelled `input` and `output` (was
   `result`) and are told apart by colour as well as by label — the request's
   label and left edge in the tertiary hue, the return's in the primary one, rose

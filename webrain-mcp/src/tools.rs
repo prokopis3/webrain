@@ -145,6 +145,16 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
   the binary directly from WEBRAIN_BROWSERS_DIR for those. obscura refuses a
   0.0.0.0 bind without OBSCURA_CDP_TOKEN (>=32 bytes). Its /json/version keeps
   advertising the built-in UA — check navigator.userAgent after navigate instead.
+- GUEST CHROME (`--guest`) IS A PURPOSE TOOL, NOT A SCRAPING ENGINE. It exists for
+  `webrain_serp`'s JS-gated engines (google, brave) and for solving an interactive
+  CAPTCHA/Turnstile; its profile (`serp/<profile>`, persisted unless `--fresh`) is
+  what makes the clearance stick for the NEXT call. It refuses new targets —
+  VERIFIED 2026-11-06 on Chrome 156: `PUT /json/new` -> 500 (200 on a normal
+  Chrome), `Target.createTarget` -> `-32000 "Failed to open a new tab"` — so a
+  batch there runs ONE serial tab: `single_target: true, effective_concurrency: 1`
+  (8 URLs in 5.65 s, vs 1.46 s on 9222 with 4 tabs). Bulk `webrain_batch` /
+  `webrain_crawl` / general navigation belong on real Chrome, obscura or
+  lightpanda. Do not "fix" a slow batch by pointing it at guest Chrome.
 - obscura will NEVER pass a Turnstile/Cloudflare challenge — upstream lists
   "Cloudflare interactive challenges" under "what stealth does not handle". Its
   stealth TLS is a fixed wreq Profile::Chrome145 while navigator reports Chrome/143,
