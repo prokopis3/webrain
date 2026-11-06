@@ -51,6 +51,8 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **Linux**: system libraries for Chrome — see [installation](docs/installation.mdx#linux-dependencies).
 - **Docker** — only to run the obscura / lightpanda engines in containers.
 - **An MCP-capable client** (VS Code + Copilot, Claude, Codex, Cursor, …) — optional; the CLI works standalone.
+- **For `webrain chat`** — the Copilot runtime first (`webrain install copilot`), then a
+  model key. See [Chat](#chat).
 
 ## Installation
 
@@ -193,11 +195,41 @@ webrain chat "<prompt>" [--provider P] [--search] # one agent turn on your own m
 The 18-tool MCP surface is discovered dynamically — `webrain_guide` lists
 it for the LLM (see [MCP Tools](#mcp-tools)).
 
-`webrain chat` needs a build made with `--features chat`: it runs one Copilot agent turn on
-your own model key, with this binary's MCP tools attached, and `--search` grounds the turn on
-live web results first (the vendor's own search where it sells one — OpenRouter `:online`,
-DeepSeek, OpenAI, Anthropic, Gemini — and webrain's engines everywhere else). Provider table,
-flags and the cost line: [chat guide](docs/guides/chat.mdx).
+## Chat
+
+`webrain chat` is the built-in agent: one Copilot turn on **your own model key**, with
+this binary's own MCP tools attached, so the turn can actually navigate, extract and
+screenshot. `chat --serve` puts the same turn in a browser page — threads, a turn
+ledger, dictation and image attachments.
+
+Install it in three steps. The Copilot runtime is **not** embedded in the release
+binary, so chat does not start without the first:
+
+```bash
+webrain install copilot   # 1. the Copilot runtime chat drives (~135 MB, SHA-256 verified)
+webrain install chat-ui   # 2. the page `chat --serve` serves (digest-verified)
+webrain install           # 3. a browser engine, so the tools can drive a real page
+
+export OPENROUTER_API_KEY=…   # or any of the 16 provider rows
+webrain chat "what does news.ycombinator.com say today?"
+webrain chat --serve          # browser UI on http://127.0.0.1:8787/
+```
+
+- **Keys**: 16 BYOK providers, one key is enough — `--provider` / `--model` pick the
+  row, `--key-from VAR` and `--base-url` cover anything else, and
+  `WEBRAIN_CHAT_API_KEY` works for any row. `webrain help env` lists the ambient names.
+- **Tools need approval**: reads and navigation run; writes and clicks need `--yes`
+  (the `--serve` page asks instead).
+- `COPILOT_CLI_PATH` points chat at a Copilot CLI you already have. Chat keeps its own
+  `COPILOT_HOME` and never reads `~/.copilot`.
+- `webrain install chat-ui` from a *different* version is refused, not served — upgrade
+  the binary and the page together.
+- From source it is opt-in: `cargo build --release --features chat` (Rust 1.94+; Linux
+  needs OpenSSL 3, a musl target vendors it; `chat-bundled` embeds the runtime). The
+  release binaries ship it on every target.
+
+Provider table, `--search` behaviour (the vendor's own search where it exists, webrain's
+engines otherwise) and the closing cost line: [chat guide](docs/guides/chat.mdx).
 
 ## Browser Engines
 
