@@ -39,12 +39,22 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// CRLF → LF. The digest and the served bytes are taken over the normalized text,
+/// because the same blob reaches disk with different line endings: git converts
+/// on a Windows checkout (so a Windows build hashed CRLF) while the release
+/// archive is packed on Linux from an LF checkout — and every Windows reader then
+/// rejected the archive shipped beside its own binary.
+fn lf(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().copied().filter(|b| *b != b'\r').collect()
+}
+
 /// The four files of `dir`, or the reason they are not this build's.
 fn read_verified(dir: &Path) -> Result<[String; 4], String> {
     let mut files: [String; 4] = Default::default();
     for (i, (name, sha, len)) in MANIFEST.iter().enumerate() {
         let path = dir.join(name);
-        let bytes = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
+        let raw = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
+        let bytes = lf(&raw);
         if bytes.len() as u64 != *len {
             return Err(format!("{name}: {} bytes, expected {len}", bytes.len()));
         }
@@ -172,6 +182,33 @@ mod tests {
         let files = read_verified(&assets()).expect("the committed assets match the manifest");
         assert!(files[2].contains("<"), "chat.js came back as text");
         assert!(files[0].contains("</html>"), "chat.html came back as text");
+    }
+
+    /// The shipped archive is packed on Linux (LF) and unpacked on Windows, where
+    /// git converts line endings. Both must verify, or the release pairs a binary
+    /// with an archive it always refuses.
+    #[test]
+    fn a_crlf_copy_of_the_archive_still_verifies() {
+        let dir = std::env::temp_dir().join(format!("webrain-chat-ui-crlf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, _, _) in MANIFEST.iter() {
+            let lf_bytes = std::fs::read(assets().join(name)).unwrap();
+            let mut crlf = Vec::with_capacity(lf_bytes.len() * 2);
+            for b in &lf_bytes {
+                if *b == b'\n' {
+                    crlf.push(b'\r');
+                }
+                crlf.push(*b);
+            }
+            std::fs::write(dir.join(name), &crlf).unwrap();
+        }
+        let files = read_verified(&dir).expect("a CRLF checkout of the same text verifies");
+        assert!(
+            !files[0].contains('\r'),
+            "the served text is normalized to LF"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

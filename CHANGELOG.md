@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-06
+
+### Fixed
+
+- **cli**: `chat --serve` refused the UI that shipped beside it on Windows. The
+  digest is computed from `webrain-cli/assets/*` at build time, and the same blob
+  reaches disk with different line endings — git converts on a Windows checkout,
+  while `webrain-chat-ui.tar.gz` is packed by the Linux job from an LF checkout.
+  So the Windows binary hashed CRLF (`chat.html` 408 bytes) and every install
+  failed with `chat.html: 394 bytes, expected 408 … nothing was installed`, on the
+  very version that was supposed to match. The digest and the served text are now
+  taken over CRLF→LF-normalized bytes, in both `build.rs` and `chat_ui.rs`, so an
+  LF archive, a CRLF checkout and a `WEBRAIN_CHAT_UI` directory all verify; a
+  tampered file is still refused. Regression test:
+  `a_crlf_copy_of_the_archive_still_verifies` (and `one_changed_byte_is_refused`
+  still passes).
+
 ## [0.17.0] - 2026-11-06
 
 ### Added

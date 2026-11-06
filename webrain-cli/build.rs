@@ -12,6 +12,14 @@ use std::path::Path;
 /// Every file the server answers with, in the order `chat_ui::Ui` holds them.
 const FILES: [&str; 4] = ["chat.html", "chat.css", "chat.js", "chunk-markdown.js"];
 
+/// CRLF → LF, the same normalization `src/chat_ui.rs` applies when it verifies and
+/// serves these files. Without it the digest is a Windows-vs-Linux fact: a
+/// Windows checkout converts line endings, so its binary hashed CRLF and refused
+/// the archive that the Linux job packed from LF.
+fn lf(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().copied().filter(|b| *b != b'\r').collect()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=assets");
     let mut out = String::from("pub const MANIFEST: [(&str, &str, u64); 4] = [\n");
@@ -20,13 +28,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         // A missing asset is a build error, not a warning: a binary that cannot
         // serve a page should fail here rather than at the first `--serve`.
-        let bytes = match std::fs::read(&path) {
+        let raw = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => panic!(
                 "{}: {e} — run `cd ui && bun run build` to write the chat UI assets",
                 path.display()
             ),
         };
+        let bytes = lf(&raw);
         let sha = Sha256::digest(&bytes);
         let hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
         out.push_str(&format!("    (\"{name}\", \"{hex}\", {}),\n", bytes.len()));
