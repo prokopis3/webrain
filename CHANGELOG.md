@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **crawl (tools)**: `dedupe_pages` on `webrain_crawl mode=spider` keeps the
+  first page per visible-text hash and reports `duplicates`. A paginated or
+  faceted listing renders one template forty times, and the caller paid a token
+  for every copy. **Off by default** — it removes rows, so a caller that wants
+  every facet row must leave it off. An error page is never dropped.
+
+### Changed
+
+- **crawl (engines)**: the spider dedupes its frontier on path + sorted query
+  params and ignores the anchor fragment, so `?b=2&a=1#top` and `?a=1&b=2` are
+  fetched once instead of twice (a `#/` hash route is kept — it is a real page,
+  not an anchor). On a faceted site (`?color=…&page=…`) that removes most of the
+  duplicate page loads without changing a single row of output — the visited set
+  was exact-string, so each facet permutation counted as a new page.
+- **crawl (engines)**: the politeness gate is keyed per host instead of one
+  global slot. `delay_ms` is the minimum gap between request **starts**, so
+  `500` means 2 req/s — one global slot made two domains split those 2 between
+  them, and now each domain gets its own 2. Matches how `autothrottle` already
+  learns its delay per domain.
+
 ### Fixed
 
 - **core (batch)**: `wait_selector_state: "visible"` is now satisfied by **any**

@@ -107,6 +107,14 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 - paginated 1..N / many URLs → `webrain_batch(op=extract, urls, base_selector, fields, concurrency=8)`
 - URLs unknown → `eval`: pagination hrefs (current-path + `/<N>` + next/prev) → range → batch
 - whole site → `crawl(mode=spider)`; patterns (emails/prices) → `extract(mode=regex)`
+  - the frontier dedupes on path + sorted query and ignores the anchor, so
+    `?a=1&b=2` and `?b=2&a=1` are crawled once — a facet permutation is not a
+    new page (`#/…` hash routes ARE kept)
+  - `dedupe_pages: true` also drops pages whose visible text repeats and reports
+    `duplicates`. Off by default: it removes rows, so leave it off when every
+    facet or pagination row must come back
+  - `delay_ms` is per host and is the gap between request starts (`500` = 2 req/s
+    for each domain, not 2 shared between them)
 - JSON-LD → `extract(mode=jsonld)`; tables → `extract(mode=table)`
 - a PDF (one, or many, by URL or local path) → `webrain_pdf op=extract`
   (`path` / `paths[]`) or `webrain_batch(op=pdf, urls)` — text + tables, no

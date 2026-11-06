@@ -12,6 +12,7 @@ regex → raw HTML (LAST resort — never for page text).
 | paginated 1..N / many URLs | `webrain_batch(op=extract, urls, base_selector, fields, concurrency=8)` |
 | URLs unknown (discover) | `eval` → pagination hrefs (same-prefix numeric + next/prev, NO hardcoded classes) → range → batch |
 | whole site | `webrain_crawl(mode=spider)` |
+| whole site, one template repeated over N pages | `webrain_crawl(mode=spider, dedupe_pages=true)` → one page per template; `duplicates` counts the rest. Off by default — it REMOVES rows |
 | emails / phones / prices / patterns | `webrain_extract(mode=regex)` |
 | JSON-LD / microdata | `webrain_extract(mode=jsonld)` |
 | tables | `webrain_extract(mode=table)` |

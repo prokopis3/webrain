@@ -78,7 +78,14 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_batch      same op across many URLs in parallel tabs (op: fetch|markdown|
                      extract|interact|eval|assets|screenshot|pdf) + cdp_urls
                      per-proxy fan-out
-  webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
+  webrain_crawl      site traversal (mode: spider|sitemap|scan|validate).
+                     spider: the frontier dedupes on path + sorted query (anchor
+                     ignored, `#/` route kept) so facet permutations are ONE
+                     page; `delay_ms` is per HOST and is a gap between starts
+                     (500 = 2 req/s each); `dedupe_pages` is OFF by default —
+                     set true to collapse pages with identical visible text and
+                     read `duplicates`, but leave it false when every facet or
+                     pagination row must come back.
   webrain_search     web search (duckduckgo|google|bing|brave)
   webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
                      engine; duckduckgo|bing|auto are pure HTTP (no browser),
@@ -212,6 +219,8 @@ EXTRACTION MATRIX
                                       + next/prev labels (NO hardcoded classes), derive
                                       range, then webrain_batch
 - whole site                       -> crawl(mode=spider, seed_url)
+- whole site, one template repeated -> crawl(mode=spider, dedupe_pages=true)
+                                      → one page per template + `duplicates`
 - emails/phones/prices/patterns    -> extract(mode=regex)
 - JSON-LD / microdata              -> extract(mode=jsonld)
 - tables                           -> extract(mode=table)
@@ -905,7 +914,7 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_crawl",
-            "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]).",
+            "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]). Spider dedupes the frontier on path + sorted query (anchor fragments ignored, `#/` hash routes kept), so `?a=1&b=2` and `?b=2&a=1` are crawled once.",
             "inputSchema": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": ["spider","sitemap","scan","validate"]},
                 "proxy": {"type": "string", "description": "sitemap/validate ONLY (they are pure HTTP): proxy URL for the fetch. Omit to use the WEBRAIN_PROXIES rotation pool. spider/scan drive a browser, so their exit is set at launch or by the session context instead."},
@@ -927,6 +936,7 @@ pub fn list_tools() -> Vec<Value> {
                 "autothrottle_max_ms": {"type": "integer", "default": 30000},
                 "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir. Persists {queue, seen, results} atomically; a resume (same crawldir) returns prior + new results and never re-fetches. max_pages counts the whole crawldir — raise it on resume to fetch more"},
                 "checkpoint_every": {"type": "integer", "default": 10},
+                "dedupe_pages": {"type": "boolean", "default": false, "description": "spider: drop pages whose visible text repeats an earlier page and report `duplicates`. Off by default — it removes rows, so a caller wanting every facet/pagination row must leave it false"},
                 "concurrency": {"type": "integer", "default": 4, "description": "spider: concurrent page fetches across tabs (real Chrome/obscura multi-target); single-target/lightpanda auto-serializes"},
                 "disable_resources": {"type": "boolean", "default": false, "description": "spider: block fonts/images/media on every page fetch"},
                 "block_trackers": {"type": "boolean", "default": false, "description": "spider: also block the 3500-domain tracker list"},
@@ -2188,7 +2198,30 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .with_concurrency(concurrency)
                 .with_nav_opts(nav_opts(args));
             let t0 = std::time::Instant::now();
-            let results = spider.crawl(backend, seed).await;
+            let mut results = spider.crawl(backend, seed).await;
+            // Opt-in: a paginated or faceted site returns the same template page N
+            // times and the caller pays a token for every copy. Keep the first page
+            // per visible-text hash. An error page is never dropped — its text is
+            // empty, so they would all collide.
+            let mut duplicates = 0usize;
+            if args
+                .get("dedupe_pages")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let mut seen = std::collections::HashSet::new();
+                let before = results.len();
+                results.retain(|r| {
+                    let text = r.page.content.as_deref().unwrap_or("");
+                    if r.page.error.is_some() || text.trim().is_empty() {
+                        return true;
+                    }
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&text, &mut h);
+                    seen.insert(std::hash::Hasher::finish(&h))
+                });
+                duplicates = before - results.len();
+            }
             // ponytail: spider stats — consistent with the batch stats block; the
             // LLM sees elapsed + ok/err at a glance for a long crawl.
             let total_ms = t0.elapsed().as_millis() as u64;
@@ -2197,6 +2230,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let page_ms: u64 = results.iter().map(|r| r.page.duration_ms).sum();
             json!({
                 "status": "ok", "pages": results.len(), "results": results,
+                "duplicates": duplicates,
                 "stats": {"elapsed_ms": total_ms, "pages_ok": ok, "pages_err": errs, "page_ms_total": page_ms}
             })
         }

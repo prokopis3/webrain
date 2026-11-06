@@ -594,6 +594,28 @@ struct SpiderShared {
     deadline: Option<std::time::Instant>,
 }
 
+/// Dedupe key for the crawl frontier: drop the fragment and sort the query
+/// params, so `?b=2&a=1#top` and `?a=1&b=2` are the same page. Nothing else is
+/// rewritten — lowercasing a path or trimming a trailing slash can change what
+/// the server returns, and a wrong page costs more than a duplicate.
+fn canonical_url(url: &str) -> String {
+    let head = match url.split_once('#') {
+        // A hash route (`#/page/2`, `#!/x`) is a real page in an SPA; an anchor
+        // (`#section`) is not. Dropping the former would lose whole routes.
+        Some((_, f)) if f.starts_with('/') || f.starts_with('!') => return url.to_string(),
+        Some((h, _)) => h,
+        None => url,
+    };
+    match head.split_once('?') {
+        None => head.to_string(),
+        Some((path, q)) => {
+            let mut params: Vec<&str> = q.split('&').filter(|s| !s.is_empty()).collect();
+            params.sort_unstable();
+            format!("{path}?{}", params.join("&"))
+        }
+    }
+}
+
 impl SpiderEngine {
     pub fn new(max_depth: usize, max_pages: usize) -> Self {
         Self {
@@ -962,8 +984,9 @@ impl SpiderEngine {
         // kept checkpoint must never re-seed — the old `queue.is_empty()` guard
         // re-crawled the whole site after a drained-but-kept checkpoint.
         if visited.is_empty() && queue.is_empty() {
-            queue.push_back((seed_url.to_string(), 0));
-            visited.insert(seed_url.to_string());
+            let seed = canonical_url(seed_url);
+            visited.insert(seed.clone());
+            queue.push_back((seed, 0));
         }
         let mut since_checkpoint = 0usize;
 
@@ -1100,13 +1123,14 @@ impl SpiderEngine {
 
             if depth < self.max_depth {
                 for link in &links {
-                    if !visited.contains(link)
-                        && self.domain_ok(link, &seed_host)
-                        && self.url_ok(link)
-                        && robots_ok(link)
+                    let link = canonical_url(link);
+                    if !visited.contains(&link)
+                        && self.domain_ok(&link, &seed_host)
+                        && self.url_ok(&link)
+                        && robots_ok(&link)
                     {
                         visited.insert(link.clone());
-                        self.push_link(&mut queue, link.clone(), depth + 1);
+                        self.push_link(&mut queue, link, depth + 1);
                     }
                 }
             }
@@ -1229,8 +1253,9 @@ impl SpiderEngine {
             results = r;
         }
         if visited.is_empty() && queue.is_empty() {
-            queue.push_back((seed_url.to_string(), 0));
-            visited.insert(seed_url.to_string());
+            let seed = canonical_url(seed_url);
+            visited.insert(seed.clone());
+            queue.push_back((seed, 0));
         }
         // Combined budget across resumes: prior results count toward max_pages.
         let next_checkpoint = results.len() + self.checkpoint_every;
@@ -1250,7 +1275,11 @@ impl SpiderEngine {
         }));
         // Per-domain learned delay (autothrottle) + polite start-spacing gate.
         let throttle = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<String, u64>::new()));
-        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
+        // Keyed by host. `delay` is the gap between request STARTS — 500 ms is
+        // 2 req/s — so one global slot made two hosts split those 2 between
+        // them; keyed, each host gets its own 2.
+        let gate: std::sync::Arc<tokio::sync::Mutex<HashMap<String, tokio::time::Instant>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let engine = std::sync::Arc::new(self.clone());
         let workers = self.concurrency.max(1);
@@ -1440,7 +1469,7 @@ impl SpiderEngine {
         browser: CdpBackend,
         shared: std::sync::Arc<tokio::sync::Mutex<SpiderShared>>,
         throttle: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
-        gate: std::sync::Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+        gate: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
     ) {
         // Own tab (multi-target parallel path); closed when this worker exits.
         let (sid, tab_id) = match browser.open_tab("about:blank").await {
@@ -1500,8 +1529,8 @@ impl SpiderEngine {
                 let wake = {
                     let mut g = gate.lock().await;
                     let now = tokio::time::Instant::now();
-                    let w = g.map_or(now, |prev| if prev > now { prev } else { now });
-                    *g = Some(w + std::time::Duration::from_millis(delay));
+                    let w = g.get(&domain).map_or(now, |prev| (*prev).max(now));
+                    g.insert(domain.clone(), w + std::time::Duration::from_millis(delay));
                     w
                 };
                 tokio::time::sleep_until(wake).await;
@@ -1531,6 +1560,7 @@ impl SpiderEngine {
                 if depth < engine.max_depth {
                     // Consume `links`: the result above already owns its copy.
                     for link in links {
+                        let link = canonical_url(&link);
                         if !sh.visited.contains(&link)
                             && engine.domain_ok(&link, &sh.seed_host)
                             && engine.url_ok(&link)
@@ -1606,6 +1636,35 @@ impl SpiderEngine {
 
 #[cfg(test)]
 mod spider_checkpoint_tests {
+    // ponytail: the frontier key only has to collapse what the server treats as
+    // the same page; over-normalizing would silently drop real pages.
+    #[test]
+    fn canonical_url_collapses_fragment_and_param_order() {
+        assert_eq!(
+            super::canonical_url("https://a.test/p?b=2&a=1#top"),
+            "https://a.test/p?a=1&b=2"
+        );
+        assert_eq!(super::canonical_url("https://a.test/p"), "https://a.test/p");
+        assert_ne!(
+            super::canonical_url("https://a.test/p?a=1"),
+            super::canonical_url("https://a.test/p?a=2")
+        );
+        // A trailing slash is a different request; leave it alone.
+        assert_ne!(
+            super::canonical_url("https://a.test/p"),
+            super::canonical_url("https://a.test/p/")
+        );
+        // A hash route is a page; an anchor is not.
+        assert_eq!(
+            super::canonical_url("https://a.test/app#/page/2"),
+            "https://a.test/app#/page/2"
+        );
+        assert_eq!(
+            super::canonical_url("https://a.test/p#section"),
+            "https://a.test/p"
+        );
+    }
+
     // ponytail: one check that checkpoint save/load round-trips queue + seen +
     // results (crash-resume is the whole point of crawldir — a resume must get
     // the already-fetched pages back and never re-fetch them).

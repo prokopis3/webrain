@@ -394,7 +394,7 @@ A browser that refuses new targets is **not** an error: `webrain_batch` attaches
 </Accordion>
 
 <Accordion title="webrain_spider">
-Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume (persists `{queue, seen, results}` atomically; resume returns prior + new, never re-fetches; `max_pages` counts the whole crawldir), `concurrency` (parallel tabs on Chrome/obscura, default 4), `crawl_timeout_secs`.
+Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume (persists `{queue, seen, results}` atomically; resume returns prior + new, never re-fetches; `max_pages` counts the whole crawldir), `concurrency` (parallel tabs on Chrome/obscura, default 4), `crawl_timeout_secs`. The frontier dedupes on path + sorted query params with the anchor fragment ignored, so `?b=2&a=1#top` and `?a=1&b=2` are crawled once; a `#/` hash route is kept (it is a real page) and output URLs keep their original form. `dedupe_pages` (off by default) keeps the first page per visible-text hash and reports `duplicates` — it removes rows, so leave it off when every facet row matters. The politeness gate is per host, so two domains each get their own `delay_ms`.
 </Accordion>
 
 <Accordion title="webrain_sitemap">

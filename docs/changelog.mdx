@@ -12,6 +12,23 @@ All notable changes, in reverse chronological order. The full version lives in
 
 <p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
 
+### Added
+
+- **crawl**: `dedupe_pages` on `webrain_crawl mode=spider` keeps the first page
+  per visible-text hash and reports `duplicates` — a forty-page listing costs one
+  row instead of forty. Off by default, because it removes rows; error pages are
+  never dropped.
+
+### Changed
+
+- **crawl (engines)**: the spider dedupes its frontier on path + sorted query
+  params, ignoring the anchor fragment, so `?b=2&a=1#top` and `?a=1&b=2` are one
+  page. The visited set was exact-string before, so every facet permutation was a
+  separate fetch. A `#/` hash route is kept — it is a real page, not an anchor.
+- **crawl (engines)**: the politeness gate is keyed per host. `delay_ms` is the
+  gap between request starts (`500` = 2 req/s), so two domains used to split
+  those 2 and now each gets its own 2.
+
 ### Fixed
 
 - **core (batch)**: `wait_selector_state: "visible"` is satisfied by **any**
