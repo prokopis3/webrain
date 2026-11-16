@@ -4,8 +4,8 @@
 // ponytail: single connection, one page, synchronous CDP command/response per call.
 
 use crate::browser::{
-    BrowserBackend, ELEMENTS_JS, InteractiveElement, LINKS_JS, PageState, detect_antibot,
-    detect_chrome_error, detect_crippled,
+    BrowserBackend, CONSOLE_CAPTOR_JS, ELEMENTS_JS, InteractiveElement, LINKS_JS, PageState,
+    detect_antibot, detect_chrome_error, detect_crippled,
 };
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -1185,6 +1185,17 @@ impl CdpBackend {
                 json!({"source": stealth_js()}),
             )
             .await?;
+            // Console capture must exist before the page's own scripts run, or the
+            // load-time errors `webrain_console` is asked about are already gone.
+            // Inside this branch, not outside: the serp-google flow turns stealth
+            // off precisely so no injected JS runs in a human's Chrome.
+            let _ = self
+                .send_cmd_with(
+                    Some(&sid),
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({"source": CONSOLE_CAPTOR_JS}),
+                )
+                .await;
         }
         // User init scripts (agent-browser --init-script borrow): replay on every
         // newly attached tab so they survive per-tab session creation. Best-effort

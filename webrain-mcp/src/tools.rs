@@ -3303,20 +3303,15 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_console" => {
-            // ponytail: lazy listener injection; captures uncaught errors + rejections.
-            let js = r#"
-            (() => {
-                if (!window.__wr_logs) {
-                    window.__wr_logs = [];
-                    window.addEventListener('error', e => { window.__wr_logs.push({type: 'error', text: (e.message || '').slice(0, 300)}); }, true);
-                    window.addEventListener('unhandledrejection', e => { window.__wr_logs.push({type: 'rejection', text: String(e.reason || '').slice(0, 300)}); });
-                }
-                const out = window.__wr_logs;
-                window.__wr_logs = [];
-                return JSON.stringify(out);
-            })()
-            "#;
-            match backend.evaluate(js).await {
+            // The captor is normally already installed at document start (see
+            // CONSOLE_CAPTOR_JS); re-sending it covers a tab attached after load
+            // and engines without addScriptToEvaluateOnNewDocument. `splice(0)`
+            // empties the SAME array the captor pushes into.
+            let js = format!(
+                "{};\nJSON.stringify((window.__wr_logs || []).splice(0))",
+                webrain_core::browser::CONSOLE_CAPTOR_JS
+            );
+            match backend.evaluate(&js).await {
                 Ok(v) => {
                     let arr = parse_json_str(&v);
                     json!({"status": "ok", "count": arr_len(&arr), "logs": arr})

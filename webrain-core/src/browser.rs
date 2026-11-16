@@ -181,10 +181,56 @@ pub const ELEMENTS_JS: &str = r#"
                 tag: el.tagName.toLowerCase(),
                 text: (el.type === 'password' ? '' : (el.textContent || el.value || '')).trim().substring(0, 80),
                 selector: uniqSel(el),
-                visible: el.offsetParent !== null
+                // getClientRects, not offsetParent: offsetParent is null for
+                // position:fixed (a real visible button) and for every element on
+                // an engine with compatibility geometry (Moli's default
+                // LayoutPolicy::Mock), which flagged healthy pages as `crippled`.
+                visible: el.getClientRects().length > 0
             }));
         })()
         "#;
+
+/// Console/exception collector, installed at document start so the page's own
+/// load-time errors are still in the buffer when `webrain_console` asks for them.
+///
+/// The lazy alternative (inject the listener on the first `console` call) can
+/// never see an error thrown before that call, which is the whole case worth
+/// debugging: "the SPA never mounted". Installed in the page rather than read off
+/// `Runtime.consoleAPICalled` because `Runtime.enable` marks the debugger as
+/// attached — the loudest automation leak we avoid (see `attach_and_init`).
+/// Drains must `splice()` the SAME array; `__wr_logs` is read at push time so a
+/// replaced array would silently swallow every later entry.
+pub const CONSOLE_CAPTOR_JS: &str = r#"
+    (() => {
+        if (window.__wr_logs) return;
+        window.__wr_logs = [];
+        const fmt = (a) => {
+            try {
+                if (typeof a === 'string') return a;
+                if (a instanceof Error) return a.message;
+                return JSON.stringify(a);
+            } catch (e) { return String(a); }
+        };
+        // Shortcut: 200 entries per page, then silence — a page logging in a
+        // loop must not grow the buffer unbounded. Raise if truncated logs hurt.
+        const push = (type, args) => {
+            const buf = window.__wr_logs;
+            if (buf && buf.length < 200) {
+                buf.push({ type: type, text: Array.prototype.map.call(args, fmt).join(' ').slice(0, 300) });
+            }
+        };
+        // Covers console.error/warn only: page errors are the field agents act on,
+        // and patching every level buys noise, not signal.
+        try {
+            ['error', 'warn'].forEach((l) => {
+                const orig = console[l];
+                console[l] = function () { push(l, arguments); return orig.apply(this, arguments); };
+            });
+        } catch (e) { /* console frozen by the page: uncaught-error capture below still works */ }
+        window.addEventListener('error', (e) => push('error', [e.message || '']), true);
+        window.addEventListener('unhandledrejection', (e) => push('rejection', [e.reason || '']));
+    })()
+"#;
 
 /// JS that collects deduped same-origin links (capped) for the PageState `links`
 /// field. Scrapling LinkExtractor-level quality: canonicalize, filter non-http

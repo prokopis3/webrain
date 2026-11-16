@@ -67,7 +67,9 @@ pub fn twofa_js() -> &'static str {
   const u = location.href.toLowerCase();
   if (/challenge|two_factor|checkpoint|verify|onetap|login_required|otp|2fa/.test(u)) return true;
   const otp = document.querySelector('input[autocomplete="one-time-code"], input[name="code"], input[name="otp"], input[inputmode="numeric"][maxlength="6"]');
-  if (otp && otp.offsetParent !== null) return true;
+  // getClientRects, not offsetParent: null for position:fixed and for engines
+  // with compatibility geometry (Moli Mock), so a live OTP input read as hidden.
+  if (otp && otp.getClientRects().length > 0) return true;
   const t = (document.body ? document.body.innerText : '').toLowerCase();
   return /enter the code from your authenticator app|enter your verification code|approve this device|confirm it's you|check your phone|we've sent a code/.test(t);
 })()"#
