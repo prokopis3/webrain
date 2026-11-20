@@ -40,7 +40,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **Get past challenges** — every `webrain_navigate` reports a `challenge` field; protected sites clear with real Chrome + a persistent profile + native login. Native CAPTCHA/vision v2 (drag, `eval_in_frame`, vision ask) — no Python sidecar.
 - **See the page** — `webrain_observe` (state / a11y / semantic tree) plus vision tiles (screenshot → vector store) for tables and charts.
 - **Structured search** — `webrain_serp` returns typed JSON (`position`/`title`/`url`/`domain`/`snippet`), deduped and paginated, across provider tiers: free HTTP engines → Brave API key → browser render → serpapi.
-- **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus `webrain_scrape` for static pages over plain HTTP — 10–100× faster than a browser.
+- **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus `webrain_scrape` for static pages over plain HTTP with no browser process at all.
 
 ---
 
@@ -257,7 +257,7 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_observe` | Read the current page: `what` = state · a11y · semantic · html · images · console · flatten (Shadow DOM) · fit · clean · screenshot · pixel · page_info · annotate · media |
 | `webrain_interact` | Drive the page: `action` = click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script |
 | `webrain_extract` | Structured data: `mode` = schema (CSS) · regex · jsonld · table · autoschema · bm25 |
-| `webrain_scrape` | No-browser HTTP fetch of one URL (10–100× faster, static only) |
+| `webrain_scrape` | No-browser HTTP fetch of one URL (static only, no render) |
 | `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · markdown · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
 | `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
 | `webrain_search` | Web search (duckduckgo · google · bing · brave) |

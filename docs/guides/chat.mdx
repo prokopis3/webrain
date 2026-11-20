@@ -153,12 +153,13 @@ WEBRAIN_CHAT_BASE_URL=http://127.0.0.1:11434/v1 webrain chat "hello"
 | `--key-from VAR` | read the key from `VAR` instead of the row's own name |
 | `--base-url URL` | override the endpoint (also the keyless-local path) |
 | `--max-output-tokens N` | cap the reply (default **4096**, see below) |
+| `--max-prompt-tokens N` | override the context window looked up from the model's catalogue, for a model nobody publishes one for |
 | `--timeout SECS` | per-turn wall clock, default 300 |
 | `--search` | turn on the provider's own web search, where it has one (see below) |
 | `--yes` | approve **every** tool call |
 | `--serve [--port N]` | same session, in a browser: the binary serves its own page on `127.0.0.1:8787` (see [In a browser](#in-a-browser)) |
 | `--json` | emit `{provider, model, base_url, answer, tools, usage, exit_code}` on stdout |
-| `--no-stream` | print only the final answer instead of token deltas |
+| `--no-stream` / `--stream` | print only the final answer instead of token deltas, or turn streaming back on (it is the default under `--serve`) |
 | `--print-config` | resolve, print, exit — no key, no network, no runtime |
 
 ## What it cost
@@ -252,10 +253,15 @@ webrain chat --serve                 # http://127.0.0.1:8787/
 webrain chat --serve --port 9000     # anywhere else on loopback
 ```
 
-The same session, driven from a page instead of a pipe: transcript on the left, a
-tool card per `webrain_*` call, a token meter in the header, a session menu on
-the right and a modal for every permission request. There is no second process
-and no CDN — the page, its CSS and its two bundles are the only files it loads.
+The same session, driven from a page instead of a pipe: threads in the left rail,
+the transcript in the middle with a tool card per `webrain_*` call and the
+reasoning that chose it above it, a token and cost meter in the header with the
+per-turn ledger on the right. An approval is a **card in the transcript**, not a
+dialog over it — the arguments it is asking about belong beside the tool calls they
+follow, and a modal that steals the screen also hides what it is asking about. A
+reloaded page asks `GET /pending` and redraws whatever is still waiting, so a
+refresh cannot strand a turn. There is no second process and no CDN — the page, its
+CSS and its two bundles are the only files it loads.
 
 The four files are **not embedded in the binary**. They live in a directory the
 server reads at startup and hashes against digests compiled in by `build.rs`:
@@ -280,42 +286,90 @@ webrain install chat-ui --from ./webrain-chat-ui.tar.gz
 A checkout does not: `cargo build` hashed the assets it found, so
 `cargo run -- chat --serve` just works.
 
-The gear in the session rail opens settings, in five tabs:
+The gear in the session rail opens settings, in six tabs:
 
 | Tab | What it holds |
 |---|---|
 | Instructions | standing instructions and a reply language — sent as a `[instructions]` / `[language]` preamble before every message, the same honest lever as the effort hint. Kept in the browser; the server stores nothing. Capped at 8 KiB per turn. |
-| Chat | default agent mode, thinking effort, palette, and whether a turn ends with suggested next steps |
+| Chat | default agent mode, thinking effort, palette, whether a turn ends with suggested next steps, and **reply rendering** — `markdown` (what most models write) or `html` (for a model that answers in HTML, which a parser mangles). Both paths run through the same sanitiser, so the switch changes how a reply is drawn and never what the page will run. |
+| Runtime | the switches only the running session can honour: cross-conversation memory, delegating to agents, the output-token ceiling, the compaction threshold, the permission policy (`manual` / `assisted` / `allow-all`), and standing instructions applied by the runtime rather than pasted onto every prompt. A save that a live session cannot absorb answers `restart: true` instead of pretending; the ones it can are patched in place, so a save no longer costs a prompt cache. |
 | Connection | the provider this session runs, its base url and model, and how many tools are preferred |
 | Storage | conversation count, where the SQLite file lives, where attachments land |
 | About | the route list, the keyboard shortcuts, and **reset every setting** (a `webrain-chat-*` sweep in localStorage, then a reload — the transcript is the server's and survives) |
 
-Seven routes, all on loopback:
+Every route the page can call, all on loopback. `webrain.permission` and the
+`webrain.*` usage frames on `/events` are the only messages this server invents;
+everything else is the runtime's own event, forwarded unchanged.
+
+**The page and the stream**
 
 | Route | What it does |
 |---|---|
 | `GET /` | the page |
 | `GET /chat.js`, `GET /chat.css` | the page's bundle, read from the verified directory |
+| `GET /chunk-markdown.js` | the lazy half of the bundle (`marked` + DOMPurify) |
 | `GET /events` | SSE, one `data: {"type":…,"data":{…}}` frame per runtime event |
-| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu |
-| `GET /sessions/<id>` | that conversation's messages, oldest first |
+| `POST /preview` | `{"url":"…"}` → that page's `og:` title, description, image and site, fetched server-side (a browser cannot read another origin's HTML) |
+
+**The turn**
+
+| Route | What it does |
+|---|---|
+| `POST /turn` | `{"prompt":"…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while busy and `delivery` is `turn` |
+| `POST /stop` | abort the turn that is running |
+| `GET /pending` | the approvals still waiting for an answer, so a reloaded page can redraw the cards |
+| `POST /permission` | `{"id":"…","allow":true}` — answers a pending approval |
+| `POST /answer` | `{"id":"…","answer":"…","freeform":true}` — answers `ask_user` |
+| `GET /mode`, `POST /mode` | the runtime's session mode (`interactive` / `plan` / `autopilot`) — a switch, not a prompt prefix |
+| `GET /queue`, `POST /queue` | what waits behind the running turn: `POST` with `{"id"}` runs one now, `{"id","text"}` edits it, `{"id","remove":true}` drops it |
+| `GET /permission-mode`, `POST /permission-mode` | the runtime's own permission policy (`manual` / `assisted` / `allow-all`) |
+| `GET /plan`, `POST /plan` | the plan the agent keeps on file |
+| `POST /undo` | put back the last file the agent changed |
+| `GET /rewind`, `POST /rewind` | the turns the session can go back to, then a preview of the files a rewind would restore (`{"event","preview":true}`) and the rewind itself (`{"event","files":true\|false}`) |
+| `POST /ephemeral` | `{"question":"…"}` → a one-shot answer against the conversation with no tools and no history |
+| `GET /context` | the runtime's token breakdown and per-message attribution |
+| `GET /todos` | the agent's todo rows |
+| `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
+| `POST /transcript`, `POST /ledger` | what the page drew, and the instruments of a finished turn, kept with the conversation |
+
+**Conversations**
+
+| Route | What it does |
+|---|---|
+| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu, plus `busy` and the runtime's own `processing` state |
+| `POST /sessions` | a new conversation — or the current one, when nobody has written to it yet |
+| `GET /sessions/<id>` | that conversation's messages, oldest first, with its turns and its saved rows. A read: it does not change which conversation is live. Gzipped when the client accepts it |
+| `POST /sessions/<id>` | claim it — from here on a new turn belongs to it — and answer with the same payload as the read, so opening a thread is one request. `POST /sessions/<id>?light=1` skips the payload for a caller that already holds the rows |
 | `PATCH /sessions/<id>` | `{"title":"…"}` → rename it in the menu |
 | `DELETE /sessions/<id>` | forget the conversation and everything in it |
+| `GET /search?q=…` | substring hits across every stored message, newest first |
+| `POST /fork` | `{"convo":"…","upto":N}` — a new conversation holding the first N messages |
+
+**Providers**
+
+| Route | What it does |
+|---|---|
 | `GET /providers` | provider *targets*: base url, model, where the key lives, a one-line description, and the context size its docs publish |
 | `POST /providers` | `{"id","base_url","model","key_env"}` → a target row in the local database (`key_env` may be empty) |
 | `POST /keys` | `{"provider":"deepseek","key":"…"}` → the key is written to the encrypted vault; nothing is echoed back |
 | `POST /switch` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes |
-| `GET /catalog` | the skills this binary ships and the MCP tools it exposes |
-| `GET /search?q=…` | substring hits across every stored message, newest first |
-| `POST /attach` | raw bytes + `x-name` → a file under the temp upload dir |
-| `POST /turn` | `{"prompt":"…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while busy and `delivery` is `turn` |
-| `POST /stop` | abort the turn that is running |
-| `POST /transcribe` | raw audio + `x-name` / `x-lang` → `{"text":…}`, transcribed locally |
-| `POST /permission` | `{"id":"…","allow":true}` — answers a pending modal |
-| `POST /answer` | `{"id":"…","answer":"…","freeform":true}` — answers `ask_user` |
-| `POST /fork` | `{"convo":"…","upto":N}` — a new conversation holding the first N messages |
 | `GET /models?provider=…` | that provider's live catalogue, cached five minutes |
-| `GET /chunk-markdown.js` | the lazy half of the bundle (`marked` + DOMPurify) |
+| `GET /price` | the vendor's published price for the running model |
+| `GET /quota` | account credits (`session.quota.get` + `limitPrediction`) — null on a key of your own |
+| `GET /settings`, `POST /settings` | the switches only this server can honour |
+
+**Tools, skills and the model's instructions**
+
+| Route | What it does |
+|---|---|
+| `GET /catalog` | the commands, the shipped skills and the MCP tools this build exposes |
+| `GET /mcp`, `POST /mcp` | the MCP servers this session attached to, and `{"server":"…","enabled":bool}` to turn one off or back on |
+| `GET /skills`, `POST /skills` | the skills on offer, and the same toggle |
+| `POST /tool` | `{"name":"…","args":{…}}` → run one tool through the session's own invocation pipeline, with no model turn |
+| `GET /instructions` | the instruction files the model was given, in merge order |
+| `POST /attach` | raw bytes + `x-name` → a file under the temp upload dir |
+| `GET /attach/<convo>/<file>` | that file back out; `?dl=1` downloads instead of inlining |
+| `POST /transcribe` | raw audio + `x-name` / `x-lang` → `{"text":…}`, transcribed locally |
 
 One dock sits under the field, and it is ordered the way a turn is built:
 `+` attach, the mode chips (`agent` / `plan` / `ask`), the thinking-effort button
@@ -341,17 +395,23 @@ window from DeepSeek's own pricing page: peak is 01:00–04:00 and 06:00–10:00
 Monday to Friday, everything else bills at half price, and the dialog says which
 side of that line the current UTC clock is on.
 
-Modes and the tools filter are still **instructions, not switches**: the runtime's
-tool set is fixed when the session is created, so a mode prepends a directive —
-`plan` asks for a plan before acting, `ask` says not to call tools — and `tools`
-prepends one line naming the tools to prefer. The filter panel states this rather
-than implying it can hot-swap the tool set.
+Modes are a **runtime switch and a directive at once**: the composer's pick is
+sent to `POST /mode` on the way in, so `plan` is the mode the agent operates in,
+and it also prepends the sentence that says what it wants. `ask` has no runtime
+equivalent, so it stays a directive: do not call tools. The **tools filter** is
+still only a directive — one line naming the tools to prefer — because the
+allowlist is fixed when the session is created and the panel says so rather than
+implying it can hot-swap the tool set. What *can* change mid-session is the MCP and
+skill half: `POST /mcp` and `POST /skills` turn a server or a skill off and back
+on, and the runtime answers with `session.skills_loaded`.
 
 Each turn shows its own evidence: a tool card carries the arguments **and the
 result the tool actually returned**, with every `http(s)` url in that result
 lifted into a source strip — the page never invents a citation, so an empty strip
-means the tool returned no links. A reasoning/thinking stream, when the runtime
-sends one, collects into a collapsed `thinking` block above the answer. The record
+means the tool returned no links. A reasoning/thinking stream is **filed with the
+step it produced**: a folded row directly above the tool call or the answer it
+explains, which is the order it happened in and survives into a saved
+conversation, instead of one block pooled at the end of the turn. The record
 control beside Send dictates: it records through `MediaRecorder`, sends the take
 to `POST /transcribe`, and puts the **text** in the field — see
 [Dictation](#dictation). `↻ retry` re-sends the last prompt.
@@ -372,6 +432,13 @@ delivery modes the runtime has that a plain send is not:
 A plain `Enter` with nothing running sends a new turn, and that is the only
 delivery refused while a turn runs: two answers interleaving in one transcript is
 what a single composer cannot show.
+
+The field stays **editable while a turn runs**, which is what makes those two
+buttons reachable at all — both are gated on there being text. What is waiting is a
+rail above the field, and a queued prompt can be run now, edited, or dropped
+(`session.queue.sendNow` / `updateText` / `removeAt`): a prompt you can send but
+not correct is one you retype in the composer, which starts a second turn instead
+of fixing the first.
 
 Provider rows are names, never secrets. A key can arrive two ways: an exported
 variable, or a key pasted into the model dialog, which goes to the **encrypted
@@ -407,17 +474,20 @@ The rail prints both numbers when they disagree (`1.0M tokens model · 128k toke
 session`) rather than quietly showing the smaller one, and `--max-prompt-tokens`
 still overrides the lookup for a model nobody publishes a window for.
 
-In the composer, `/` lists the commands the page itself runs (`/clear`,
-`/tools`), `@` lists the shipped skills and `#` lists the MCP tools — both read
-from `GET /catalog`, so neither menu can offer something this build does not
-have. `+` attaches a file. A pick inserts `@name` / `#name` into the prompt;
-nothing is sent for you.
+In the composer, `/` lists the commands the page itself runs — `/clear`, `/tools`,
+`/undo`, `/rewind`, `/instructions`, `/quota`, `/todos`, `/agents`, `/fleet`,
+`/context`, `/mcp`, `/skills` — `@` lists the shipped skills and `#` lists the MCP
+tools. Both menus read from `GET /catalog`, so neither can offer something this
+build does not have. `+` attaches a file, and ↑/↓ walk the menu with the selected
+row scrolled into view. A pick inserts `@name` / `#name` into the prompt; nothing
+is sent for you.
 
 ### The deck: rail, transcript, instruments
 
 The page is three columns and only the middle one scrolls. The left rail is
 navigation (threads), the right rail is instrumentation (model, tokens, tok/s,
-cost, tool count, source count, and the per-turn ledger), and the transcript
+cost, tool count, source count, **the conversation's own totals**, and the
+per-turn ledger), and the transcript
 hangs off a single hairline — the **spine**. Every row puts a tick on it: a
 message tick is the role's colour, a tool tick is its state (amber running,
 mint complete, red failed), and reasoning is grey. The spine is the one element
@@ -427,11 +497,79 @@ Type is three roles and no webfonts, because the page still makes zero network
 requests: a serif for the wordmark and the empty state, the OS UI face for
 prose, and monospace for every label, number, tool name and timestamp.
 
+The turn closes with one monospace line under the answer — model, tokens, tok/s,
+cost, **how many steps it took** and **how long it took**:
+
+```
+deepseek-flash · 4367 in / 328 out · 1 request(s) · 79.9 tok/s · $0.00036 · 0 steps · 7.1s
+```
+
+The duration is scaled rather than pinned to seconds, because one formatter is
+used for a tool row, a reasoning block, a turn and the ledger:
+
+| elapsed | reads |
+|---|---|
+| 240 ms | `240ms` |
+| 7.1 s | `7.1s` |
+| 3 min | `3m 00s` |
+| 1 h 5 min | `1h 05m` |
+| 2 days 3 h | `2d 3h` |
+| 45 days | `1mo 15d` |
+| 13 months | `1y 1mo` |
+
+Thirty-day months and twelve of them to a year, said once so nobody has to guess
+what `1mo` means.
+
+#### A step is a sentence, not a wire name
+
+Every tool row is labelled the way a person would say it — `Searched the web for
+“tickets to Mytilini”`, `Ran curl -s -m 5 http://127.0.0.1:9222/json/version`,
+`Read el.aegeanair.com`, `Edited src/App.svelte` — built on the page from the
+tool's name and its arguments, which is the same trade VS Code's own transcript
+makes (the runtime sends `webrain_serp` and `{q:…}`, not a title). The wire name
+stays beside it in small print, because that is what **edit & re-run** sends back.
+The live line above the composer uses the same function, so a step is never named
+two ways, and a failed call appends its reason on one ellipsised line.
+
+The sentences are covered by `bun run check` in `webrain-cli/ui` — one file,
+assertions only, no test framework — which reads the function out of
+`App.svelte` so it cannot pass against a copy that no longer ships.
+
+#### The reply streams in pieces, not in one re-render
+
+A reply is cut at its last safe block boundary: everything above the cut is parsed
+once and then left alone, and only the tail is re-rendered per frame. That is not
+just less work — a word in the tail is a **node that was just created**, and a new
+node is the only thing a stream can animate. So each word fades in as it arrives
+(`fade`, 140 ms) without the paragraph above it flickering, which is what a
+per-token animation would otherwise do. The cut never lands inside a code fence: a
+blank line is a boundary only when an even number of fence markers stand before it,
+and a reply still inside one is parsed whole. `bun run check` covers that rule with
+ten assertions, `html` mode is never split (there is no markdown to cut), and the
+scroll follows by easing a row landing over a few frames while a token or two is
+set directly — easing that would leave the pane reading behind the text.
+
 The scale is deliberate: a `5/10/14/20/26/32` px spacing ramp, 15 px body text on
 a 1.65 line, 16 px prose, and hit targets of at least 2.1 rem (2.9 rem for send).
 It is sized to be read across a desk, not to fit the most controls in a row — the
 composer's dock wraps rather than compressing, and the field carries
 `min-width: 0` so a long model name cannot widen the column past the viewport.
+
+#### Reading history is one request, once
+
+A saved row carries the tool arguments and the result that backs them, so a
+single scrape conversation measures 354–663 KB of JSON. Three things keep a
+thread switch from costing that every time:
+
+- **One request.** Claiming a thread answers with the transcript, so picking a
+  thread is one `POST` instead of a read followed by a claim.
+- **Gzip.** Conversation payloads over 2 KB are compressed when the browser
+  accepts it: the 663 KB example arrives as 201 KB, and `Content-Length` is the
+  compressed size.
+- **A page-local cache.** A tab keeps the conversations it has read, so going
+  back to one costs a `?light=1` claim — 28 bytes. The entry is dropped for the
+  live conversation whenever a turn is sent or a transcript is saved, which is
+  the only way a stored conversation can change.
 
 ### Generative UI: the result picks its own view
 
@@ -458,12 +596,63 @@ dropped by name, because this page can approve shell commands and
 `position:fixed;inset:0` in a reply would be enough to paint a fake dialog over
 the real one.
 
+### HTML replies: the model designs the panel
+
+Most models write markdown, and parsing markdown *is* the right default. Some
+answer in HTML instead, and a markdown parser mangles that. Settings → Chat →
+**reply rendering: html** changes three things and nothing else: the reply is
+`marked`-free (sanitised only, tags kept), the streaming split is skipped (there
+is no markdown block to cut cleanly, so the text arrives in one render), and the
+session carries one extra paragraph of instruction naming the class vocabulary the
+stylesheet already styles — `section.card`, `div.grid`, `div.stat` with `<b>` and
+`<small>`, `span.pill`, `progress`, `table`, `details`/`summary`,
+`figure`/`figcaption`, `kbd`, `mark`, `hr`.
+
+That paragraph also says **which shape to reach for, unasked**: a short answer is
+a `<p>` (with an `<h3>` once there is more than one block), comparable items are
+`div.grid > section.card`, a number worth reading is `div.stat`, sequential work
+is an `<ol>` in a card, a comparison is a `<table>`, a long aside is `details`,
+an image result is a `figure`. That is the point of the mode — "design it" is not
+something you should have to say. Ask *"what does CDP stand for?"* in `html` mode
+and the answer comes back as a paragraph with inline `<code>`, not as a wall of
+plain text; ask a comparison question and it comes back as cards or a table,
+because those rules are in the session, not in your prompt.
+
+It is **standing instruction, not prompt text**. The runtime applies
+`organization_custom_instructions` to every turn without spending tokens
+re-sending it, so the paragraph costs nothing per turn — the switch is one
+`POST /settings` (1174 characters, patched into the live session, no restart,
+prompt cache intact) instead of 1.2 kB of prompt on every answer. The same is
+true of the follow-up contract below. Flipping the switch back to `markdown`
+rewrites it to 295 characters, and the Runtime tab's own *standing instructions*
+field keeps showing only what you typed: the page appends its hints on the way
+out and strips them on the way back.
+
+The safety story does not change: `<script>`, `<style>`, `<iframe>`, `<form>`,
+`<object>`, `<embed>` and every `style` attribute are dropped by name in both
+modes, because this page can approve shell commands and
+`position:fixed;inset:0` in a reply would paint a fake dialog over the real one.
+A model that wants emphasis gets `<mark>` and `kbd`, not inline CSS. The
+vocabulary is scoped to `.md`, not to the switch, so an HTML answer still looks
+designed when you turn the switch back off — the mode decides what the model is
+asked for and how the text is parsed, never what is allowed.
+
 Under each turn, **sources** collects every `http(s)` url the tools returned,
-deduplicated, with the tool that found it; **next** offers up to three prompts
-derived from what the turn actually did — the host that came back, the tool that
-failed, the screenshot that was taken. Both are derived from the transcript, not
-generated by a model, so a suggestion you cannot trace back to a tool result
-never appears.
+deduplicated, with the tool that found it; **next** offers three prompts. Those
+three are written by the model that just answered — it knows what it left out,
+which sentence is the shakiest and what the next real question is, and a rule
+list on the page can only approximate that. It emits them on one machine-readable
+line (`<suggest>a | b | c</suggest>`), the page lifts them out of the text and
+renders buttons, so the words never appear in the body and the answer stored on
+disk is the answer a reader would copy.
+
+When a model ignores that tail, or on a transcript saved before it existed, the
+page falls back to the prompts the turn itself justifies — the tool that failed,
+the host that answered, a capture that was taken, code or length in the answer —
+and then to a floor true of any finished answer (`give me a concrete example`,
+`what did you leave out?`, `go deeper on the first point`), so a plain question
+still ends with three things to press. Nothing is offered while the turn is still
+running, and a chip that would just repeat your own prompt is dropped.
 
 Branching is `fork` on any user message: `POST /fork` copies the thread up to
 that message into a new conversation. It is a transcript operation — the runtime
@@ -695,14 +884,15 @@ stragglers.
 
 ## What chat does not do
 
-No interactive REPL and no `--session` resume in this version: one prompt, one
-turn, one exit code. Everything here is additive to `webrain mcp`, which keeps
-its stdout contract — chat's own logs go to stderr for that reason.
+No interactive REPL and no session resume in this version. `--serve` keeps one
+runtime session alive for as long as the process does, but a **new** process
+replays the stored transcript instead of resuming the runtime's own context, and
+one-shot `webrain chat` is one prompt, one turn, one exit code. Everything here is
+additive to `webrain mcp`, which keeps its stdout contract — chat's own logs go to
+stderr for that reason.
 
-No GUI either. The runtime already emits everything a conversation window needs
-(streamed deltas, tool calls, permission requests, context and cost meters) and
-the CLI flattens all of it into stderr lines; [ADR-004](/adr/0004-chat-gui-surface)
-maps each event to the element it should become and specifies `webrain chat
---serve` as the smallest interface that keeps the binary self-contained — the
-page excepted, since it is the one part that is a file rather than a process,
-and it is verified by digest wherever it lives.
+The page is a conversation window, not an editor. There is no code canvas, no
+plugin or extension renderer, no sandbox, and no way to reach it from another
+machine: it binds `127.0.0.1` and nothing it serves is authenticated beyond that.
+[ADR-004](/adr/0004-chat-gui-surface) is the mapping from runtime event to
+element that the page implements.

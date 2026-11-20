@@ -137,13 +137,17 @@ the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the C
 that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
 For an obscura/lightpanda identity, start the binary with `--storage-dir`.
 
-**Guest Chrome (`--guest`) is a purpose tool**: `webrain_serp` engine=google|brave and
-interactive CAPTCHA/Turnstile — its profile (`serp/<profile>`, persisted unless
-`--fresh`) is what keeps the clearance for the next call; a fresh profile gets
-re-captcha'd every launch. It refuses new targets (`PUT /json/new` → 500; `-32000
-"Failed to open a new tab"`), so batch/crawl there run ONE serial tab
-(`single_target: true`; 8 URLs 5.65 s vs 1.46 s on 9222 with `concurrency: 4`).
-Bulk work goes to real Chrome / obscura / lightpanda — never to guest Chrome.
+**The ephemeral Chrome ("guest") is a purpose tool, and it is SERP-only**: `webrain_serp`
+engine=google|brave and interactive CAPTCHA/Turnstile are the only callers — its
+profile (`serp/<profile>`, persisted unless `--fresh`) is what keeps the clearance
+for the next call; a fresh profile gets re-captcha'd every launch. It is launched
+with `--incognito` (it used to be `--guest`, which cannot open a tab at all:
+measured 2026-11-07 on Chrome 151 and 156, `Target.createTarget` answers `-32000
+"Failed to open new tab - no browser is open"` because Browse-as-Guest has no
+Browser in Chrome's BrowserList, while `--incognito` succeeds on both
+`createTarget` and `createBrowserContext`). The tab limit is gone, but that does
+not make it an engine: bulk work stays on real Chrome / obscura / lightpanda, on a
+profile you control.
 Do not re-read the Rust source to learn any of this — it is documented here and in
 `webrain_guide`; read source only to change behavior.
 

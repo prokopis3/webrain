@@ -53,8 +53,7 @@ Every reply carries `stats`, and the numbers there are **measured**:
 - `effective_concurrency` is the number of tabs the batch **really obtained**
   (summed across `cdp_urls`), so `2` next to `requested_concurrency: 4` means two
   workers won and two did not — not a display bug.
-- `single_target: true` means the connection holds **one** tab (lightpanda, guest
-  Chrome): the queue runs serially and no `concurrency` value changes that. It is
+- `single_target: true` means the connection holds **one** tab (lightpanda, or a browser whose last window was closed): the queue runs serially and no `concurrency` value changes that. It is
   still a pass when `ok` equals `total`.
 - `ms_wall` far below `ms_total` is the parallelism you actually got; the two
   within a few ms of each other means serial.
@@ -87,14 +86,17 @@ page work was ~1.8 s/URL. So before blaming `concurrency` or the site, compare
   full timeout either way.
 
 <Warning>
-  **Guest Chrome is a purpose tool, not a batch engine.** It exists for
-  `webrain_serp` (`engine=google|brave`) and for solving an interactive
+  **The ephemeral ("guest") Chrome is a purpose tool, not a batch engine.** It
+  exists for `webrain_serp` (`engine=google|brave`) and for solving an interactive
   CAPTCHA/Turnstile, and its profile (`serp/<profile>`, kept unless `--fresh`) is
-  what carries the clearance to the next call. It refuses new targets
-  (`PUT /json/new` → 500; `-32000 "Failed to open a new tab"`), so a batch there
-  attaches the page it already has and runs **one serial tab** — measured 8 URLs
-  in 5.65 s versus **1.46 s** on a real Chrome with `concurrency: 4`. Route bulk
-  work to real Chrome, obscura or lightpanda.
+  what carries the clearance to the next call. It is now launched with
+  `--incognito` **because `--guest` cannot open a tab at all** — measured
+  2026-11-07 on Chrome 151 and 156, `--guest` answers `-32000 "Failed to open new
+  tab - no browser is open"` while `--incognito` accepts `Target.createTarget` and
+  `Target.createBrowserContext`. The tab limit is gone; the routing rule is not —
+  this browser has two callers (serp, CAPTCHA) and bulk work stays on real Chrome,
+  obscura or lightpanda. Mixing a queue into the profile that must keep looking
+  human is how the clearance gets burned.
 </Warning>
 
 ## Crawl — whole sites

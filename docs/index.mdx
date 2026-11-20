@@ -447,6 +447,7 @@ mode: custom
           <div className="core">
             <h3><span className="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" /></svg></span>One prompt, one turn</h3>
             <p><code>webrain chat "compare these two listings"</code> runs the agent loop and prints the answer. Exit 0 completed, 1 the turn failed, 2 could not start, so it composes in a script.</p>
+            <p className="proven-note">Or give that same session a page: <code>webrain chat --serve</code> — transcript, approval cards, a queued prompt you can edit, and a rewind that walks the conversation back. Loopback only.</p>
             <p className="proven-note">The answer goes to stdout and the tool trail to stderr, so <code>| jq</code> and <code>&gt; file</code> stay clean.</p>
           </div>
         </div>
@@ -656,7 +657,7 @@ mode: custom
         </div>
         <div className="engine">
           <span className="engine-logo engine-logo-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-          <div><h3>fetch_http</h3><p>Static HTML, no JS, no auth. 10-100× faster. No engine at all.</p></div>
+          <div><h3>fetch_http</h3><p>Static HTML, no JS, no auth. No engine at all.</p></div>
           <span className="tag">No browser</span>
         </div>
       </div>
@@ -755,7 +756,7 @@ mode: custom
         </div>
         <div className="faq-item">
           <h3>How is this different from a scraping API?</h3>
-          <p>webrain runs on your machine, sends no data to a third party, and gives the LLM a real browser with stealth and challenge bypass. For static pages it can be 10-100× faster than a full browser.</p>
+          <p>webrain runs on your machine, sends no data to a third party, and gives the LLM a real browser with stealth and challenge bypass. For static pages it skips the browser entirely and issues one HTTP GET.</p>
         </div>
         <div className="faq-item">
           <h3>Does <code>webrain chat</code> read my own Copilot setup?</h3>

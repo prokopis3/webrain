@@ -15,6 +15,25 @@ tile) — set ANY cloud key for accurate solving; local is the offline fallback.
 - Real Chrome on CDP: `webrain_session(op=open, cdp_url="http://127.0.0.1:9222")`.
 - Vision backend: one of `OPENROUTER_API_KEY` / `OPENAI_API_KEY` /
   `FIREWORKS_API_KEY` / `GROQ_API_KEY`, or `webrain install vision` (local).
+- **Paid solver key — opt-in, two entry points.** `CAPSOLVER_API_KEY` or
+  `WEBRAIN_2CAPTCHA_KEY` / `TWOCAPTCHA_API_KEY` (the same vendor under two
+  spellings) configures a reCAPTCHA-**v2** solver inside the binary; CapSolver
+  wins when both are set, because it is cheaper and faster per solve.
+  `2CAPTCHA_API_KEY` is **not** read — a name starting with a digit cannot be
+  exported in a POSIX shell, so it would only ever work on Windows.
+  Reach it with `webrain_session(op="captcha", sitekey=…, page_url=…)`
+  (MCP) or `webrain captcha --sitekey <sk> --url <page>` (CLI); optional
+  `data_s` / `--data-s` for enterprise, optional proxy (`--proxy` on the CLI is
+  the same exit the page loads through). Both return **the token only** —
+  neither reads the sitekey off the page nor injects the token, so the calls
+  above are still yours to make with `webrain_eval`:
+  `document.getElementById('g-recaptcha-response').value = TOKEN` (+ fire
+  `submit`), then confirm via Step 0.
+  A key is a shortcut for **v2 checkbox/grid only**. hCaptcha, Turnstile,
+  drag/slider and audio are outside it — those stay on the vision flow below,
+  and a token you read off the page remains the only ground truth.
+  The call blocks while polling (up to ~2.5 min), so do not run it inside a
+  batch interaction.
 
 ## The one true flow
 This generic tool flow (proven live) solves ANY challenge — there is no

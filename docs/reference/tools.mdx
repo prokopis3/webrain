@@ -43,7 +43,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
 | `webrain_download` (`engine=…`) | http · ytdlp | 🔶 mixed |
 | `webrain_watch` | watch (transcript + frames) | ❌ no browser |
-| `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state (`inline`) · restore_state (`payload`) · profiles · login · close_launch | ✅ CDP + vault |
+| `webrain_session` (`op=…`) | open (· `proxy` / `keep_identity`) · close · list · cookies · setcookies · save_state (`inline`) · restore_state (`payload`) · profiles · login · captcha (`sitekey`, `page_url`, `data_s`) · close_launch | ✅ CDP + vault |
 | `webrain_vision` (`op=…`) | index · retrieve · ask (viewport · `tiles[]` batch · `images[]` paths saved by `observe what=pixel tiles_dir`) | ✅ CDP (screenshot) |
 | `webrain_eval` | eval · eval_in_frame (cross-origin iframe, isolated world) | ✅ CDP |
 | `webrain_eval_in_frame` | Run JS inside a specific cross-origin iframe (isolated world, matched by `url_contains` src substring) — the only way to read exact geometry inside reCAPTCHA/hCaptcha/Turnstile challenge frames | ✅ CDP |
@@ -387,7 +387,7 @@ Every reply ends with `stats`, and the concurrency numbers are **measured, not a
 | `total` / `ok` / `errors` | rows returned, succeeded, failed — `total` always equals the number of URLs, even when the whole batch dies (one row per URL, not one row for the batch) |
 | `requested_concurrency` | what you asked for on this connection |
 | `effective_concurrency` | tabs the batch **really obtained**; summed across `cdp_urls`; `0` when every row failed, `1` on a single-target engine |
-| `single_target` | `true` when the connection holds one tab (lightpanda, guest Chrome): the batch runs serially and no `concurrency` value changes that |
+| `single_target` | `true` when the connection holds one tab (lightpanda, or a browser whose last window was closed): the batch runs serially and no `concurrency` value changes that |
 | `ms_total` / `ms_wall` | summed per-URL time vs the wall clock — far apart means real parallelism |
 
 A browser that refuses new targets is **not** an error: `webrain_batch` attaches the page that browser already has and runs the queue there, so `single_target: true, effective_concurrency: 1` with `ok: total` is a pass (guest Chrome measured 8 URLs in 5.65 s vs 1.46 s on a real Chrome with `concurrency: 4`). Guest Chrome is for SERP + CAPTCHA, not batch — see the [agent decision guide](../guides/agent-decision-guide.mdx).
@@ -410,7 +410,7 @@ Validate a list of URLs — alive vs dead. Filters 404s/5xx/errors. HEAD first, 
 </Accordion>
 
 <Accordion title="webrain_fetch_http">
-No-browser HTTP fetch: GET a URL, return `{url, status, text}`. 10–100× faster than browser navigation, zero memory — but no JS/SPA/auth. Use for static pages.
+No-browser HTTP fetch: GET a URL, return `{url, status, text}`. No browser process, no render, no JS, zero memory — but no JS/SPA/auth. Use for static pages.
 </Accordion>
 
 </AccordionGroup>
@@ -438,7 +438,24 @@ Built-in: provider fallback (`fallback`), URL dedupe, pagination (`page`), safe 
 
 **Brave API:** set `BRAVE_API_KEY` and `engine=brave` goes through `api.search.brave.com` — typed JSON, 20 results per page, no browser at all; `auto` engages it for `limit > 20` while still short, before any browser render.
 
-**serpapi.com:** set the standard `SERPAPI_API_KEY` env var. It's the reliable way to get MORE than the free engines' ~10-result cap — serpapi honors `num` up to 100 — so for `limit > 10` it's tried **first** for google (the full best result set); for `limit <= 10` the free browser path stays primary and serpapi is a fallback. Unset key / quota-exhausted / 4xx degrades to the normal fallback with no error.
+**serpapi.com:** set the standard `SERPAPI_API_KEY` env var and it becomes the paid provider for **every engine it serves** — google, bing, duckduckgo, yahoo, baidu and yandex (brave is not a serpapi engine; that path is `BRAVE_API_KEY`). For `limit > 10` it is tried **first** for the requested engine — one HTTP call, no browser, no IP risk; for `limit <= 10` the engine's own free path stays primary and serpapi is the fallback. Unset key / quota-exhausted / 4xx degrades to the free path with no error.
+
+Each engine carries its own parameters, taken from serpapi's docs — the query is not always `q`, and neither is localization:
+
+| engine | query | region | `--safe` | size | page |
+|---|---|---|---|---|---|
+| google | `q` | `hl` + `gl` | `safe=active\|off` | `num` ≤100 | `start` (0-based) |
+| bing | `q` | `cc` + `mkt` | `safeSearch=Strict` | — | `first` (1-based) |
+| duckduckgo | `q` | `kl` | `safe=1\|-2` | `m` ≤50 | `start` (0-based) |
+| yahoo | **`p`** | `vc` + `vl` | `vm=r\|p` | — (`pz` discontinued) | `b` (1-based) |
+| baidu | `q` | — | — | `rn` 10–50 | `pn` (0-based) |
+| yandex | **`text`** | `lang` | `family_mode=0\|2` | `groups_on_page` | **`p` (0-based page)** |
+
+Sending google's `hl`/`gl` to all six was silently ignored by the others, so `--region` did nothing outside google before this was fixed; `--safe` likewise had no effect outside google. Bing and yahoo have no size knob, so they return whatever page their engine gives (measured: google 9, bing 10, duckduckgo 11, yahoo 7, baidu 10, yandex 12). `num` is a request, not a promise: Google decides how many organic rows it prints, and a row with **no destination** (its `displayed_link` is a view count, a comment count or a version string rather than a site) is dropped.
+
+A refused key is **reported, not swallowed**: `skipped` carries `google (serpapi: HTTP 401: Invalid API key. Your API key should be here: …)`. That message is the difference between a truncated key and an engine that genuinely has no results — and `auto`'s fill stops after the first refusal instead of spending six requests to learn the same thing.
+
+`engine: "auto"` fills a deep request from the **same set of engines**, one at a time, in the order google → bing → duckduckgo → baidu → yandex → yahoo, stopping the moment `limit` is met. There is no `limit > 10` gate: a 10-row ask whose free engines were all walled gets the same help a 40-row ask does, and a request the free engines already filled is short-circuited before any paid call. Google goes first because its `num` reaches 100 in a single call and usually ends the loop; a very deep request on a walled IP can spend up to six searches, and `per_engine` names which of them ran.
 
 ```json
 { "q": "product reviews", "engine": "google", "limit": 20, "proxy": "http://user:pass@host:port" }

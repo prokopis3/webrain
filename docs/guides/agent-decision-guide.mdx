@@ -72,7 +72,7 @@ canvas/audio/`canPlayType`, which made Next.js abort with
 - `mode=schema` — extract with your JSON schema
 - `mode=regex` / `table` / `jsonld` / `bm25` — targeted modes
 
-**Static HTML, no JS?** → `webrain_scrape` (10–100× faster than a browser).
+**Static HTML, no JS?** → `webrain_scrape` (one HTTP GET: no browser process, no render, no JS).
 
 **One URL → many pages** → `webrain_crawl` (`mode=spider`, `sitemap`, `scan`).
 
