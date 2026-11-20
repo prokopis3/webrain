@@ -1664,7 +1664,10 @@ async fn serpapi_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<Ser
         anyhow::bail!("HTTP {status}: {msg}");
     }
     if !(200..300).contains(&status) {
-        anyhow::bail!("HTTP {status}: {}", body.trim().chars().take(160).collect::<String>());
+        anyhow::bail!(
+            "HTTP {status}: {}",
+            body.trim().chars().take(160).collect::<String>()
+        );
     }
     Ok(parse_serpapi_json(&body, opts.limit))
 }
@@ -3116,9 +3119,8 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect()
         };
-        let has = |p: &[(String, String)], k: &str, v: &str| {
-            p.iter().any(|(pk, pv)| pk == k && pv == v)
-        };
+        let has =
+            |p: &[(String, String)], k: &str, v: &str| p.iter().any(|(pk, pv)| pk == k && pv == v);
 
         let opts = o("rust tokio", 12, 1, false, Some("us-en"));
         assert_eq!(serpapi_params("brave", &opts), None, "no brave engine");
@@ -3169,9 +3171,15 @@ mod tests {
 
         // Every engine `auto` fills from must be one serpapi actually serves.
         for e in SERPAPI_AUTO_FILL {
-            assert!(serpapi_params(e, &opts).is_some(), "{e} is not a serpapi engine");
+            assert!(
+                serpapi_params(e, &opts).is_some(),
+                "{e} is not a serpapi engine"
+            );
         }
-        assert_eq!(SERPAPI_AUTO_FILL[0], "google", "deepest single call goes first");
+        assert_eq!(
+            SERPAPI_AUTO_FILL[0], "google",
+            "deepest single call goes first"
+        );
     }
 
     fn mk_result(title: &str, url: &str) -> SerpResult {

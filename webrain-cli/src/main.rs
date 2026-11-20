@@ -19,9 +19,9 @@ mod chat_ui;
 // Only exists with `--features chat`: without it, `webrain chat` still resolves
 // and prints its config, then says how to build the runtime.
 #[cfg(feature = "chat")]
-mod chat_server;
-#[cfg(feature = "chat")]
 mod chat_hooks;
+#[cfg(feature = "chat")]
+mod chat_server;
 #[cfg(feature = "chat")]
 mod chat_session;
 #[cfg(feature = "chat")]

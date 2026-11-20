@@ -3568,10 +3568,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         },
         "webrain_captcha" => {
             let sitekey = args.get("sitekey").and_then(|v| v.as_str()).unwrap_or("");
-            let page_url = args
-                .get("page_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let page_url = args.get("page_url").and_then(|v| v.as_str()).unwrap_or("");
             if sitekey.is_empty() || page_url.is_empty() {
                 return json!({"status": "error", "message": "sitekey and page_url required"});
             }
@@ -3585,10 +3582,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let proxy = args
-                .get("proxy")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            let proxy = args.get("proxy").and_then(|v| v.as_str()).map(String::from);
             // The solver sleeps between polls (up to ~2.5 min) — never on the executor.
             match tokio::task::spawn_blocking(move || {
                 webrain_core::captcha::solve_recaptcha2_auto(
@@ -4064,9 +4058,15 @@ mod surface_tests {
             "webrain_session",
             json!({"op": "captcha", "sitekey": "sk", "page_url": "https://x/sorry"}),
         );
-        assert_eq!(name, "webrain_captcha", "op=captcha must fold to its own executor");
+        assert_eq!(
+            name, "webrain_captcha",
+            "op=captcha must fold to its own executor"
+        );
         assert_eq!(args["sitekey"], "sk");
-        assert!(args.get("op").is_none(), "op must be dropped before dispatch");
+        assert!(
+            args.get("op").is_none(),
+            "op must be dropped before dispatch"
+        );
     }
 
     #[test]

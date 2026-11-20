@@ -622,7 +622,8 @@ fn taken(out: &Arc<Mutex<String>>) -> String {
 
 /// Both branches end up here: a tool that failed says so in the text the model
 /// reads, which is what lets it correct course instead of retrying blind.
-fn shown(r: Result<String, String>) -> String {    match r {
+fn shown(r: Result<String, String>) -> String {
+    match r {
         Ok(t) => t,
         Err(e) => format!("error: {e}"),
     }

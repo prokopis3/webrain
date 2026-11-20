@@ -262,19 +262,19 @@ pub fn solve_recaptcha2_capsolver(
     for _ in 0..CAPSOLVER_POLL_TRIES {
         std::thread::sleep(std::time::Duration::from_secs(CAPSOLVER_POLL_SECS));
         let poll = json!({ "clientKey": client_key, "taskId": task_id });
-        let (status, text) = match crate::engines::serp_http_post_json(CAPSOLVER_RESULT, &poll, None)
-        {
-            Ok(v) => v,
-            // The task is already billed and still running server-side, so a
-            // transport blip must not abort the solve.
-            Err(e) => {
-                transport_fails += 1;
-                if transport_fails >= 5 {
-                    return Err(e.context("CapSolver poll failed repeatedly"));
+        let (status, text) =
+            match crate::engines::serp_http_post_json(CAPSOLVER_RESULT, &poll, None) {
+                Ok(v) => v,
+                // The task is already billed and still running server-side, so a
+                // transport blip must not abort the solve.
+                Err(e) => {
+                    transport_fails += 1;
+                    if transport_fails >= 5 {
+                        return Err(e.context("CapSolver poll failed repeatedly"));
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         let v: Value = serde_json::from_str(&text).with_context(|| {
             format!("CapSolver getTaskResult returned non-JSON (HTTP {status}): {text}")
         })?;

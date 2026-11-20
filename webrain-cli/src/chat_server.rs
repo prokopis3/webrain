@@ -174,17 +174,15 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
                 // stream, a tab switch aborts an in-flight read, a prefetch is
                 // cancelled. Printing those as server errors buried the real ones
                 // under a wall of `os error 10053` on every page load.
-                let gone = e
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| {
-                        matches!(
-                            io.kind(),
-                            std::io::ErrorKind::ConnectionReset
-                                | std::io::ErrorKind::ConnectionAborted
-                                | std::io::ErrorKind::BrokenPipe
-                                | std::io::ErrorKind::UnexpectedEof
-                        )
-                    });
+                let gone = e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    )
+                });
                 if !gone {
                     eprintln!("· http · {e}");
                 }
@@ -846,14 +844,7 @@ impl RuntimeSettings {
         // and `instructions` are all reachable through `session.options.update`,
         // and rebuilding the session for them threw away the prompt cache for a
         // save that is usually just a wording change.
-        let session = |s: &Self| {
-            (
-                s.memory,
-                s.allow_agents,
-                s.max_output_tokens,
-                s.compact_at,
-            )
-        };
+        let session = |s: &Self| (s.memory, s.allow_agents, s.max_output_tokens, s.compact_at);
         let before = session(self);
         if let Some(b) = v["memory"].as_bool() {
             self.memory = b;
@@ -1407,7 +1398,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // The plan file says what the work is; these say how far it got.
         ("GET", "/todos") => {
             let live = state.live.read().await.clone();
-            let body = match live.session.rpc().plan().read_sql_todos_with_dependencies().await {
+            let body = match live
+                .session
+                .rpc()
+                .plan()
+                .read_sql_todos_with_dependencies()
+                .await
+            {
                 Ok(r) => json!({
                     "rows": r.rows.iter().map(|t| json!({
                         "id": t.id, "title": t.title,
@@ -1437,7 +1434,12 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     ..Default::default()
                 })
                 .await;
-            let attribution = live.session.rpc().metadata().get_context_attribution().await;
+            let attribution = live
+                .session
+                .rpc()
+                .metadata()
+                .get_context_attribution()
+                .await;
             // Best effort, like the attribution above: the attribution says which
             // *category* is expensive, this says which message is. A silent empty
             // list cannot be told from a failed call, so the failure is named.
@@ -1555,7 +1557,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let live = state.live.read().await.clone();
             let skills = live.session.rpc().skills();
             let r = if on {
-                skills.enable(SkillsEnableRequest { name: name.clone() }).await
+                skills
+                    .enable(SkillsEnableRequest { name: name.clone() })
+                    .await
             } else {
                 skills
                     .disable(SkillsDisableRequest { name: name.clone() })
@@ -1572,11 +1576,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // so and fix it without a restart.
         ("POST", "/mcp") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-            let name = v["server"]
-                .as_str()
-                .unwrap_or("webrain")
-                .trim()
-                .to_string();
+            let name = v["server"].as_str().unwrap_or("webrain").trim().to_string();
             let on = v["enabled"].as_bool().unwrap_or(true);
             let live = state.live.read().await.clone();
             let mcp = live.session.rpc().mcp();
@@ -1623,7 +1623,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 })
                 .await
             {
-                Ok(r) => json!({ "name": name, "result": serde_json::to_value(&r).unwrap_or(Value::Null) }),
+                Ok(r) => {
+                    json!({ "name": name, "result": serde_json::to_value(&r).unwrap_or(Value::Null) })
+                }
                 Err(e) => json!({ "name": name, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
@@ -1683,11 +1685,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 }
             }
             if prompt.is_empty() {
-                let out = json!({ "started": false, "error": "nothing to run — ask something first" });
+                let out =
+                    json!({ "started": false, "error": "nothing to run — ask something first" });
                 return respond(&mut stream, 400, "application/json", &out.to_string()).await;
             }
             if !state.settings.lock().await.allow_agents {
-                let out = json!({ "started": false, "error": "delegating is off in runtime settings" });
+                let out =
+                    json!({ "started": false, "error": "delegating is off in runtime settings" });
                 return respond(&mut stream, 409, "application/json", &out.to_string()).await;
             }
             let live = state.live.read().await.clone();
@@ -1720,11 +1724,17 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let id = v["id"].as_str().unwrap_or_default().to_string();
             let message = v["text"].as_str().unwrap_or_default().to_string();
             if id.is_empty() || message.is_empty() {
-                return respond(&mut stream, 400, "application/json", r#"{"error":"id and text"}"#)
-                    .await;
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"id and text"}"#,
+                )
+                .await;
             }
             if !state.settings.lock().await.allow_agents {
-                let out = json!({ "sent": false, "error": "delegating is off in runtime settings" });
+                let out =
+                    json!({ "sent": false, "error": "delegating is off in runtime settings" });
                 return respond(&mut stream, 409, "application/json", &out.to_string()).await;
             }
             let live = state.live.read().await.clone();
@@ -1888,8 +1898,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let event_id = v["event"].as_str().unwrap_or_default().to_string();
             if event_id.is_empty() {
-                return respond(&mut stream, 400, "application/json", r#"{"error":"event"}"#)
-                    .await;
+                return respond(&mut stream, 400, "application/json", r#"{"error":"event"}"#).await;
             }
             let live = state.live.read().await.clone();
             let reply = if v["preview"].as_bool().unwrap_or(false) {
@@ -1961,7 +1970,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             req.mode = session_mode_of(want);
             let live = state.live.read().await.clone();
             let reply = match live.session.rpc().mode().set(req).await {
-                Ok(r) => json!({ "mode": want, "message": r.message, "deferred": r.defer_implementation }),
+                Ok(r) => {
+                    json!({ "mode": want, "message": r.message, "deferred": r.defer_implementation })
+                }
                 Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
@@ -2003,10 +2014,19 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // agent can act in.
         ("POST", "/ephemeral") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-            let question = v["question"].as_str().unwrap_or_default().trim().to_string();
+            let question = v["question"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if question.is_empty() {
-                return respond(&mut stream, 400, "application/json", r#"{"error":"question"}"#)
-                    .await;
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"question"}"#,
+                )
+                .await;
             }
             // A crate-private field, so `Default` then assign.
             let mut req = UIEphemeralQueryRequest::default();
@@ -2030,7 +2050,10 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             // marked while the page sat in exactly that conversation. Pressing
             // "new chat" and finding no active tab is this, not a click that
             // failed to register.
-            if !list.iter().any(|c| c["id"].as_str() == Some(current.as_str())) {
+            if !list
+                .iter()
+                .any(|c| c["id"].as_str() == Some(current.as_str()))
+            {
                 list.insert(
                     0,
                     json!({ "id": current, "title": "(new conversation)", "ts": "", "n": 0 }),
@@ -3553,7 +3576,15 @@ mod tests {
             assert!(is_convo_path(ok), "{ok}");
         }
         // Every one of these starts with `c` and is an API route.
-        for bad in ["/catalog", "/chat.js", "/context", "/chat.css", "/c", "/c12x", "/"] {
+        for bad in [
+            "/catalog",
+            "/chat.js",
+            "/context",
+            "/chat.css",
+            "/c",
+            "/c12x",
+            "/",
+        ] {
             assert!(!is_convo_path(bad), "{bad}");
         }
     }
@@ -3575,7 +3606,10 @@ mod tests {
 
         // A vote is the same card with different words.
         let vote = json!({ "kind": "memory", "action": "vote", "fact": "f" });
-        assert_eq!(permission_card("p2", &vote, false)["title"], "vote on a memory");
+        assert_eq!(
+            permission_card("p2", &vote, false)["title"],
+            "vote on a memory"
+        );
 
         // Everything else is still a tool, with the server prefix stripped.
         let tool = json!({
@@ -3849,7 +3883,10 @@ mod tests {
         assert_eq!(transcript(&msgs, 15), "user: third");
         assert_eq!(transcript(&[], 100), "");
         // A stored body of whitespace is not something the model should read.
-        assert_eq!(transcript(&[json!({"role": "user", "body": "   "})], 100), "");
+        assert_eq!(
+            transcript(&[json!({"role": "user", "body": "   "})], 100),
+            ""
+        );
     }
 
     #[test]

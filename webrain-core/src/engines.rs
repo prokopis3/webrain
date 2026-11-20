@@ -1469,7 +1469,9 @@ impl SpiderEngine {
         browser: CdpBackend,
         shared: std::sync::Arc<tokio::sync::Mutex<SpiderShared>>,
         throttle: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
-        gate: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
+        gate: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>,
+        >,
     ) {
         // Own tab (multi-target parallel path); closed when this worker exits.
         let (sid, tab_id) = match browser.open_tab("about:blank").await {
@@ -2959,12 +2961,8 @@ pub(crate) fn serp_http_post_json(
     proxy: Option<&str>,
 ) -> anyhow::Result<(u16, String)> {
     let agent = http_agent(proxy)?;
-    let resp = browser_req(
-        agent
-            .post(url)
-            .header("content-type", "application/json"),
-    )
-    .send(body.to_string())?;
+    let resp = browser_req(agent.post(url).header("content-type", "application/json"))
+        .send(body.to_string())?;
     let status = resp.status().as_u16();
     let bytes = resp.into_body().read_to_vec()?;
     Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
@@ -3246,9 +3244,7 @@ pub fn autoschema_report(html: &str, min_occurrences: usize) -> (Vec<Value>, Val
         let doc = scraper::Html::parse_document(html);
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for el in doc.select(&sel) {
-            *counts
-                .entry(el.value().name().to_lowercase())
-                .or_insert(0) += 1;
+            *counts.entry(el.value().name().to_lowercase()).or_insert(0) += 1;
         }
         containers = counts.values().sum();
         best = counts.values().copied().max().unwrap_or(0);

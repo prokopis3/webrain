@@ -249,9 +249,11 @@ impl Store {
     pub fn rows(&self, convo: &str) -> Option<Value> {
         let db = self.lock()?;
         let body: String = db
-            .query_row("SELECT body FROM transcript WHERE convo = ?1", [convo], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT body FROM transcript WHERE convo = ?1",
+                [convo],
+                |r| r.get(0),
+            )
             .ok()?;
         serde_json::from_str::<Value>(&body).ok()
     }

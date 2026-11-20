@@ -213,7 +213,10 @@ mod tests {
         assert!(reason.contains("outside"), "{reason}");
 
         // An absolute path outside is the same decision, on every platform.
-        let sibling = root.parent().unwrap_or(&root).join("definitely-outside.txt");
+        let sibling = root
+            .parent()
+            .unwrap_or(&root)
+            .join("definitely-outside.txt");
         assert!(refuse("view", &json!({ "path": sibling }), &root).is_some());
         // Inside is allowed, in both spellings of the argument.
         assert!(refuse("view", &json!({ "path": "src/lib.rs" }), &root).is_none());
