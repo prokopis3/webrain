@@ -20,6 +20,30 @@ const esc = (s) =>
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// The fenced language as the card should say it. `rs` and `rust` are one thing to
+// a reader, and a fence with no language is still a code block — without this a
+// card said `rs`, `Rust` or `code` depending on who wrote the fence.
+const LANG = {
+  js: "js", javascript: "js", mjs: "js", cjs: "js", jsx: "jsx",
+  ts: "ts", typescript: "ts", tsx: "tsx",
+  rs: "rust", rust: "rust", go: "go", golang: "go",
+  py: "python", python: "python", rb: "ruby", ruby: "ruby",
+  sh: "shell", bash: "shell", zsh: "shell", ps1: "shell", powershell: "shell", console: "shell",
+  json: "json", jsonc: "json", json5: "json",
+  yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", env: "env",
+  xml: "xml", html: "html", svg: "svg", css: "css", scss: "css", less: "css",
+  sql: "sql", md: "markdown", markdown: "markdown",
+  c: "c", h: "c", cpp: "cpp", "c++": "cpp", hpp: "cpp", cc: "cpp",
+  cs: "c#", csharp: "c#", java: "java", kt: "kotlin", kotlin: "kotlin",
+  swift: "swift", php: "php", lua: "lua", dart: "dart", vue: "vue", svelte: "svelte",
+  diff: "diff", patch: "diff", text: "text", plaintext: "text",
+};
+
+const langLabel = (raw) => {
+  const tag = String(raw || "").trim().toLowerCase();
+  return LANG[tag] || tag || "code";
+};
+
 // The host of a url, for a destination card. A relative path has none, and a
 // string that does not parse is left alone rather than guessed at.
 function hostOf(href) {
@@ -37,7 +61,7 @@ marked.use({
     code(token) {
       const { text, lang } = typeof token === "string" ? { text: token } : token;
       const tag = (lang || "").split(/\s+/)[0];
-      return `<div class="code"><div class="bar"><span>${esc(tag || "code")}</span><button class="code-copy" type="button">copy</button></div><pre><code>${esc(text ?? "")}</code></pre></div>`;
+      return `<div class="code"><div class="bar"><span>${esc(langLabel(tag))}</span><button class="code-copy" type="button">copy</button></div><pre><code>${esc(text ?? "")}</code></pre></div>`;
     },
 
     // A picture arrives as a frame you can click, with its own words under it —
@@ -98,6 +122,22 @@ export function render(text) {
     // make wider than the column, so it needs its own scroller, and a tag this
     // module emits itself is the only `<table>` left in the string by then.
     return DOMPurify.sanitize(marked.parse(text ?? "", { async: false }), CLEAN)
+      .replace(/<table>/g, '<div class="table-wrap"><table>')
+      .replace(/<\/table>/g, "</table></div>");
+  } catch {
+    return `<pre>${esc(text ?? "")}</pre>`;
+  }
+}
+
+// The same sanitiser and the same table wrap, with the parser left out. Some
+// models answer in HTML — Gemini and several OpenRouter endpoints write a
+// document rather than markdown — and for those, parsing is what mangles the
+// reply: a `<div>` on one line becomes paragraph text around a block. The
+// setting chooses which of the two a reply is put through; both are sanitised
+// with the same list, so the choice can never widen what the page will run.
+export function renderRaw(text) {
+  try {
+    return DOMPurify.sanitize(String(text ?? ""), CLEAN)
       .replace(/<table>/g, '<div class="table-wrap"><table>')
       .replace(/<\/table>/g, "</table></div>");
   } catch {

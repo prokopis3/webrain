@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "check": "node check-step-titles.mjs && node check-stream-split.mjs && node check-next-steps.mjs && node check-duration.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",
