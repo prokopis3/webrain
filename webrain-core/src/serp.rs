@@ -14,7 +14,9 @@
 // navigate + get_html. `auto` fetches duckduckgo+bing concurrently (no browser)
 // and merges; google/brave join the merge when a browser is attached. Optional keyed
 // providers fill deep requests: `BRAVE_API_KEY` (Brave's own API, 20/page, no
-// browser) then `SERPAPI_API_KEY` (aggregator, num<=100) as the last resort.
+// browser) and `SERPAPI_API_KEY` (aggregator — serves google, bing, duckduckgo,
+// yahoo, baidu and yandex, each under its own query parameter; see
+// `serpapi_shape`).
 // Every result is relevance-filtered against the query (unrelated junk pages
 // never enter the reply — engines on flagged/GeoIP'd IPs sometimes serve garbage).
 //
@@ -239,18 +241,22 @@ fn engine_url(
             // FORM=PERE`) from this client also returns page 1; after priming
             // bing's own cookies (`MUID`, `_EDGE_S`, `SRCHHPGUSR`…) page 2 parses
             // to ZERO. So bing's pagination is JS/session-gated per client and 10
-            // is the HTTP ceiling — page 0 uses the RSS form (flat 10, immune to
-            // layout churn) and the `first=` branch stays only so a future bing
-            // that honours it costs nothing to pick up. The pager's two-dry-page
-            // guard stops after the duplicate page.
+            // is the HTTP ceiling. The pager's two-dry-page guard ends the loop
+            // after the duplicate page; the `first=` branch stays only so a
+            // future bing that honours it costs nothing to pick up.
             //
-            // `mkt`/`cc` are deliberately absent: on the RSS form either one
-            // empties the feed (10 items → 0). Bing re-adds them by redirect.
+            // Every offset is HTML — `format=rss` is NOT used. The RSS feed is a
+            // second, differently-shaped document (XML `<item>`, its own parser,
+            // its own entity decoding) that also refuses `count`/`first` and, with
+            // a market/country pinned, drops to zero items. One shape for all
+            // pages means one parser and one set of failure modes to reason about.
+            //
+            // `mkt`/`cc` are deliberately absent: they narrow the result set to a
+            // market bing then fills by redirect, and a pinned market is a bot
+            // signal for a client with no locale of its own.
             p.append_pair("adlt", if safe { "strict" } else { "off" });
             p.append_pair("setlang", lang);
-            if offset == 0 {
-                p.append_pair("format", "rss");
-            } else {
+            if offset > 0 {
                 // `first` is 1-based: offset 10 → first=11 → results 11-20.
                 p.append_pair("first", &(offset + 1).to_string());
             }
@@ -403,51 +409,6 @@ fn parse_duckduckgo(html: &str, limit: usize) -> Vec<SerpResult> {
             url,
             snippet,
         });
-    }
-    out
-}
-
-/// Text of the first `<tag>…</tag>` in `s`, entity-decoded.
-fn tag_text(s: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = s.find(&open)? + open.len();
-    let end = s[start..].find(&close)? + start;
-    Some(xml_unescape(&s[start..end]))
-}
-
-/// Decode the five predefined XML entities. `&amp;` goes last so `&amp;lt;`
-/// decodes to `&lt;` rather than being eaten twice.
-fn xml_unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
-
-/// Parse bing's RSS SERP — the only form it serves without a JS engine.
-/// One page of 10 by design (see `engine_url`): `count`/`first` are ignored.
-fn parse_bing_rss(xml: &str, limit: usize) -> Vec<SerpResult> {
-    let mut out: Vec<SerpResult> = Vec::new();
-    for block in xml.split("<item>").skip(1) {
-        let (Some(title), Some(url)) = (tag_text(block, "title"), tag_text(block, "link")) else {
-            continue;
-        };
-        if url.is_empty() {
-            continue;
-        }
-        let snippet = tag_text(block, "description").unwrap_or_default();
-        out.push(SerpResult {
-            position: out.len() + 1,
-            title: strip_tags(&title),
-            url: url.clone(),
-            domain: domain(&url),
-            snippet: strip_tags(&snippet),
-        });
-        if out.len() >= limit {
-            break;
-        }
     }
     out
 }
@@ -1211,13 +1172,9 @@ async fn http_search_page(
                         "{engine} served a challenge page instead of results: {kind}"
                     ));
                 }
-                // Page 0 for bing asks for RSS (see engine_url); everything else —
-                // including deeper bing offsets — is an HTML page.
-                let parsed = if url.contains("format=rss") {
-                    parse_bing_rss(&body, opts.limit)
-                } else {
-                    parse_results(engine, &body, opts.limit)
-                };
+                // One document shape per engine: bing answers every offset as
+                // HTML (`li.b_algo`), so `parse_results` is the only path.
+                let parsed = parse_results(engine, &body, opts.limit);
                 // A 2xx body that parses to ZERO is usually a flaky empty /
                 // JS-shell page an engine serves under rate-limit pressure
                 // (bing intermittently returns one for an otherwise-fine
@@ -1570,45 +1527,159 @@ async fn wait_for_results<B: BrowserBackend>(backend: &B, engine: &str) -> anyho
     Ok(())
 }
 
-/// serpapi.com as a paid Google provider — the standard `SERPAPI_API_KEY` env
-/// var gates it (unset → empty with no network, so the normal fallback chain
-/// is untouched). Returns typed organic results; 4xx/quota/parse failures also
-/// surface as empty so a dead or quota-exhausted key degrades to fallback.
-async fn serpapi_google(opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
+/// Order `auto` asks the paid provider while its reply is still short: google
+/// first, because its `num` reaches 100 in one call and usually ends the loop,
+/// then breadth. Every entry must be a `serpapi_params` engine.
+const SERPAPI_AUTO_FILL: [&str; 6] = ["google", "bing", "duckduckgo", "baidu", "yandex", "yahoo"];
+
+/// serpapi's per-engine parameter set, taken from the vendor's own docs
+/// (fetched 2026-11-06) and each one exercised live.
+///
+/// The query parameter is **not** `q` everywhere — yahoo wants `p` (`q` answers
+/// `400 Missing query p parameter`, and its `pz` size parameter is
+/// discontinued) and yandex wants `text`. Neither is localization: google takes
+/// `hl`/`gl`, bing `cc`/`mkt`, duckduckgo `kl`, yahoo `vc`/`vl`, yandex `lang`.
+/// Sending google's `hl`/`gl` to all six was silently ignored by the others, so
+/// `--region` did nothing outside google.
+///
+/// Size parameters exist only where the engine has one: google `num` (≤100),
+/// duckduckgo `m` (≤50), baidu `rn` (10..50, desktop), yandex `groups_on_page`;
+/// bing and yahoo have none. Offsets: google/duckduckgo `start` and baidu `pn`
+/// are 0-based, yandex `p` is a 0-based **page number**, bing `first` and yahoo
+/// `b` are 1-based.
+///
+/// `brave` is absent on purpose: serpapi has no brave engine (`BRAVE_API_KEY`
+/// covers it), and `auto` is a merge, not an engine.
+fn serpapi_params(engine: &str, opts: &SerpOpts) -> Option<Vec<(&'static str, String)>> {
+    let region = opts.region.as_deref().unwrap_or("us-en");
+    let (cc, lang) = region.split_once('-').unwrap_or(("us", "en"));
+    let limit = opts.limit.clamp(1, 100);
+    let off = opts.page * limit;
+    let mut p: Vec<(&'static str, String)> = Vec::new();
+    match engine {
+        "google" => {
+            p.push(("q", opts.query.clone()));
+            p.push(("num", limit.to_string()));
+            p.push(("start", off.to_string()));
+            p.push(("hl", lang.to_string()));
+            p.push(("gl", cc.to_string()));
+            p.push(("safe", if opts.safe { "active" } else { "off" }.to_string()));
+        }
+        "bing" => {
+            p.push(("q", opts.query.clone()));
+            p.push(("first", (off + 1).to_string()));
+            p.push(("cc", cc.to_string()));
+            p.push(("mkt", format!("{lang}-{}", cc.to_uppercase())));
+            // Omitting `safeSearch` keeps Bing's own default (Moderate).
+            if opts.safe {
+                p.push(("safeSearch", "Strict".to_string()));
+            }
+        }
+        "duckduckgo" => {
+            p.push(("q", opts.query.clone()));
+            p.push(("m", limit.min(50).to_string()));
+            p.push(("start", off.to_string()));
+            p.push(("kl", region.to_string()));
+            // 1 = strict, -1 = moderate, -2 = off.
+            p.push(("safe", if opts.safe { "1" } else { "-2" }.to_string()));
+        }
+        "yahoo" => {
+            p.push(("p", opts.query.clone()));
+            p.push(("b", (off + 1).to_string()));
+            p.push(("vc", cc.to_string()));
+            p.push(("vl", format!("lang_{lang}")));
+            // r = strict, i = moderate, p = off.
+            p.push(("vm", if opts.safe { "r" } else { "p" }.to_string()));
+        }
+        "baidu" => {
+            p.push(("q", opts.query.clone()));
+            // `rn` only works on desktop/tablet (the default device).
+            p.push(("rn", limit.clamp(10, 50).to_string()));
+            p.push(("pn", off.to_string()));
+        }
+        "yandex" => {
+            p.push(("text", opts.query.clone()));
+            p.push(("p", opts.page.to_string()));
+            p.push(("lang", lang.to_string()));
+            // family_mode: 0 = off, 1 = moderate, 2 = strict.
+            p.push(("family_mode", if opts.safe { "2" } else { "0" }.to_string()));
+        }
+        _ => return None,
+    }
+    Some(p)
+}
+
+/// Is serpapi usable for this engine and request? An unset key is false with no
+/// network, so an unkeyed install behaves exactly as it did before.
+fn serpapi_ready(engine: &str, opts: &SerpOpts) -> bool {
+    serpapi_params(engine, opts).is_some()
+        && std::env::var("SERPAPI_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false)
+}
+
+/// serpapi.com as a paid provider for every engine it serves — the standard
+/// `SERPAPI_API_KEY` env var gates it (unset → empty with no network, so the
+/// normal fallback chain is untouched).
+///
+/// A refusal is an `Err` carrying the vendor's own message ("Invalid API key…",
+/// "run out of searches") rather than an empty list: a truncated key used to be
+/// indistinguishable from "this engine has no results", which is exactly the
+/// bug that made a keyed search look broken. Callers that only want the rows
+/// treat `Err` the same as empty; the ones that report `skipped` say why.
+async fn serpapi_search(engine: &str, opts: &SerpOpts) -> anyhow::Result<Vec<SerpResult>> {
     let key = match std::env::var("SERPAPI_API_KEY") {
         Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => return Ok(Vec::new()),
     };
-    let region = opts.region.as_deref().unwrap_or("us-en");
-    let (cc, lang) = region.split_once('-').unwrap_or(("us", "en"));
+    let Some(params) = serpapi_params(engine, opts) else {
+        return Ok(Vec::new());
+    };
     let mut u = Url::parse("https://serpapi.com/search.json")?;
     {
         let mut p = u.query_pairs_mut();
-        p.append_pair("engine", "google");
-        p.append_pair("q", &opts.query);
-        p.append_pair("num", &opts.limit.clamp(1, 100).to_string());
-        // serpapi honors `start` up to `num` — page the results like the other
-        // engines (was silently ignored, returning page-0 dupes on --page N).
-        p.append_pair("start", &(opts.page * opts.limit.clamp(1, 100)).to_string());
-        p.append_pair("hl", lang);
-        p.append_pair("gl", cc);
-        p.append_pair("safe", if opts.safe { "active" } else { "off" });
+        p.append_pair("engine", engine);
+        for (k, v) in &params {
+            p.append_pair(k, v);
+        }
         p.append_pair("api_key", &key);
     }
     // ureq is blocking — off the executor (this fn is called from the async
-    // serp path, incl. the post-browser fallback).
+    // serp path, incl. the post-browser fallback). `allow_error` keeps the body
+    // of a 401 so the vendor's own message reaches the caller.
     let url_s = u.as_str().to_string();
     let proxy = opts.proxy.clone();
     let fetched = tokio::task::spawn_blocking(move || {
-        crate::engines::serp_http_get(&url_s, proxy.as_deref())
+        crate::engines::serp_http_get_allow_error(&url_s, proxy.as_deref())
     })
     .await
     .unwrap_or_else(|e| Err(anyhow::anyhow!("serpapi task failed: {e}")))?;
     let (status, body) = fetched;
+    // serpapi reports a refused key / exhausted quota as 401 with
+    // `{"error": "..."}`; some failures come back as 200 + `error`.
+    let provider_error = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+    if let Some(msg) = provider_error {
+        anyhow::bail!("HTTP {status}: {msg}");
+    }
     if !(200..300).contains(&status) {
-        return Ok(Vec::new());
+        anyhow::bail!("HTTP {status}: {}", body.trim().chars().take(160).collect::<String>());
     }
     Ok(parse_serpapi_json(&body, opts.limit))
+}
+
+/// Does this failure mean the key/account is the problem, so asking the next
+/// engine would fail identically? Used to stop `auto`'s fill walk after one
+/// refusal instead of spending six requests to learn the same thing.
+fn serpapi_fatal(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("http 401")
+        || m.contains("http 403")
+        || m.contains("http 429")
+        || m.contains("invalid api key")
+        || m.contains("run out of searches")
+        || m.contains("out of searches")
 }
 
 /// Brave Search API key (optional). Unset → empty with no network, so an unkeyed
@@ -1831,6 +1902,57 @@ fn parse_brave_api_json(body: &str, limit: usize) -> Vec<SerpResult> {
     out
 }
 
+/// Recover the destination of a serpapi organic row.
+///
+/// Google sometimes serves encrypted click-tracking links —
+/// `https://www.google.com/goto?url=CAES…` — and the token is genuinely opaque:
+/// base64-decoding one yields 114 bytes with no URL anywhere in them, and
+/// serpapi returns the same token nested in `redirect_link`, so the provider
+/// cannot resolve it either. Measured 2026-11-06: **7 of 9** rows on a normal
+/// query arrived that way, so a parser that takes `link` verbatim reports
+/// `google.com` as the domain of almost every result and hands the caller a
+/// dead end that looks like a URL.
+///
+/// What is trustworthy is `displayed_link`, the breadcrumb Google printed
+/// (`https://tokio.rs › tokio › glossary`). Its first token is the real site, so
+/// a redirect row is reported at that **origin** — right site, exact path not
+/// recoverable. A redirect row whose displayed link has no host (Google's
+/// "1.8K+ views" / "20+ comments" widgets) has no destination at all and is
+/// dropped rather than dressed up as a result.
+fn serpapi_destination(link: &str, displayed: &str) -> Option<String> {
+    let redirect = link.contains("google.com/goto?") || link.contains("google.com/url?");
+    if !redirect {
+        return (!link.is_empty()).then(|| link.to_string());
+    }
+    let site = displayed.split_whitespace().next()?;
+    let site = site.trim_end_matches('/');
+    let with_scheme = if site.contains("://") {
+        site.to_string()
+    } else {
+        format!("https://{site}")
+    };
+    let u = Url::parse(&with_scheme).ok()?;
+    let host = u.host_str()?;
+    // A real hostname: dot-separated, made only of hostname characters, and
+    // ending in a **letters** TLD. That last rule is what keeps the impostors
+    // out — Google's breadcrumb slot also carries view counts ("1.8K+ views"),
+    // comment counts ("20+ comments") and version strings ("0.0.0.4"), and
+    // `0.0.0.4` parses as a perfectly valid URL host.
+    let tld = host.rsplit('.').next().unwrap_or("");
+    if !host.contains('.')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        || tld.len() < 2
+        || !tld.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(format!("{}://{host}", u.scheme()))
+}
+
 /// Parse serpapi `/search.json` organic results into typed results. Pure —
 /// unit-tested below. Error / missing organic_results yield empty (caller
 /// falls back). serpapi honors `num` up to 100, so `limit` here is the real
@@ -1851,17 +1973,23 @@ fn parse_serpapi_json(body: &str, limit: usize) -> Vec<SerpResult> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let url = r
-                .get("link")
+            let raw_link = r.get("link").and_then(|x| x.as_str()).unwrap_or("");
+            let displayed = r
+                .get("displayed_link")
                 .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
+                .unwrap_or("");
             let snippet = r
                 .get("snippet")
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            if title.is_empty() || url.is_empty() {
+            // An encrypted-google-redirect row is resolved to its site origin,
+            // or dropped when it has no site at all — never reported as
+            // `google.com`, which reads as a real result and is not one.
+            let Some(url) = serpapi_destination(raw_link, displayed) else {
+                continue;
+            };
+            if title.is_empty() {
                 continue;
             }
             out.push(SerpResult {
@@ -1888,22 +2016,21 @@ async fn specific_engine<B: BrowserBackend>(
     opts: &SerpOpts,
     backend: Option<&B>,
 ) -> anyhow::Result<(Vec<SerpResult>, Vec<String>, String)> {
-    // serpapi.com paid Google provider (SERPAPI_API_KEY): the reliable way to
-    // get MORE than the free engines' ~10-per-page cap — serpapi honors `num`
-    // up to 100, so a high limit is best served by serpapi FIRST. For small
-    // limits (or no key) the free browser path stays primary and serpapi is a
-    // fallback. Empty on unset key; errors are swallowed so a dead/quota key
-    // just falls through to the chain below.
-    let serpapi_ready = engine == "google"
-        && std::env::var("SERPAPI_API_KEY")
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false);
-    let serpapi_first = serpapi_ready && opts.limit > 10;
+    // serpapi.com (SERPAPI_API_KEY) is the paid provider for every engine it
+    // serves — google, bing, duckduckgo, yahoo, baidu, yandex — not just google.
+    // A high limit is best served by serpapi FIRST: one HTTP call returns the
+    // engine's whole first page with no browser and no IP risk. A small limit
+    // keeps the engine's own free path primary and serpapi as the fallback.
+    // Empty on an unset key; a refusal (bad key, no quota) is remembered so the
+    // reply can say why instead of looking like "this engine had nothing".
+    let serpapi = serpapi_ready(engine, opts);
+    let serpapi_first = serpapi && opts.limit > 10;
+    let mut serpapi_note: Vec<String> = Vec::new();
     if serpapi_first {
-        if let Ok(rs) = serpapi_google(opts).await {
-            if !rs.is_empty() {
-                return Ok((rs, Vec::new(), "google".to_string()));
-            }
+        match serpapi_search(engine, opts).await {
+            Ok(rs) if !rs.is_empty() => return Ok((rs, Vec::new(), engine.to_string())),
+            Ok(_) => {}
+            Err(err) => serpapi_note.push(format!("{engine} (serpapi: {err})")),
         }
     }
     // Google is JS-gated over plain HTTP (consent/JS shell → zero results), so
@@ -1963,14 +2090,21 @@ async fn specific_engine<B: BrowserBackend>(
     }
     // serpapi as a post-browser fallback (only when it wasn't tried first AND
     // fallback is enabled — an explicit --no-fallback must not silently get
-    // serpapi.com results).
-    if opts.fallback && serpapi_ready && !serpapi_first {
-        if let Ok(rs) = serpapi_google(opts).await {
-            if !rs.is_empty() {
-                return Ok((rs, Vec::new(), "google".to_string()));
-            }
+    // serpapi.com results). Covers whichever engine this branch is for; brave is
+    // excluded by `serpapi` itself, since serpapi has no brave engine.
+    if opts.fallback && serpapi && !serpapi_first {
+        match serpapi_search(engine, opts).await {
+            Ok(rs) if !rs.is_empty() => return Ok((rs, Vec::new(), engine.to_string())),
+            Ok(_) => {}
+            Err(err) => serpapi_note.push(format!("{engine} (serpapi: {err})")),
         }
     }
+    // Attach any provider refusal to whatever the chain ends up reporting, so
+    // "0 results" never hides a rejected key.
+    let with_note = |(rs, mut sk, src): (Vec<SerpResult>, Vec<String>, String)| {
+        sk.splice(0..0, serpapi_note.iter().cloned());
+        (rs, sk, src)
+    };
     // Engines that answer over plain HTTP but are NOT browser-first (yahoo,
     // baidu, yandex) still need a browser for exactly one case: the engine
     // served a WALL instead of results — yandex answers a SmartCaptcha page
@@ -1995,20 +2129,20 @@ async fn specific_engine<B: BrowserBackend>(
             }
         }
         if opts.fallback {
-            return Ok(fallback_chain(engine, opts, backend).await);
+            return Ok(with_note(fallback_chain(engine, opts, backend).await));
         }
         // Nothing could answer. If the engine WALLED, say so — an empty result
         // list here would read as "this engine has nothing for your query".
         return match http {
             Err(err) => Err(err),
-            _ => Ok((Vec::new(), Vec::new(), String::new())),
+            _ => Ok(with_note((Vec::new(), Vec::new(), String::new()))),
         };
     }
     match http_search(engine, opts).await {
         Ok(rs) if !rs.is_empty() => Ok((rs, Vec::new(), engine.to_string())),
-        Ok(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
-        Ok(rs) => Ok((rs, Vec::new(), String::new())),
-        Err(_) if opts.fallback => Ok(fallback_chain(engine, opts, backend).await),
+        Ok(_) if opts.fallback => Ok(with_note(fallback_chain(engine, opts, backend).await)),
+        Ok(rs) => Ok(with_note((rs, Vec::new(), String::new()))),
+        Err(_) if opts.fallback => Ok(with_note(fallback_chain(engine, opts, backend).await)),
         Err(err) => Err(err),
     }
 }
@@ -2033,14 +2167,18 @@ async fn fallback_chain<B: BrowserBackend>(
             Err(_) => skipped.push(e.to_string()),
         }
     }
-    // serpapi.com paid Google provider when the key is set (covers auto +
-    // fallback paths) — before spending a browser render on a walled IP.
-    if exclude == "google" {
-        if let Ok(rs) = serpapi_google(opts).await {
-            if !rs.is_empty() {
+    // serpapi.com paid provider when the key is set (covers auto + fallback
+    // paths) — before spending a browser render on a walled IP. The requested
+    // engine is preferred, because answering a `--engine yandex` request with
+    // google's rows would be a silently different search.
+    if serpapi_ready(exclude, opts) {
+        match serpapi_search(exclude, opts).await {
+            Ok(rs) if !rs.is_empty() => {
                 skipped.retain(|s| s != exclude);
-                return (rs, skipped, "google".to_string());
+                return (rs, skipped, exclude.to_string());
             }
+            Ok(_) => {}
+            Err(err) => skipped.push(format!("{exclude} (serpapi: {err})")),
         }
     }
     if let Some(b) = backend {
@@ -2231,29 +2369,69 @@ pub async fn serp_search<B: BrowserBackend>(
                     });
                 }
             }
-            // Deep fill from the paid provider. The HTTP engines cap at ~10
-            // each (measured 2026-10-10: 11 results for duckduckgo, 10 for bing
-            // at limit=50), so `auto` could not satisfy a deep request however
-            // the pager was written — the only deep-capable provider in this
-            // file was reachable from `engine == "google"` alone, and `auto` is
-            // the default. serpapi needs NO browser (`num` returns up to 100 in
-            // one call), so this top-up is what makes `auto` + a high limit mean
-            // what it says. Mirrors the `serpapi_first` policy of only engaging
-            // for `limit > 10`, so a default small search never touches it; and
-            // `serpapi_google` returns empty with no SERPAPI_API_KEY, so this is
-            // inert on an unkeyed install. Reported as `google` because that is
-            // the Google result set serpapi serves (same label `serpapi_google`
-            // already returns through `specific_engine`).
-            if opts.limit > 10 && merged.len() < opts.limit {
-                if let Ok(rs) = serpapi_google(opts).await {
-                    if !rs.is_empty() {
-                        let count = rs.len();
-                        merged.extend(rs);
-                        per_engine.push(SerpEngineReport {
-                            engine: "google".to_string(),
-                            status: "ok".to_string(),
-                            count,
-                        });
+            // Deep fill from the paid provider. The free engines cap at ~10 each
+            // (measured 2026-10-10: 11 for duckduckgo, 10 for bing at limit=50),
+            // so `auto` could not satisfy a deep request however the pager was
+            // written — and serpapi's GOOGLE set alone is only ~9 rows on a
+            // normal query, so google-only could not either. serpapi serves all
+            // six engines and needs no browser, so the fill walks them in order
+            // and stops the moment the request is satisfied: each call is only
+            // made while the reply is still SHORT, so a request the free path
+            // already filled costs nothing — there is no `limit > 10` gate here
+            // for that reason. A 10-row ask whose free engines all wailed gets
+            // the same paid help a 40-row ask does, which is what `--engine X`
+            // already does. A very deep request on a walled IP can spend up to
+            // six searches — `per_engine` names which ran, and an unkeyed
+            // install never enters the loop.
+            let serpapi_keyed = std::env::var("SERPAPI_API_KEY")
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
+            if serpapi_keyed {
+                for e in SERPAPI_AUTO_FILL {
+                    if merged.len() >= opts.limit {
+                        break;
+                    }
+                    if !serpapi_ready(e, opts) {
+                        continue;
+                    }
+                    // Ask only for what is still missing.
+                    let need = (opts.limit - merged.len()).max(10);
+                    let part = SerpOpts {
+                        limit: need,
+                        ..opts.clone()
+                    };
+                    match serpapi_search(e, &part).await {
+                        Ok(rs) if !rs.is_empty() => {
+                            let count = rs.len();
+                            merged.extend(rs);
+                            per_engine.push(SerpEngineReport {
+                                engine: e.to_string(),
+                                status: "ok".to_string(),
+                                count,
+                            });
+                        }
+                        Ok(_) => {
+                            skipped.push(format!("{e} (serpapi: no results)"));
+                            per_engine.push(SerpEngineReport {
+                                engine: e.to_string(),
+                                status: "skipped".to_string(),
+                                count: 0,
+                            });
+                        }
+                        Err(err) => {
+                            // Say WHY. A refused key used to look exactly like
+                            // "this engine has nothing", and the walk then spent
+                            // six requests to learn the same thing.
+                            skipped.push(format!("{e} (serpapi: {err})"));
+                            per_engine.push(SerpEngineReport {
+                                engine: e.to_string(),
+                                status: "skipped".to_string(),
+                                count: 0,
+                            });
+                            if serpapi_fatal(&err.to_string()) {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -2519,19 +2697,21 @@ mod tests {
         assert_eq!(rs[1].title, "Trannos: albums, songs");
     }
 
-    /// Bing's page 0 uses the RSS form (flat 10 items, immune to layout churn);
-    /// deeper offsets use the HTML form. Measured 2026-10-23: the HTML SERP is
-    /// NOT a JS shell for a Chrome-headered client (126 KB, 10 `b_algo` at
-    /// `first=1|11|21`) — but `first` is ignored, the same 10 titles come back
-    /// for every offset, even with session cookies. So paging bing over HTTP
-    /// yields exactly 10 and the pager's two-dry-page guard ends the loop; the
-    /// HTML branch still matters because it is the only shape that can page if
-    /// bing ever honours `first` again.
+    /// Bing asks for its HTML SERP at EVERY offset — never `format=rss`.
+    /// The RSS feed is a second document shape (XML `<item>`, its own parser),
+    /// refuses `count`/`first`, and empties when a market is pinned, so it was
+    /// retired. Measured 2026-10-23: the HTML SERP is NOT a JS shell for a
+    /// Chrome-headered client (126 KB, 10 `b_algo` at `first=1|11|21`) — but
+    /// `first` is ignored, the same 10 titles come back for every offset, even
+    /// with session cookies. So paging bing over HTTP yields exactly 10 and the
+    /// pager's two-dry-page guard ends the loop.
     #[test]
-    fn bing_page0_uses_rss_and_parses_it() {
+    fn bing_never_asks_for_rss_and_pages_by_first() {
         let u = engine_url("bing", "rust proxy", 0, false, None, 10).unwrap();
-        assert!(u.contains("format=rss"), "{u}");
-        // `mkt`/`cc` each empty the RSS feed (10 items -> 0), so no URL may carry them.
+        assert!(!u.contains("format=rss"), "page 0 must be HTML: {u}");
+        // `first` is 1-based, so page 0 omits it — bing honours `count` here.
+        assert!(!u.contains("first="), "{u}");
+        // `mkt`/`cc` narrow the page to a market bing then fills by redirect.
         assert!(!u.contains("mkt="), "{u}");
         assert!(!u.contains("cc="), "{u}");
 
@@ -2540,24 +2720,6 @@ mod tests {
         assert!(u.contains("first=11"), "{u}");
         assert!(!u.contains("mkt="), "{u}");
         assert!(!u.contains("cc="), "{u}");
-
-        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
-            <item><title>Rust &amp; proxies</title><link>https://example.com/a</link>
-              <description>A &lt;b&gt;page&lt;/b&gt; about proxies</description></item>
-            <item><title>Second</title><link>https://other.org/b</link>
-              <description>two</description></item>
-            </channel></rss>"#;
-        let rs = parse_bing_rss(xml, 10);
-        assert_eq!(rs.len(), 2);
-        assert_eq!(rs[0].position, 1);
-        assert_eq!(rs[0].title, "Rust & proxies");
-        assert_eq!(rs[0].url, "https://example.com/a");
-        assert!(rs[0].domain.contains("example.com"), "{}", rs[0].domain);
-        // Entities are decoded, then markup is stripped from the snippet.
-        assert!(rs[0].snippet.contains("page"), "{}", rs[0].snippet);
-        assert!(!rs[0].snippet.contains('<'), "{}", rs[0].snippet);
-        // `limit` truncates.
-        assert_eq!(parse_bing_rss(xml, 1).len(), 1);
     }
 
     #[test]
@@ -2878,6 +3040,138 @@ mod tests {
         assert_eq!(parse_serpapi_json(body, 1).len(), 1, "limit respected");
         assert!(parse_serpapi_json(r#"{"error":"bad"}"#, 10).is_empty());
         assert!(parse_serpapi_json("not json", 10).is_empty());
+    }
+
+    #[test]
+    fn serpapi_encrypted_google_redirects_become_the_site_origin() {
+        // Measured 2026-11-06: 7 of 9 organic rows on a normal query came back
+        // as `google.com/goto?url=CAES…`, an opaque token (base64-decoded: 114
+        // bytes, no URL in them) that serpapi repeats in `redirect_link`. Before
+        // this fix the reply said `domain: google.com` seven times and handed
+        // the caller a dead end that looked like a result.
+        let body = r#"{"organic_results":[
+            {"position":1,"title":"When to use Tokio?",
+             "link":"https://www.google.com/goto?url=CAESbgHEIkXXV-miCJRIV-TQF85Mk",
+             "displayed_link":"https://users.rust-lang.org › when-to-use-tokio",
+             "snippet":"S"},
+            {"position":2,"title":"I/O | Tokio",
+             "link":"https://tokio.rs/tokio/tutorial/io",
+             "displayed_link":"https://tokio.rs › tokio › tutorial",
+             "snippet":"S"},
+            {"position":3,"title":"A gentle introduction to Tokio",
+             "link":"https://www.google.com/goto?url=CAESbgHEIkXXSGH2TUEUybONZXSj",
+             "displayed_link":"1.8K+ views",
+             "snippet":"S"},
+            {"position":4,"title":"no scheme breadcrumb",
+             "link":"https://www.google.com/url?q=CAESjAEBxCJF19seBNAPT",
+             "displayed_link":"docs.rs › tokio",
+             "snippet":"S"},
+            {"position":5,"title":"Tokio select macro syntax : r/rust",
+             "link":"https://www.google.com/goto?url=CAESbgHEIkXXXAX6eWx1WQiVJr3",
+             "displayed_link":"0.0.0.4",
+             "snippet":"S"}
+        ]}"#;
+        let rs = parse_serpapi_json(body, 10);
+        // The view-count widgets and the version-string breadcrumb have no
+        // destination and are dropped, not dressed up as a google.com result.
+        assert_eq!(rs.len(), 3, "destination-less rows are dropped");
+        assert_eq!(rs[0].url, "https://users.rust-lang.org");
+        assert_eq!(rs[0].domain, "users.rust-lang.org");
+        // A direct link is never rewritten.
+        assert_eq!(rs[1].url, "https://tokio.rs/tokio/tutorial/io");
+        // A breadcrumb without a scheme still names the site.
+        assert_eq!(rs[2].url, "https://docs.rs");
+        assert_eq!(rs[2].domain, "docs.rs");
+        assert!(
+            !rs.iter().any(|r| r.domain.contains("google")),
+            "no row may claim google.com"
+        );
+        assert_eq!(rs[2].position, 3, "positions are renumbered after a drop");
+    }
+
+    #[test]
+    fn serpapi_serves_every_engine_with_its_own_query_parameter() {
+        // Every parameter below is from the vendor's own docs (fetched
+        // 2026-11-06) and was exercised live. The query parameter is not `q`
+        // everywhere: yahoo answers `400 Missing query p parameter` and yandex
+        // `400 Missing query text parameter`, so a hardcoded `q` returned
+        // nothing for both — and sending google's `hl`/`gl` everywhere meant
+        // `--region` was silently ignored outside google.
+        let o = |q: &str, limit: usize, page: usize, safe: bool, region: Option<&str>| SerpOpts {
+            query: q.to_string(),
+            engine: "auto".to_string(),
+            limit,
+            page,
+            safe,
+            region: region.map(str::to_string),
+            retries: 0,
+            fallback: true,
+            proxy: None,
+            http_only: false,
+        };
+        let get = |eng: &str, opts: &SerpOpts| -> Vec<(String, String)> {
+            serpapi_params(eng, opts)
+                .unwrap_or_else(|| panic!("{eng} is not a serpapi engine"))
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()
+        };
+        let has = |p: &[(String, String)], k: &str, v: &str| {
+            p.iter().any(|(pk, pv)| pk == k && pv == v)
+        };
+
+        let opts = o("rust tokio", 12, 1, false, Some("us-en"));
+        assert_eq!(serpapi_params("brave", &opts), None, "no brave engine");
+        assert_eq!(serpapi_params("auto", &opts), None, "auto is a merge");
+
+        // google: q/num/start(0-based)/hl/gl/safe
+        let g = get("google", &opts);
+        assert!(has(&g, "q", "rust tokio") && has(&g, "num", "12"));
+        assert!(has(&g, "start", "12") && has(&g, "hl", "en") && has(&g, "gl", "us"));
+        assert!(has(&g, "safe", "off"));
+
+        // duckduckgo: `m` is the size knob, `kl` the region, `start` 0-based.
+        let d = get("duckduckgo", &opts);
+        assert!(has(&d, "q", "rust tokio") && has(&d, "m", "12"));
+        assert!(has(&d, "start", "12") && has(&d, "kl", "us-en"));
+        assert!(!has(&d, "hl", "en"), "google's hl is not a ddg parameter");
+
+        // yahoo: query is `p`, offset `b` is 1-based, no size knob (pz is gone).
+        let y = get("yahoo", &opts);
+        assert!(has(&y, "p", "rust tokio") && has(&y, "b", "13"));
+        assert!(has(&y, "vc", "us") && has(&y, "vl", "lang_en"));
+        assert!(!y.iter().any(|(k, _)| k == "pz" || k == "q"));
+
+        // yandex: query is `text`, `p` is a 0-based PAGE (not an offset).
+        let ya = get("yandex", &opts);
+        assert!(has(&ya, "text", "rust tokio") && has(&ya, "p", "1"));
+        assert!(has(&ya, "lang", "en") && !ya.iter().any(|(k, _)| k == "text" && false));
+
+        // bing: `first` 1-based, market + country, no size knob.
+        let b = get("bing", &opts);
+        assert!(has(&b, "q", "rust tokio") && has(&b, "first", "13"));
+        assert!(has(&b, "cc", "us") && has(&b, "mkt", "en-US"));
+
+        // baidu: `rn` 10..50 clamped, `pn` offset.
+        let ba = get("baidu", &opts);
+        assert!(has(&ba, "q", "rust tokio") && has(&ba, "rn", "12"));
+        assert!(has(&ba, "pn", "12"));
+        let small = get("baidu", &o("x", 3, 0, false, None));
+        assert!(has(&small, "rn", "10"), "rn is clamped to its 10..50 range");
+
+        // `--safe` maps to each engine's own spelling.
+        let safe = o("x", 10, 0, true, None);
+        assert!(has(&get("google", &safe), "safe", "active"));
+        assert!(has(&get("duckduckgo", &safe), "safe", "1"));
+        assert!(has(&get("yahoo", &safe), "vm", "r"));
+        assert!(has(&get("yandex", &safe), "family_mode", "2"));
+        assert!(has(&get("bing", &safe), "safeSearch", "Strict"));
+
+        // Every engine `auto` fills from must be one serpapi actually serves.
+        for e in SERPAPI_AUTO_FILL {
+            assert!(serpapi_params(e, &opts).is_some(), "{e} is not a serpapi engine");
+        }
+        assert_eq!(SERPAPI_AUTO_FILL[0], "google", "deepest single call goes first");
     }
 
     fn mk_result(title: &str, url: &str) -> SerpResult {
