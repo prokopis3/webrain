@@ -176,12 +176,28 @@ fn bearer_allows(expected: Option<&str>, authorization: Option<&str>) -> bool {
 /// box. Only enforced under `WEBRAIN_NO_STATE` — a local user owns the machine.
 const MAX_SHARED_CONCURRENCY: usize = 6;
 
-/// Tab budget for THIS box: two per logical core (the second absorbs network
-/// wait, not render work). Measured on 16 cores — past ~2× cores throughput
-/// stops improving while peak RSS keeps climbing (24 tabs / 100 pages → 4.4 GB).
-/// `WEBRAIN_MAX_TABS` overrides for boxes that must stay small or deliberately
-/// over-subscribe.
-pub(crate) fn tab_budget() -> usize {
+/// Tool calls served and how many came back `status: "error"`, for
+/// `webrain_stats`. Two atomics and no framework: an operator asks "is this
+/// instance healthy", not "graph my latency". Traces and histograms are a
+/// separate, later step.
+pub(crate) static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static CALL_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Calls that a read-only retry rescued after the browser socket died. Without
+/// this the recovery is invisible: the caller cannot tell a clean run from one
+/// that only looked clean because we re-dialled.
+pub(crate) static RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tab budget for THIS box. Memory comes first because the browser is what
+/// costs: ~56 MB per tab measured (PERF_AUDIT.md phase 1), and 32 tabs on a
+/// 32 GB machine reached 1.8 GB while 16 tabs with the same throughput used 1.0
+/// GB. Cores then bound the top (two per logical core absorbs network wait, not
+/// render work), and `WEBRAIN_MAX_TABS` overrides both for boxes that must stay
+/// small or deliberately over-subscribe.
+/// Tab budget for an op that costs `cost_mult` tab-equivalents of memory. A
+/// screenshot / tile / pdf row holds a full-frame bitmap, so the same box buys
+/// fewer of them than text rows. `WEBRAIN_MAX_TABS` still wins: an explicit
+/// number from the operator is a decision, not an estimate.
+pub(crate) fn tab_budget_for(cost_mult: usize) -> usize {
     if let Ok(v) = std::env::var("WEBRAIN_MAX_TABS") {
         if let Ok(n) = v.trim().parse::<usize>() {
             if n > 0 {
@@ -189,15 +205,25 @@ pub(crate) fn tab_budget() -> usize {
             }
         }
     }
-    std::thread::available_parallelism()
+    let by_core = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .saturating_mul(2)
-        .max(1)
+        .max(1);
+    match webrain_core::backends::cdp::memory_tab_budget(cost_mult.max(1) as u64) {
+        0 => by_core,
+        by_mem => by_core.min(by_mem).max(1),
+    }
 }
 
 pub fn clamp_concurrency(n: usize) -> usize {
-    let n = n.max(1).min(tab_budget());
+    clamp_concurrency_for(n, 1)
+}
+
+/// `clamp_concurrency` with the op's per-tab cost applied — the batch arm calls
+/// this so a screenshot batch is bounded by what its bitmaps really cost.
+pub fn clamp_concurrency_for(n: usize, cost_mult: usize) -> usize {
+    let n = n.max(1).min(tab_budget_for(cost_mult));
     if no_state() {
         n.min(MAX_SHARED_CONCURRENCY)
     } else {
@@ -206,6 +232,12 @@ pub fn clamp_concurrency(n: usize) -> usize {
 }
 
 /// Shared JSON-RPC dispatch: stdio and HTTP both route through here.
+/// The span names the tool, so `RUST_LOG=debug` shows which call spent the time
+/// — the latency histogram says WHICH CDP command is slow, this says for whom.
+#[tracing::instrument(
+    skip_all,
+    fields(tool = %msg.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or(""))
+)]
 async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Option<&str>) -> Value {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -285,7 +317,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                         "webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set",
                     );
                 }
-                let out = tools::host_stats();
+                let mut out = tools::host_stats();
+                // Per-command CDP latency: the metric any change to the command
+                // path has to justify itself against. Empty until a browser
+                // command has run.
+                out["cdp_latency"] = webrain_core::backends::cdp::cdp_latency();
                 return json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -1156,33 +1192,15 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             }
 
             if backend.is_none() {
-                let mut res = if let Some(url) = cdp_url {
-                    CdpBackend::connect_with_url(url).await
-                } else {
-                    CdpBackend::connect_default().await
-                };
-                // A call that names its own backends in `cdp_urls` does not need the
-                // shared endpoint: a box running only lightpanda containers has
-                // nothing on the default 9222, and the arm used to die here before
-                // the fan-out ever ran. Fall back to the first listed backend.
-                if res.is_err() {
-                    if let Some(first) = arguments
-                        .get("cdp_urls")
-                        .and_then(|v| v.as_array())
-                        .and_then(|a| a.first())
-                        .and_then(|v| v.as_str())
-                    {
-                        res = CdpBackend::connect_with_url(first).await;
-                    }
-                }
-                match res {
+                match connect_for(cdp_url, &arguments).await {
                     Ok(b) => *backend = Some(b),
                     Err(e) => {
                         return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": format!("Cannot connect to browser: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222.")}});
                     }
                 }
             }
-            let result = tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
+            let mut result =
+                tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
             // Scoped no-stealth: the google serp arm armed set_no_stealth on the
             // shared session backend — clear it now so later browse/batch/scrape
             // calls in this session don't inherit the google-only no-stealth mode.
@@ -1199,15 +1217,37 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // backend at all (a refused dial, an OS-level reset mid-handshake).
             // The rest of the error surface is tool-level and must NOT reset the
             // session.
-            let transport_dead = backend.as_ref().is_some_and(|b| b.is_dead());
-            if transport_dead || is_connection_error(&result) {
+            let dead =
+                backend.as_ref().is_some_and(|b| b.is_dead()) || is_connection_error(&result);
+            if dead {
                 *backend = None;
+                // The socket died between the call and its reply, so a read-only
+                // tool never saw it: reconnect and run it once instead of charging
+                // the caller a whole failed turn. A mutating tool returns as-is —
+                // a click that landed with its reply lost would run TWICE.
+                if retry_after_dead_socket(&tool_name) {
+                    if let Ok(b) = connect_for(cdp_url, &arguments).await {
+                        let retried = tools::call_tool(&b, &tool_name, &arguments).await;
+                        if b.is_dead() || is_connection_error(&retried) {
+                            // Still broken: leave `backend` dropped so the next
+                            // call pays a fresh dial instead of reusing a corpse.
+                        } else {
+                            result = retried;
+                            *backend = Some(b);
+                            RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
             }
             // MCP spec: tools/call result must be {content: [{type:"text",text}], isError}.
             // ponytail: JSON-encode the tool payload into one text block; mark isError
             // when the tool returned status:"error". Without the content array the
             // client JS throws "r.content is not iterable".
             let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error");
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if is_error {
+                CALL_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             json!({
                 "jsonrpc": "2.0",
@@ -1300,6 +1340,61 @@ fn inline_state(arguments: &Value) -> Option<Value> {
 
 fn vault_cdp_target(arguments: &Value, port: u16) -> String {
     caller_cdp(arguments).unwrap_or_else(|| format!("http://127.0.0.1:{port}"))
+}
+
+/// Connect for a call: the session's endpoint, else the default, else the first
+/// listed `cdp_urls`. That last fallback matters — a box running only
+/// lightpanda containers has nothing on 9222, and the caller's own list is the
+/// only endpoint it named.
+async fn connect_for(cdp_url: Option<&str>, arguments: &Value) -> anyhow::Result<CdpBackend> {
+    let mut res = if let Some(url) = cdp_url {
+        CdpBackend::connect_with_url(url).await
+    } else {
+        CdpBackend::connect_default().await
+    };
+    if res.is_err() {
+        if let Some(first) = arguments
+            .get("cdp_urls")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+        {
+            res = CdpBackend::connect_with_url(first).await;
+        }
+    }
+    res
+}
+
+/// Tools whose reply cannot be a side effect — safe to run a second time after a
+/// transport death, because the lost attempt never changed anything the retry
+/// would re-read. Mutating tools are deliberately absent: navigate is here,
+/// click/type/interact/upload/download are not.
+fn retry_after_dead_socket(tool: &str) -> bool {
+    matches!(
+        tool,
+        "webrain_navigate"
+            | "webrain_fetch_http"
+            | "webrain_extract"
+            | "webrain_extract_json"
+            | "webrain_extract_regex"
+            | "webrain_table"
+            | "webrain_observe"
+            | "webrain_snapshot"
+            | "webrain_markdown"
+            | "webrain_clean"
+            | "webrain_fit"
+            | "webrain_flatten"
+            | "webrain_autoschema"
+            | "webrain_get_html"
+            | "webrain_get_images"
+            | "webrain_get_jsonld"
+            | "webrain_console"
+            | "webrain_screenshot"
+            | "webrain_a11y"
+            | "webrain_semantic_tree"
+            | "webrain_page_info"
+            | "webrain_stats"
+    )
 }
 
 /// True when a tool result is a dead-socket error (browser killed/restarted),
@@ -1986,6 +2081,54 @@ mod tests {
             {"status":"error","message":"no element at index 3"}
         )));
         assert!(!is_connection_error(&json!({"status":"ok","result":1})));
+    }
+
+    #[test]
+    fn retry_never_repeats_a_mutation() {
+        // The retry exists for a socket that died between call and reply. A
+        // click that LANDED with its reply lost must not run twice, so anything
+        // that writes is out — the two lists below are disjoint on purpose.
+        for read in [
+            "webrain_navigate",
+            "webrain_extract",
+            "webrain_observe",
+            "webrain_fetch_http",
+            "webrain_screenshot",
+        ] {
+            assert!(retry_after_dead_socket(read), "{read} should be retried");
+        }
+        for write in [
+            "webrain_click",
+            "webrain_interact",
+            "webrain_download",
+            "webrain_setcookies",
+            "webrain_upload",
+            "webrain_eval",
+        ] {
+            assert!(
+                !retry_after_dead_socket(write),
+                "{write} must not be retried — it can have a side effect"
+            );
+        }
+    }
+
+    #[test]
+    fn every_advertised_tool_is_in_the_reference_page() {
+        // `list_tools()` is what an MCP client sees; docs/reference/tools.mdx is
+        // the only place a human reads what a tool does. A tool added to one and
+        // not the other is invisible — this fails instead of drifting.
+        const DOC: &str = include_str!("../../docs/reference/tools.mdx");
+        let advertised = tools::list_tools();
+        let missing: Vec<String> = advertised
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .filter(|n| !DOC.contains(n))
+            .map(String::from)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "advertised but absent from docs/reference/tools.mdx: {missing:?}"
+        );
     }
 
     // ── vault CDP target ─────────────────────────────────────────────────────
