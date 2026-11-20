@@ -2219,10 +2219,17 @@ where
     r
 }
 
+/// How often a running batch hit the memory pressure valve. Monotonic, never
+/// reset: the caller reports the DELTA across its own call, so two batches on
+/// two backends can trip in the same call without one clearing the other's flag.
+pub static THROTTLE_EVENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Shared batch skeleton. Multi-target browsers (obscura/Chrome) load N tabs IN
-/// PARALLEL (crawl4ai MemoryAdaptiveDispatcher / arun_many): each URL gets its
-/// own tab driven via per-session CDP routing; a tokio semaphore bounds
-/// in-flight tabs. lightpanda serve is SINGLE-target by design — its CDP holds
+/// PARALLEL (crawl4ai MemoryAdaptiveDispatcher / arun_many): a fixed pool of
+/// `concurrency` workers each holds ONE tab and drains a shared queue, so live
+/// documents stay at N whatever the URL count; `open_tab` is what actually
+/// refuses past the memory-derived tab budget. lightpanda serve is SINGLE-target
+/// by design — its CDP holds
 /// one browser context and `Target.createTarget` errors `TargetAlreadyLoaded`
 /// once one exists (src/cdp/domains/target.zig) — so batch probes tab
 /// capability and falls back to running every URL SEQUENTIALLY on one reused
@@ -2247,6 +2254,24 @@ where
     if urls.is_empty() {
         return Vec::new();
     }
+    // Admission: below one tab's cost the batch would start and die halfway,
+    // and the caller could not tell OOM from a broken site. Refuse once with a
+    // reason. `WEBRAIN_MAX_TABS` wins over this probe — a caller who pinned a
+    // number already decided what the box can take.
+    if std::env::var("WEBRAIN_MAX_TABS").is_err() {
+        let avail = crate::backends::cdp::memory_available_mb();
+        let total = crate::backends::cdp::memory_total_mb();
+        if avail > 0 && total > 0 && avail < crate::backends::cdp::PER_TAB_MB {
+            return batch_all_err(
+                urls,
+                &format!(
+                    "refusing to start: {avail} MB free of {total} MB, one tab needs \
+                     ~{} MB — close a browser or raise WEBRAIN_MAX_TABS",
+                    crate::backends::cdp::PER_TAB_MB
+                ),
+            );
+        }
+    }
     // Capability probe (raw CDP — sees the real single-target behavior even
     // when a target already exists): lightpanda errors TargetAlreadyLoaded on
     // any 2nd createTarget → sequential reuse; obscura/Chrome → parallel.
@@ -2270,6 +2295,12 @@ where
     // required.
     let workers = concurrency.max(1).min(urls.len());
     let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // One-way pressure valve. Halving is permanent for this batch: growing back
+    // mid-run oscillates harder (open a tab → free drops → close → open) than
+    // the rows it would save, and the next batch starts from a fresh reading.
+    let pressure = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rows = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let keep = workers.div_ceil(2);
     let done: std::sync::Arc<tokio::sync::Mutex<Vec<(usize, BatchResult)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(urls.len())));
     let mut handles = Vec::with_capacity(workers);
@@ -2282,7 +2313,7 @@ where
     let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // One shared copy of the URL list — per-worker `to_vec()` was O(workers × urls).
     let urls_arc = std::sync::Arc::new(urls.to_vec());
-    for _ in 0..workers {
+    for widx in 0..workers {
         let b = browser.clone();
         let next = next.clone();
         let done = done.clone();
@@ -2291,6 +2322,8 @@ where
         let per_url = per_url.clone();
         let no_tab = no_tab.clone();
         let opened = opened.clone();
+        let pressure = pressure.clone();
+        let rows = rows.clone();
         handles.push(tokio::spawn(async move {
             // No tab → this worker retires; `next` was never touched, so the
             // remaining workers still claim every URL.
@@ -2303,6 +2336,11 @@ where
             };
             opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             loop {
+                // Retired by the pressure valve: break BEFORE claiming a URL so
+                // the survivors' queue is exactly what it would have been.
+                if widx >= keep && pressure.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if i >= urls.len() {
                     break;
@@ -2332,6 +2370,23 @@ where
                     }
                 }
                 done.lock().await.push((i, r));
+                // Sample once per `workers` rows, not per row: the probe is a
+                // syscall round trip and the threshold moves far slower than the
+                // queue. Never re-sample after a trip — see `keep`.
+                if rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % workers == 0
+                    && !pressure.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let avail = crate::backends::cdp::memory_available_mb();
+                    let total = crate::backends::cdp::memory_total_mb();
+                    if crate::backends::cdp::under_pressure(avail, total) {
+                        pressure.store(true, std::sync::atomic::Ordering::Relaxed);
+                        THROTTLE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            "free memory {avail} of {total} MB is under 12% — \
+                             halving batch workers to {keep}"
+                        );
+                    }
+                }
             }
             let _ = b.close_tab(&id).await;
         }));
@@ -2537,7 +2592,7 @@ pub async fn batch_markdown(
 }
 
 /// Batch extraction: run a CSS/XPath schema over every URL concurrently
-/// (one tab per URL, semaphore-bounded). Zero-LLM, in-page JS.
+/// (a fixed pool of `concurrency` tabs, one per worker). Zero-LLM, in-page JS.
 pub async fn batch_extract(
     browser: &CdpBackend,
     urls: &[String],
@@ -2669,8 +2724,8 @@ pub async fn batch_interact(
 }
 
 /// Batch screenshots: save a full-page PNG per URL into `dir`, concurrently
-/// (one tab per URL, semaphore-bounded). Honors `NavOpts` (network_idle,
-/// disable_resources, wait_selector) like the other batch ops.
+/// (a fixed pool of `concurrency` tabs, one per worker). Honors `NavOpts`
+/// (network_idle, disable_resources, wait_selector) like the other batch ops.
 pub async fn batch_screenshot(
     browser: &CdpBackend,
     urls: &[String],
@@ -2802,6 +2857,23 @@ pub(crate) fn serp_http_get(url: &str, proxy: Option<&str>) -> anyhow::Result<(u
     Ok((status, text))
 }
 
+/// Like `serp_http_get`, but a non-2xx reply comes back as `(status, body)`
+/// instead of an error. serpapi answers a refused key / exhausted quota as
+/// `401 {"error": "..."}` — the body IS the diagnosis, and ureq's default
+/// status-as-error throws it away, leaving a caller with "http status: 401" and
+/// no idea which key was wrong or why. No httpcache: a refused reply must never
+/// be replayed.
+pub(crate) fn serp_http_get_allow_error(
+    url: &str,
+    proxy: Option<&str>,
+) -> anyhow::Result<(u16, String)> {
+    let agent = http_agent(proxy)?;
+    let resp = browser_req(agent.get(url).config().http_status_as_error(false).build()).call()?;
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().read_to_vec()?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// Like `serp_http_get`, plus request headers — keyed SERP APIs authenticate
 /// with a header (Brave: `X-Subscription-Token`), not a query param. No
 /// httpcache: a keyed response must never be replayed for another key.
@@ -2878,6 +2950,26 @@ pub(crate) fn serp_http_post(
     Ok((status, text))
 }
 
+/// JSON-POST variant of `serp_http_post` — CapSolver's API takes a JSON body
+/// and its key must never travel in a query string. Same pooled agent and
+/// Chrome headers, so a proxied solve reuses its connection pool.
+pub(crate) fn serp_http_post_json(
+    url: &str,
+    body: &serde_json::Value,
+    proxy: Option<&str>,
+) -> anyhow::Result<(u16, String)> {
+    let agent = http_agent(proxy)?;
+    let resp = browser_req(
+        agent
+            .post(url)
+            .header("content-type", "application/json"),
+    )
+    .send(body.to_string())?;
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().read_to_vec()?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// Per-proxy agent cache. Building a fresh agent per proxied call threw away
 /// the connection pool, so every proxied request paid a new TCP+TLS handshake
 /// — the exact cost the shared agent above exists to avoid — and rotation
@@ -2931,6 +3023,7 @@ pub fn http_fetch(url: &str) -> anyhow::Result<Value> {
 /// `None` reuses the shared unproxied pool, which is what keeps a caller that
 /// names no proxy byte-identical to the pre-proxy behaviour.
 pub fn http_fetch_proxied(url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {
+    guard_url(url)?;
     http_fetch_capped_proxied(url, 3000, proxy)
 }
 
@@ -3120,7 +3213,7 @@ pub fn http_fetch_autoschema(
     proxy: Option<&str>,
 ) -> anyhow::Result<Value> {
     let (status, content_type, html) = http_get_full(url, proxy)?;
-    let candidates = autoschema_candidates(&html, min_occurrences);
+    let (candidates, diagnosis) = autoschema_report(&html, min_occurrences);
     let sample = candidates
         .first()
         .and_then(|c| c["selector"].as_str())
@@ -3130,9 +3223,74 @@ pub fn http_fetch_autoschema(
         "status": status,
         "content_type": content_type,
         "candidates": candidates,
+        "diagnosis": diagnosis,
         "sample": sample,
         "bytes": html.len(),
     }))
+}
+
+/// `autoschema_candidates` plus the reason it came back empty.
+///
+/// An empty candidate list used to be indistinguishable from a broken tool: the
+/// reply said `[]` and the caller could not tell a page with one card from a
+/// selector miss. The diagnosis costs one extra parse and runs only on that path.
+pub fn autoschema_report(html: &str, min_occurrences: usize) -> (Vec<Value>, Value) {
+    let candidates = autoschema_candidates(html, min_occurrences);
+    if !candidates.is_empty() {
+        return (candidates, json!({"reason": "ok"}));
+    }
+    let sel = scraper::Selector::parse("div[class],li,tr,article,section").ok();
+    let mut containers = 0usize;
+    let mut best = 0usize;
+    if let Some(sel) = sel {
+        let doc = scraper::Html::parse_document(html);
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for el in doc.select(&sel) {
+            *counts
+                .entry(el.value().name().to_lowercase())
+                .or_insert(0) += 1;
+        }
+        containers = counts.values().sum();
+        best = counts.values().copied().max().unwrap_or(0);
+    }
+    let reason = if containers == 0 {
+        "no_candidate_containers"
+    } else if best < min_occurrences {
+        "too_few_repeats"
+    } else {
+        "no_fields"
+    };
+    (
+        candidates,
+        json!({
+            "reason": reason,
+            "min_occurrences": min_occurrences,
+            "best_repeat": best,
+            "containers": containers,
+        }),
+    )
+}
+
+#[cfg(test)]
+mod autoschema_report_tests {
+    use super::autoschema_report;
+
+    #[test]
+    fn an_empty_answer_names_why() {
+        let (cards, diag) = autoschema_report(r#"<div class="card"><h2>One</h2></div>"#, 3);
+        assert!(cards.is_empty());
+        assert_eq!(diag["reason"], "too_few_repeats");
+        assert_eq!(diag["best_repeat"], 1);
+
+        let (none, diag) = autoschema_report("<p>plain</p>", 3);
+        assert!(none.is_empty());
+        assert_eq!(diag["reason"], "no_candidate_containers");
+
+        let repeated = r#"<div class="card">x</div>"#.repeat(3);
+        let (found, diag) = autoschema_report(&repeated, 3);
+        assert!(!found.is_empty());
+        assert_eq!(diag["reason"], "ok");
+    }
 }
 
 #[cfg(test)]
@@ -3452,14 +3610,111 @@ pub fn validate_urls(urls: &[String], proxy: Option<&str>) -> Vec<Value> {
         .collect()
 }
 
+/// yt-dlp flags a caller may pass through. Anything else is refused by name.
+///
+/// A download tool that forwards arbitrary argv is a command runner: yt-dlp's
+/// `--exec` runs a shell command on the downloaded file, so one prompt-injected
+/// page could turn "download this video" into host command execution. These are
+/// the flags the tool's own description promises (cookies, proxy, size, subs).
+const YTDLP_ALLOWED: &[&str] = &[
+    "--cookies",
+    "--proxy",
+    "--max-filesize",
+    "--write-subs",
+    "--write-auto-subs",
+    "--sub-langs",
+    "--no-playlist",
+    "--playlist-items",
+    "--rate-limit",
+    "--retries",
+    "--socket-timeout",
+    "--user-agent",
+];
+
+/// Reject anything outside `YTDLP_ALLOWED`. A bare token (not a flag) is also
+/// refused: URLs come from `urls[]`, and a stray argument would be treated by
+/// yt-dlp as another target or, worse, as a flag in disguise.
+fn check_ytdlp_args(extra: &[String]) -> Result<(), String> {
+    for arg in extra {
+        if !arg.starts_with('-') {
+            continue; // value of the preceding flag
+        }
+        if !YTDLP_ALLOWED.contains(&arg.as_str()) {
+            return Err(format!(
+                "yt-dlp flag {arg} is not allowed; permitted: {}",
+                YTDLP_ALLOWED.join(" ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Scheme and address guard for every outbound target (navigate, fetch, download).
+///
+/// Refuses non-web schemes and link-local / cloud-metadata addresses, which is
+/// what a prompt-injected page would ask for next. Loopback stays allowed on
+/// purpose: this is a local single-user binary whose documented workflows
+/// include a dev server, a self-hosted CDP endpoint and the soak fixture on
+/// 127.0.0.1, so blocking it would break the tool to block an attack the tool
+/// cannot be attacked by (the caller owns the machine).
+///
+/// Shortcut: host literals only. A DNS name that resolves to a link-local
+/// address is not caught here; upgrade to a resolve-then-check if this binary
+/// ever runs on a host with metadata credentials AND is driven by untrusted input.
+pub fn guard_url(url: &str) -> anyhow::Result<()> {
+    let u = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => anyhow::bail!("invalid URL {url}: {e}"),
+    };
+    match u.scheme() {
+        "http" | "https" => {}
+        // No network flow: the caller's own disk or an inline document.
+        "file" | "data" | "about" => return Ok(()),
+        other => anyhow::bail!("refusing {other}: URLs must be http, https, file or data"),
+    }
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.starts_with("169.254.")
+        || host == "[fe80::1]"
+        || host.starts_with("[fe80:")
+        || host.starts_with("fe80:")
+        || host.ends_with("metadata.google.internal")
+    {
+        anyhow::bail!("refusing {host}: link-local / metadata address");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod url_guard_tests {
+    use super::guard_url;
+
+    #[test]
+    fn refuses_metadata_and_odd_schemes_but_allows_local_targets() {
+        assert!(guard_url("https://example.com/a").is_ok());
+        assert!(guard_url("file:///tmp/fixture.html").is_ok());
+        assert!(guard_url("data:text/html,<h1>x</h1>").is_ok());
+        assert!(
+            guard_url("http://127.0.0.1:9222/json").is_ok(),
+            "loopback is a documented local target"
+        );
+        assert!(guard_url("http://169.254.169.254/latest/meta-data").is_err());
+        assert!(
+            guard_url("http://metadata.google.internal/computeMetadata").is_err(),
+            "GCP metadata hostname"
+        );
+        assert!(guard_url("javascript:alert(1)").is_err());
+        assert!(guard_url("ftp://example.com/x").is_err());
+    }
+}
+
 /// Download URLs to `dir` over plain HTTP (no browser). For session-bound files
 /// use the browser instead (open a tab, navigate, click).
 /// ponytail: ureq stream-to-file via into_reader() (unlimited — read_to_vec caps
 /// at 10 MiB, which silently failed on antenna's multi-hundred-MB mp4s);
 /// cookie plumbing still pending — add when downloads need auth.
 /// yt-dlp download (video/audio/HLS/playlists/age-gated media). Shells out to
-/// the installed yt-dlp binary — no new Rust dep; `extra` passthrough exposes
-/// every yt-dlp flag (--write-subs, --embed-thumbnail, --cookies, --proxy...).
+/// the installed yt-dlp binary — no new Rust dep; `extra` is allowlisted to the
+/// flags the tool advertises (see `YTDLP_ALLOWED`).
 /// ponytail: ONE implementation shared by the MCP no-browser path (lib.rs) and
 /// the tools.rs dispatch, so the advertised `engine: "ytdlp"` actually works
 /// instead of being silently ignored by the HTTP short-circuit.
@@ -3487,6 +3742,9 @@ pub fn download_ytdlp(
     // Ours first, so a caller's explicit `args: ["--proxy", ...]` still wins.
     if let Some(p) = proxy.filter(|p| !p.is_empty()) {
         cmd.arg("--proxy").arg(p);
+    }
+    if let Err(msg) = check_ytdlp_args(extra) {
+        return json!({"status": "error", "message": msg});
     }
     for a in extra {
         cmd.arg(a);

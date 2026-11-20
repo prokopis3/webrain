@@ -411,6 +411,158 @@ fn resolve_ws(http_url: &str) -> anyhow::Result<String> {
 /// In-flight command replies, keyed by CDP id. Filled by the socket reader.
 type Pending = Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>;
 
+/// Memory the OS says is free right now, in MB. 0 when the probe fails, which
+/// callers treat as "no memory information" and fall back to the core count.
+pub fn memory_available_mb() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory() / (1024 * 1024)
+}
+
+/// Total physical memory in MB, 0 when unknown. Only `webrain_stats` needs the
+/// pair, and it needs it on Windows and macOS too, where there is no /proc.
+pub fn memory_total_mb() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.total_memory() / (1024 * 1024)
+}
+
+/// Tabs a budget allows for a given amount of free memory. Pure, so the
+/// arithmetic is tested without a browser or an OS probe.
+///
+/// 0 means "this machine cannot afford a tab right now", which callers read as
+/// either "fall back to the core count" (when memory is unknown) or "refuse".
+pub fn tabs_for(available_mb: u64, cost_mult: u64) -> usize {
+    if available_mb == 0 {
+        return 0;
+    }
+    let per_tab = PER_TAB_MB.saturating_mul(cost_mult.max(1));
+    (available_mb / 2 / per_tab) as usize
+}
+
+/// Measured cost of one live tab: PERF_AUDIT.md phase 1 shows +55 to +60 MB per
+/// added tab. Exposed because the batch admission check compares free memory to
+/// it directly.
+pub const PER_TAB_MB: u64 = 56;
+
+/// Under 12% free is where a running batch halves its workers instead of letting
+/// the OS kill a renderer. Pure, so the threshold is testable without a box
+/// actually running out: either total or available unknown (0) never trips —
+/// a failed probe must not throttle a machine that is fine.
+pub fn under_pressure(available_mb: u64, total_mb: u64) -> bool {
+    total_mb > 0 && available_mb > 0 && available_mb * 100 / total_mb < 12
+}
+
+/// Tabs a batch may open on THIS machine, from measured cost rather than cores.
+///
+/// Half of free memory is the browser's share (the other half stays with the
+/// caller and the rest of the process tree). 56 MB per tab is measured, not
+/// assumed: PERF_AUDIT.md phase 1 shows 85 MB at one tab and +55 to +60 per
+/// added tab on a 4 KB fixture. A heavy op passes `cost_mult` 3 (screenshots,
+/// pixel tiles, pdf render).
+///
+/// Returns 0 when memory is unknown so callers fall back to cores.
+pub fn memory_tab_budget(cost_mult: u64) -> usize {
+    tabs_for(memory_available_mb(), cost_mult)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::{tabs_for, under_pressure};
+
+    #[test]
+    fn tabs_follow_memory_and_cost_multiplier() {
+        assert_eq!(tabs_for(0, 1), 0, "unknown memory must not imply 'no tabs'");
+        assert_eq!(tabs_for(1120, 1), 10, "half of 1120 MB at 56 MB/tab");
+        assert_eq!(tabs_for(1120, 3), 3, "screenshot/tile ops cost 3x");
+        assert_eq!(tabs_for(56, 1), 0, "under one tab's cost");
+    }
+
+    #[test]
+    fn pressure_trips_below_twelve_percent_only() {
+        assert!(
+            !under_pressure(0, 1000),
+            "unknown free memory is not pressure"
+        );
+        assert!(!under_pressure(100, 0), "unknown total is not pressure");
+        assert!(under_pressure(119, 1000), "11.9% is under the line");
+        assert!(!under_pressure(120, 1000), "12% is the line, not under it");
+        assert!(!under_pressure(4000, 8000), "half free is healthy");
+    }
+}
+
+/// Ceiling enforced by `open_tab`: `WEBRAIN_MAX_TABS` when set, else the
+/// memory-derived budget, else a generous floor when memory is unknown.
+fn max_tabs() -> usize {
+    if let Ok(v) = std::env::var("WEBRAIN_MAX_TABS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    memory_tab_budget(1).max(4)
+}
+
+/// Per-method CDP latency for `webrain_stats`: count, total ms, max ms.
+///
+/// Process-global on purpose. A per-backend field would mean touching the struct
+/// and both constructors, and the operator question ("which command is slow") is
+/// the same across backends. `other` (last slot) keeps every unlisted method
+/// counted instead of silently dropped.
+static LAT_METHODS: &[&str] = &[
+    "Page.navigate",
+    "Runtime.evaluate",
+    "Page.captureScreenshot",
+    "Page.printToPDF",
+    "DOM.getContentQuads",
+    "Target.createTarget",
+    "Accessibility.getFullAXTree",
+    "Network.getCookies",
+];
+const LAT_OTHER: usize = 8;
+#[rustfmt::skip]
+static LAT_N: [std::sync::atomic::AtomicU64; 9] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+#[rustfmt::skip]
+static LAT_MS: [std::sync::atomic::AtomicU64; 9] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+#[rustfmt::skip]
+static LAT_MAX: [std::sync::atomic::AtomicU64; 9] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+
+fn lat_idx(method: &str) -> usize {
+    LAT_METHODS
+        .iter()
+        .position(|m| *m == method)
+        .unwrap_or(LAT_OTHER)
+}
+
+fn record_latency(method: &str, elapsed: std::time::Duration) {
+    let i = lat_idx(method);
+    let ms = elapsed.as_millis() as u64;
+    LAT_N[i].fetch_add(1, Ordering::Relaxed);
+    LAT_MS[i].fetch_add(ms, Ordering::Relaxed);
+    LAT_MAX[i].fetch_max(ms, Ordering::Relaxed);
+}
+
+/// Snapshot for `webrain_stats`: `{method: {n, avg_ms, max_ms}}`, plus `other`.
+pub fn cdp_latency() -> Value {
+    let mut out = serde_json::Map::new();
+    for (i, name) in LAT_METHODS.iter().chain(["other"].iter()).enumerate() {
+        let n = LAT_N[i].load(Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let total = LAT_MS[i].load(Ordering::Relaxed);
+        out.insert(
+            (*name).to_string(),
+            json!({"n": n, "avg_ms": total / n, "max_ms": LAT_MAX[i].load(Ordering::Relaxed)}),
+        );
+    }
+    Value::Object(out)
+}
+
 /// Clone shares the same CDP connection + tab registry (all Arc internals), so
 /// concurrent tasks can each own a handle to drive their OWN tab concurrently.
 #[derive(Clone)]
@@ -850,6 +1002,7 @@ impl CdpBackend {
             "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
             _ => std::time::Duration::from_secs(30),
         };
+        let t0 = std::time::Instant::now();
         let reply = match tokio::time::timeout(cap, rx).await {
             Ok(Ok(v)) => v,
             Ok(Err(_)) => {
@@ -863,6 +1016,7 @@ impl CdpBackend {
                 anyhow::bail!("CDP command {method} timed out after {cap:?}");
             }
         };
+        record_latency(method, t0.elapsed());
         if let Some(err) = reply.get("error") {
             anyhow::bail!("CDP error [{}]: {}", method, err);
         }
@@ -1304,6 +1458,22 @@ impl CdpBackend {
         self.batch_tabs.store(n, Ordering::Relaxed);
     }
 
+    /// What this engine can do, from facts already probed on this connection.
+    ///
+    /// Reported in `navigate` and batch replies so an agent routes on evidence
+    /// instead of assuming every CDP peer behaves like Chrome. `null` means "not
+    /// probed yet", which is not the same as `false` and must not be read as a
+    /// refusal: the probe costs two scratch targets, so it runs on the batch path
+    /// rather than on every navigate.
+    pub fn caps(&self) -> serde_json::Value {
+        json!({
+            "transport": BrowserBackend::backend_name(self),
+            "parallel_tabs": self.batch_tabs(),
+            "single_target": self.single_target_known(),
+            "stealth": !self.no_stealth.load(Ordering::Relaxed),
+        })
+    }
+
     async fn single_target_probe_uncached(&self) -> anyhow::Result<bool> {
         let first = self
             .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
@@ -1358,6 +1528,20 @@ impl CdpBackend {
     /// ponytail: blank tab so the caller's `navigate(url)` is the ONE load — the
     /// old pre-load here made every batch op fetch each URL twice.
     pub async fn open_tab(&self, url: &str) -> anyhow::Result<String> {
+        // Hard ceiling HERE, not in every caller: the batch pool asks for
+        // `concurrency` tabs and a crawl asks for its worker count, so without
+        // this the invariant "tabs never exceed the machine" is only a
+        // convention that the next new call path silently breaks. Measured cost
+        // is ~56 MB per tab (PERF_AUDIT.md phase 1 baseline), so the budget is
+        // memory-derived; `WEBRAIN_MAX_TABS` still overrides.
+        let cap = max_tabs();
+        let held = self.tabs.lock().await.len();
+        if held >= cap {
+            anyhow::bail!(
+                "tab budget reached ({held}/{cap} tabs); free some tabs, raise \
+                 WEBRAIN_MAX_TABS, or lower concurrency"
+            );
+        }
         let r = match self
             .send_cmd_with(None, "Target.createTarget", json!({"url": "about:blank"}))
             .await
@@ -1867,6 +2051,9 @@ impl CdpBackend {
 impl CdpBackend {
     /// Navigate the active page with request-quality options.
     pub async fn navigate_opts(&self, url: &str, opts: &NavOpts) -> anyhow::Result<PageState> {
+        // Shared guard, same one the HTTP and download paths use: link-local and
+        // non-web schemes are refused before any target sees them.
+        crate::engines::guard_url(url)?;
         self.ensure_page_attached().await?;
         // Real navigation invalidates any cached snapshot/D1 fingerprint.
         *self.snap.lock().await = None;
