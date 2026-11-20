@@ -21,6 +21,11 @@ pub struct Args {
     pub prompt: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// the page's chosen reasoning effort, `None` meaning let the runtime decide.
+    pub effort: Option<String>,
+    /// The operator's standing instructions, applied by the runtime so they cost
+    /// nothing per turn and survive a restart.
+    pub instructions: Option<String>,
     pub base_url: Option<String>,
     pub key_from: Option<String>,
     /// Completion budget. `None` (the default) becomes 4096, not the runtime's
@@ -41,6 +46,18 @@ pub struct Args {
     pub json: bool,
     pub stream: bool,
     pub print_config: bool,
+    /// `--serve` only, and set by the page rather than by a flag: runtime
+    /// switches that live in `settings.json` (`chat_server::RuntimeSettings`).
+    /// `Option` on purpose — `None` reproduces the constants `connect` used
+    /// before they were settings, so a one-shot turn is byte-identical.
+    pub memory: Option<bool>,
+    pub session_store: Option<bool>,
+    pub allow_agents: Option<bool>,
+    /// Where the runtime starts rewriting history, as a percentage of the context
+    /// window. `None` leaves the runtime's own 80/95 pair alone; naming a value
+    /// sets the blocking threshold 15 points above it, so the background pass
+    /// always wins the race.
+    pub compact_at: Option<u8>,
     /// `--serve`: same session, in a browser. The page is served by this binary
     /// and answers permission prompts itself, so `--yes` is not implied.
     pub serve: bool,

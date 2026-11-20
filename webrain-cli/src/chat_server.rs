@@ -24,6 +24,15 @@
 //! POST /keys        {"provider":"deepseek","key":"…"} → the key goes to the vault
 //! POST /switch      {"provider":"…","model":"…","effort":"high"} → live model/effort
 //!                   change, or a new session when the endpoint itself changes
+//! GET  /settings    the runtime switches only this server can honour
+//! POST /settings    {"memory":true,…} → saved beside the chat database
+//! GET  /todos       the agent's todo rows, out of the session SQL database
+//! GET  /context     why the context window is full: token breakdown + attribution
+//! GET  /mcp         the MCP servers this session has, and the `webrain` one's tools
+//! GET  /skills      the skills on offer, and the ones this session invoked
+//! POST /fleet       {"prompt":"…"} → let the runtime dispatch sub-agents
+//! GET  /tasks       the agents this session is running, as the runtime sent them
+//! POST /agents      {"id":"…","text":"…"} → a word to one of them
 //! ```
 //!
 //! Loopback only, like `webrain mcp --http` without a token: a UI that can
@@ -43,6 +52,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use github_copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
+use github_copilot_sdk::rpc::{
+    FleetStartRequest, HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest,
+    McpDisableRequest, McpEnableRequest, McpListToolsRequest,
+    MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
+    PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest,
+    QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest, TasksSendMessageRequest,
+    ToolsExecuteRequest, UIEphemeralQueryRequest,
+};
+use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
 use github_copilot_sdk::types::{
     DeliveryMode, PermissionRequestData, RequestId, SessionId, SetModelOptions,
 };
@@ -101,6 +119,10 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
             .unwrap_or(0)
     );
 
+    // Read once, before the first session exists, so a page that switched
+    // something on last time boots with it.
+    let settings = RuntimeSettings::load();
+
     let live = spawn_live(
         args,
         provider,
@@ -109,6 +131,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         bus.clone(),
         store.clone(),
         convo.clone(),
+        &settings,
     )
     .await?;
 
@@ -132,10 +155,13 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         input,
         live: RwLock::new(Arc::new(live)),
         args: args.clone(),
-        timeout: Duration::from_secs(args.timeout_secs),
+        timeout: AtomicU64::new(settings.timeout_secs),
+        settings: Mutex::new(settings),
         busy: AtomicBool::new(false),
         store,
-        convo,
+        convo: Mutex::new(convo),
+        provider: Mutex::new(provider.clone()),
+        seed: AtomicBool::new(false),
         ui,
     });
 
@@ -144,7 +170,24 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_conn(stream, state).await {
-                eprintln!("· http · {e}");
+                // A browser closes sockets all the time: a reload drops the SSE
+                // stream, a tab switch aborts an in-flight read, a prefetch is
+                // cancelled. Printing those as server errors buried the real ones
+                // under a wall of `os error 10053` on every page load.
+                let gone = e
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::UnexpectedEof
+                        )
+                    });
+                if !gone {
+                    eprintln!("· http · {e}");
+                }
             }
         });
     }
@@ -156,6 +199,10 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
 /// One task owns the subscription and every SSE client taps the bus;
 /// subscribing here (not per request) is what makes a delta emitted during
 /// session creation reach the page.
+// One assembly point for a whole session: the eight arguments are the eight
+// things a session is made of, and bundling them into a struct would only move
+// the list somewhere else.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_live(
     args: &Args,
     provider: &ChatProvider,
@@ -164,12 +211,14 @@ async fn spawn_live(
     bus: Bus,
     store: Option<Arc<chat_store::Store>>,
     convo: String,
+    settings: &RuntimeSettings,
 ) -> anyhow::Result<Live> {
     // The runtime's own idea of a window is Copilot's 128k, so a 1M-token model
     // was measured at 7% of 128k and compacted at a quarter of its real size.
     // The vendor's catalogue is the authority here — it is the same number the
     // page prints — and `--max-prompt-tokens` still wins over it.
     let mut args = args.clone();
+    settings.stamp(&mut args);
     args.max_prompt_tokens = args
         .max_prompt_tokens
         .or_else(|| model_context(&provider.base_url, &provider.model));
@@ -194,6 +243,11 @@ async fn spawn_live(
                 store.append(&convo, "assistant", text);
             }
             let frame = json!({
+                // Which conversation this belongs to. There is exactly one live
+                // session and every open tab is a viewer of it, so without this
+                // a turn still running in the previous conversation painted its
+                // rows into a tab that had just started a new one.
+                "convo": &convo,
                 "type": event.event_type,
                 "data": event.data,
             });
@@ -209,6 +263,82 @@ async fn spawn_live(
         effort: std::sync::Mutex::new(String::new()),
         base_url: provider.base_url.clone(),
     })
+}
+
+/// How much of a reopened conversation travels with the next turn. A long chat
+/// is many times this; the model needs the shape of it, not every word.
+const HISTORY_CAP: usize = 6000;
+
+/// Restart the runtime on the conversation the page just opened, and return its
+/// stored transcript for the turn to carry.
+///
+/// A failure keeps the session already running and returns no history: a chat
+/// that cannot reseed must still answer, and a transcript from another
+/// conversation on top of the wrong context helps nobody.
+async fn reseed(state: &Arc<State>) -> String {
+    let convo = state.convo().await;
+    let history = state
+        .store
+        .as_ref()
+        .map(|s| transcript(&s.messages(&convo), HISTORY_CAP))
+        .unwrap_or_default();
+    // The provider the live session runs, so the restarted one is the same model
+    // on the same key.
+    let provider = state.provider.lock().await.clone();
+    let settings = state.settings.lock().await.clone();
+    match spawn_live(
+        &state.args,
+        &provider,
+        state.permission.clone(),
+        state.input.clone(),
+        state.bus.clone(),
+        state.store.clone(),
+        convo,
+        &settings,
+    )
+    .await
+    {
+        Ok(fresh) => {
+            let old = std::mem::replace(&mut *state.live.write().await, Arc::new(fresh));
+            // Stop the fan-out before the runtime it reads from.
+            old.reader.abort();
+            drop(old);
+            history
+        }
+        Err(e) => {
+            let _ = state.bus.send(
+                json!({"type": "webrain.error", "data": {
+                    "message": format!("could not restart the session for this conversation: {e} \u{2014} continuing the current one")
+                }})
+                .to_string(),
+            );
+            String::new()
+        }
+    }
+}
+
+/// The tail of a stored conversation as one block — oldest first, whole
+/// messages only. The store is the only place that remembers what was said
+/// before the runtime session that said it went away.
+fn transcript(msgs: &[Value], cap: usize) -> String {
+    let mut rows: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    // Newest first while filling, so the cap drops the OLDEST messages.
+    for m in msgs.iter().rev() {
+        let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+        let body = m.get("body").and_then(Value::as_str).unwrap_or("").trim();
+        if body.is_empty() {
+            continue;
+        }
+        let row = format!("{role}: {body}");
+        if used + row.len() > cap {
+            break;
+        }
+        used += row.len() + 1;
+        rows.push(row);
+    }
+    rows.reverse();
+    rows.join("\n")
 }
 
 /// The row name a base url belongs to, which is what the page calls a provider.
@@ -617,6 +747,168 @@ impl Live {
     }
 }
 
+/// The runtime switches only the server can honour — the ones a page cannot
+/// express by shaping a prompt.
+///
+/// Kept in `settings.json` beside the chat database: a knob that resets with the
+/// process is not a setting. A missing or partial file means the defaults, which
+/// are exactly the constants `chat_session::connect` hard-coded before this
+/// existed, so nothing changes for anyone who never opens the dialog.
+/// Ranges a control may hold. Clamped here and not only in the page: `min`/`max`
+/// on an `<input>` is advisory, and a one-token budget or a one-second timeout is
+/// a chat that cannot answer — a legal-looking value that cannot work is worse
+/// than a rejected one.
+const OUT_TOKENS: (u32, u32) = (64, 200_000);
+const TIMEOUT_S: (u64, u64) = (30, 3600);
+const COMPACT_PCT: (u8, u8) = (30, 80);
+
+#[derive(Clone)]
+struct RuntimeSettings {
+    memory: bool,
+    session_store: bool,
+    allow_agents: bool,
+    max_output_tokens: u32,
+    timeout_secs: u64,
+    /// Percentage of the context window where history starts being rewritten.
+    compact_at: u8,
+    /// The page's reasoning effort. Empty means "let the runtime decide", which
+    /// is what the first turn used before this existed.
+    effort: String,
+    /// Standing instructions for every turn, applied by the runtime. Empty means
+    /// none.
+    instructions: String,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            memory: false,
+            session_store: false,
+            allow_agents: true,
+            max_output_tokens: 4096,
+            timeout_secs: 300,
+            compact_at: 80,
+            effort: String::new(),
+            instructions: String::new(),
+        }
+    }
+}
+
+impl RuntimeSettings {
+    fn load() -> Self {
+        let d = Self::default();
+        let Ok(text) = std::fs::read_to_string(chat_store::settings_path()) else {
+            return d;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            return d;
+        };
+        Self {
+            memory: v["memory"].as_bool().unwrap_or(d.memory),
+            session_store: v["session_store"].as_bool().unwrap_or(d.session_store),
+            allow_agents: v["allow_agents"].as_bool().unwrap_or(d.allow_agents),
+            max_output_tokens: v["max_output_tokens"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(d.max_output_tokens)
+                .clamp(OUT_TOKENS.0, OUT_TOKENS.1),
+            timeout_secs: v["timeout_secs"]
+                .as_u64()
+                .unwrap_or(d.timeout_secs)
+                .clamp(TIMEOUT_S.0, TIMEOUT_S.1),
+            compact_at: v["compact_at"]
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(d.compact_at)
+                .clamp(COMPACT_PCT.0, COMPACT_PCT.1),
+            effort: v["effort"].as_str().unwrap_or_default().to_string(),
+            instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "memory": self.memory,
+            "session_store": self.session_store,
+            "allow_agents": self.allow_agents,
+            "max_output_tokens": self.max_output_tokens,
+            "timeout_secs": self.timeout_secs,
+            "compact_at": self.compact_at,
+            "effort": self.effort,
+            "instructions": self.instructions,
+        })
+    }
+
+    /// Merge a partial body and report whether a *session* field moved. Timeout
+    /// is read per turn, so changing it alone never costs a restart.
+    fn merge(&mut self, v: &Value) -> bool {
+        // Only the fields a live session cannot absorb. `session_store`, `effort`
+        // and `instructions` are all reachable through `session.options.update`,
+        // and rebuilding the session for them threw away the prompt cache for a
+        // save that is usually just a wording change.
+        let session = |s: &Self| {
+            (
+                s.memory,
+                s.allow_agents,
+                s.max_output_tokens,
+                s.compact_at,
+            )
+        };
+        let before = session(self);
+        if let Some(b) = v["memory"].as_bool() {
+            self.memory = b;
+        }
+        if let Some(b) = v["session_store"].as_bool() {
+            self.session_store = b;
+        }
+        if let Some(b) = v["allow_agents"].as_bool() {
+            self.allow_agents = b;
+        }
+        if let Some(n) = v["max_output_tokens"].as_u64() {
+            self.max_output_tokens = u32::try_from(n)
+                .unwrap_or(OUT_TOKENS.1)
+                .clamp(OUT_TOKENS.0, OUT_TOKENS.1);
+        }
+        if let Some(n) = v["timeout_secs"].as_u64() {
+            self.timeout_secs = n.clamp(TIMEOUT_S.0, TIMEOUT_S.1);
+        }
+        if let Some(n) = v["compact_at"].as_u64() {
+            self.compact_at = u8::try_from(n)
+                .unwrap_or(COMPACT_PCT.1)
+                .clamp(COMPACT_PCT.0, COMPACT_PCT.1);
+        }
+        if let Some(e) = v["effort"].as_str() {
+            self.effort = e.to_string();
+        }
+        if let Some(t) = v["instructions"].as_str() {
+            self.instructions = t.to_string();
+        }
+        before != session(self)
+    }
+
+    fn save(&self) {
+        let path = chat_store::settings_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.to_json().to_string());
+    }
+
+    /// Stamp onto the flags `connect` reads, so the three places that rebuild a
+    /// session cannot disagree about what the page asked for.
+    fn stamp(&self, args: &mut Args) {
+        args.memory = Some(self.memory);
+        args.session_store = Some(self.session_store);
+        args.allow_agents = Some(self.allow_agents);
+        args.max_output_tokens = Some(self.max_output_tokens);
+        args.timeout_secs = self.timeout_secs;
+        args.compact_at = Some(self.compact_at);
+        // empty is "unset", which is what `connect` already treats as the default.
+        args.effort = Some(self.effort.clone());
+        args.instructions = Some(self.instructions.clone());
+    }
+}
+
 struct State {
     bus: Bus,
     permission: Arc<WebPermission>,
@@ -626,19 +918,43 @@ struct State {
     live: RwLock<Arc<Live>>,
     /// The first session's flags, so a replacement is configured identically.
     args: Args,
-    timeout: Duration,
+    /// Seconds per turn. Atomic because the page can change it mid-conversation
+    /// and no session has to be rebuilt for it.
+    timeout: AtomicU64,
+    /// What the page switched on. Read when a session is built, written by
+    /// `POST /settings`.
+    settings: Mutex<RuntimeSettings>,
     busy: AtomicBool,
     store: Option<Arc<chat_store::Store>>,
-    convo: String,
+    /// The conversation new turns are stored in. Mutable: opening a past
+    /// conversation moves it, so a continued chat lands where the page shows it.
+    convo: Mutex<String>,
+    /// The provider the live session runs, kept here because restarting the
+    /// session (a conversation switch) has to rebuild one and `/switch` owns the
+    /// key, which `Live` deliberately does not hold.
+    provider: Mutex<ChatProvider>,
+    /// Set when the page opens a stored conversation: the next turn restarts the
+    /// runtime on it instead of continuing the previous one's context.
+    seed: AtomicBool,
     /// The page, read from disk and verified once at startup — not carried in
     /// the binary (`super::chat_ui`).
     ui: super::chat_ui::Ui,
 }
 
+impl State {
+    async fn convo(&self) -> String {
+        self.convo.lock().await.clone()
+    }
+}
+
 /// Answers a permission prompt from the page instead of the CLI's policy.
 struct WebPermission {
     bus: Bus,
-    pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    // The card's payload is kept beside its sender so a page reload can ask for
+    // the open requests back. Without it a refresh stranded the turn: the
+    // runtime waited for an answer the page could no longer give, and nothing
+    // was on screen to answer.
+    pending: Mutex<HashMap<String, (oneshot::Sender<bool>, Value)>>,
     seq: AtomicU64,
 }
 
@@ -652,27 +968,16 @@ impl PermissionHandler for WebPermission {
     ) -> PermissionResult {
         let id = format!("p{}", self.seq.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
         // The runtime packs a structured request inside `extra` — server, tool,
         // arguments, whether it only reads. `format!("{data:?}")` was what turned
         // the dialog into a wall of text; these are the fields a person decides on.
         let req = &data.extra["permissionRequest"];
-        let tool = req["toolName"].as_str().unwrap_or("tool");
-        let ask = json!({
-            "type": "webrain.permission",
-            "data": {
-                "id": id,
-                "kind": req["kind"].as_str().unwrap_or("tool"),
-                "server": req["serverName"].as_str().unwrap_or_default(),
-                // `webrain-webrain_pdf` → `pdf`: the doubling is the MCP server
-                // key plus the tool name, and it means nothing to a reader.
-                "tool": tool.strip_prefix("webrain-webrain_").unwrap_or(tool),
-                "title": req["toolTitle"].as_str().unwrap_or(tool),
-                "args": req["args"].clone(),
-                "read_only": req["readOnly"].as_bool().unwrap_or(false),
-                "managed": data.managed_approval_required.unwrap_or(false),
-            },
-        });
+        let card = permission_card(&id, req, data.managed_approval_required.unwrap_or(false));
+        self.pending
+            .lock()
+            .await
+            .insert(id.clone(), (tx, card.clone()));
+        let ask = json!({ "type": "webrain.permission", "data": card });
         let _ = self.bus.send(ask.to_string());
 
         let answer = tokio::time::timeout(PERMISSION_WAIT, rx).await;
@@ -683,6 +988,50 @@ impl PermissionHandler for WebPermission {
             _ => PermissionResult::reject(Some("no answer from the web UI".into())),
         }
     }
+}
+
+/// One approval, as the page draws it. A memory write is not a tool call: the
+/// runtime asks before it stores a fact that will be recalled in *other*
+/// sessions, so the card has to carry the fact. Without that branch the quote
+/// being remembered arrived as a tool named "tool" with no arguments — the one
+/// card a reader must be able to judge was the one card that said nothing.
+fn permission_card(id: &str, req: &Value, managed: bool) -> Value {
+    let kind = req["kind"].as_str().unwrap_or("tool");
+    if kind == "memory" {
+        let action = req["action"].as_str().unwrap_or("store");
+        let fact = req["fact"].as_str().unwrap_or_default();
+        return json!({
+            "id": id,
+            "kind": "memory",
+            "action": action,
+            "title": if action == "store" { "remember this" } else { "vote on a memory" },
+            "tool": if action == "store" { "remember" } else { "memory vote" },
+            "server": "memory",
+            "read_only": false,
+            "managed": managed,
+            // The whole point of the card: the fact, where it came from, and the
+            // subject it will be filed under.
+            "args": json!({
+                "fact": fact,
+                "subject": req["subject"].as_str().unwrap_or_default(),
+                "citations": req["citations"].as_str().unwrap_or_default(),
+            }),
+            "fact": fact,
+        });
+    }
+    let tool = req["toolName"].as_str().unwrap_or("tool");
+    json!({
+        "id": id,
+        "kind": kind,
+        "server": req["serverName"].as_str().unwrap_or_default(),
+        // `webrain-webrain_pdf` → `pdf`: the doubling is the MCP server key plus
+        // the tool name, and it means nothing to a reader.
+        "tool": tool.strip_prefix("webrain-webrain_").unwrap_or(tool),
+        "title": req["toolTitle"].as_str().unwrap_or(tool),
+        "args": req["args"].clone(),
+        "read_only": req["readOnly"].as_bool().unwrap_or(false),
+        "managed": managed,
+    })
 }
 
 struct WebInput {
@@ -782,6 +1131,15 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             // Modes and the composer's own picks are instructions, not a hard
             // tool switch: the runtime's tool set is fixed at session creation.
             let effort = payload["effort"].as_str().unwrap_or("medium");
+            // A conversation opened from history gets its own runtime session:
+            // the live one still holds whatever was said before the switch, and
+            // two histories in one context is worse than a fresh session with
+            // the stored transcript on the front of the turn.
+            let history = if state.seed.swap(false, Ordering::SeqCst) {
+                reseed(&state).await
+            } else {
+                String::new()
+            };
             // Before the busy check: a queued or steering message must not
             // change the model mid-turn, so one that is already running keeps
             // the effort it started with and the next turn picks the new one.
@@ -809,8 +1167,27 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                         .collect()
                 })
                 .unwrap_or_default();
+            // Plan mode WRITES the plan; every other mode reads it, so "do it"
+            // after a plan still knows what the plan was. A mode is otherwise
+            // only a sentence on the front of the prompt.
+            let plan = if mode == "plan" {
+                String::new()
+            } else {
+                state
+                    .live
+                    .read()
+                    .await
+                    .session
+                    .rpc()
+                    .plan()
+                    .read()
+                    .await
+                    .ok()
+                    .and_then(|r| r.content)
+                    .unwrap_or_default()
+            };
             let prompt = with_controls(
-                &with_mode(&expand_mentions(&raw), mode),
+                &with_mode(&expand_mentions(&raw), mode, &plan),
                 effort,
                 &tools,
                 &tools_off,
@@ -819,6 +1196,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     payload["language"].as_str().unwrap_or_default(),
                 ),
             );
+            // Empty for every turn except the first one after opening a stored
+            // conversation, which is the only turn that has history to carry.
+            let prompt = if history.is_empty() {
+                prompt
+            } else {
+                format!("[earlier in this conversation]\n{history}\n\n{prompt}")
+            };
             // `delivery` is the runtime's own knob, not a queue this page
             // invents: `queue` waits behind the turn that is running, `steer`
             // interrupts it and runs now. Only a fresh turn is refused while one
@@ -831,7 +1215,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                         .await;
                 }
                 if let Some(store) = &state.store {
-                    store.append(&state.convo, "user", &raw);
+                    store.append(&state.convo().await, "user", &raw);
                 }
                 let live = state.live.read().await.clone();
                 let opts = github_copilot_sdk::MessageOptions::new(prompt.as_str()).with_mode(
@@ -853,13 +1237,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 return respond(&mut stream, code, "application/json", &reply.to_string()).await;
             }
             if let Some(store) = &state.store {
-                store.append(&state.convo, "user", &raw);
+                store.append(&state.convo().await, "user", &raw);
             }
             let live = state.live.read().await.clone();
             let st = state.clone();
+            let plan_mode = mode == "plan";
             tokio::spawn(async move {
                 let wait = github_copilot_sdk::MessageOptions::new(prompt.as_str())
-                    .with_wait_timeout(st.timeout);
+                    .with_wait_timeout(Duration::from_secs(st.timeout.load(Ordering::SeqCst)));
                 let turn = live.session.send_and_wait(wait);
                 tokio::pin!(turn);
 
@@ -894,6 +1279,30 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                         json!({"type": "webrain.error", "data": {"message": e.to_string()}})
                             .to_string(),
                     );
+                } else if plan_mode
+                    && let Some(text) = outcome
+                        .ok()
+                        .flatten()
+                        .and_then(|ev| ev.data.get("content")?.as_str().map(str::to_string))
+                        .filter(|t| !t.trim().is_empty())
+                {
+                    // The answer to a plan-mode turn IS the plan. Stored through
+                    // the runtime so the next turn can be told to execute it
+                    // without the whole plan being pasted in again.
+                    if let Err(e) = live
+                        .session
+                        .rpc()
+                        .plan()
+                        .update(PlanUpdateRequest { content: text })
+                        .await
+                    {
+                        let _ = st.bus.send(
+                            json!({"type": "webrain.error", "data": {
+                                "message": format!("planned, but could not save the plan: {e}")
+                            }})
+                            .to_string(),
+                        );
+                    }
                 }
                 // The closing block. `nano_aiu` is 0 on BYOK turns — the key
                 // pays the provider — so the page shows cost as n/a rather than
@@ -928,15 +1337,453 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
         }
+        // The plan on file: written by a plan-mode turn, read into every later
+        // prompt. Exposed so the page (or a script) can see what the next turn
+        // will be told, instead of trusting that the agent remembers.
+        ("GET", "/plan") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().plan().read().await {
+                Ok(r) => json!({
+                    "exists": r.exists,
+                    "content": r.content.unwrap_or_default(),
+                    "path": r.path,
+                }),
+                Err(e) => json!({ "exists": false, "content": "", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Put the last file change back. The tool row already shows the diff;
+        // this is the half a diff cannot do.
+        ("POST", "/undo") => {
+            let body = match crate::chat_tools::undo_last() {
+                Ok(what) => json!({ "restored": what }),
+                Err(e) => json!({ "error": e }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // The switches a page cannot express as prompt text. Saved next to the
+        // chat database so they outlive the process.
+        ("GET", "/settings") => {
+            let s = state.settings.lock().await.clone().to_json();
+            let body = json!({ "settings": s }).to_string();
+            respond(&mut stream, 200, "application/json", &body).await
+        }
+        ("POST", "/settings") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let mut s = state.settings.lock().await;
+            let restart = s.merge(&v);
+            s.save();
+            state.timeout.store(s.timeout_secs, Ordering::SeqCst);
+            // The three that do not need a rebuild go into the live session now;
+            // `None` means "leave it", so an empty effort sends nothing.
+            let patch = github_copilot_sdk::rpc::SessionUpdateOptionsParams {
+                organization_custom_instructions: Some(s.instructions.clone()),
+                enable_session_store: Some(s.session_store),
+                reasoning_effort: if s.effort.is_empty() {
+                    None
+                } else {
+                    Some(s.effort.clone())
+                },
+                ..Default::default()
+            };
+            let out = json!({ "saved": true, "restart": restart });
+            drop(s);
+            let live = state.live.read().await.clone();
+            let patched = match live.session.rpc().options().update(patch).await {
+                Ok(_) => json!({ "ok": true }),
+                Err(e) => json!({ "error": e.to_string() }),
+            };
+            let mut out = out;
+            out["patched"] = patched;
+            // A session field cannot reach a session that already exists, so the
+            // next turn rebuilds one — the same lever opening a past conversation
+            // uses, and the page's transcript is what carries over.
+            if restart && !state.busy.load(Ordering::SeqCst) {
+                state.seed.store(true, Ordering::SeqCst);
+            }
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // The agent's own todo rows, straight out of the session SQL database.
+        // The plan file says what the work is; these say how far it got.
+        ("GET", "/todos") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().plan().read_sql_todos_with_dependencies().await {
+                Ok(r) => json!({
+                    "rows": r.rows.iter().map(|t| json!({
+                        "id": t.id, "title": t.title,
+                        "status": t.status, "description": t.description,
+                    })).collect::<Vec<_>>(),
+                    "dependencies": r.dependencies.iter().map(|d| json!({
+                        "todo": d.todo_id, "depends_on": d.depends_on,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(e) => json!({ "rows": [], "dependencies": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // The runtime's own token breakdown answers "why is the context full"
+        // instead of leaving it to a guess. Attribution is passed through
+        // untouched: its shape is the CLI's, not ours.
+        ("GET", "/context") => {
+            let live = state.live.read().await.clone();
+            // Both limits at 0 means "resolve from the session and its model".
+            let info = live
+                .session
+                .rpc()
+                .metadata()
+                .context_info(MetadataContextInfoRequest {
+                    output_token_limit: 0,
+                    prompt_token_limit: 0,
+                    ..Default::default()
+                })
+                .await;
+            let attribution = live.session.rpc().metadata().get_context_attribution().await;
+            // Best effort, like the attribution above: the attribution says which
+            // *category* is expensive, this says which message is. A silent empty
+            // list cannot be told from a failed call, so the failure is named.
+            let heaviest = live
+                .session
+                .rpc()
+                .metadata()
+                .get_context_heaviest_messages(MetadataContextHeaviestMessagesRequest {
+                    limit: Some(5),
+                })
+                .await;
+            let heaviest_error = heaviest.as_ref().err().map(|e| e.to_string());
+            let heaviest: Vec<Value> = heaviest
+                .map(|r| {
+                    r.messages
+                        .into_iter()
+                        .map(|m| json!({"label": m.label, "role": m.role, "tokens": m.tokens}))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut body = match (info, attribution) {
+                (Ok(r), Ok(a)) => match r.context_info {
+                    Some(c) => json!({
+                        "totalTokens": c.total_tokens,
+                        "promptTokenLimit": c.prompt_token_limit,
+                        "systemTokens": c.system_tokens,
+                        "conversationTokens": c.conversation_tokens,
+                        "attribution": a,
+                        "heaviest": heaviest,
+                    }),
+                    None => json!({
+                        "totalTokens": 0,
+                        "promptTokenLimit": 0,
+                        "systemTokens": 0,
+                        "conversationTokens": 0,
+                        "attribution": a,
+                        "heaviest": heaviest,
+                        "error": "no context snapshot yet — the session has not initialised",
+                    }),
+                },
+                (Ok(_), Err(e)) => json!({
+                    "totalTokens": 0,
+                    "promptTokenLimit": 0,
+                    "systemTokens": 0,
+                    "conversationTokens": 0,
+                    "attribution": null,
+                    "heaviest": heaviest,
+                    "error": e.to_string(),
+                }),
+                (Err(e), _) => json!({
+                    "totalTokens": 0,
+                    "promptTokenLimit": 0,
+                    "systemTokens": 0,
+                    "conversationTokens": 0,
+                    "attribution": null,
+                    "heaviest": heaviest,
+                    "error": e.to_string(),
+                }),
+            };
+            if let Some(e) = heaviest_error {
+                body["heaviestError"] = json!(e);
+            }
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Whether the server this session attached to itself is actually up:
+        // `list` reports connection status, `list_tools` proves it answers.
+        ("GET", "/mcp") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().mcp().list().await {
+                Ok(r) => {
+                    let tools = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .list_tools(McpListToolsRequest {
+                            server_name: "webrain".to_string(),
+                        })
+                        .await;
+                    match tools {
+                        Ok(t) => json!({ "servers": r.servers, "tools": t.tools }),
+                        Err(e) => {
+                            json!({ "servers": r.servers, "tools": [], "error": e.to_string() })
+                        }
+                    }
+                }
+                Err(e) => json!({ "servers": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Which skills exist is one question, which ones the agent used is
+        // another — an unused skill is a prompt problem, not a missing file.
+        ("GET", "/skills") => {
+            let live = state.live.read().await.clone();
+            let list = live.session.rpc().skills().list().await;
+            let invoked = live.session.rpc().skills().get_invoked().await;
+            let body = match (list, invoked) {
+                (Ok(l), Ok(i)) => json!({ "skills": l.skills, "invoked": i.skills }),
+                (Ok(l), Err(e)) => {
+                    json!({ "skills": l.skills, "invoked": [], "error": e.to_string() })
+                }
+                (Err(e), _) => json!({ "skills": [], "invoked": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Turn one skill on or off in the live session. The tool set is fixed at
+        // creation, so before this the only way to drop a skill was to restart —
+        // and a skill's tools went with it.
+        ("POST", "/skills") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let on = v["enabled"].as_bool().unwrap_or(true);
+            let live = state.live.read().await.clone();
+            let skills = live.session.rpc().skills();
+            let r = if on {
+                skills.enable(SkillsEnableRequest { name: name.clone() }).await
+            } else {
+                skills
+                    .disable(SkillsDisableRequest { name: name.clone() })
+                    .await
+            };
+            let reply = match r {
+                Ok(()) => json!({ "name": name, "enabled": on }),
+                Err(e) => json!({ "name": name, "enabled": !on, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Start or stop the MCP server this session attached to itself. A stopped
+        // server is why a turn suddenly has no webrain tools; the page can now say
+        // so and fix it without a restart.
+        ("POST", "/mcp") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["server"]
+                .as_str()
+                .unwrap_or("webrain")
+                .trim()
+                .to_string();
+            let on = v["enabled"].as_bool().unwrap_or(true);
+            let live = state.live.read().await.clone();
+            let mcp = live.session.rpc().mcp();
+            let r = if on {
+                mcp.enable(McpEnableRequest {
+                    server_name: name.clone(),
+                })
+                .await
+            } else {
+                mcp.disable(McpDisableRequest {
+                    server_name: name.clone(),
+                })
+                .await
+            };
+            let reply = match r {
+                Ok(()) => json!({ "server": name, "enabled": on }),
+                Err(e) => json!({ "server": name, "enabled": !on, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Run one tool directly, with arguments the page can edit. This is the
+        // difference between "the model called the wrong selector" and "let me fix
+        // the selector": no model turn, no tokens, the same invocation pipeline.
+        ("POST", "/tool") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let arguments = if v["args"].is_null() {
+                json!({})
+            } else {
+                v["args"].clone()
+            };
+            let live = state.live.read().await.clone();
+            let reply = match live
+                .session
+                .rpc()
+                .tools()
+                .execute(ToolsExecuteRequest {
+                    name: name.clone(),
+                    arguments,
+                    tool_call_id: None,
+                })
+                .await
+            {
+                Ok(r) => json!({ "name": name, "result": serde_json::to_value(&r).unwrap_or(Value::Null) }),
+                Err(e) => json!({ "name": name, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // The permission policy the runtime itself applies. `manual` asks the page
+        // (what it already did), `allow-all` approves tool, path and URL requests
+        // without asking, and `assisted` attaches a safety recommendation.
+        ("GET", "/permission-mode") => {
+            let live = state.live.read().await.clone();
+            let r = live.session.rpc().permissions();
+            let body = match r.get_mode().await {
+                Ok(m) => json!({ "mode": mode_name(&m.mode) }),
+                Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        ("POST", "/permission-mode") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let want = v["mode"].as_str().unwrap_or("manual");
+            let live = state.live.read().await.clone();
+            let r = live
+                .session
+                .rpc()
+                .permissions()
+                .set_mode(PermissionsSetModeRequest {
+                    mode: mode_of(want),
+                    assisted_approval_model: None,
+                    source: None,
+                })
+                .await;
+            let reply = match r {
+                Ok(m) => json!({ "mode": mode_name(&m.mode) }),
+                Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Hand the runtime an objective and let it dispatch sub-agents. Refused
+        // when the page switched delegating off, because that switch hides the
+        // very tools the workers would be given.
+        ("POST", "/fleet") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let mut prompt = v["prompt"].as_str().unwrap_or_default().trim().to_string();
+            // No objective means "the thing I just asked": the composer cleared
+            // itself the moment the command was picked, and the store is the only
+            // side that still has the words.
+            if prompt.is_empty() {
+                let convo = state.convo().await;
+                if let Some(store) = &state.store {
+                    let msgs = store.messages(&convo);
+                    prompt = msgs
+                        .iter()
+                        .rev()
+                        .find(|m| m["role"] == "user")
+                        .and_then(|m| m["body"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            }
+            if prompt.is_empty() {
+                let out = json!({ "started": false, "error": "nothing to run — ask something first" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            if !state.settings.lock().await.allow_agents {
+                let out = json!({ "started": false, "error": "delegating is off in runtime settings" });
+                return respond(&mut stream, 409, "application/json", &out.to_string()).await;
+            }
+            let live = state.live.read().await.clone();
+            // `FleetStartRequest` carries a crate-private field, so it is built
+            // from `Default` rather than a struct literal.
+            let mut req = FleetStartRequest::default();
+            req.prompt = Some(prompt);
+            req.wait = Some(false);
+            let reply = match live.session.rpc().fleet().start(req).await {
+                Ok(r) => json!({ "started": r.started }),
+                Err(e) => json!({ "started": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // The agents this session is running. Experimental on the wire and
+        // untyped (`Vec<Value>`), so it is passed through as the runtime sent it
+        // rather than reshaped into a schema this build would have to invent.
+        ("GET", "/tasks") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().tasks().list().await {
+                Ok(r) => json!({ "tasks": r.tasks }),
+                Err(e) => json!({ "tasks": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Agent-to-agent: a word to one of them mid-flight. Same gate as fleet,
+        // because a message to a worker is delegation by another name.
+        ("POST", "/agents") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let id = v["id"].as_str().unwrap_or_default().to_string();
+            let message = v["text"].as_str().unwrap_or_default().to_string();
+            if id.is_empty() || message.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"id and text"}"#)
+                    .await;
+            }
+            if !state.settings.lock().await.allow_agents {
+                let out = json!({ "sent": false, "error": "delegating is off in runtime settings" });
+                return respond(&mut stream, 409, "application/json", &out.to_string()).await;
+            }
+            let live = state.live.read().await.clone();
+            let reply = match live
+                .session
+                .rpc()
+                .tasks()
+                .send_message(TasksSendMessageRequest {
+                    from_agent_id: None,
+                    id,
+                    message,
+                })
+                .await
+            {
+                Ok(_) => json!({ "sent": true }),
+                Err(e) => json!({ "sent": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        ("POST", "/plan") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let content = v["content"].as_str().unwrap_or_default().to_string();
+            let live = state.live.read().await.clone();
+            let reply = match live
+                .session
+                .rpc()
+                .plan()
+                .update(PlanUpdateRequest { content })
+                .await
+            {
+                Ok(()) => json!({ "saved": true }),
+                Err(e) => json!({ "saved": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
         ("POST", "/permission") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let id = v["id"].as_str().unwrap_or_default().to_string();
             let allow = v["allow"].as_bool().unwrap_or(false);
             let sent = match state.permission.pending.lock().await.remove(&id) {
-                Some(tx) => tx.send(allow).is_ok(),
+                Some((tx, _)) => tx.send(allow).is_ok(),
                 None => false,
             };
             let body = json!({ "answered": sent }).to_string();
+            respond(&mut stream, 200, "application/json", &body).await
+        }
+        // The approvals still waiting for an answer. A reload used to lose them:
+        // the runtime kept waiting, the page had no card, and the turn sat there
+        // until the five-minute timeout rejected it.
+        ("GET", "/pending") => {
+            let asks: Vec<Value> = state
+                .permission
+                .pending
+                .lock()
+                .await
+                .values()
+                .map(|(_, card)| card.clone())
+                .collect();
+            let body = json!({ "asks": asks }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
         // The answer to an `ask_user` question. Same shape as `/permission`, but
@@ -953,30 +1800,337 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let out = json!({ "answered": sent }).to_string();
             respond(&mut stream, 200, "application/json", &out).await
         }
+        // What is waiting behind the running turn, and what is steering it. The
+        // page can queue a prompt mid-turn, so it has to be able to show the
+        // queue — otherwise "I sent it" and "it ran" look the same.
+        ("GET", "/queue") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().queue().pending_items().await {
+                Ok(q) => json!({
+                    "items": q.items.iter().map(|i| json!({
+                        "id": i.id,
+                        "text": i.display_text,
+                        "kind": i.kind,
+                    })).collect::<Vec<_>>(),
+                    "steering": q.steering_messages,
+                    "withdrawable": q.withdrawable_turn_message_id,
+                }),
+                Err(e) => json!({ "items": [], "steering": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Promote, edit or drop one queued prompt. `sendNow` runs it now instead
+        // of after the turn in flight; the other two exist because a prompt you
+        // can send but not correct is a prompt you retype in the composer.
+        ("POST", "/queue") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let id = v["id"].as_str().unwrap_or_default().to_string();
+            if id.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"id"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let q = live.session.rpc().queue();
+            let reply = if v["remove"].as_bool().unwrap_or(false) {
+                match q.remove_at(QueueRemoveAtRequest { id: id.clone() }).await {
+                    Ok(r) => json!({ "id": id, "removed": r.removed }),
+                    Err(e) => json!({ "id": id, "error": e.to_string() }),
+                }
+            } else if let Some(text) = v["text"].as_str() {
+                match q
+                    .update_text(QueueUpdateTextRequest {
+                        display_prompt: None,
+                        id: id.clone(),
+                        prompt: text.to_string(),
+                    })
+                    .await
+                {
+                    Ok(r) => json!({ "id": id, "updated": r.updated }),
+                    Err(e) => json!({ "id": id, "error": e.to_string() }),
+                }
+            } else {
+                match q.send_now(QueueSendNowRequest { id: id.clone() }).await {
+                    Ok(r) => json!({ "id": id, "steered": r.steered }),
+                    Err(e) => json!({ "id": id, "error": e.to_string() }),
+                }
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Every user turn the session could go back to. `listRewindPoints`
+        // answers with a reason instead of points while a turn is in flight
+        // (`session-busy`), so that reason is passed on rather than shown as an
+        // empty list. `files` says whether file restore is available at all —
+        // without it "undo" would promise the workspace back and only get the
+        // conversation.
+        ("GET", "/rewind") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().history().list_rewind_points().await {
+                Ok(r) => json!({
+                    "files": r.file_change_tracking_enabled,
+                    "unavailable": r.unavailable_reason,
+                    "points": r.points.iter().map(|p| json!({
+                        "event": p.event_id,
+                        "text": p.user_message,
+                        "ts": p.timestamp,
+                        "files": p.file_count,
+                        "added": p.lines_added,
+                        "removed": p.lines_removed,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(e) => json!({ "points": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Undo a conversation, and optionally the files it touched. `preview`
+        // runs first for a reason: a rewind that restores files writes to the
+        // workspace, and the list of what it would overwrite has to be readable
+        // before that happens. `files:false` leaves the workspace alone.
+        ("POST", "/rewind") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let event_id = v["event"].as_str().unwrap_or_default().to_string();
+            if event_id.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"event"}"#)
+                    .await;
+            }
+            let live = state.live.read().await.clone();
+            let reply = if v["preview"].as_bool().unwrap_or(false) {
+                match live
+                    .session
+                    .rpc()
+                    .history()
+                    .preview_rewind(HistoryPreviewRewindRequest { event_id })
+                    .await
+                {
+                    Ok(r) => json!({
+                        "preview": true,
+                        "available": r.available,
+                        "reason": r.reason,
+                        "files": r.files.iter().map(|f| json!({
+                            "path": f.path,
+                            "change": f.change_type,
+                            "added": f.lines_added,
+                            "removed": f.lines_removed,
+                        })).collect::<Vec<_>>(),
+                    }),
+                    Err(e) => json!({ "preview": true, "error": e.to_string() }),
+                }
+            } else {
+                let mode = if v["files"].as_bool().unwrap_or(false) {
+                    HistoryRewindMode::ConversationAndFiles
+                } else {
+                    HistoryRewindMode::Conversation
+                };
+                match live
+                    .session
+                    .rpc()
+                    .history()
+                    .rewind(HistoryRewindRequest { event_id, mode })
+                    .await
+                {
+                    Ok(r) => json!({
+                        "outcome": r.outcome,
+                        "removed": r.events_removed,
+                        "restored": r.restored_files,
+                        "skipped": r.skipped_files.iter().map(|s| json!({
+                            "path": s.path,
+                            "reason": s.reason,
+                        })).collect::<Vec<_>>(),
+                        "error": r.error,
+                    }),
+                    Err(e) => json!({ "error": e.to_string() }),
+                }
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // The runtime's session mode. Until now a mode was only a sentence
+        // pasted onto the front of the prompt (`with_mode`); this is the switch
+        // the agent actually reads, and `set` reports when honouring it needs a
+        // model switch or a compaction.
+        ("GET", "/mode") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().mode().get().await {
+                Ok(m) => json!({ "mode": mode_word(&m) }),
+                Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        ("POST", "/mode") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let want = v["mode"].as_str().unwrap_or("interactive");
+            // A crate-private field, so `Default` then assign.
+            let mut req = ModeSetRequest::default();
+            req.mode = session_mode_of(want);
+            let live = state.live.read().await.clone();
+            let reply = match live.session.rpc().mode().set(req).await {
+                Ok(r) => json!({ "mode": want, "message": r.message, "deferred": r.defer_implementation }),
+                Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // What the model was told before the user's words, in merge order. The
+        // content is left out on purpose: it is raw instruction files, and the
+        // page only needs to name them.
+        ("GET", "/instructions") => {
+            let live = state.live.read().await.clone();
+            let body = match live.session.rpc().instructions().get_sources().await {
+                Ok(r) => json!({
+                    "sources": r.sources.iter().map(|s| json!({
+                        "label": s.label,
+                        "path": s.source_path,
+                        "kind": s.r#type,
+                        "apply": s.apply_to,
+                        "disabled": s.default_disabled,
+                        "about": s.description,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(e) => json!({ "sources": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Account credits. Both are Copilot-plan reads and answer null on BYOK,
+        // which is the honest answer for a key you pay for yourself.
+        ("GET", "/quota") => {
+            let live = state.live.read().await.clone();
+            let quota = live.session.rpc().quota().get().await.ok();
+            let prediction = live.session.rpc().limit_prediction().predict().await.ok();
+            let body = json!({
+                "quota": quota.map(|q| serde_json::to_value(&q).unwrap_or(Value::Null)),
+                "prediction": prediction.map(|p| serde_json::to_value(&p).unwrap_or(Value::Null)),
+            });
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // One question answered against the conversation context, with no tools
+        // and no history: "summarise this result" must not become a turn the
+        // agent can act in.
+        ("POST", "/ephemeral") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let question = v["question"].as_str().unwrap_or_default().trim().to_string();
+            if question.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"question"}"#)
+                    .await;
+            }
+            // A crate-private field, so `Default` then assign.
+            let mut req = UIEphemeralQueryRequest::default();
+            req.question = question;
+            let live = state.live.read().await.clone();
+            let reply = match live.session.rpc().ui().ephemeral_query(req).await {
+                Ok(r) => json!({ "answer": r.answer }),
+                Err(e) => json!({ "answer": "", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
         // The session menu: what was said before, and the current id so the page
-        // can mark the live conversation.
+        // can mark the live conversation. `busy` is here because a reloaded page
+        // has no other way to learn that a turn is still running on the server —
+        // without it the page looks idle while the agent keeps working.
         ("GET", "/sessions") => {
-            let list = state.store.as_ref().map(|s| s.convos()).unwrap_or_default();
-            let body = json!({ "current": state.convo, "sessions": list }).to_string();
+            let mut list = state.store.as_ref().map(|s| s.convos()).unwrap_or_default();
+            let current = state.convo().await;
+            // A conversation with no messages yet is not in the store, so it had
+            // no row — and the rail marks rows by id, which meant nothing was
+            // marked while the page sat in exactly that conversation. Pressing
+            // "new chat" and finding no active tab is this, not a click that
+            // failed to register.
+            if !list.iter().any(|c| c["id"].as_str() == Some(current.as_str())) {
+                list.insert(
+                    0,
+                    json!({ "id": current, "title": "(new conversation)", "ts": "", "n": 0 }),
+                );
+            }
+            // The runtime's own answer beats our `AtomicBool`: a background
+            // continuation runs with nothing of ours flagging it, and a turn
+            // killed by a page reload leaves ours stuck on.
+            let processing = state
+                .live
+                .read()
+                .await
+                .session
+                .rpc()
+                .metadata()
+                .is_processing()
+                .await
+                .map(|r| r.processing)
+                .unwrap_or_else(|_| state.busy.load(Ordering::SeqCst));
+            let body = json!({
+                "current": state.convo().await,
+                "sessions": list,
+                "busy": state.busy.load(Ordering::SeqCst),
+                "processing": processing,
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
+        // A new conversation, minted here so the id exists before the first word
+        // is said and the page can put it in the address bar. The next turn
+        // reseeds, which is what drops the previous conversation's context.
+        //
+        // A conversation nobody has written to is not worth an id: pressing "new
+        // chat" twice used to mint a second one, leave the first as an empty row
+        // in the menu and make the browser store a per-conversation setup key for
+        // it. Reuse the empty one and mint only when there is something to leave.
+        ("POST", "/sessions") => {
+            let current = state.convo().await;
+            let unused = state
+                .store
+                .as_ref()
+                .is_some_and(|s| s.messages(&current).is_empty());
+            if unused && !state.busy.load(Ordering::SeqCst) {
+                let body = json!({ "current": current, "reused": true }).to_string();
+                return respond(&mut stream, 200, "application/json", &body).await;
+            }
+            let id = format!(
+                "c{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            *state.convo.lock().await = id.clone();
+            state.seed.store(true, Ordering::SeqCst);
+            let body = json!({ "current": id }).to_string();
+            respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Reading a conversation is a read. It used to also make that
+        // conversation the live one, which the page calls from `seedLive` on
+        // every load — so a second tab, or a reload racing a slow list, stole the
+        // live conversation from the tab that owned it and two pages ping-ponged
+        // `current` between them. The menu then looked like it had stopped
+        // taking clicks until a reload. Claiming is its own route, below.
         ("GET", p) if p.starts_with("/sessions/") => {
             let id = p.trim_start_matches("/sessions/");
-            let msgs = state
+            let out = convo_payload(&state, id).to_string();
+            respond_gz(&mut stream, &head, 200, "application/json", &out).await
+        }
+        // What a link is worth showing before it is clicked. `POST` so the url
+        // needs no query-string decoding.
+        ("POST", "/preview") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let url = v["url"].as_str().unwrap_or_default().trim().to_string();
+            if url.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"url"}"#).await;
+            }
+            let out = link_preview(&url).await.to_string();
+            respond(&mut stream, 200, "application/json", &out).await
+        }
+        // The page saves what it drew. Whole-array replace rather than a row at a
+        // time: the page owns the row shape, and a second copy of it here would
+        // drift the day a row gains a field.
+        ("POST", "/transcript") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let rows = v["rows"].clone();
+            // The tab says which conversation it drew. Not `state.convo`: two
+            // tabs can be on two conversations, and the server's own id follows
+            // whichever one was opened last — a debounced save from the other tab
+            // would land on the wrong transcript.
+            let convo = match v["convo"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) => c.to_string(),
+                None => state.convo().await,
+            };
+            let saved = state
                 .store
                 .as_ref()
-                .map(|s| s.messages(id))
-                .unwrap_or_default();
-            // The numbers the right-hand panel shows. They are computed on the
-            // page (provider prices, cache discounts), so they are stored as the
-            // page computed them and replayed here.
-            let turns = state
-                .store
-                .as_ref()
-                .map(|s| s.turns(id))
-                .unwrap_or_default();
-            let body = json!({ "id": id, "messages": msgs, "turns": turns }).to_string();
-            respond(&mut stream, 200, "application/json", &body).await
+                .is_some_and(|s| s.save_rows(&convo, &rows.to_string()));
+            let out = json!({ "saved": saved, "convo": convo }).to_string();
+            respond(&mut stream, 200, "application/json", &out).await
         }
         // The instruments of a finished turn, handed over by the page that
         // measured them. A conversation reopened from history used to show a
@@ -984,13 +2138,34 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         ("POST", "/ledger") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let n = v["n"].as_u64().unwrap_or(0) as u32;
+            let convo = state.convo().await;
             let saved = n > 0
                 && state
                     .store
                     .as_ref()
-                    .is_some_and(|s| s.record_turn(&state.convo, n, &v["turn"].to_string()));
+                    .is_some_and(|s| s.record_turn(&convo, n, &v["turn"].to_string()));
             let out = json!({ "saved": saved }).to_string();
             respond(&mut stream, 200, "application/json", &out).await
+        }
+        // Claim a conversation: from here on, a new turn belongs to it and the
+        // next turn restarts the runtime on it (see `reseed`). The rail sends
+        // this when you pick a thread, and it is deliberately not a GET.
+        ("POST", p) if p.starts_with("/sessions/") => {
+            let id = p.trim_start_matches("/sessions/").to_string();
+            *state.convo.lock().await = id.clone();
+            state.seed.store(true, Ordering::SeqCst);
+            // The claim answers with the transcript as well. Picking a thread used
+            // to be two round trips — GET for the rows, POST to claim — and the GET
+            // is the expensive one (measured 354–663 KB of JSON for a scrape), so
+            // folding it in halves both the requests and the wait. `?light=1` is a
+            // caller that already holds those rows (a revisit) and wants only the
+            // claim, which is a `state` write either way.
+            if param(query, "light").is_some() {
+                let out = json!({ "current": id }).to_string();
+                return respond(&mut stream, 200, "application/json", &out).await;
+            }
+            let out = convo_payload(&state, &id).to_string();
+            respond_gz(&mut stream, &head, 200, "application/json", &out).await
         }
         ("PATCH", p) if p.starts_with("/sessions/") => {
             let id = p.trim_start_matches("/sessions/");
@@ -1015,10 +2190,11 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // rewind.
         ("POST", "/fork") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let current = state.convo().await;
             let from = v["convo"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(state.convo.as_str())
+                .unwrap_or(current.as_str())
                 .to_string();
             let upto = v["upto"].as_u64().unwrap_or(0) as usize;
             let stamp = SystemTime::now()
@@ -1331,6 +2507,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 return respond(&mut stream, 400, "application/json", &out).await;
             }
             let provider = ChatProvider::new(typ, base, model.clone(), None, key);
+            let settings = state.settings.lock().await.clone();
             match spawn_live(
                 &state.args,
                 &provider,
@@ -1338,7 +2515,8 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 state.input.clone(),
                 state.bus.clone(),
                 state.store.clone(),
-                state.convo.clone(),
+                state.convo().await,
+                &settings,
             )
             .await
             {
@@ -1347,6 +2525,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     // Stop the fan-out before the runtime it reads from.
                     old.reader.abort();
                     drop(old);
+                    // A later conversation switch restarts from the provider in
+                    // use now, not the one this process booted with.
+                    *state.provider.lock().await = provider.clone();
                     let reply = json!({
                         "switched": true, "restarted": true,
                         "provider": row_name_for_base(&provider.base_url),
@@ -1368,6 +2549,16 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let mut items: Vec<Value> = vec![
                 json!({"name": "clear", "kind": "cmd", "hint": "empty the transcript"}),
                 json!({"name": "tools", "kind": "cmd", "hint": "list every tool this build has"}),
+                json!({"name": "undo", "kind": "cmd", "hint": "put back the last file the agent changed"}),
+                json!({"name": "rewind", "kind": "cmd", "hint": "walk the conversation back to an earlier turn, files too"}),
+                json!({"name": "instructions", "kind": "cmd", "hint": "the instruction files the model was given, in merge order"}),
+                json!({"name": "quota", "kind": "cmd", "hint": "account credits, when the provider has a plan"}),
+                json!({"name": "todos", "kind": "cmd", "hint": "read the agent's todo list"}),
+                json!({"name": "agents", "kind": "cmd", "hint": "list the agents this session is running"}),
+                json!({"name": "fleet", "kind": "cmd", "hint": "run the last thing you asked as a fleet"}),
+                json!({"name": "context", "kind": "cmd", "hint": "how full the context window is, and where it goes"}),
+                json!({"name": "mcp", "kind": "cmd", "hint": "the MCP server this session attached to, and its tools"}),
+                json!({"name": "skills", "kind": "cmd", "hint": "installed skills and which ones the agent used"}),
             ];
             for name in skill_names() {
                 // A reference chapter is a `.md` with no frontmatter `name:`, and
@@ -1382,13 +2573,20 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             for (name, hint) in webrain_mcp::tool_briefs() {
                 items.push(json!({"name": name, "kind": "tool", "hint": hint}));
             }
-            // Installed on the session by this binary, not reachable through the
-            // MCP server, so they come last and read as the always-on tail.
-            for name in chat_tools::NAMES
-                .iter()
-                .map(|n| n.to_string())
-                .chain(["ask_user".to_string(), "skill".to_string()])
-            {
+            // This binary's own tools. They are not runtime built-ins —
+            // `tool_filter` sends them as `custom:` — and they belong in the
+            // same checklist as the MCP ones, or the dialog would show a group
+            // it cannot tick.
+            for name in chat_tools::NAMES {
+                items.push(json!({
+                    "name": name, "kind": "tool",
+                    "hint": "installed by this binary, path-fenced",
+                }));
+            }
+            // The four the session actually allows. `task` and `task_complete`
+            // were missing here, so delegation had no checkbox at all and the
+            // only place to switch it was the Runtime tab.
+            for name in ["ask_user", "skill", "task", "task_complete"] {
                 items.push(
                     json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}),
                 );
@@ -1414,7 +2612,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let Some(name) = safe_name(&raw) else {
                 return respond(&mut stream, 415, "application/json", r#"{"error":"type"}"#).await;
             };
-            let dir = attach_dir().join(&state.convo);
+            let dir = attach_dir().join(state.convo().await);
             if std::fs::create_dir_all(&dir).is_err() {
                 return respond(&mut stream, 500, "application/json", r#"{"error":"dir"}"#).await;
             }
@@ -1513,7 +2711,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let dir = attach_dir()
-                .join(&state.convo)
+                .join(state.convo().await)
                 .join(format!("dict-{stamp}"));
             if std::fs::create_dir_all(&dir).is_err() {
                 return respond(&mut stream, 500, "application/json", r#"{"error":"dir"}"#).await;
@@ -1540,6 +2738,12 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 500
             };
             respond(&mut stream, code, "application/json", &reply.to_string()).await
+        }
+        // A conversation is addressable. `/<id>` serves the same shell, so a
+        // reload — or a link pasted into another tab — opens that thread instead
+        // of a 404, and the page reads the id back out of the path.
+        ("GET", p) if is_convo_path(p) => {
+            respond(&mut stream, 200, "text/html; charset=utf-8", &state.ui.html).await
         }
         _ => respond(&mut stream, 404, "text/plain", "not found").await,
     }
@@ -1702,6 +2906,216 @@ fn stored_segment(raw: &str, dotted: bool) -> Option<String> {
     ok.then(|| raw.to_string())
 }
 
+/// The runtime's permission policy, as the page names it. `Unknown` is not
+/// printed as a mode: the runtime sends it for a variant this build does not
+/// model, and a page that claimed "manual" would be inventing the answer.
+fn mode_name(m: &PermissionMode) -> &'static str {
+    match m {
+        PermissionMode::Manual => "manual",
+        PermissionMode::Assisted => "assisted",
+        PermissionMode::AllowAll => "allow-all",
+        _ => "unknown",
+    }
+}
+
+/// `manual` for anything unrecognised, because that is the mode that asks.
+fn mode_of(name: &str) -> PermissionMode {
+    match name {
+        "allow-all" => PermissionMode::AllowAll,
+        "assisted" => PermissionMode::Assisted,
+        _ => PermissionMode::Manual,
+    }
+}
+
+/// The runtime's *session* mode — what the agent is allowed to do — which is a
+/// different switch from the permission policy above.
+fn mode_word(m: &SessionMode) -> &'static str {
+    match m {
+        SessionMode::Interactive => "interactive",
+        SessionMode::Plan => "plan",
+        SessionMode::Autopilot => "autopilot",
+        _ => "unknown",
+    }
+}
+
+/// `interactive` for anything unrecognised: it is the mode that asks before it
+/// acts, and the alternative is putting the agent in autopilot by typo.
+fn session_mode_of(name: &str) -> SessionMode {
+    match name {
+        "plan" => SessionMode::Plan,
+        "autopilot" => SessionMode::Autopilot,
+        _ => SessionMode::Interactive,
+    }
+}
+
+/// Whether a GET path is a conversation id rather than a route. Our ids are/// `c<millis>` and forks are `fork-<millis>`; a prefix test alone would swallow
+/// The one-line summary of a page: what a link is worth showing before it is
+/// clicked. Fetched here because a browser cannot read another origin's HTML.
+///
+/// Only `http`/`https` is followed — the URL arrives from the page, and a
+/// `file:` or `data:` preview would turn a link into a local read.
+async fn link_preview(url: &str) -> Value {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return json!({ "url": url, "error": "not an http(s) url" });
+    }
+    let owned = url.to_string();
+    let got = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let body = ureq::get(&owned)
+            .header("accept", "text/html,application/xhtml+xml")
+            .header("user-agent", "Mozilla/5.0 (webrain chat link preview)")
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_body()
+            .read_to_vec()
+            .map_err(|e| e.to_string())?;
+        // 512 KB is more than any `<head>`; a 50 MB page is not a preview.
+        let cut = body.len().min(512 * 1024);
+        Ok(String::from_utf8_lossy(&body[..cut]).to_string())
+    })
+    .await;
+    let html = match got {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => return json!({ "url": url, "error": e }),
+        Err(e) => return json!({ "url": url, "error": e.to_string() }),
+    };
+    let pick = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|k| meta_content(&html, k))
+            .unwrap_or_default()
+    };
+    let og = pick(&["og:title"]);
+    let title = if og.is_empty() {
+        text_between(&html, "title").unwrap_or_default()
+    } else {
+        og
+    };
+    json!({
+        "url": url,
+        "title": clean(&title),
+        "description": clean(&pick(&["og:description", "description", "twitter:description"])),
+        "image": pick(&["og:image", "og:image:url", "twitter:image"]),
+        "site": clean(&pick(&["og:site_name"])),
+    })
+}
+
+/// `content="…"` of the `<meta>` that names `key`, in either attribute order —
+/// the order in the file is the page's business, not ours.
+fn meta_content(html: &str, key: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = html[from..].find(key) {
+        let start = from + at;
+        // The tag that carries it: back to the nearest `<meta>`.
+        let open = html[..start].rfind("<meta").unwrap_or(start);
+        let end = html[start..].find('>').map(|e| start + e)?;
+        if let Some(v) = attr(&html[open..end], "content") {
+            return Some(v);
+        }
+        from = end;
+    }
+    None
+}
+
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let at = tag.find(&format!("{name}="))? + name.len() + 1;
+    let quote = tag[at..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &tag[at + 1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// The text inside `<tag>…</tag>`, for the one case worth reading: the fallback
+/// `<title>` when a page publishes no `og:title`.
+fn text_between(html: &str, tag: &str) -> Option<String> {
+    let at = html.find(&format!("<{tag}"))?;
+    let start = html[at..].find('>')? + at + 1;
+    let end = html[start..].find(&format!("</{tag}>"))? + start;
+    Some(html[start..end].to_string())
+}
+
+/// Entities a `<title>` or a description realistically carries, decoded so the
+/// card does not read `Tom &amp; Jerry`.
+fn clean(s: &str) -> String {
+    let t = s
+        .trim()
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ");
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    t.chars().take(300).collect()
+}
+
+/// `/catalog`, `/chat.js`, `/context` and half the API, so the tail must be
+/// digits.
+fn is_convo_path(path: &str) -> bool {
+    let s = path.trim_start_matches('/');
+    let tail = s
+        .strip_prefix('c')
+        .or_else(|| s.strip_prefix("fork-"))
+        .unwrap_or_default();
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())
+}
+
+/// One stored conversation as the page wants it. Shared by the read and the
+/// claim so opening a thread is one request instead of two.
+fn convo_payload(state: &State, id: &str) -> Value {
+    let store = state.store.as_ref();
+    // The words, for the model's side of a reseed.
+    let messages = store.map(|s| s.messages(id)).unwrap_or_default();
+    // The numbers the right-hand panel shows. They are computed on the page
+    // (provider prices, cache discounts), so they are stored as the page
+    // computed them and replayed here.
+    let turns = store.map(|s| s.turns(id)).unwrap_or_default();
+    // The rows the page drew, when it kept them: a tool call with its arguments
+    // and result is the evidence, and `messages` has only the words. Older
+    // conversations fall back to the words.
+    let rows = store.and_then(|s| s.rows(id)).unwrap_or(Value::Null);
+    json!({ "id": id, "current": id, "messages": messages, "turns": turns, "rows": rows })
+}
+
+/// `respond`, gzipped when the client asked for it. A saved conversation is the
+/// largest thing this server sends — 354–663 KB of JSON for a scrape, measured
+/// off the wire — and it is repetitive JSON, so it deflates by roughly an order
+/// of magnitude for the cost of one `miniz_oxide` pass that is already compiled
+/// in via `flate2`.
+async fn respond_gz(
+    stream: &mut TcpStream,
+    head: &str,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> anyhow::Result<()> {
+    // Below this the framing outweighs the saving, and `Vary` would need to be
+    // honoured for a body nobody notices.
+    const FLOOR: usize = 2048;
+    let wants = header(head, "accept-encoding").is_some_and(|v| {
+        v.to_ascii_lowercase()
+            .split(',')
+            .any(|enc| enc.trim().starts_with("gzip"))
+    });
+    if !wants || body.len() < FLOOR {
+        return respond(stream, status, content_type, body).await;
+    }
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(body.as_bytes())?;
+    let gz = enc.finish()?;
+    respond_bytes(
+        stream,
+        status,
+        content_type,
+        &[("Content-Encoding", "gzip"), ("Vary", "Accept-Encoding")],
+        &gz,
+    )
+    .await
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -1766,8 +3180,9 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// A mode shapes the prompt; it does not change the tool set, which is fixed when
-/// the session is created.
-fn with_mode(prompt: &str, mode: &str) -> String {
+/// the session is created. `plan` is what a plan-mode answer is stored as, and
+/// every other mode carries it so "do it" still has the plan in hand.
+fn with_mode(prompt: &str, mode: &str, plan: &str) -> String {
     match mode {
         "plan" => format!(
             "[mode: plan] Investigate and answer with a numbered plan. Do not carry it out yet.\n\n{prompt}"
@@ -1775,6 +3190,9 @@ fn with_mode(prompt: &str, mode: &str) -> String {
         "ask" => format!(
             "[mode: ask] Answer from the conversation and what you already know. Do not call tools.\n\n{prompt}"
         ),
+        _ if !plan.trim().is_empty() => {
+            format!("[the plan on file]\n{}\n\n{prompt}", plan.trim())
+        }
         _ => prompt.to_string(),
     }
 }
@@ -2130,6 +3548,103 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_conversation_id_is_a_page() {
+        for ok in ["/c1700000000000", "/fork-1700000000000", "/c1"] {
+            assert!(is_convo_path(ok), "{ok}");
+        }
+        // Every one of these starts with `c` and is an API route.
+        for bad in ["/catalog", "/chat.js", "/context", "/chat.css", "/c", "/c12x", "/"] {
+            assert!(!is_convo_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_memory_write_asks_about_the_fact_not_the_tool() {
+        let store = json!({
+            "kind": "memory",
+            "action": "store",
+            "fact": "ab.gr prices need the desktop profile",
+            "subject": "ab.gr",
+            "citations": "webrain_navigate",
+        });
+        let card = permission_card("p1", &store, false);
+        assert_eq!(card["kind"], "memory");
+        assert_eq!(card["fact"], "ab.gr prices need the desktop profile");
+        assert_eq!(card["title"], "remember this");
+        assert_eq!(card["args"]["subject"], "ab.gr");
+
+        // A vote is the same card with different words.
+        let vote = json!({ "kind": "memory", "action": "vote", "fact": "f" });
+        assert_eq!(permission_card("p2", &vote, false)["title"], "vote on a memory");
+
+        // Everything else is still a tool, with the server prefix stripped.
+        let tool = json!({
+            "kind": "tool",
+            "serverName": "webrain",
+            "toolName": "webrain-webrain_navigate",
+            "args": { "url": "https://example.com" },
+        });
+        let card = permission_card("p3", &tool, false);
+        assert_eq!(card["kind"], "tool");
+        assert_eq!(card["tool"], "navigate");
+        assert_eq!(card["args"]["url"], "https://example.com");
+        // No name at all must not produce a card claiming to be something.
+        assert_eq!(permission_card("p4", &json!({}), false)["tool"], "tool");
+    }
+
+    #[test]
+    fn a_page_summary_is_read_from_either_attribute_order() {
+        let page = concat!(
+            r#"<html><head><title>Tom &amp; Jerry</title>"#,
+            r#"<meta property="og:title" content="T1">"#,
+            r#"<meta content="D1" name="description">"#,
+            r#"<meta property='og:image' content='https://x/i.png'></head></html>"#
+        );
+        assert_eq!(meta_content(page, "og:title").as_deref(), Some("T1"));
+        // `content` before `name` is just as valid and just as common.
+        assert_eq!(meta_content(page, "description").as_deref(), Some("D1"));
+        assert_eq!(
+            meta_content(page, "og:image").as_deref(),
+            Some("https://x/i.png")
+        );
+        assert_eq!(meta_content(page, "og:site_name"), None);
+        assert_eq!(
+            text_between(page, "title").as_deref(),
+            Some("Tom &amp; Jerry")
+        );
+        assert_eq!(clean(" Tom &amp;  Jerry "), "Tom & Jerry");
+        // A page with no `<head>` is not an error, it is an empty card.
+        assert_eq!(meta_content("<p>hi</p>", "og:title"), None);
+    }
+
+    #[test]
+    fn the_permission_mode_round_trips_through_its_wire_name() {
+        // The page posts these exact strings, so a rename on either side would
+        // silently fall back to `manual` and start asking again.
+        for want in ["manual", "assisted", "allow-all"] {
+            assert_eq!(mode_name(&mode_of(want)), want);
+        }
+        // Anything unrecognised must resolve to the mode that asks, never to
+        // `allow-all`.
+        assert_eq!(mode_name(&mode_of("")), "manual");
+        assert_eq!(mode_name(&mode_of("Allow-All")), "manual");
+    }
+
+    #[test]
+    fn the_session_mode_round_trips_and_never_defaults_to_autopilot() {
+        // The composer's own three modes: `agent` and `ask` are both the
+        // runtime's `interactive`, and only `plan` is a separate wire value.
+        assert_eq!(mode_word(&session_mode_of("plan")), "plan");
+        assert_eq!(mode_word(&session_mode_of("agent")), "interactive");
+        assert_eq!(mode_word(&session_mode_of("ask")), "interactive");
+        // A typo must not start a turn in the mode that stops asking.
+        assert_eq!(mode_word(&session_mode_of("")), "interactive");
+        assert_eq!(mode_word(&session_mode_of("Autopilot")), "interactive");
+        // The one that *is* asked for still arrives.
+        assert_eq!(mode_word(&session_mode_of("autopilot")), "autopilot");
+    }
+
+    #[test]
     fn finds_the_header_break_and_tolerates_absence() {
         assert_eq!(find(b"GET / HTTP/1.1\r\n\r\nbody", b"\r\n\r\n"), Some(14));
         assert_eq!(find(b"GET / HTTP/1.1\r\n", b"\r\n\r\n"), None);
@@ -2163,6 +3678,40 @@ mod tests {
         // Byte-identical to what a turn looked like before settings existed.
         assert_eq!(with_controls("hi", "", &[], &[], &user_notes("", "")), "hi");
         assert_eq!(user_notes("   ", "  "), "");
+    }
+
+    #[test]
+    fn only_a_session_setting_asks_for_a_restart() {
+        let mut s = RuntimeSettings::default();
+        // The defaults are what `connect` hard-coded: nothing switched on, every
+        // built-in reachable.
+        assert!(!s.memory && !s.session_store && s.allow_agents);
+        assert_eq!(s.max_output_tokens, 4096);
+        // Timeout is read per turn, so it never costs a rebuilt session.
+        assert!(!s.merge(&json!({"timeout_secs": 900})));
+        assert_eq!(s.timeout_secs, 900);
+        // A session field does.
+        assert!(s.merge(&json!({"memory": true})));
+        // Repeating the same value is not a change.
+        assert!(!s.merge(&json!({"memory": true})));
+        // A body that says nothing leaves everything alone.
+        assert!(!s.merge(&Value::Null));
+        // Values that cannot work are clamped, not stored: a one-second timeout
+        // or a one-token budget is a chat that never answers.
+        s.merge(&json!({"timeout_secs": 0, "max_output_tokens": 1}));
+        assert_eq!(s.timeout_secs, TIMEOUT_S.0);
+        assert_eq!(s.max_output_tokens, OUT_TOKENS.0);
+        // The compaction point is a session field: the runtime reads it when the
+        // session is created, so a change has to rebuild one.
+        assert!(s.merge(&json!({"compact_at": 60})));
+        assert_eq!(s.compact_at, 60);
+        s.merge(&json!({"compact_at": 5}));
+        assert_eq!(s.compact_at, COMPACT_PCT.0);
+        // And the stamp is what `connect` actually reads.
+        let mut args = Args::default();
+        s.stamp(&mut args);
+        assert_eq!(args.memory, Some(true));
+        assert_eq!(args.compact_at, Some(COMPACT_PCT.0));
     }
 
     #[test]
@@ -2263,12 +3812,44 @@ mod tests {
 
     #[test]
     fn modes_shape_the_prompt_only() {
-        assert_eq!(with_mode("do it", "agent"), "do it");
-        assert_eq!(with_mode("do it", ""), "do it");
-        let plan = with_mode("do it", "plan");
+        assert_eq!(with_mode("do it", "agent", ""), "do it");
+        assert_eq!(with_mode("do it", "", ""), "do it");
+        let plan = with_mode("do it", "plan", "");
         assert!(plan.starts_with("[mode: plan]"));
         assert!(plan.ends_with("do it"));
-        assert!(with_mode("x", "ask").contains("Do not call tools"));
+        assert!(with_mode("x", "ask", "").contains("Do not call tools"));
+    }
+
+    #[test]
+    fn a_saved_plan_rides_along_with_the_next_turn() {
+        let p = with_mode("do it", "agent", "1. read the page\n2. extract the price");
+        assert!(p.starts_with("[the plan on file]"), "{p}");
+        assert!(p.contains("2. extract the price"), "{p}");
+        assert!(p.ends_with("do it"), "{p}");
+        // Plan mode writes the plan, so it must not be handed its own draft back.
+        assert!(!with_mode("x", "plan", "stale").contains("stale"));
+        // Whitespace is not a plan.
+        assert_eq!(with_mode("do it", "agent", "  \n "), "do it");
+    }
+
+    #[test]
+    fn a_reopened_conversation_carries_its_tail() {
+        let msgs = vec![
+            json!({"role": "user", "body": "first"}),
+            json!({"role": "assistant", "body": "second"}),
+            json!({"role": "user", "body": "third"}),
+        ];
+        // Oldest first, and each row names who said it.
+        assert_eq!(
+            transcript(&msgs, 1000),
+            "user: first\nassistant: second\nuser: third"
+        );
+        // The cap keeps the NEWEST messages: a reopened chat continues from the
+        // end, not the beginning.
+        assert_eq!(transcript(&msgs, 15), "user: third");
+        assert_eq!(transcript(&[], 100), "");
+        // A stored body of whitespace is not something the model should read.
+        assert_eq!(transcript(&[json!({"role": "user", "body": "   "})], 100), "");
     }
 
     #[test]
