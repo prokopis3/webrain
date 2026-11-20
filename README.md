@@ -41,6 +41,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 - **See the page** — `webrain_observe` (state / a11y / semantic tree) plus vision tiles (screenshot → vector store) for tables and charts.
 - **Structured search** — `webrain_serp` returns typed JSON (`position`/`title`/`url`/`domain`/`snippet`), deduped and paginated, across provider tiers: free HTTP engines → Brave API key → browser render → serpapi.
 - **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus `webrain_scrape` for static pages over plain HTTP with no browser process at all.
+- **Talk to it, and watch it work** — `webrain chat` drives all of the above from your own model key; `chat --serve` puts that turn in a page with tool cards you can re-run, model-written follow-up chips, conversation totals, and replies that can be laid out as cards or tables instead of prose. See [Chat](#chat).
 
 ---
 
@@ -227,6 +228,44 @@ webrain chat --serve          # browser UI on http://127.0.0.1:8787/
 - From source it is opt-in: `cargo build --release --features chat` (Rust 1.94+; Linux
   needs OpenSSL 3, a musl target vendors it; `chat-bundled` embeds the runtime). The
   release binaries ship it on every target.
+
+### What the page does that a terminal does not
+
+![An html-mode answer: a dashboard of cards, stats, pills and a progress bar](docs/images/chat-html-answer.png)
+
+- **The reply can be laid out, not just written.** Settings → Chat switches rendering
+  between `markdown` and a sanitised **HTML5 fragment**. In `html` mode the model is
+  told which shapes the page styles — a short answer is a paragraph, comparable items
+  are `div.grid > section.card`, a number worth reading is `div.stat`, a comparison is
+  a table — so "design it" is not something you have to ask for; ask a comparison
+  question and it comes back as cards. `<script>`, `<style>` and every `style=""` are
+  dropped by name in both modes.
+- **Both hints are standing instructions**, held by the session rather than pasted onto
+  every prompt: the render vocabulary and the follow-up contract cost no tokens per
+  turn, and flipping the switch is one patched setting (`restart: false`, prompt cache
+  intact).
+- **A reply streams in two halves.** It is cut at its last safe block boundary (never
+  inside a code fence) and only the tail re-renders per frame, so each new word fades
+  in without flickering the paragraph above it.
+- **The next three prompts are the model's own.** It ends the answer with a
+  machine-readable `<suggest>` tail; the page lifts it out and renders buttons, stores
+  the clean answer, and falls back to evidence-derived prompts when a model ignores the
+  tail.
+- **The right rail totals the conversation**: turns, tokens in/out, steps, sources and
+  cost summed from the per-turn ledger — `6 turns · 540052 in / 29798 out · 17 steps ·
+  $0.031` — with durations that scale (`240ms → 7.1s → 3m 00s → 2d 3h → 1y 1mo`)
+  instead of always seconds.
+- **A tool call is a card you can re-run.** Arguments and result are shown verbatim,
+  the row reads as a sentence (`Searched the web for "…"`, `Read el.aegeanair.com`),
+  and **edit & re-run** sends the corrected arguments through the session's own
+  invocation pipeline — no model turn, no tokens, and the original call stays visible.
+- **The turn is steerable**: queue a prompt behind the running one or steer it, stop
+  it, rewind the conversation (and the files it changed) to any earlier turn, fork a
+  thread at a message, and switch permission mode (ask / assisted / allow-all) or MCP
+  servers and skills from the page.
+- **Evidence is kept**: every URL a tool returned becomes a source chip, every failure
+  says why in one line, a dead tool server raises a banner with a reconnect button, and
+  a reload redraws open approvals instead of stranding the turn.
 
 Provider table, `--search` behaviour (the vendor's own search where it exists, webrain's
 engines otherwise) and the closing cost line: [chat guide](docs/guides/chat.mdx).
