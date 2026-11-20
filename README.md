@@ -231,7 +231,14 @@ webrain chat --serve          # browser UI on http://127.0.0.1:8787/
 
 ### What the page does that a terminal does not
 
+![A turn in webrain chat: the prompt, the answer streaming in, the turn footer and three follow-up chips](docs/images/chat-turn.gif)
+
+*One turn, recorded: the prompt, the answer arriving, the closing `… · 0 steps · 6.2s`
+line and the three follow-up chips the model wrote.*
+
 ![An html-mode answer: a dashboard of cards, stats, pills and a progress bar](docs/images/chat-html-answer.png)
+
+*The same page in `html` mode, where an answer can be a dashboard rather than prose.*
 
 - **The reply can be laid out, not just written.** Settings → Chat switches rendering
   between `markdown` and a sanitised **HTML5 fragment**. In `html` mode the model is
