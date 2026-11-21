@@ -530,7 +530,7 @@ fn copilot_dir() -> PathBuf {
 }
 
 /// The official artifact is one Node SEA executable, not the `copilot-runtime`
-/// + `runtime.node` pair — that pair is something the SDK's own build script
+/// plus `runtime.node` pair — that pair is something the SDK's own build script
 /// derives from this binary. Verified: the SDK spawns this directly when
 /// `CliProgram::Path` / `COPILOT_CLI_PATH` names it.
 fn copilot_bin_name() -> &'static str {

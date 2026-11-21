@@ -20,9 +20,9 @@ use copilot_sdk::types::{
     CreateSessionFilesystemOptions, CreateSessionInstructionOptions, CreateSessionOptions,
     InfiniteSessionConfig, LargeToolOutputConfig, McpServerConfig, McpStdioServerConfig,
     MemoryConfiguration, NamedProviderConfig, PermissionRequestData, PermissionRequestKind,
-    ProviderModelConfig, SessionEventOptions, SessionInferenceOptions, SessionInteractionOptions,
-    SessionPermissionOptions, SessionSkillOptions, SessionStateOptions, SessionToolOptions,
-    SystemMessageConfig, ToolSearchConfig,
+    ProviderModelConfig, ResumeSessionOptions, SessionEventOptions, SessionInferenceOptions,
+    SessionInteractionOptions, SessionPermissionOptions, SessionSkillOptions, SessionStateOptions,
+    SessionToolOptions, SystemMessageConfig, ToolSearchConfig,
 };
 use copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
@@ -311,6 +311,41 @@ impl AutoModeSwitchHandler for AutoAsk {
     }
 }
 
+/// The create config, re-expressed as a resume config.
+///
+/// Copying from the one we just built is deliberate: a resume that re-derives its
+/// groups is a resume that can quietly differ from the session it restores.
+fn resume_options(id: SessionId, c: &CreateSessionOptions) -> ResumeSessionOptions {
+    let mut r = ResumeSessionOptions::new(id);
+    r.model = c.model.clone();
+    r.system_message = c.system_message.clone();
+    r.working_directory = c.working_directory.clone();
+    r.enable_config_discovery = c.enable_config_discovery;
+    r.inference = c.inference.clone();
+    r.events = c.events.clone();
+    r.state = c.state.clone();
+    r.tools = c.tools.clone();
+    r.skills = c.skills.clone();
+    r.mcp = c.mcp.clone();
+    // These two have resume-specific twins rather than a shared type, so each
+    // field we set on the create side is copied across by name.
+    let mut fs = copilot_sdk::types::SessionFilesystemOptions::new();
+    if let Some(t) = c.filesystem.track_file_changes {
+        fs = fs.with_track_file_changes(t);
+    }
+    r.filesystem = fs;
+    let mut ins = copilot_sdk::types::SessionInstructionOptions::new();
+    if let Some(t) = c.instructions.organization_text.clone() {
+        ins = ins.with_organization_text(t);
+    }
+    r.instructions = ins;
+    r.hooks = c.hooks.clone();
+    r.permissions = c.permissions.clone();
+    r.interaction = c.interaction.clone();
+    r.github = c.github.clone();
+    r
+}
+
 /// Ground `prompt` with webrain's own engines and return the prompt to send.
 /// `http_only`: no browser needed for auto (duckduckgo + bing over pooled
 /// HTTP), and a chat turn should not pay a Chrome launch.
@@ -429,6 +464,9 @@ pub(crate) async fn connect(
     // can be listed and resumed before its first turn. `None` for the one-shot
     // command, which must leave no state behind.
     name: Option<String>,
+    // `Some(id)`: resume that runtime session instead of creating one. Everything
+    // else is built exactly as for a create, which is the point.
+    resume: Option<SessionId>,
 ) -> anyhow::Result<(Client, Session)> {
     let exe = std::env::current_exe()?;
 
@@ -709,10 +747,19 @@ pub(crate) async fn connect(
     let client = Client::start(options).await.map_err(|e| {
         anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint())
     })?;
-    let session = client
-        .create_session(config)
-        .await
-        .map_err(|e| anyhow::anyhow!("could not create the session: {e}"))?;
+    // `Some(id)` restores the runtime's own session instead of starting a blank
+    // one — the same groups, applied through `ResumeSessionOptions`, so a resumed
+    // session cannot silently differ from a created one.
+    let session = match resume {
+        Some(id) => client
+            .resume_session(resume_options(id, &config))
+            .await
+            .map_err(|e| anyhow::anyhow!("could not resume the session: {e}"))?,
+        None => client
+            .create_session(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("could not create the session: {e}"))?,
+    };
     // The disk and a shell, for the one mode that should have them. Installed on
     // the session rather than only configured, so a resumed one gets them too.
     session
@@ -723,7 +770,7 @@ pub(crate) async fn connect(
 }
 
 pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
-    let (client, session) = connect(args, provider, None, None, None).await?;
+    let (client, session) = connect(args, provider, None, None, None, None).await?;
 
     // Subscribe before sending: a create-time turn can emit deltas before a
     // late subscriber exists.

@@ -141,6 +141,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         store.clone(),
         convo.clone(),
         &settings,
+        None,
     )
     .await?;
 
@@ -219,6 +220,9 @@ async fn spawn_live(
     store: Option<Arc<chat_store::Store>>,
     convo: String,
     settings: &RuntimeSettings,
+    // `Some(id)` restores the runtime's session for this conversation instead of
+    // starting a blank one; every other caller starts fresh.
+    resume: Option<SessionId>,
 ) -> anyhow::Result<Live> {
     // The runtime's own idea of a window is Copilot's 128k, so a 1M-token model
     // was measured at 7% of 128k and compacted at a quarter of its real size.
@@ -238,6 +242,9 @@ async fn spawn_live(
         // The conversation id names the runtime's copy of this session, so the
         // runtime can list it from creation and a later resume has a handle.
         Some(format!("webrain-{convo}")),
+        // `resume` is filled by the caller that has a runtime session id to
+        // restore; a plain spawn starts a fresh one.
+        resume,
     )
     .await?;
     let session = Arc::new(session);
@@ -306,6 +313,7 @@ async fn reseed(state: &Arc<State>) -> String {
         state.store.clone(),
         convo,
         &settings,
+        None,
     )
     .await
     {
@@ -2778,6 +2786,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 state.store.clone(),
                 state.convo().await,
                 &settings,
+                None,
             )
             .await
             {
