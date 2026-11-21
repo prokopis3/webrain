@@ -521,8 +521,8 @@ compile yet.
 | group field | what it buys our chat | work |
 |---|---|---|
 | `inference.allow_multiple_tool_calls` | parallel tool calls — a turn that reads three files stops being three round-trips | **SHIPPED 2026-11-21** as the Runtime tab's `parallel_tools` switch (default on; creation-time, so a flip answers `restart: true`). Verified by the unit test that the flag gates a restart and by the 58 CLI tests — not by a live turn, because the migration below only just compiled |
-| `interaction.on_elicitation_request` + `interaction.ask_user_variant` | the structured-question row from Tier 2 #4; the card shape already exists as `askcard`/`askCard` | M |
-| `execution.limits` | the runaway-turn cap Tier 2 #6 was dropped for — in 1.0.28 the only field was a Copilot-plan budget | M |
+| `interaction.on_elicitation_request` + `interaction.ask_user_variant` | the structured-question row from Tier 2 #4 — **but it is L, not M.** `ElicitationRequest.requested_schema` is a JSON schema the host renders as a form and `ElicitationResult.content` is what gets submitted, so reusing `askcard` would `accept` a form with the wrong payload | L, needs a form renderer |
+| `execution.limits` | **measured 2026-11-21 — not the runaway cap this row assumed.** `SessionLimitsConfig` has one field, `max_ai_credits`: a Copilot-plan credit budget. Nothing in 2.0.1 caps a turn except our own `timeout_secs`, which already exists | nothing to build |
 | `agents.default` / `agents.selected` / `agents.included_builtin_agents` | a real agent picker, where 1.0.28 needed `custom_agents` built by hand | L |
 | `state.memory_store` | a memory backend we choose, instead of "the runtime's store or nothing" | L |
 | `policy.allowed_models` | refuse a model the endpoint cannot serve before the turn fails | S |

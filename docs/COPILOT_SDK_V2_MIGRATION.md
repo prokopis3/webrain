@@ -177,11 +177,21 @@ worse than one that does not compile.
 
 | # | setting | change | check |
 |---|---|---|---|
-| 3.1 | `inference.allow_multiple_tool_calls` | one flag; a turn reading three files stops being three round-trips | two tool rows before the answer on a prompt naming two files |
-| 3.2 | `execution.limits` | the runaway-turn cap 1.0.28 made us drop (`session_limits` had only `max_ai_credits`); surfaces in `RuntimeSettings` + `/settings` | a cap small enough to trip stops the turn with an error instead of spending the budget |
-| 3.3 | `interaction.on_elicitation_request` + `ask_user_variant` | structured questions — the Tier 2 #4 row, reusing the existing `askcard` shape instead of building a card vocabulary | a turn that asks a multi-choice question renders buttons, not one free-text box |
+| 3.1 | `inference.allow_multiple_tool_calls` | **SHIPPED** as the `parallel_tools` switch | two tool rows before the answer on a prompt naming two files |
+| 3.2 | `execution.limits` | **NOT A FEATURE — measured.** `SessionLimitsConfig` has one field, `max_ai_credits`, which is a Copilot-plan credit budget, not a cap on a runaway turn. Nothing in 2.0.1 stops a turn except our own `timeout_secs`, which already exists | — |
+| 3.3 | `interaction.on_elicitation_request` + `ask_user_variant` | **L, not M.** `ElicitationRequest` carries `requested_schema: Option<Value>` — a JSON schema the host must render as a form, plus `ElicitationResult { action, content }` to submit it. An `accept` with the wrong `content` is worse than no card, so this needs a real form renderer, not a bigger `askcard` | a turn that asks a multi-choice question renders buttons |
 
-3.1 is one line and is the reason to do this step at all; 3.2/3.3 are M each.
+3.1 is one line and is the reason to do this step at all; 3.2 does not exist and 3.3
+is a phase of its own.
+
+### Next phase — resume, and why it is not in this branch
+
+`ResumeSessionOptions` is 32 fields, and every group in it is one `connect()`
+already builds — so the config half is reuse, not new work. What it still needs is
+not config: a `POST /resume {convo}` route that maps our conversation id to the
+runtime's session id, the `Arc<Live>` swap the restart path already does, and a
+page surface that uses it when a conversation is opened. Half of that is UI, so it
+gets its own pass rather than being bolted onto the end of the migration.
 
 ### Step 4 — cheap plumbing, one pass
 

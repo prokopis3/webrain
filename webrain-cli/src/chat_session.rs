@@ -223,6 +223,15 @@ fn not_destructive(d: &PermissionRequestData) -> bool {
     )
 }
 
+/// `a, b ,,c` → `["a", "b", "c"]`: the list a person types into one box.
+fn allowlist(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Ground `prompt` with webrain's own engines and return the prompt to send.
 /// `http_only`: no browser needed for auto (duckduckgo + bing over pooled
 /// HTTP), and a chat turn should not pay a Chrome launch.
@@ -552,9 +561,16 @@ pub(crate) async fn connect(
         .with_instructions(|_| instructions)
         .with_permissions(|_| permissions)
         .with_hooks(|h| h.with_handlers(fence))
+        // `sessions.list` reports this instead of the generic `sdk`, so a thread
+        // the runtime holds is attributable to the surface that opened it.
+        .with_client_name("webrain")
         .with_enable_config_discovery(false);
     if let Some(n) = session_name {
         config = config.with_name(n);
+    }
+    let allowed = allowlist(args.allowed_models.as_deref().unwrap_or_default());
+    if !allowed.is_empty() {
+        config = config.with_policy(|p| p.with_allowed_models(allowed));
     }
     if let Some(interaction) = interaction {
         config = config.with_interaction(|_| interaction);
@@ -857,6 +873,14 @@ fn usage_json(t: Totals) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_allowlist_ignores_the_commas_and_blanks_people_type() {
+        assert!(allowlist("").is_empty());
+        assert!(allowlist(" , ").is_empty());
+        assert_eq!(allowlist("a"), ["a"]);
+        assert_eq!(allowlist(" a ,b, , c "), ["a", "b", "c"]);
+    }
 
     #[test]
     fn tokens_per_sec_is_output_tokens_over_api_seconds() {

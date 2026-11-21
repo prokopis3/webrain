@@ -56,6 +56,10 @@ pub struct Args {
     /// `--serve`: let one turn ask for several tool calls at once instead of
     /// serially. `None` means on — it only ever shortens a turn.
     pub parallel_tools: Option<bool>,
+    /// Comma-separated models the runtime may use. Empty means "whatever the
+    /// provider serves", which is the default; naming models turns a typo into
+    /// a refusal at creation instead of a provider error mid-turn.
+    pub allowed_models: Option<String>,
     /// Where the runtime starts rewriting history, as a percentage of the context
     /// window. `None` leaves the runtime's own 80/95 pair alone; naming a value
     /// sets the blocking threshold 15 points above it, so the background pass

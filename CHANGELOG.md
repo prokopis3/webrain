@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `chat`: **`parallel_tools` switch** — one turn may ask for several tool calls
   at once (`inference.allow_multiple_tool_calls`, on by default in the Runtime
   tab). Creation-time in the SDK, so flipping it reports `restart: true`.
+- `chat`: **model allowlist** — the Runtime tab's "models the runtime may use"
+  (`policy.allowed_models`). Empty means unrestricted; naming models turns a typo
+  into a refusal when the session is built instead of a provider error mid-turn.
+- `chat`: sessions now identify themselves as `webrain` instead of the generic
+  `sdk` in the runtime's own session list (`client_name`).
 
 ### Changed
 - `chat`: migrated to **`copilot-sdk` 2.0.1** (the successor to the now-deprecated

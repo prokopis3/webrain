@@ -792,6 +792,8 @@ struct RuntimeSettings {
     /// One turn may ask for several tool calls at once. Creation-time only, so
     /// flipping it costs a restart — the trade nobody minds for a faster turn.
     parallel_tools: bool,
+    /// Comma-separated models the runtime may use; empty means unrestricted.
+    allowed_models: String,
 }
 
 impl Default for RuntimeSettings {
@@ -806,6 +808,7 @@ impl Default for RuntimeSettings {
             effort: String::new(),
             instructions: String::new(),
             parallel_tools: true,
+            allowed_models: String::new(),
         }
     }
 }
@@ -840,6 +843,7 @@ impl RuntimeSettings {
             effort: v["effort"].as_str().unwrap_or_default().to_string(),
             instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
             parallel_tools: v["parallel_tools"].as_bool().unwrap_or(d.parallel_tools),
+            allowed_models: v["allowed_models"].as_str().unwrap_or_default().to_string(),
         }
     }
 
@@ -854,6 +858,7 @@ impl RuntimeSettings {
             "effort": self.effort,
             "instructions": self.instructions,
             "parallel_tools": self.parallel_tools,
+            "allowed_models": self.allowed_models,
         })
     }
 
@@ -871,6 +876,7 @@ impl RuntimeSettings {
                 s.max_output_tokens,
                 s.compact_at,
                 s.parallel_tools,
+                s.allowed_models.clone(),
             )
         };
         let before = session(self);
@@ -905,6 +911,9 @@ impl RuntimeSettings {
         if let Some(b) = v["parallel_tools"].as_bool() {
             self.parallel_tools = b;
         }
+        if let Some(m) = v["allowed_models"].as_str() {
+            self.allowed_models = m.to_string();
+        }
         before != session(self)
     }
 
@@ -929,6 +938,7 @@ impl RuntimeSettings {
         args.effort = Some(self.effort.clone());
         args.instructions = Some(self.instructions.clone());
         args.parallel_tools = Some(self.parallel_tools);
+        args.allowed_models = Some(self.allowed_models.clone());
     }
 }
 
