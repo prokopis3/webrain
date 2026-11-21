@@ -1,0 +1,92 @@
+---
+title: Performance
+description: What webrain actually measures — footprint, throughput, tokens per turn — with the method and the date beside every number, and the engine vendor claims kept separate from ours.
+---
+
+# Performance
+
+Two rules on this page, because a benchmark without them is marketing:
+
+1. **Every webrain number was measured on this project** — the date and the
+   command are named, and you can re-run them.
+2. **Vendor numbers are labelled as vendor numbers.** Obscura's "30 MB / 85 ms"
+   comes from its own README, not from our measurements. We have not run a
+   stopwatch comparison of every engine against Chrome on the same page, and we
+   are not going to pretend we have.
+
+## Footprint — what you install and what it costs to run
+
+| what | webrain | source |
+|---|---|---|
+| default binary (no engine embedded) | **~22 MB** | `docs/index.mdx` |
+| with `chat` (runtime installed separately) | **~45 MB** | `docs/guides/chat.mdx` |
+| with `chat-bundled` (runtime inside the binary) | ~211 MB | embeds ~166 MB of archives; the point of the flag is *no download at install* |
+| runtime dependencies | **0** by default | Rust, statically linked; no Node, no Python, no browser to start |
+| memory per browser tab | **~56 MB**, measured | `docs/reference/environment.mdx`; the batch sizes itself from free RAM ÷ 56 MB, capped at cores × 2 |
+| memory pressure valve | workers halve when free RAM crosses **12%** | same page; a slow run reports `throttled_by_memory: true` instead of silently swapping |
+
+The tab figure is the one that matters for scale, because it is what the batch
+admission actually uses: a `webrain_batch` of 27 URLs on a 16 GB box is planned
+from that number, not from a fixed concurrency.
+
+## Speed — numbers we measured, with the change that produced them
+
+| measurement | result | where |
+|---|---|---|
+| static page fetch (no browser) | **427 KB in 266 ms** | Sklavenitis page, `docs/changelog.mdx` |
+| search round trip | **492 ms** | a "plural" query, same changelog |
+| 27 search URLs, concurrency 6 | **10 s** | down from **159 s** — the wait strategy was fixed, not the site. `AGENTS.md` |
+| the same run's dead time | 810 s of pure timeout → **0** | `wait_selector` state fix, measured on masoutis.gr |
+| page shells vs mounted SPAs | 1 MB shell with a **518 B** Apollo cache = 0 products | obscura v0.2.5 on `ab.gr/eshop/search` — recorded as a *limitation*, not a win: an unmounted SPA is not a fast page |
+
+The 159 s → 10 s row is the honest version of "16× faster": nobody optimised the
+network, we stopped waiting for a selector that could never match.
+
+## Tokens — the cost that actually dominates an agent turn
+
+A scraping agent's bill is mostly schema and history, not answers. Measured on
+this project:
+
+| lever | before | after |
+|---|---|---|
+| 18 MCP tool schemas sent every request | **9 820 tokens** | deferred — `tool_search` loads a schema when the model asks for it |
+| `builtin:*` wildcard | **6 972 tokens** of runtime tool schemas | four named built-ins (`task`, `task_complete`, `ask_user`, `skill`) |
+| the runtime's default coding-agent system prompt | **~8 048 tokens** (`systemTokens: 8048`) | replaced by webrain's own, one paragraph about scraping |
+| parallel tool calls (2.0.1) | serial: three file reads = three round-trips | `parallel_tools`, on by default |
+
+## Engines — vendor claims, kept separate
+
+| metric | Obscura (vendor) | Headless Chrome |
+|---|---|---|
+| memory | **30 MB** | 200+ MB |
+| binary size | ~70 MiB | 300+ MB |
+| page load | **85 ms** | ~500 ms |
+| startup | instant | ~2 s |
+| anti-detect | built in | none |
+
+Those are Obscura's README figures (`github.com/h4ckf0r0day/obscura`). What we
+add is the part a claim cannot tell you: **when the small engine is the wrong
+tool.** Measured here, obscura v0.2.5 returns an unmounted shell on a data-driven
+SPA — its own stderr names a missing DOM API — so webrain routes Material/React
+pages to real Chrome and keeps obscura for the pages it can actually render. The
+engine choice is a routing decision, and `webrain_batch` takes `cdp_urls` so one
+run can use both.
+
+## Reproduce it
+
+```bash
+webrain_stats                                   # host health, memory, browser processes
+webrain serp "rust programming language" --limit 10
+webrain batch --urls urls.txt --concurrency 6   # reports tabs_allowed, mem_* and throttling
+webrain chat --serve                            # the page shows per-turn tokens and cost
+```
+
+Every batch reply carries its own accounting — `tabs_allowed`, `mem_total_mb`,
+`mem_available_mb`, `throttled_by_memory`, `cost_multiplier` — so a client can
+read *why* a run looked slow instead of taking a number on faith.
+
+## Related
+
+- [MCP tools reference](/reference/tools)
+- [Memory contract](/reference/environment)
+- [Scrape at scale](/guides/scrape-at-scale)
