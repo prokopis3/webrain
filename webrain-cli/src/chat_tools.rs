@@ -519,6 +519,51 @@ fn sessions() -> &'static Mutex<Sessions> {
     S.get_or_init(|| Mutex::new(Sessions::default()))
 }
 
+/// Where a finished job is announced. This module has no bus of its own — one
+/// process has one event stream and it belongs to the server — so `chat serve`
+/// installs its publisher once, at boot.
+static ANNOUNCE: OnceLock<Box<dyn Fn(String) + Send + Sync>> = OnceLock::new();
+
+/// Install the publisher. Called once; a second call is ignored rather than
+/// panicking, because the only caller is the server's own startup.
+pub(crate) fn watch_exit(f: impl Fn(String) + Send + Sync + 'static) {
+    let _ = ANNOUNCE.set(Box::new(f));
+}
+
+/// Nobody asks a process whether it is still alive, so one thread per job does
+/// nothing but ask. Without it a build that finishes while the page is idle is
+/// only discovered the next time somebody polls — and "did it finish" is the
+/// question a background job exists to answer.
+fn announce_when_over(id: u64, label: String) {
+    let Some(tell) = ANNOUNCE.get() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(400));
+            let exit = {
+                let mut s = sessions().lock().unwrap();
+                match s.all.get_mut(&id) {
+                    Some(t) => t.exit(),
+                    // Stopped from the page: that path already told the reader, and
+                    // the entry is gone.
+                    None => return,
+                }
+            };
+            if let Some(code) = exit {
+                tell(
+                    json!({
+                        "type": "webrain.job",
+                        "data": { "id": id, "command": label, "exit": code, "running": false },
+                    })
+                    .to_string(),
+                );
+                return;
+            }
+        }
+    });
+}
+
 fn terminal(
     op: &str,
     id: Option<u64>,
@@ -720,16 +765,18 @@ fn term_start(command: Option<&str>, cwd: &str) -> Result<String, String> {
     }
     s.next += 1;
     let id = s.next;
+    let label = program.to_string();
     s.all.insert(
         id,
         Term {
-            label: program.to_string(),
+            label: label.clone(),
             child,
             stdin,
             out: out.clone(),
         },
     );
     drop(s);
+    announce_when_over(id, label);
     // A shell prints its banner; without the pause the first read looks empty.
     std::thread::sleep(Duration::from_millis(300));
     Ok(format!(

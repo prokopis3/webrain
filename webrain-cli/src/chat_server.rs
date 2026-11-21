@@ -94,6 +94,15 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     // two seconds of session setup reads like a hang.
     let ui = super::chat_ui::load().map_err(|e| anyhow::anyhow!(e))?;
     let (bus, _) = broadcast::channel::<String>(256);
+    // A job that ends while the page is idle has to say so: nothing polls the
+    // terminal registry on its own, and "did my build finish" is the question a
+    // background job exists to answer.
+    chat_tools::watch_exit({
+        let bus = bus.clone();
+        move |frame| {
+            let _ = bus.send(frame);
+        }
+    });
     let permission = Arc::new(WebPermission {
         bus: bus.clone(),
         pending: Mutex::new(HashMap::new()),

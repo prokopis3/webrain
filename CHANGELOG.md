@@ -50,7 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of leaving the model polling a process that will never print. A new
   `terminal op=list` names every job the session still knows, which is what keeps
   one started many turns ago usable once the context that named it is gone, and
-  `/jobs` in the composer shows those rows to the user. Verified live: a
+  `/jobs` in the composer shows those rows to the user. A job also *announces*
+  its end: one thread per job watches it and publishes
+  `{"type":"webrain.job","data":{"id","command","exit","running":false}}` on
+  `/events`, because nothing polls the registry on its own and "did my build
+  finish" is the question a background job exists to answer. Verified live: a
   `cmd.exe` job at `running:true, bytes:151`
   stayed readable after the model's `read` answered `(no new output)`, `where.exe`
   reported `running:false, exit:2`, and `POST /jobs` answered

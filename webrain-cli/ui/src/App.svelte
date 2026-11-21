@@ -1041,6 +1041,17 @@
         // for an answer, so the page must never swallow one.
         asksIn = [...asksIn, d];
         return;
+      case "webrain.job":
+        // A process the agent started in an earlier turn has ended. It is a note
+        // and not a row of its own: the turn that started it may be long gone, so
+        // there is no step to attach it to — but silence would leave a dead dev
+        // server looking like a running one.
+        return push({
+          kind: "note",
+          text: `job #${d.id} ${d.command} — ${
+            d.exit === null || d.exit === undefined ? "ended" : `exit ${d.exit}`
+          }`,
+        });
       case "webrain.error":
       case "model.call_failure":
       case "session.error":
