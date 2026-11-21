@@ -87,11 +87,121 @@ errors**, which is the whole call-site surface:
 4. `McpEnableRequest` / `McpDisableRequest` gained `expected_installation_id`.
 5. `ClientOptions::default()` → `ClientOptions::new(mode)`.
 
-## Still to read before writing `connect()`
+## The plan
 
-- `NamedProviderConfig` full field list, and whether the old `ProviderConfig`
-  nests inside it or was replaced.
-- Whether the generated rpc request types keep their 1.0.28 names.
+Ordered so each step is verifiable before the next depends on it. Sizes are the
+work in `connect()` (M) or a route plus a card (S/M).
+
+### Step 1 — make it compile: `connect()` (the gate)
+
+Nothing else is reachable until this lands. The two open errors are the outline;
+the group measurements below are what makes it mechanical.
+
+**1a. `ClientOptions`** — `with_base_directory` and `with_mode` still exist, so
+only the program moves:
+
+```rust
+let mut options = ClientOptions::new(ClientMode::Empty).with_base_directory(home);
+if let Some(bin) = webrain_core::install::find_copilot() {
+    options.child_process_options_mut().program = ...;   // was with_program(CliProgram::Path)
+}
+```
+
+(`for_spawned_stdio` is the other door; `child_process_options_mut` keeps the
+existing shape.)
+
+**1b. The 12 settings, by group** — `SessionMcpOptions { servers }`,
+`SessionToolOptions { available_tools, excluded_tools, search, large_output }`,
+`SessionEventOptions { streaming, include_sub_agent_streaming_events }`,
+`SessionStateOptions { infinite_sessions, memory, enable_cross_session_store }`,
+`SessionSkillOptions { enabled, directories }`,
+`SessionInstructionOptions { organization_text }`,
+`SessionFilesystemOptions { track_file_changes }`,
+`SessionHookOptions { handlers }`,
+`SessionInteractionOptions { on_user_input_request }`.
+
+**1c. The provider is three pieces now, and two of them hold the cost fix.**
+`ProviderConfig` is gone; `NamedProviderConfig` has no `model_id`,
+`max_prompt_tokens` or `max_output_tokens` — those live on `ProviderModelConfig`,
+which is what `inference.models` takes:
+
+```rust
+inference: Some(SessionInferenceOptions {
+    providers: vec![NamedProviderConfig {
+        name: "webrain".into(),
+        base_url: provider.base_url.clone(),
+        provider_type: provider.provider_type.clone(),
+        api_key: provider.bearer_token(),
+        ..Default::default()
+    }],
+    default_provider: Some(Some("webrain".into())),
+    models: vec![ProviderModelConfig {
+        id: provider.model.clone(), provider: "webrain".into(),
+        model_id: Some(provider.model.clone()),
+        max_prompt_tokens: args.max_prompt_tokens,
+        max_output_tokens: Some(i64::from(args.max_output_tokens.unwrap_or(4096))),
+        ..Default::default()
+    }],
+    ..Default::default()
+})
+```
+
+Dropping `max_output_tokens` here silently re-breaks what the comment in
+`connect()` documents: OpenRouter refusing a request that reserves 64k
+("you requested up to 64000 tokens, but can only afford 171").
+
+**1d. Permissions — the one silent failure in the step.**
+`SessionPermissionOptions { sandbox, mode: Option<PermissionMode>, on_request:
+Option<Arc<dyn PermissionHandler>> }`, and `PermissionMode` is
+`Manual | Assisted | AllowAll | Unknown`. `approve_all_permissions` →
+`mode: Some(AllowAll)`; our handler → `on_request: Some(handler)`.
+`approve_permissions_if(not_destructive)` has **no** 2.0.1 equivalent — it was a
+predicate on the default flow, so it is answered either by our own handler or by
+`Assisted`. If neither takes it, the consequence is not a compile error: every
+tool call reaches the page as an unanswered prompt.
+
+**1e.** Delete `enable_session_telemetry` (gone).
+
+Check: `cargo check -p webrain-cli --features pdfium,chat` exit 0, then
+`cargo test -p webrain-cli --features pdfium,chat` = the 58 that pass today.
+
+### Step 2 — parity, not just compilation
+
+Reused because it is cheap and it is the only thing that catches 1d: one live
+`webrain chat --serve` turn that calls a tool (approval card appears and is
+answerable), one `POST /settings` (patching still answers `restart:false`), one
+answer that streams. A migration that compiles and never asks for permission is
+worse than one that does not compile.
+
+### Step 3 — the three capabilities that change behaviour
+
+| # | setting | change | check |
+|---|---|---|---|
+| 3.1 | `inference.allow_multiple_tool_calls` | one flag; a turn reading three files stops being three round-trips | two tool rows before the answer on a prompt naming two files |
+| 3.2 | `execution.limits` | the runaway-turn cap 1.0.28 made us drop (`session_limits` had only `max_ai_credits`); surfaces in `RuntimeSettings` + `/settings` | a cap small enough to trip stops the turn with an error instead of spending the budget |
+| 3.3 | `interaction.on_elicitation_request` + `ask_user_variant` | structured questions — the Tier 2 #4 row, reusing the existing `askcard` shape instead of building a card vocabulary | a turn that asks a multi-choice question renders buttons, not one free-text box |
+
+3.1 is one line and is the reason to do this step at all; 3.2/3.3 are M each.
+
+### Step 4 — cheap plumbing, one pass
+
+`policy.allowed_models` (refuse an unservable model before the turn fails),
+`filesystem.additional_directories` (a second readable root without widening the
+fence), `mcp.disable` (stop the enable-then-disable dance), and
+`inference.enable_citations`. All S; batch them, they touch `connect()` only.
+
+### Step 5 — merge
+
+Steps 1–2 are one PR (`feat/copilot-sdk-v2`); 3 and 4 follow separately so a
+capability problem cannot hold the migration hostage. PR #107 is untouched either
+way.
+
+### Not planned, on purpose
+
+`agents.*` (L, and config discovery is off by design), `state.memory_store` (L,
+product decision), resume via `ResumeSessionConfig` (L, the callback set has to
+be re-supplied or the resumed session silently differs), and everything in
+"Refuse" in `docs/CHAT_SDK_GAPS.md`.
 
 ## Second pass — three call sites fixed, and the builders are not what we assumed
 
@@ -160,7 +270,19 @@ and its 8 errors catalogued above, then all five call-site fixes from the
 generated sources. **8 errors → 2**, and both survivors are the same line of
 `connect()`: the `SessionConfig` import and `ClientOptions::default()`.
 
-Not done: the `connect()` rewrite — blocked on measuring the group structs, not
-on anything external — and any runtime verification. **This branch does not
-compile yet.** The measured totals that re-baseline the gaps inventory are in
+Not done: the `connect()` rewrite — now fully measured (see "The plan"), so it is
+scheduled rather than blocked — and any runtime verification. **This branch does
+not compile yet.** The measured totals that re-baseline the gaps inventory are in
 `docs/CHAT_SDK_GAPS.md` (fifth pass).
+
+## Evidence notes
+
+- `github_repo` (semantic) answers `404` for `github/copilot-sdk`, and
+  `github_text_search` / `search_code` return empty for every query tried
+  (`SessionUpdateOptionsParams`, `session.options.update`,
+  `ToolsExecuteRequest`, `CreateSessionOptions`, `SessionPermissionOptions
+  mode`), re-checked 2026-11-21. The repo is not readable through those tools, so
+  no fact above came from them.
+- What does answer: the extracted crate plus one `cargo check`, after which
+  `src/generated/` holds the protocol (see "second pass"). That is the only
+  source used for type and field names.
