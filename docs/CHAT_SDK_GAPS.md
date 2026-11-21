@@ -472,3 +472,57 @@ That stays the single row here that needs a design pass.
   `taskCompleteEventData`, `handlePendingToolCall`, `listPendingRequests`.
 - `ClientRpc.runtime` is not "version, capabilities and environment": it has one
   method, `shutdown`. That claim was written from the plan, not from `rpc.rs`.
+
+## Fifth pass, 2026-11-21 — the baseline moved: `copilot-sdk` 2.0.1
+
+Every number above was counted against `github-copilot-sdk` 1.0.28. That crate is
+**deprecated**: its own 1.0.35 metadata says *"Migrate to copilot-sdk"*, and the
+successor is `copilot-sdk` **2.0.1**. So this table is a 1.0.x table, and it is
+the last one that can be produced this way.
+
+**What can no longer be counted by reading.** In 2.0.1 only `types.rs` is
+authored. `rpc.rs` and `session_events.rs` are 7-line facades over a private
+`generated` module produced at build time, and no schema ships in the crate. The
+"47 namespaces" and "158 events" rows above therefore **cannot be carried forward
+by reading the crate** — they need a build, or the runtime's own schema. Do not
+quote them for 2.0.1 until one of those exists; a fabricated number here would
+repeat the mistake the third pass already had to correct.
+
+`SessionConfig` — the 99-field object this whole document is measured against —
+also no longer exists. `CreateSessionOptions` has **31 fields, 19 of them groups**,
+so "fields we set out of N" stops being a meaningful ratio. What replaces it as a
+useful question is: *which group does each setting live in, and which groups do we
+still leave empty*. The mapping is in `docs/COPILOT_SDK_V2_MIGRATION.md`.
+
+### Capabilities 2.0.1 adds that this document never listed
+
+Read from `types.rs` (the only authored surface), so these are the options the
+next pass can actually build against. Sizes are the same S/M/L the rest of the
+file uses; **all of them are blocked on the migration itself**, which does not
+compile yet.
+
+| group field | what it buys our chat | work |
+|---|---|---|
+| `inference.allow_multiple_tool_calls` | parallel tool calls — a turn that reads three files stops being three round-trips | M |
+| `interaction.on_elicitation_request` + `interaction.ask_user_variant` | the structured-question row from Tier 2 #4; the card shape already exists as `askcard`/`askCard` | M |
+| `execution.limits` | the runaway-turn cap Tier 2 #6 was dropped for — in 1.0.28 the only field was a Copilot-plan budget | M |
+| `agents.default` / `agents.selected` / `agents.included_builtin_agents` | a real agent picker, where 1.0.28 needed `custom_agents` built by hand | L |
+| `state.memory_store` | a memory backend we choose, instead of "the runtime's store or nothing" | L |
+| `policy.allowed_models` | refuse a model the endpoint cannot serve before the turn fails | S |
+| `filesystem.additional_directories` | a second readable root without widening the path fence | S |
+| `mcp.disable` | turn a server off at creation, instead of enabling then disabling it | S |
+| `inference.enable_citations` | citations on answers, when the provider supports them | S |
+
+The three that change behaviour rather than plumbing are the first three:
+`allow_multiple_tool_calls` is wall-clock, elicitation is fidelity, and
+`execution.limits` is the only thing in this list that stops a turn running away
+with the budget. Build those first once the session creates.
+
+### What stayed the same
+
+`PermissionHandler`, `ToolHandler`, `ToolInvocation`, `ToolResult` and the
+`types` / `rpc` / `session_events` / `handler` / `hooks` / `tool` / `session`
+module paths are unchanged, and the feature names we pass (`runtime`,
+`network-forwarding`, `bundled-cli`) still exist. So the chat's own code — the
+seven tools, `Fence`, `WebPermission`, `WebInput`, every route — is not what this
+migration rewrites. `connect()` is.
