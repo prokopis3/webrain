@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **mcp**: `webrain_session(op=open|close|list)` over **stdio** answered
+  `Unknown tool: webrain_open_session`, so a stdio client could not point its
+  backend at another endpoint. The fold from the intent surface to the executor
+  name happens in `handle_rpc`, which both transports share, but only
+  `handle_http_conn` answered the three session names — stdio passed the folded
+  name to `tools::call_tool`, which has no arm for it. stdio now treats `open` as
+  "point this connection's backend at `cdp_url`" (all one connection can offer),
+  `close` drops it and `list` names it. Also: a payload shaped
+  `{"error": "…"}` was reported `isError: false`, because only
+  `{"status":"error"}` was inspected.
+
 ## [0.19.0] - 2026-11-21
 
 ### Added

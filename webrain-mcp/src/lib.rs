@@ -231,6 +231,11 @@ pub fn clamp_concurrency_for(n: usize, cost_mult: usize) -> usize {
     }
 }
 
+/// The endpoint the stdio transport is pointed at, so `webrain_session(op=list)`
+/// can name it. stdio has exactly one connection and no session map, and
+/// `CdpBackend` keeps its URL to itself, so the target is remembered here.
+static STDIO_TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Shared JSON-RPC dispatch: stdio and HTTP both route through here.
 /// The span names the tool, so `RUST_LOG=debug` shows which call spent the time
 /// — the latency histogram says WHICH CDP command is slow, this says for whom.
@@ -1191,6 +1196,84 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 });
             }
 
+            // Session management on stdio. `handle_http_conn` answers these three
+            // from a per-session map it owns; stdio has one connection and no map,
+            // so the folded name fell through to `tools::call_tool`, which has no
+            // executor for it — every `webrain_session(op=open)` answered
+            // `Unknown tool: webrain_open_session`. Here "open" means "point this
+            // connection's backend at cdp_url", which is the whole of what a single
+            // connection can offer.
+            match tool_name.as_str() {
+                "webrain_open_session" => {
+                    let url = arguments.get("cdp_url").and_then(|v| v.as_str());
+                    return match connect_for(url, &arguments).await {
+                        Ok(b) => {
+                            *backend = Some(b);
+                            let target = url.map(String::from).or_else(|| {
+                                std::env::var("CDP_URL")
+                                    .ok()
+                                    .filter(|s| !s.trim().is_empty())
+                            });
+                            if let Ok(mut t) = STDIO_TARGET.lock() {
+                                *t = target.clone();
+                            }
+                            let sid = arguments
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("stdio");
+                            let text = serde_json::to_string(&json!({
+                                "session_id": sid,
+                                "cdp_url": target,
+                                "proxied": false,
+                                // A proxy is a browser context, which one raw stdio
+                                // connection cannot carry — so identity never switches.
+                                "identity": false,
+                                "created": true
+                            }))
+                            .unwrap_or_default();
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}})
+                        }
+                        Err(e) => tool_error(
+                            id,
+                            &format!("cannot open a session at {}: {e}", url.unwrap_or("CDP_URL")),
+                        ),
+                    };
+                }
+                "webrain_close_session" => {
+                    let had = backend.take().is_some();
+                    if let Ok(mut t) = STDIO_TARGET.lock() {
+                        *t = None;
+                    }
+                    let text = serde_json::to_string(&json!({
+                        "session_id": "stdio",
+                        "closed": had
+                    }))
+                    .unwrap_or_default();
+                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
+                }
+                "webrain_list_sessions" => {
+                    let target = STDIO_TARGET
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.clone())
+                        .or_else(|| {
+                            std::env::var("CDP_URL")
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                        });
+                    let text = serde_json::to_string(&json!({
+                        "sessions": [{
+                            "session_id": "stdio",
+                            "cdp_url": target,
+                            "connected": backend.is_some()
+                        }]
+                    }))
+                    .unwrap_or_default();
+                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
+                }
+                _ => {}
+            }
+
             if backend.is_none() {
                 match connect_for(cdp_url, &arguments).await {
                     Ok(b) => *backend = Some(b),
@@ -1243,7 +1326,11 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             // ponytail: JSON-encode the tool payload into one text block; mark isError
             // when the tool returned status:"error". Without the content array the
             // client JS throws "r.content is not iterable".
-            let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error");
+            // `{"error": "Unknown tool: X"}` carries no `status`, so a bare
+            // status check reported it as success and the client never saw the
+            // failure. Both error shapes count.
+            let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error")
+                || result.get("error").is_some();
             CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if is_error {
                 CALL_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
