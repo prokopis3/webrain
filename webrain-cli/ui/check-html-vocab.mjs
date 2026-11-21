@@ -47,7 +47,7 @@ for (const name of VOCAB) {
 
 // The two hazards the prompt must keep stating, because they are how a reply
 // breaks the page instead of laying it out.
-assert.ok(/<style>/.test(hint) && /<script>/.test(hint), "prompt names the stripped tags");
+assert.ok(/<style>/i.test(hint) && /<script>/i.test(hint), "prompt names the stripped tags");
 assert.ok(hint.includes('style=\\"\\"') || hint.includes('style=""'), "prompt forbids inline style");
 
 // The copyable skeleton is the part models actually follow — assert it survives
