@@ -356,7 +356,7 @@ const OTP_JS: &str = r#"(() => {
   const el = (SEL && document.querySelector(SEL)) ||
     document.querySelector('input[autocomplete="one-time-code"]') ||
     document.querySelector('input[inputmode="numeric"]');
-  if (!el || el.offsetParent === null) return {found:false};
+  if (!el || el.getClientRects().length === 0) return {found:false};
   return {found:true};
 })()"#;
 

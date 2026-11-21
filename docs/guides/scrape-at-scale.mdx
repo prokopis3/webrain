@@ -53,23 +53,50 @@ Every reply carries `stats`, and the numbers there are **measured**:
 - `effective_concurrency` is the number of tabs the batch **really obtained**
   (summed across `cdp_urls`), so `2` next to `requested_concurrency: 4` means two
   workers won and two did not — not a display bug.
-- `single_target: true` means the connection holds **one** tab (lightpanda, guest
-  Chrome): the queue runs serially and no `concurrency` value changes that. It is
+- `single_target: true` means the connection holds **one** tab (lightpanda, or a browser whose last window was closed): the queue runs serially and no `concurrency` value changes that. It is
   still a pass when `ok` equals `total`.
 - `ms_wall` far below `ms_total` is the parallelism you actually got; the two
   within a few ms of each other means serial.
 - A batch that dies as a whole answers **once per URL**, with the same error in
   each row — `total` always equals the number of URLs you sent.
 
+### Wait on the list, not on the first card
+
+`wait_selector_state` is satisfied by **any** match. Before the fix only the
+first DOM match counted, and an SPA list page renders the same cards twice —
+a hidden mobile container first, the visible desktop copy second — so `visible`
+never arrived and each page burned the whole `wait_timeout_secs`. Measured on
+`masoutis.gr` (27 search URLs, `wait_selector: "div.product"`, `concurrency: 6`,
+2026-11-06):
+
+| setting | wall | rows |
+|---|---|---|
+| `visible`, 30 s timeout (before the fix) | **159.4 s** | 27/27 ok |
+| `attached`, 30 s timeout | 33.6 s | 27/27, same `found` |
+| `attached`, **6 s** timeout | **10.1 s** | 27/27, identical data |
+
+`ms_total` was 858 s, of which 27 × 30 s = **810 s (94 %)** was pure wait; real
+page work was ~1.8 s/URL. So before blaming `concurrency` or the site, compare
+`ms_total` with the page times.
+
+- `wait_selector_state: "attached"` + `wait_timeout_secs: 6` on a list.
+- Anchor on the **repeated card**. A shell element that exists before the cards
+  (`#ProductsClass`) returns in 0.2-2.4 s with `found: 0` on every page.
+- A "no results" search never matches the card selector, so that row pays the
+  full timeout either way.
+
 <Warning>
-  **Guest Chrome is a purpose tool, not a batch engine.** It exists for
-  `webrain_serp` (`engine=google|brave`) and for solving an interactive
+  **The ephemeral ("guest") Chrome is a purpose tool, not a batch engine.** It
+  exists for `webrain_serp` (`engine=google|brave`) and for solving an interactive
   CAPTCHA/Turnstile, and its profile (`serp/<profile>`, kept unless `--fresh`) is
-  what carries the clearance to the next call. It refuses new targets
-  (`PUT /json/new` → 500; `-32000 "Failed to open a new tab"`), so a batch there
-  attaches the page it already has and runs **one serial tab** — measured 8 URLs
-  in 5.65 s versus **1.46 s** on a real Chrome with `concurrency: 4`. Route bulk
-  work to real Chrome, obscura or lightpanda.
+  what carries the clearance to the next call. It is now launched with
+  `--incognito` **because `--guest` cannot open a tab at all** — measured
+  2026-11-07 on Chrome 151 and 156, `--guest` answers `-32000 "Failed to open new
+  tab - no browser is open"` while `--incognito` accepts `Target.createTarget` and
+  `Target.createBrowserContext`. The tab limit is gone; the routing rule is not —
+  this browser has two callers (serp, CAPTCHA) and bulk work stays on real Chrome,
+  obscura or lightpanda. Mixing a queue into the profile that must keep looking
+  human is how the clearance gets burned.
 </Warning>
 
 ## Crawl — whole sites

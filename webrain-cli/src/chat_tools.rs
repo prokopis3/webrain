@@ -177,7 +177,17 @@ fn root() -> Result<PathBuf, String> {
 /// lexically first, so a path that does not exist yet is still checked, and then
 /// through symlinks, so a link out of the tree is not a way out.
 fn inside(p: &str) -> Result<PathBuf, String> {
-    let root = root()?;
+    resolved(&root()?, p)
+}
+
+/// Is `p` inside `root`? The same rule `inside` enforces, asked as a yes/no by
+/// `chat_hooks` so a built-in tool cannot be approved past the fence.
+pub(crate) fn within(root: &Path, p: &str) -> bool {
+    resolved(root, p).is_ok()
+}
+
+/// The fence itself, with its reason — one implementation for both callers.
+fn resolved(root: &Path, p: &str) -> Result<PathBuf, String> {
     let want = Path::new(if p.trim().is_empty() { "." } else { p });
     let joined = if want.is_absolute() {
         want.to_path_buf()
@@ -185,11 +195,11 @@ fn inside(p: &str) -> Result<PathBuf, String> {
         root.join(want)
     };
     let norm = lexically(&joined);
-    if !norm.starts_with(&root) {
+    if !norm.starts_with(root) {
         return Err(format!("refusing {p}: outside {}", root.display()));
     }
     match std::fs::canonicalize(&norm) {
-        Ok(real) if real.starts_with(&root) => Ok(real),
+        Ok(real) if real.starts_with(root) => Ok(real),
         Ok(real) => Err(format!("refusing {p}: resolves to {}", real.display())),
         Err(_) => Ok(norm),
     }
@@ -318,12 +328,36 @@ fn edit(path: &str, old: &str, new: &str, all: bool) -> Result<String, String> {
             p.display()
         ));
     }
+    let at = text.find(old).unwrap_or(0);
+    let line = 1 + text[..at].matches('\n').count();
+    remember(&p, Some(text.clone()));
     std::fs::write(&p, text.replacen(old, new, n)).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(format!(
-        "edited {}: {n} replacement{}",
+        "edited {}: {n} replacement{} at line {line}\n{}",
         p.display(),
-        if n == 1 { "" } else { "s" }
+        if n == 1 { "" } else { "s" },
+        delta(old, new)
     ))
+}
+
+/// The change, as the tool row shows it: what `old` became.
+///
+/// The model wrote both strings, but the person reading the turn did not, and
+/// this row is the only place it is visible before the file is already different.
+fn delta(old: &str, new: &str) -> String {
+    /// Lines of each side worth rendering — a whole-file move is not a reading
+    /// task, and the row would be taller than the answer.
+    const LINES: usize = 12;
+    let mut out = String::new();
+    for (sign, text) in [('-', old), ('+', new)] {
+        for line in text.lines().take(LINES) {
+            out.push_str(&format!("{sign} {line}\n"));
+        }
+        if text.lines().nth(LINES).is_some() {
+            out.push_str(&format!("{sign} …\n"));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// Trees whose contents are generated or vendored: walking them turns a
@@ -595,6 +629,55 @@ fn shown(r: Result<String, String>) -> String {
     }
 }
 
+/// How many file changes can be put back. A turn that rewrites twenty files is
+/// already past the point where a single undo answers the question.
+const UNDO_MAX: usize = 20;
+
+/// The pre-image of every change this process made, newest last. `None` means
+/// the file did not exist, so putting it back means removing it.
+fn undo_stack() -> &'static Mutex<Vec<(PathBuf, Option<String>)>> {
+    static STACK: OnceLock<Mutex<Vec<(PathBuf, Option<String>)>>> = OnceLock::new();
+    STACK.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Remember what `p` held before this change. Best effort: an undo that cannot
+/// be recorded must not fail the edit the user asked for.
+fn remember(p: &Path, before: Option<String>) {
+    let Ok(mut stack) = undo_stack().lock() else {
+        return;
+    };
+    if stack.len() >= UNDO_MAX {
+        stack.remove(0);
+    }
+    stack.push((p.to_path_buf(), before));
+}
+
+/// Put the most recent change back and say which file moved.
+///
+/// This is the half a diff cannot do: the page shows `- old / + new`, and until
+/// now the only way back was to edit again by hand.
+pub(crate) fn undo_last() -> Result<String, String> {
+    let entry = undo_stack().lock().ok().and_then(|mut s| s.pop());
+    let Some((path, before)) = entry else {
+        return Err("nothing to undo".to_string());
+    };
+    match before {
+        Some(text) => std::fs::write(&path, text)
+            .map(|()| format!("restored {}", path.display()))
+            .map_err(|e| format!("{}: {e}", path.display())),
+        None => {
+            // The change created the file, so undoing it removes it.
+            match std::fs::remove_file(&path) {
+                Ok(()) => Ok(format!("removed {}", path.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(format!("{} was already gone", path.display()))
+                }
+                Err(e) => Err(format!("{}: {e}", path.display())),
+            }
+        }
+    }
+}
+
 fn read(path: &str, from: Option<u64>, to: Option<u64>) -> Result<String, String> {
     let p = inside(path)?;
     let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -631,6 +714,7 @@ fn write(path: &str, content: &str) -> Result<String, String> {
     {
         return Err(format!("{} is not a directory", dir.display()));
     }
+    remember(&p, std::fs::read_to_string(&p).ok());
     std::fs::write(&p, content).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(format!("wrote {} bytes to {}", content.len(), p.display()))
 }
@@ -760,6 +844,46 @@ mod tests {
                 .unwrap_err()
                 .contains("places")
         );
+    }
+
+    // The stack is exercised directly rather than through `write`/`edit`: those
+    // resolve against the process's working directory, which for this test is
+    // the crate root, so a round trip through them would write into the source
+    // tree. `remember` is the one call each of them makes.
+    #[test]
+    fn a_change_can_be_put_back() {
+        let dir = std::env::temp_dir().join(format!("webrain-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "edited").unwrap();
+
+        // As `edit` records it: the text before the change.
+        remember(&file, Some("original".to_string()));
+        assert!(undo_last().unwrap().starts_with("restored"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+
+        // As `write` records a file it created: nothing to restore, so undo
+        // removes it.
+        remember(&file, None);
+        assert!(undo_last().unwrap().starts_with("removed"));
+        assert!(!file.exists());
+
+        assert!(undo_last().is_err(), "an empty stack has nothing to undo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_delta_shows_what_the_old_text_became() {
+        let d = delta("let a = 1;\n", "let a = 2;\n");
+        assert!(d.contains("- let a = 1;"), "{d}");
+        assert!(d.contains("+ let a = 2;"), "{d}");
+        // A long change is cut on both sides rather than filling the row.
+        let long = "x\n".repeat(40);
+        let d = delta(&long, "y");
+        assert_eq!(d.lines().filter(|l| *l == "- x").count(), 12, "{d}");
+        // The cut is marked, and the new side still follows it.
+        assert!(d.contains("- …"), "{d}");
+        assert!(d.ends_with("+ y"), "{d}");
     }
 
     #[test]

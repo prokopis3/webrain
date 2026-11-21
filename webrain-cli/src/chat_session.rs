@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use github_copilot_sdk::rpc::UsageGetMetricsResult;
+use github_copilot_sdk::session_events::ReasoningSummary;
 use github_copilot_sdk::types::{
-    InfiniteSessionConfig, McpServerConfig, McpStdioServerConfig, MemoryConfiguration,
-    PermissionRequestData, PermissionRequestKind, ProviderConfig, SessionConfig,
-    SystemMessageConfig,
+    InfiniteSessionConfig, LargeToolOutputConfig, McpServerConfig, McpStdioServerConfig,
+    MemoryConfiguration, PermissionRequestData, PermissionRequestKind, ProviderConfig,
+    SessionConfig, SystemMessageConfig, ToolSearchConfig,
 };
 use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
@@ -170,10 +171,19 @@ fn render_usage(t: Totals, base: &str, model: &str) -> String {
     } else {
         "n/a (BYOK: your provider bills the key)".to_string()
     };
+    // The cache share belongs on this line: a long conversation is cheap or
+    // expensive almost entirely by how much of `in` the provider served from its
+    // prompt cache, and the number was already computed for the cost estimate.
+    let hit = if t.input > 0 {
+        format!("{}%", t.cached * 100 / t.input)
+    } else {
+        "—".to_string()
+    };
     format!(
-        "tokens  {} in / {} out · {:.1} tok/s\nmodel   {} · {} request{} · {:.1} s API\ncost    {}",
+        "tokens  {} in / {} out · {} cached · {:.1} tok/s\nmodel   {} · {} request{} · {:.1} s API\ncost    {}",
         t.input,
         t.output,
+        hit,
         t.tokens_per_sec(),
         model,
         t.requests,
@@ -278,10 +288,37 @@ fn tool_filter() -> Vec<String> {
             .add_custom(name)
             .expect("chat_tools::NAMES are runtime-valid names");
     }
-    allowed
-        .add_builtin("*")
-        .expect("\"*\" matches every built-in")
-        .into_vec()
+    // The four built-ins we actually use, not `builtin:*`.
+    //
+    // Measured 2026-11-07 against the same one-word prompt: the wildcard costs
+    // 6 972 input tokens, because it sends a schema for every runtime built-in —
+    // `bash`, `view`, `edit`, `write`, `glob`, `grep`, `sql`, the agent tools and
+    // more — and `chat_tools` already provides the file and shell ones behind
+    // `chat_hooks::Fence`. `add_builtin` validates each name, so a rename in the
+    // runtime is a panic here rather than a silently missing tool.
+    for name in ["task", "task_complete", "ask_user", "skill"] {
+        allowed = allowed
+            .add_builtin(name)
+            .expect("these built-ins exist in the runtime");
+    }
+    allowed.into_vec()
+}
+
+/// When the runtime rewrites history instead of letting the window fill.
+///
+/// Unset leaves the runtime's own numbers (documented as 0.80 background /
+/// 0.95 blocking) alone. A value moves both together, 15 points apart, because
+/// they are one decision: if the blocking threshold is not above the background
+/// one, the background pass never gets to finish and every turn blocks.
+fn infinite_sessions(args: &Args) -> InfiniteSessionConfig {
+    let mut cfg = InfiniteSessionConfig::new().with_enabled(args.serve);
+    if let Some(pct) = args.compact_at {
+        let start = f64::from(pct.min(80)) / 100.0;
+        cfg = cfg
+            .with_background_compaction_threshold(start)
+            .with_buffer_exhaustion_threshold((f64::from(pct) + 15.0).min(95.0) / 100.0);
+    }
+    cfg
 }
 
 /// Build the runtime client and the session in one place, so the one-shot turn
@@ -307,6 +344,10 @@ pub(crate) async fn connect(
         McpServerConfig::Stdio(McpStdioServerConfig {
             command: exe.to_string_lossy().into_owned(),
             args: vec!["mcp".to_string()],
+            // Ten minutes, not the runtime's default: `webrain_crawl` and
+            // `webrain_batch` legitimately run for minutes, and a call killed at
+            // the default reports as a failed tool with no result.
+            timeout: Some(600_000),
             ..Default::default()
         }),
     );
@@ -342,7 +383,7 @@ pub(crate) async fn connect(
         // is the opposite: a long conversation, where hitting the context limit
         // mid-answer is the failure this switch exists to prevent. Compaction is
         // reported as `session.compaction_*` and already lands in the page.
-        .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(args.serve));
+        .with_infinite_sessions(infinite_sessions(args));
     if let Some(handler) = permission {
         config = config.with_permission_handler(handler);
     } else if args.yes {
@@ -356,10 +397,18 @@ pub(crate) async fn connect(
     if let Some(handler) = user_input {
         config = config.with_user_input_handler(handler);
     }
+    // The boundary the runtime's own tools do not have, plus the workspace's
+    // own instruction files at session start. Installed here rather than on the
+    // page so `webrain chat "<prompt>"` (one turn, no UI) is fenced identically.
+    config = config.with_hooks(std::sync::Arc::new(crate::chat_hooks::Fence::new(
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    )));
     // The same directory the page's `@` menu lists, so a skill named there can
     // actually be loaded. Discovery-only: the runtime reads a skill when the
     // model asks for it, it is not inlined into every prompt.
     let skills = webrain_core::skills::dir();
+    // empty mode forces this off when unset, so the directories below stay inert.
+    config.enable_skills = Some(true);
     if skills.is_dir() {
         config = config.with_skill_directories([skills]);
     }
@@ -367,28 +416,96 @@ pub(crate) async fn connect(
     // shows nothing until it is over. The CLI keeps `--stream` opt-in because
     // there stdout *is* the answer, not a progress bar.
     config.streaming = Some(args.stream || args.serve);
-    config.enable_session_store = Some(false);
+    // on the session, so turn one reasons as asked instead of at the runtime's default.
+    if let Some(e) = args.effort.as_deref()
+        && !e.is_empty()
+        && e != "off"
+    {
+        config.reasoning_effort = Some(e.to_string());
+        // The page has a thinking panel, so ask for the summary explicitly: what
+        // a model emits is otherwise the runtime's call, and a provider that
+        // supports summaries stays silent without this.
+        config.reasoning_summary = Some(ReasoningSummary::Concise);
+    }
+    // without this a delegated worker stays silent until it finishes.
+    config.include_sub_agent_streaming_events = Some(true);
+    // Captures what each turn changed on disk, which is the half of "undo" the
+    // conversation cannot give back — `session.history.listRewindPoints` answers
+    // `fileChangeTrackingEnabled: false` for a session that never opted in.
+    config.enable_file_change_tracking = Some(args.serve);
+    // The runtime's cross-session store: off unless the page switched it on,
+    // because writing session state is not something a scraping command should
+    // do behind the user's back, and the `todos` table the plan view reads lives
+    // in that database.
+    config.enable_session_store = Some(args.session_store.unwrap_or(false));
     // One turn, no memory writes: the runtime's memory feature is on by default
     // in CLI mode and would accumulate state a one-shot command never reads.
-    config.memory = Some(MemoryConfiguration::disabled());
+    // `--serve` may turn it on, which is the only path to remembering anything
+    // across conversations.
+    config.memory = Some(if args.memory.unwrap_or(false) {
+        MemoryConfiguration::enabled()
+    } else {
+        MemoryConfiguration::disabled()
+    });
     // Nothing about this turn is Copilot's to measure.
     config.enable_session_telemetry = Some(false);
     // Keep the agent's reachable surface to our own tools. Note what this does
-    // NOT do: measured (`session.usage_info`) the prompt is still
-    // `toolDefinitionsTokens: 8080` / `systemTokens: 272` ~= 8.4k either way, so
-    // the allowlist is a behavioural guard (the model cannot call the runtime's
-    // built-in tools), not a way to shrink the prompt. Trimming the budget
-    // further means fewer `webrain_*` tools, which is a product call.
+    // NOT do: measured 2026-11-07 on a one-word prompt (`webrain chat`, deepseek,
+    // the printed `tokens N in`) the turn still carries ~19.8k input tokens before
+    // the user's words, and the model request that follows one tool call carries
+    // as much again — so the allowlist is a behavioural guard (the model cannot
+    // call the runtime's built-in tools), not a way to shrink the prompt. The bulk
+    // is the schemas of the `webrain_*` tools; cutting it means offering fewer
+    // tools, which is a product call.
     //
     // `ToolSet` rather than raw strings: it validates each name at build time
     // and emits the runtime's documented `mcp:<server>-<tool>` form.
     config.enable_config_discovery = Some(false);
     config.available_tools = Some(tool_filter());
+    // Defer the tool schemas. Measured 2026-11-07: the 18 `webrain_*` schemas are
+    // 9 820 input tokens on every request, and a turn usually wants one of them.
+    // Above `defer_threshold` the runtime offers `tool_search_tool` and the model
+    // loads a schema when it asks for it. The runtime default is 30, which our 18
+    // MCP tools sit below — hence the explicit 1.
+    config.tool_search = Some(
+        ToolSearchConfig::new()
+            .with_enabled(true)
+            .with_defer_threshold(1),
+    );
     // `ask_user` is in the wildcard, but a one-shot turn has no handler to answer
     // it: the runtime would send the question nowhere and the turn would sit
     // until it timed out, so it is the one built-in worth hiding there.
+    //
+    // The agent-spawning built-ins are the sub-agent surface: hiding them is how
+    // the page's "delegate" switch is enforced, since the runtime gives a
+    // sub-agent whatever the session allows. `task_complete` stays either way —
+    // it reports a plan step, it does not spawn an agent.
+    let mut hidden: Vec<String> = Vec::new();
     if !ask {
-        config.excluded_tools = Some(vec!["builtin:ask_user".to_string()]);
+        hidden.push("builtin:ask_user".to_string());
+    }
+    if !args.allow_agents.unwrap_or(true) {
+        for tool in ["task", "read_agent", "write_agent", "list_agents"] {
+            hidden.push(format!("builtin:{tool}"));
+        }
+    }
+    if !hidden.is_empty() {
+        config.excluded_tools = Some(hidden);
+    }
+    // A tool result over 50 KB is spilled to a file and the model is handed a
+    // preview. The CLI's default directory is the OS temp dir, which our own path
+    // fence (`chat_hooks::Fence`) refuses — so the preview named a file the agent
+    // could not open, and it re-scraped instead. Keep the spill in the workspace.
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let spill = workdir.join(".webrain").join("tool-output");
+    let _ = std::fs::create_dir_all(&spill);
+    config.large_output = Some(LargeToolOutputConfig::new().with_output_directory(spill));
+    // The page's standing instructions, applied by the runtime rather than pasted
+    // onto every prompt: this survives a restart and costs no tokens per turn.
+    if let Some(text) = args.instructions.as_deref()
+        && !text.trim().is_empty()
+    {
+        config.organization_custom_instructions = Some(text.trim().to_string());
     }
 
     // A process that exits must not leave the runtime holding a session: reap
@@ -760,14 +877,32 @@ mod tests {
     }
 
     #[test]
-    fn the_allowlist_keeps_the_whole_builtin_namespace() {
+    fn the_allowlist_names_the_four_builtins_it_uses() {
         let served = tool_filter();
-        // The wildcard, not a list of names: the names went stale once already.
-        assert!(served.contains(&"builtin:*".to_string()), "{served:?}");
+        // Not `builtin:*`: the wildcard cost 6 972 input tokens on every request
+        // by sending a schema for every runtime built-in, and `chat_tools` already
+        // covers the file and shell ones behind the fence. Measured 2026-11-07.
+        assert!(!served.contains(&"builtin:*".to_string()), "{served:?}");
+        for name in ["task", "task_complete", "ask_user", "skill"] {
+            assert!(
+                served.contains(&format!("builtin:{name}")),
+                "{name} missing from {served:?}"
+            );
+        }
+        // The ones we removed stay removed — a silent return of `bash` would put
+        // an unfenced shell back in the model's reach.
+        for name in ["bash", "shell", "view", "edit", "write", "glob"] {
+            assert!(
+                !served.contains(&format!("builtin:{name}")),
+                "{name} is back in {served:?}"
+            );
+        }
         assert!(
             served.contains(&"custom:terminal".to_string()),
             "{served:?}"
         );
+        // The MCP surface is still offered; it is deferred at run time by the
+        // `tool_search` threshold, not removed here.
         assert!(
             served.iter().any(|f| f.starts_with("mcp:webrain-")),
             "{served:?}"

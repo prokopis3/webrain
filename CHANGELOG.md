@@ -7,6 +7,853 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-20
+
+### Changed
+
+- **docs**: the README's Chat section now shows the page instead of describing it —
+  a 13-frame recording of one turn (`docs/images/chat-turn.gif`: the prompt, the
+  answer streaming, the closing `… · 0 steps · 6.2s` line, the three follow-up chips)
+  and a still of an `html`-mode answer. Documentation only; no code changed.
+
+## [0.18.0] - 2026-11-20
+
+### Added
+
+- **chat (rendering)**: Settings → Chat has a **reply rendering** switch, `markdown`
+  (default) or `html`. Most models write markdown; some — Gemini, several OpenRouter
+  endpoints — write HTML, and a parser mangles that (`<div>` on one line becomes
+  paragraph text around a block). The HTML path is the same module with the parser
+  removed: same DOMPurify list, same table scroller, same forced
+  `target=_blank rel=noopener` on links. Verified by calling it on a hostile string —
+  `<script>`, `onclick=`, `style=` and a `javascript:` href all come back dropped —
+  and by flipping the switch on a real transcript: 13 rendered blocks in markdown
+  mode, 0 in html mode (the source is text), 13 again on the way back.
+- **chat (generative layout)**: in `html` mode the turn carries a short paragraph of
+  instructions naming the class vocabulary the stylesheet already owns —
+  `section.card`, `div.grid`, `div.stat` with `<b>`/`<small>`, `span.pill`,
+  `progress`, `table`, `details`/`summary`, `figure`/`figcaption`, `kbd`, `mark`,
+  `hr` — **and which shape to reach for unasked**: a short answer is `<p>` (plus
+  `<h3>` once there is more than one block), comparable items are
+  `div.grid > section.card`, a number is `div.stat`, sequential work is an `<ol>` in
+  a card, a comparison is a `<table>`, an aside is `details`. Design is no longer
+  something the prompt has to ask for: *"what does CDP stand for?"* answers as a
+  paragraph with inline `<code>`. Cost is fixed at 877 characters (~220 tokens) per
+  turn. The vocabulary is scoped to `.md` rather than to the switch, so an HTML
+  answer still looks designed with the switch off: verified live, `html` mode
+  asked for three stats and answered `section.card` > `div.grid` > 3×`div.stat` +
+  3×`span.pill` + a `progress` bar, and after turning the switch back to `markdown`
+  that same stored reply still measured a 20,28,24 card at 12 px radius on a
+  3-column grid with 21 px stat numerals. Nothing new is allowed by it: `<script>`,
+  `<style>` and every `style` attribute are still dropped by name.
+- **chat (next steps)**: the follow-up chips under a turn now work for any kind of
+  chat, not only a scrape. Evidence first — the tool that failed, two sources to
+  compare, a host to pull tables from, a capture, files that were written, an answer
+  with code or length — then a floor that is true of any finished answer
+  (`give me a concrete example`, `what did you leave out?`, `go deeper on the first
+  point`), so a plain question still ends with three things to press instead of none.
+  A chip that would repeat your own prompt is dropped, and none is offered while the
+  turn is still running. Fourteen assertions in `check-next-steps.mjs`, which lifts
+  the pure `suggestNext()` out of the component and runs it with no DOM.
+- **chat (fixed)**: reasoning is escaped before it is rendered. A model thinking
+  *about* HTML writes `<p>` in its trace, and the reply renderer turned that into an
+  empty paragraph — the word vanished from the thinking panel. Markdown still parses
+  after `esc`; only the tags stop being tags.
+- **chat (session summary)**: the right rail now totals the conversation above the
+  per-turn ledger — turns, tokens in/out, steps, sources and cost — summed from the
+  same rows the ledger lists. Money is summed from the numeric `usd` each turn
+  stored rather than parsed out of a `"$0.00135"` string, and a turn whose provider
+  publishes no price marks the total partial (`$0.00452+`) instead of quietly
+  counting it as free. Six assertions in the numbers gate (empty ledger, sums,
+  unpriced rows, string inputs).
+- **docs (SDK gaps)**: third pass on `docs/CHAT_SDK_GAPS.md` — the counts in "The
+  totals" hid a namespace whenever a call chain was line-broken (`.rpc()` then
+  `.tools()`, which is why `tools` read as unmeasured). Re-counted: **28 of 47**
+  session namespaces have no call site, and **all 34 `ClientRpc` namespaces** are
+  uncalled. The one new capability found is `session.completions`
+  (`get_trigger_characters`, `request`) — inline completion inside a session, which
+  nothing in the page does.
+- **chat (render mode)**: the HTML vocabulary and the `<suggest>` contract moved
+  from per-turn `instructions` to the session's `organization_custom_instructions`.
+  Per-turn instructions are folded into the *user
+  message* by the server, so the two hints were ~1.2 kB of prompt text on every
+  answer; the runtime applies standing instructions to every turn without re-sending
+  them, so they now cost nothing. Flipping the render switch is one `POST /settings`
+  — verified live: `instructions` 1174 chars in `html`, 295 in `markdown`, answered
+  with no restart, and a turn sent with an empty per-turn `instructions` still came
+  back as `<p>` with the model's own three chips. The page appends the hints on the
+  way out and strips them on the way back, so the Runtime tab's field keeps showing
+  only what the operator typed, and saving that tab re-appends them rather than
+  wiping them. 9 assertions on the round trip (`withHints`/`stripHints`, both modes,
+  idempotent).
+- **chat (next steps, model-written)**: the three follow-up chips are now written by
+  the model that just answered, not derived from rules. The turn carries one short
+  contract — end the reply with `<suggest>a | b | c</suggest>` — and the page lifts
+  that line out of the answer and renders it as buttons: the text stored on disk
+  stays the answer a reader would copy, and the chips survive a reload because they
+  are a field on the row. Verified live on a one-word question: the chips came back
+  as *"Did CDP ship with Chrome 1.0 in 2008?"*, *"When was the CDP
+  JSON-over-WebSocket protocol formalised?"* and *"Explain how CDP is used to drive
+  non-Chrome engines like lightpanda and obscura"* — impossible to derive, exactly
+  the point. The rule list is kept as the fallback for a model that ignores the tail
+  or a transcript saved before it existed. 19 assertions in `check-next-steps.mjs`
+  (`suggestNext` + `parseSuggest` lifted out and run with no DOM).
+- **chat (turn footer)**: the usage line under an answer now ends with the turn's
+  **step count** and **duration** — `… · $0.00036 · 0 steps · 7.1s` — and the
+  duration scales: `240ms`, `7.1s`, `3m 00s`, `1h 05m`, `2d 3h`, `1mo 15d`,
+  `1y 1mo`. One formatter (`ms`) serves a tool row, a reasoning block, the turn and
+  the ledger's `api` column, so a three-minute crawl stops reading `180.0s`.
+  23 assertions in `check-duration.mjs`, including `null`/`NaN`/`"x"` inputs.
+- **chat (streaming)**: a reply is now cut at its last safe block boundary — the
+  part above the cut is parsed once, and only the tail is re-rendered per frame, so
+  each new word is a node that was just created and fades in (140 ms) without
+  flickering the paragraph above it. The cut never lands inside a code fence
+  (an even number of markers must precede it, or the reply is parsed whole), and
+  html mode is never split. Verified live on a two-paragraph answer: the streaming
+  row held 2 children while writing, then 69 `span.w` nodes in the tail, each with
+  the `fade` animation.
+- **chat (scroll)**: follow eases the scroll when a whole row lands and sets a token
+  or two directly, instead of jumping the viewport on every delta.
+- **chat (images)**: a picture's box carries a container tone before its pixels
+  arrive, so a slow thumbnail reads as "not yet" instead of a hole in the row.
+
+- **chat (steps)**: a tool row is labelled the way a person would say it —
+  `Searched the web for “tickets to Mytilini”`, `Ran curl -s -m 5 …`,
+  `Read el.aegeanair.com`, `Edited src/App.svelte`, `Loaded the webrain skill` —
+  built on the page from the tool's name and arguments, which is the trade VS
+  Code's transcript already makes (the runtime sends `webrain_serp` + `{q:…}`,
+  never a title). The wire name stays beside it in small print because that is
+  what **edit & re-run** sends back, the live line uses the same sentence so a
+  step is never named two ways, and a turn that failed says so once at the end
+  (`1 tool call failed, 3 other steps`) instead of leaving the reader to count
+  red ticks. Covered by `bun run check` in `webrain-cli/ui`: 20 assertions over a
+  function it extracts from `App.svelte`, which caught two real defects while
+  being written (a multi-line command collapsed to one line before it was split).
+
+- **batch (memory contract)**: a batch now sizes itself from the machine and says so
+  in `stats`. `tabs_allowed` is the real budget (free RAM ÷ ~56 MB per tab, capped by
+  cores ×2), `cost_multiplier` is `3` for `screenshot`/`pixel`/`pdf` so a bitmap tab
+  buys a third of the tabs, `mem_total_mb` sits beside `mem_available_mb`, and
+  `throttled_by_memory` reports that workers were halved mid-run. Verified live:
+  `concurrency: 16` with `WEBRAIN_MAX_TABS=4` → `tabs_allowed: 4`, every row done;
+  `op: screenshot` → `cost_multiplier: 3`.
+- **batch (pressure valve)**: free memory below 12% of total retires the workers past
+  the halfway mark — checked before they claim a URL, so no row is lost — and they stay
+  retired for the batch. Below one tab's cost at admission the batch refuses with a
+  named error per URL instead of starting and dying halfway; `WEBRAIN_MAX_TABS` skips
+  the refusal. The threshold is a pure `under_pressure()` and is unit tested.
+- **mcp (retry)**: a read-only call that finds a latched dead socket now reconnects and
+  runs once, so a browser restart no longer costs the caller the whole turn. Mutating
+  tools (click, type, interact, upload, download, setcookies, eval) are deliberately NOT
+  retried — a click that landed with its reply lost must not run twice. Counter:
+  `mcp.retries` in `webrain_stats`. Verified live: killed Chrome, restarted it, called
+  `webrain_page_info` → reply succeeded with `retries: 1, errors: 0`.
+- **traces**: `handle_rpc` and `tools::call_tool` are instrumented (`RUST_LOG=debug`),
+  the second with the FOLDED tool name, so `webrain_observe{what:screenshot}` shows up
+  as `webrain_screenshot` in the trace.
+- **screenshot (`b64`)**: `b64: false` returns the file path only. The base64 stays the
+  default because it is what the MCP `image` block is built from.
+- **extraction (autoschema)**: an empty candidate list now says why. The HTTP path
+  returns `diagnosis: {reason, min_occurrences, best_repeat, containers}`, where the
+  reason is `no_candidate_containers`, `too_few_repeats` or `no_fields`, so `[]` is
+  distinguishable from a selector miss. Tested: a one-card page reports
+  `too_few_repeats` with `best_repeat: 1`.
+- **stats (latency)**: `webrain_stats` reports `cdp_latency` per command
+  (`n`, `avg_ms`, `max_ms`) for navigate, evaluate, screenshot, printToPDF, quads,
+  createTarget, the a11y tree and cookies, with an `other` bucket for the rest. That
+  is the metric any future CDP-path change has to justify itself against. Verified
+  live: `Page.navigate 723ms/1`, `Runtime.evaluate 6ms/10`.
+- **capabilities**: every `navigate` reply and the batch `stats` block now carry a
+  `capabilities` object (`transport`, `parallel_tabs`, `single_target`, `stealth`)
+  filled from the probe the batch path already runs. `null` means "not probed yet",
+  which is not the same as `false`, so an agent can route on evidence instead of
+  assuming every CDP peer behaves like Chrome. Verified live: `null` before the first
+  batch, `parallel_tabs: 2, single_target: false` after it.
+- **stats**: `webrain_stats` reports `mcp.calls` and `mcp.errors` for the process, so
+  an operator can tell a healthy instance from one failing every call without reading
+  stderr. Verified live: 4 calls / 1 error after a refused URL.
+- **chat (rewind)**: `/rewind` walks the conversation back to an earlier turn —
+  and, when the runtime captured them, the files those turns changed. `undo` only
+  puts back the last file and `fork` only copies the transcript; `session.history.
+  listRewindPoints` / `previewRewind` / `rewind` is the real one. `GET /rewind`
+  lists the points, `POST /rewind {"event":…, "preview":true}` returns the files a
+  rewind would restore, and nothing is written until that list has been shown.
+  `enable_file_change_tracking` is now set for `--serve`, which is what makes file
+  restore possible at all. Verified live: `/rewind` answers `{"files":true,
+  "unavailable":"session-busy","points":[]}` while a turn runs — the SDK's
+  documented transient state — where before the session had nothing to offer.
+- **chat (runtime)**: the session mode is a runtime switch, not a sentence on the
+  front of the prompt. `GET/POST /mode` (`interactive`/`plan`/`autopilot`) talks
+  to `session.mode.get/set`, and every turn posts the composer's mode, so `plan`
+  is now the mode the agent operates in. Verified live: `POST /mode {"mode":
+  "plan"}` → `GET /mode` → `"plan"` → back to `"interactive"`.
+- **chat (commands)**: `/instructions` lists the instruction files the model was
+  given, in merge order (`session.instructions.getSources`), and `/quota` reports
+  account credits (`session.quota.get` + `session.limitPrediction.predict`), which
+  answers null on a key of your own rather than showing an empty meter. A tool row
+  with a result also grows **summarise**, which asks a question about it through
+  `session.ui.ephemeralQuery`: no tools, no history, and the exchange never joins
+  the transcript.
+- **chat (queue)**: a queued prompt can now be corrected or dropped, not just
+  promoted — `session.queue.updateText` / `removeAt`. A prompt you can send but
+  not edit is one you retype in the composer, which starts a second turn.
+- **chat (turn)**: three events the page was throwing away. `user.message` draws a
+  bubble for a message that did not come from this composer (an autopilot
+  continuation, a steering note from another client) — it used to vanish, leaving
+  an answer to a question nobody could see. The page's own sends are recognised by
+  the first 80 characters it drew, compared as a substring because the prompt
+  reaches the runtime with a mode sentence in front of it and controls behind it;
+  verified on a live turn, which produced one bubble rather than two.
+  `pending_messages.modified` refreshes the queue rail. `session.shutdown` now
+  prints the session's bill — tokens, cost per model, files changed — instead of
+  one "the runtime shut down" line.
+- **chat (truth)**: the busy badge reads `session.metadata.isProcessing` rather
+  than our own flag, which a page reload could leave stuck on and a background
+  continuation never set.
+
+- **chat (mcp)**: a tool server that is not connected now says so. The runtime's
+  `session.mcp_server_status_changed` / `_tools_loaded` / `_needs_reconnect` /
+  `_removed` events used to collapse into the one collapsed `runtime` row, so a
+  server that had died looked like a model that had forgotten how to scrape. They
+  now feed a per-server map, and any status that is not `connected`/`pending`
+  raises a banner naming the server, its error and its tool count, with a
+  **reconnect** button that posts `/mcp` and waits for the status event to clear
+  it. Verified live: `POST /mcp {"enabled":false}` produced "tool server webrain
+  · disabled", and clicking reconnect cleared it.
+- **chat (memory)**: a fact the agent wants to keep across sessions is now its own
+  approval card — the fact quoted, its subject and citations underneath, with
+  Deny / Remember / Always remember. It used to arrive through the generic tool
+  branch as a tool called `tool` with no arguments: memory writes are permission
+  requests of `kind: "memory"`, and they were the one card a reader could not
+  judge. `permission_card` is unit-tested for both shapes.
+- **chat (composer)**: an attachment is a chip, not a line in the field. A long
+  paste used to drop `[pasted text #7 · 79 lines · 7 KB → C:\\…\\pasted-7.md]`
+  into the prompt, so the first thing you read after pasting was your own temp
+  path. The receipt is now composed at send time from the chip list — the agent
+  is still told the name, size and path, `filesOf`/`withoutLines` still rebuild
+  the chips from a stored message — and the field holds only what you typed.
+  Chips are also remembered across a reload, which the field text used to do by
+  accident.
+- **chat (rail)**: the settings and about rows use a filled Material cog and a
+  filled info circle, one line each; the hint moved into the tooltip, because a
+  second line in a 200 px rail truncates to a letter.
+- **chat (tabs)**: a turn can no longer leak between conversations. There is one
+  live session and every open tab is a viewer of it, so a turn still running in
+  the previous conversation used to paint its rows into a tab that had just
+  started a new chat. Every frame now carries the conversation it belongs to and
+  a tab drops the ones that are not its own — except the end of a turn, because
+  `busy` is one flag and a tab that ignored the idle would sit disabled forever.
+  The rail marks the conversation the turn is actually running in (a pulsing dot,
+  even when it is not the row this tab shows), and the composer says which
+  conversation it is waiting for. A fresh tab also opens on what the live
+  conversation already said instead of an empty pane: it is the same conversation,
+  so it shows the same transcript.
+- **chat (history)**: the whole transcript is saved, not just the words. A new
+  `transcript` table holds the rows the page drew — every tool call with its
+  arguments and result, the steps strip, the notes — so reopening a scrape shows
+  the evidence, not prose that mentions it. `messages` still holds the text and
+  remains the fallback for conversations saved before this. The rows are posted
+  whole on a debounce (the page owns the row shape; a second copy of it on the
+  server would drift) and capped at the last 400.
+- **chat (links)**: a source chip now shows the page's own preview — `og:title`,
+  `og:image` and the description as its tooltip. `POST /preview` fetches and parses
+  the `<head>` server-side because a page cannot read another origin's HTML; only
+  `http`/`https` is followed, and a link that fails keeps its url and nothing else.
+- **chat (composer)**: `#tool` and `@skill` are tinted where they are typed. A
+  layer behind the field repeats the draft in transparent ink and paints only the
+  token's background, so a one-pixel disagreement costs a shifted tint rather than
+  doubled letters.
+- **chat (tools)**: the tools dialog has an approval policy per tool — `ask` or
+  `always` — which is the same list the "Always allow" button on a card writes
+  into, now persisted instead of dying with the tab.
+- **chat (rail)**: settings and about are two-line rows (`model · tools · runtime`,
+  `build · routes · storage`) and the open one reads as pressed.
+- **chat (steps)**: the turn's route strip sits **above** the answer it explains
+  instead of under the sources, where it read as a footnote to a claim already
+  made. It is attached to the answer row rather than pushed as its own, so it
+  cannot drift away from the reply it describes.
+- **chat (sdk surface)**: five more of the runtime's own controls, so the page can
+  change a live session instead of rebuilding it. `POST /tool` runs one tool with
+  arguments the page can edit — no model turn, no tokens — and a tool row grew
+  **edit & re-run**, which turns its arguments into a textarea and lands the reply
+  as a *new* row so the model's original call stays visible. (The wire name is
+  `webrain-webrain_navigate`, so a re-run sends that back unmodified; the row keeps
+  both names.) `GET/POST /permission-mode` exposes the policy the *runtime*
+  enforces — `manual` asks the page, `assisted` attaches a recommendation,
+  `allow-all` approves tools, paths and URLs before anyone is asked — as a
+  segmented control in the Runtime tab; verified live, the runtime echoed
+  `permissions_changed manual → assisted → manual`. `POST /skills` and `POST /mcp`
+  turn the `/skills` and `/mcp` notes into **togglable cards**, so a stopped MCP
+  server (which is why a turn suddenly has no tools) can be restarted without
+  losing the session. `GET/POST /queue` reads the runtime's queue and promotes one
+  prompt, with a rail above the composer so a queued message cannot be mistaken for
+  a lost one.
+- **chat (approvals)**: a page refresh no longer strands an open approval. The
+  server keeps the request's card beside its `oneshot` sender, and the page asks
+  `GET /pending` on boot and redraws it — before this, the runtime waited for an
+  answer the reloaded page had no way to give, until the five-minute timeout
+  rejected it.
+- **chat (settings)**: saving Runtime settings **no longer restarts the session**
+  unless it has to. `session.options.update` is now used for the three fields a
+  live session can absorb (`session_store`, `effort`, standing instructions), and
+  only `memory`, `allow_agents`, `max_output_tokens` and `compact_at` still trigger
+  a reseed — a reseed throws away the prompt cache, which was a heavy price for
+  rewording an instruction. Verified live: instructions answer
+  `{"restart":false,"patched":{"ok":true}}`, `max_output_tokens` still answers
+  `{"restart":true}`.
+- **chat (ui)**: a conversation is now **addressable and disposable**. A `new
+  chat` button above the thread list mints an id on the server (`POST /sessions`)
+  and puts it in the address bar, so `/<id>` is the conversation: a reload opens
+  that thread instead of a 404, and the id survives a reload, a bookmark or a
+  pasted link. Only a real id serves the shell — `/catalog`, `/chat.js` and
+  `/context` all start with `c`, so the tail must be digits (test:
+  `only_a_conversation_id_is_a_page`). Opening a conversation id that is *not*
+  the live one reads it as history; the live one stays live, because the boot
+  path waits for `/sessions` before deciding.
+- **chat (ui)**: a **reloaded page now knows a turn is still running**. `GET
+  /sessions` carries `busy`, and the page only ever raises it from there —
+  `assistant.idle` still lowers it — so a refresh re-attaches to work in progress
+  instead of showing an idle composer over a turn that never stopped.
+- **chat (ui)**: the transcript renders a **window of 120 rows** with a "show
+  earlier" button that grows it back 200 at a time. Every tool row keeps its
+  result, so an unbounded transcript is what makes a long turn heavy in the tab;
+  the items are all still in memory, they are just not painted. Tool results stay
+  capped at 20 000 characters per row, as before.
+- **chat (markdown)**: a fenced block's language is **normalised** — `rs`/`rust`,
+  `py`/`python`, `sh`/`bash`/`ps1`, `json`/`jsonc`, `xml`/`html`, `ts`, `go`,
+  `sql`, and the rest — so a code card says the same thing whoever wrote the
+  fence, and no longer says `code` for a language it did not recognise. Code
+  blocks also gained leading (1.55) and `tab-size: 2`, which is what makes
+  indentation line up across languages without shipping a highlighter.
+- **chat (ui)**: source chips de-duplicate `https://x/a`, `https://x/a/` and a
+  `#fragment` of the same page — the key is normalised, the link keeps the url
+  the tool actually returned.
+- **chat (sdk surface)**: four things the runtime already offered and we did not
+  take. A tool result over 50 KB is now spilled to `<cwd>/.webrain/tool-output`
+  instead of the OS temp dir — the default spill lived somewhere our own path
+  fence refuses, so the model was handed a preview plus a path it could not open
+  and re-scraped instead. The self-attached MCP server gets an explicit
+  `timeout` of 600 s, because a real `webrain_crawl` outlives the runtime's
+  default and was being reported as a failed tool. `organization_custom_instructions`
+  is wired to a new **standing instructions** box in the Runtime tab, so an
+  operator preference is applied by the runtime rather than pasted onto every
+  prompt. And six events that were reaching the page and being dropped are now
+  handled: `assistant.intent` (the agent's own one-line plan replaces "working"
+  in the live step), `assistant.tool_call_delta` ("asking for <tool>" while the
+  arguments stream), `assistant.turn_retry`, `agent.interrupted` (what was
+  running, and for how long), `session.title_changed` (the rail stops keeping a
+  stale title) and `session.context_cleared` / `session.context_changed` (a reset
+  context meter, and the directory the agent believes it is in). The dead
+  `tool.execution_end` arm is deleted — it is not a runtime event.
+- **chat (ui)**: an approval is a **row in the transcript**, not a modal over it.
+  The card sits under the call that asked for it and shows the tool, its server,
+  whether it only reads, and the exact arguments — the same rows the dialog had,
+  in the place you were already looking. It says which tool *Always allow*
+  covers (`Always allow scrape`), and that button now auto-answers **that tool
+  from that server only**: it was keyed on the runtime's `kind` (`tool`), so one
+  click silently granted every tool there was. Verified live: after one *Always
+  allow*, the next `webrain_scrape` ran with no card at all. The row keeps its
+  verdict (`approved once` / `denied`), and Escape no longer denies anything —
+  a keystroke that refuses a tool is not a shortcut.
+- **chat (ui)**: the **thinking panel opens itself** the moment reasoning
+  arrives and stays open for the whole turn, across every tool call and the next
+  step, instead of coming back collapsed after each one — a closed panel during
+  the model's reasoning is the one moment you cannot see what the agent is doing.
+  Reasoning is now kept for the whole turn and split into steps with a rule, so a
+  three-call turn reads as three thoughts rather than three restarts of the same
+  text. Your own collapse wins: once you close it, no chunk re-opens it until the
+  next turn.
+- **chat (effort + sub-agent stream)**: the session itself now carries a
+  reasoning effort, so a **delegated worker** reasons at the level the page chose
+  instead of the runtime's default — the composer's effort chip only binds a
+  turn, and a spawned sub-agent has no turn of its own to inherit from. Stored as
+  `effort` in `settings.json` and exposed as a segmented control in the Runtime
+  tab (unset = the runtime's own default, which is what every turn used before).
+  Verified: a session created with `effort: "high"` answers `/context` with no
+  error, and saving it reports `{"restart":true}` because effort is read at
+  session create. `include_sub_agent_streaming_events` is on as well, so a
+  worker's intermediate steps reach the page instead of the row staying silent
+  until the worker finishes.
+- **chat (inspect)**: three read-only routes that answer "what does this session
+  actually have", each with a `/` command that prints it. `GET /context` asks the
+  runtime for its own accounting — `10875/1000000 tokens · system 479 ·
+  conversation 0`, plus the per-category attribution (`mcpTools 8389`,
+  `systemTools 2007`, `buffer 50000`, `freeSpace 939125`) and the compaction
+  threshold, which is the only honest answer to "why did cost change?". `GET /mcp`
+  proves the server the session attached to itself is *answering*, not merely
+  listed — name, `status: connected`, and the tool schemas it really serves.
+  `GET /skills` lists installed skills beside `get_invoked`, because an unused
+  skill is a prompt problem rather than a missing file. `/context` also carries the
+  five **heaviest messages** (`label · role · tokens`): the attribution says which
+  category is expensive, this says which message. A failed call is named in
+  `heaviestError` rather than collapsing into an empty list.
+- **chat (events)**: eleven runtime signals the page was dropping now reach it.
+  `session.warning` / `session.info` / `system.notification` say when the runtime
+  is unhappy — some failures only ever appeared there, inside a collapsed row
+  nobody opens. `tool.execution_progress` puts what a running tool is doing on its
+  own row, so a two-minute scrape stops looking like a hang.
+  `session.compaction_start` / `_complete` and `session.truncation` say history was
+  rewritten or cut, with the counts, instead of the start of the chat vanishing
+  silently. `session.plan_changed` refreshes the plan chip without waiting for a
+  turn; `session.model_change` / `session.mode_changed` report a switch the runtime
+  made itself; `abort` says why a turn stopped; `permission.completed` puts the
+  verdict on the tool row; `tool_search.activated` shows the deferred tool surface
+  loading a schema on demand. Sub-agent rows now carry `durationMs`,
+  `totalTokens` and `totalToolCalls` rather than just the agent's name.
+- **chat (cache)**: the prompt cache is now visible instead of implied. The CLI's
+  usage block gained a `cached` share (`tokens 3186 in / 2 out · 84% cached`), the
+  page's topbar gained the same meter, and the runtime's `prompt_cache_break` event
+  prints how many prefix tokens were lost and what fraction survived — that event
+  is the only thing that says *why* a turn suddenly costs full price, and a
+  conversation switch or a saved Runtime setting both land in it. Measured on
+  deepseek with the 3 186-token prefix: **84% cached**, stable across separate
+  processes, which is why the per-turn cost was already the cached price.
+- **chat (perf)**: a turn now carries **3 186** input tokens instead of **19 753**
+  (−84%), measured on the same one-word prompt against deepseek. Two causes, each
+  measured separately: the runtime's built-ins were allowlisted with `builtin:*`,
+  which sends a schema for every one of them (6 972 tokens) where `chat_tools`
+  already provides the file and shell ones behind the path fence — the filter now
+  names only the four built-ins we use; and the 18 `webrain_*` MCP schemas
+  (9 820 tokens) are now deferred behind the SDK's `tool_search`
+  (`ToolSearchConfig`, threshold 1 — the runtime default is 30, which our 18 tools
+  sit below, so enabling it alone changed nothing). Verified live: with deferral
+  on, a tool turn calls `tool_search_tool`, then loads and calls `webrain_scrape`,
+  and still returns the page title.
+- **chat (settings)**: the runtime switches a page cannot express as prompt text
+  are now settings, and they survive a restart. `GET/POST /settings` reads and
+  writes `settings.json` beside the chat database (so `WEBRAIN_CHAT_DB` moves
+  both), and a new **Runtime** tab in the dialog drives them: remember across
+  conversations, keep a session store, allow sub-agents, completion budget, turn
+  timeout. Defaults are exactly the constants `connect` used before, so a chat
+  that never opens the dialog behaves identically; the server reports
+  `{"restart":true}` when a save needs a rebuilt session instead of pretending a
+  checkbox reached a live one. Test: `only_a_session_setting_asks_for_a_restart`.
+- **chat (todos)**: `GET /todos` returns the agent's todo rows and dependency
+  edges out of the session SQL database (`session.plan.readSqlTodosWithDependencies`),
+  and the composer's `/` menu gains a `todos` command that prints them as
+  `status · title`. The plan file says what the work is; these say how far it
+  got. Empty is a normal answer — the runtime treats the table as best-effort.
+- **chat (fleet)**: `POST /fleet {"prompt":"…"}` hands the runtime an objective
+  and lets it dispatch sub-agents (`session.fleet.start`), refusing with 409 when
+  the Runtime tab has delegating switched off — the same switch that hides the
+  `task`/`read_agent`/`write_agent`/`list_agents` built-ins from the session.
+- **chat (settings)**: `compact_at` sets where history starts being rewritten
+  (30-80% of the context window; the blocking threshold follows 15 points later,
+  so the default 80 reproduces the runtime's own 0.80/0.95 pair exactly). Also
+  fixes two clamps that accepted values which cannot work: a 1-token completion
+  budget and a 1-second turn timeout now floor at 64 and 30. Test:
+  `only_a_session_setting_asks_for_a_restart`.
+- **chat (sub-agents)**: the workspace's `AGENTS.md` now reaches a delegated
+  sub-agent. `on_session_start` fires for the parent only, so a child started with
+  an empty prompt and knew less than the turn that spawned it; `on_subagent_start`
+  prepends the same notes. The tool fence already held — `preToolUse` fires for
+  sub-agent calls too.
+- **chat (todos)**: `session.todos_changed` now prints the list as it changes. The
+  runtime signals that its todo table was written and leaves the rows to a separate
+  read; the page refetches on that signal and announces only a *changed* list, so a
+  chatty agent cannot turn one step into three identical notes.
+- **chat (agents)**: `GET /tasks` lists the agents a session is running and
+  `POST /agents {"id","text"}` sends one of them a message mid-flight
+  (`session.tasks.list` / `session.tasks.sendMessage`) — the parent-to-child half
+  of delegation that `POST /fleet` only started. The task list is experimental and
+  untyped on the wire, so it is passed through as the runtime sent it rather than
+  reshaped into a schema this build would have to invent. Both share the
+  `allow_agents` gate.
+- **chat (fleet)**: `POST /fleet` with no prompt now runs the last thing you asked,
+  so the composer's `fleet` command works from an empty draft instead of demanding
+  the objective twice. `agents` and `fleet` join `todos` in the `/` menu.
+- **chat (agents)**: a chip in the topbar shows how many sub-agents are running and
+  lists each one's display name, type and execution mode on click. It is driven by
+  the documented `subagent.started` / `completed` / `failed` lifecycle events, so a
+  delegated worker is visible while it works — the transcript only ever showed the
+  parent's tool row. The chip exists only when agents do, and sits beside the plan
+  chip using the same markup. It cannot address one: the payload carries no task
+  id, so `POST /agents` stays a script/API surface for now.
+- **chat (tools)**: `edit_file`/`write_file` record the file's previous state, and
+  `POST /undo` (the `/undo` command in the composer) puts it back — restoring the
+  old bytes, or removing a file the write created. The tool row already showed
+  `- old / + new`; this is the half a diff cannot do. The stack holds 20 changes
+  and is process-scoped: it is an undo for what this chat just did, not a
+  checkpoint system. Test: `a_change_can_be_put_back`.
+- **chat (serve)**: a conversation opened from the menu is now continued, not
+  just replayed. `GET /sessions/<id>` moves the live conversation to it, the next
+  turn replaces the runtime session (a fresh one, seeded with the stored
+  transcript as `[earlier in this conversation]`, capped at 6 KB of whole
+  messages) and both the prompt and the reply are stored in the conversation the
+  page is showing. Before this, a continued chat landed in a brand-new hidden
+  conversation the page never displayed and the model never saw. Restarting the
+  runtime failing keeps the running session and reports on the bus — a chat that
+  cannot reseed still answers. Verified live: opening a fork moves `current`,
+  the new turn appears in that fork and not in the boot conversation, and the
+  runtime session id changes (proved by the plan file path); test:
+  `a_reopened_conversation_carries_its_tail`.
+- **chat (serve)**: plan mode now leaves a plan behind. The runtime's plan file
+  (`session.plan.read` / `session.plan.update`, which lands under the isolated
+  `WEBRAIN_CHAT_HOME/session-state/<id>/plan.md`) is written with the answer to a
+  plan-mode turn and read back into every later prompt as `[the plan on file]`,
+  so "do it" after a plan no longer needs the plan pasted in again. Both halves
+  are exposed as `GET /plan` and `POST /plan {"content"}` for the page and for
+  scripts; a turn that fails to save says so on the event bus rather than
+  silently losing the plan. The page shows a plan chip beside the theme toggle
+  (a glyph from the mode picker, a scrollable panel) whenever a plan exists, so
+  the text `do it` will be given is visible. Verified live: `exists:false` →
+  `POST` → `saved:true` → `GET` returns the text, and the chip renders and
+  expands in the browser; test: `a_saved_plan_rides_along_with_the_next_turn`.
+- **chat (cli)**: a `preToolUse` fence over the runtime's OWN tools. `chat_tools`
+  already resolves every path against the working directory, but the built-ins
+  the allowlist admits through `builtin:*` had only a permission prompt in front
+  of them — an approval, not a boundary. `chat_hooks::Fence` now denies
+  `bash`/`shell` outright (naming `run_shell`/`terminal`, which are fenced) and
+  refuses `str_replace_editor`/`edit`/`write`/`view` on a path outside the
+  directory, so clicking "allow" cannot move the boundary. Installed in
+  `chat_session::connect`, so one-shot `webrain chat "<prompt>"` is fenced like
+  `--serve`. Tests: `the_builtin_shell_is_refused_and_the_fenced_one_named`,
+  `a_builtin_path_tool_outside_the_directory_is_refused`,
+  `our_own_tools_and_the_scraping_server_pass_through`.
+- **chat (cli)**: the workspace's own instructions now reach the model.
+  `SessionStart` injects `AGENTS.md` (else `.github/copilot-instructions.md`)
+  from the directory the chat was started in, capped at 4 KiB because every
+  byte is off a per-turn prompt that already spends ~8.4k on tool schemas.
+  Test: `workspace_notes_carry_the_first_file_and_stop_at_the_budget`.
+- **chat (tools)**: `edit_file` returns the change it made (`- old` / `+ new`,
+  twelve lines a side) alongside the line number. The model wrote both strings;
+  the person reading the turn did not, and this row was the only place the edit
+  was invisible.
+- **core (captcha)**: CapSolver alongside 2captcha. `solve_recaptcha2_capsolver`
+  posts a `ReCaptchaV2Task` (or `…ProxyLess` when no exit is given) as JSON,
+  polls `getTaskResult` every 5 s for ~2.5 min, and surfaces the vendor's
+  `errorCode: errorDescription` instead of a generic failure. `CAPSOLVER_API_KEY`
+  selects it; `solve_recaptcha2_auto` falls back to `WEBRAIN_2CAPTCHA_KEY`, and
+  with neither set it names the variable to set instead of failing silently. A
+  proxy is mapped from `scheme://user:pass@host:port` to CapSolver's
+  `scheme:user:pass@host:port`; SOCKS4 (unsupported there) or a missing port is
+  an error, because a dropped proxy yields a token bound to the solver's IP —
+  a paid solve wasted. Tests: `capsolver_task_body_and_proxy`,
+  `capsolver_error_surfaces_vendor_text`.
+
+- **captcha (tools, cli)**: the paid reCAPTCHA-v2 solver is now reachable from
+  both surfaces — `webrain_session {op:"captcha", sitekey, page_url, data_s}`
+  (folds to a `webrain_captcha` executor, `spawn_blocking` so the ~2.5 min poll
+  cannot stall the JSON-RPC loop) and `webrain captcha --sitekey <sk> --url
+  <page> [--data-s … --proxy … --json]` for scripts. Both pick the provider
+  through `configured_provider()` (CapSolver first, then 2captcha) and return
+  `{provider, token}`; with no key set they name **both** variables instead of
+  failing generically. They buy and return a token — neither reads the sitekey
+  off the page nor injects the result, so that half stays with `eval`, and
+  hCaptcha / Turnstile / drag challenges remain on the vision flow
+  (`skills/webrain/workflows/captcha-solve.md`). Test:
+  `folds_session_captcha_op`.
+
+- **crawl (tools)**: `dedupe_pages` on `webrain_crawl mode=spider` keeps the
+  first page per visible-text hash and reports `duplicates`. A paginated or
+  faceted listing renders one template forty times, and the caller paid a token
+  for every copy. **Off by default** — it removes rows, so a caller that wants
+  every facet row must leave it off. An error page is never dropped.
+
+### Changed
+
+- **chat (thinking)**: reasoning is filed with the step it produced instead of
+  pooling into one panel at the end of the turn. Each time the model finishes
+  thinking and either calls a tool or writes an answer, that block becomes its own
+  folded row *above* the call it explains — which is also the order it happened
+  in, and it survives into a saved conversation. The live panel at the bottom now
+  only shows the step that is running, so a five-call turn reads as five thoughts
+  rather than one block with `---` separators. Verified on a saved transcript:
+  `user → thinking 1.4s → webrain_navigate → thinking 900ms → assistant`.
+- **chat (fix)**: the keyed transcript could throw `each_key_duplicate` on a
+  direct reload, because seeded rows keep the ids they were saved with while
+  `push` counts from zero — the first new row re-used id 1. `seedLive` now lifts
+  the counter past the highest seeded id.
+- **chat (perf)**: opening a saved conversation now paints the same 120-row window
+  the live transcript does, with "show earlier" to grow it. It used to paint the
+  whole thing at once — one markdown parse, one `shape()` of its result and one
+  link preview per row — so a 300-row scrape meant 300 rows, ~100 markdown parses
+  and ~3900 DOM nodes before the page could be read. Measured on a 300-row thread:
+  120 rows / 40 parses / 1714 nodes on open, and the full 300 on request. The row
+  loop is also keyed by row id instead of list index, so growing the window moves
+  the existing blocks instead of re-creating every painted row.
+- **build**: `webrain-cli` now inherits the workspace `rust-version` (1.94) like
+  `webrain-core`/`webrain-mcp` already did. It is the crate that carries the
+  `chat` feature, so it was the one package whose declared MSRV did not say what
+  the SDK forces; `cargo metadata` reported `rust_version = null` for it.
+- **serp (serpapi)**: `SERPAPI_API_KEY` now covers **every engine serpapi serves**
+  — google, bing, duckduckgo, yahoo, baidu and yandex — instead of google only.
+  With a key, a `limit > 10` request is answered by serpapi first for whatever
+  `--engine` was asked for (`--engine yahoo --limit 12` → serpapi yahoo, not
+  google's rows mislabelled), a small limit keeps the free path primary with
+  serpapi as its fallback, and **`auto` now fills from every serpapi engine**
+  instead of google alone — google's set is only ~9 rows on a normal query, so a
+  40-result request could never be satisfied from it. The fill walks
+  google → bing → duckduckgo → baidu → yandex → yahoo and stops the moment the
+  limit is met, so the cost is bounded by what the free path left missing
+  (measured: a nonsense query at `--limit 40` walked four of them and merged 37
+  unique rows). Brave is
+  untouched: serpapi has no brave engine, so `BRAVE_API_KEY` stays that path.
+  Parameters come from serpapi's own docs (fetched 2026-11-06) and are exercised
+  per engine, because the query name and the localization knobs are not shared:
+  google `q`/`hl`/`gl`/`num`/`start`, bing `q`/`cc`/`mkt`/`first`, duckduckgo
+  `q`/`kl`/`m`/`start`, yahoo `p`/`vc`/`vl`/`b`, baidu `q`/`rn`/`pn`, yandex
+  `text`/`lang`/`p`. Sending google's `hl`/`gl` to all six was silently ignored
+  by the others, so `--region` did nothing outside google; `--safe` now maps to
+  each engine's own spelling (`safe` / `safeSearch` / `safe=1` / `vm=r` /
+  `family_mode=2`). yandex `p` is a 0-based page number — the earlier "no offset"
+  conclusion came from probing `page=`, so paged yandex uses serpapi again.
+  Test: `serpapi_serves_every_engine_with_its_own_query_parameter`.
+- **captcha (core)**: the 2captcha key answers to two spellings —
+  `WEBRAIN_2CAPTCHA_KEY` (what shipped in v0.7.3) and `TWOCAPTCHA_API_KEY`
+  (what everyone guesses, since the vendor writes the name as "2captcha").
+  `CAPSOLVER_API_KEY` still wins when both vendors are configured — it is
+  cheaper and faster per solve — and the reply's `provider` names the one that
+  ran. `2CAPTCHA_API_KEY` is deliberately **not** read: an env name starting
+  with a digit cannot be exported in a POSIX shell, so accepting it would ship
+  a variable that only works on Windows.
+- **crawl (engines)**: the spider dedupes its frontier on path + sorted query
+  params and ignores the anchor fragment, so `?b=2&a=1#top` and `?a=1&b=2` are
+  fetched once instead of twice (a `#/` hash route is kept — it is a real page,
+  not an anchor). On a faceted site (`?color=…&page=…`) that removes most of the
+  duplicate page loads without changing a single row of output — the visited set
+  was exact-string, so each facet permutation counted as a new page.
+- **crawl (engines)**: the politeness gate is keyed per host instead of one
+  global slot. `delay_ms` is the minimum gap between request **starts**, so
+  `500` means 2 req/s — one global slot made two domains split those 2 between
+  them, and now each domain gets its own 2. Matches how `autothrottle` already
+  learns its delay per domain.
+- **serp**: bing is fetched as HTML at every offset; `format=rss` is gone. The
+  RSS feed was a second document shape (XML `<item>`, its own parser, its own
+  entity decoding) that also ignores `count`/`first` and empties when a market is
+  pinned — one parser and one set of failure modes is worth more than the flat
+  feed. `parse_bing_rss` and its `tag_text`/`xml_unescape` helpers are deleted;
+  `--limit 10` measures 10 rows, `source: bing`, 3/3 live runs.
+
+### Fixed
+
+- **chat (transcript)**: a tab could write the **wrong conversation's rows** over a
+  thread. The save is a whole-array replace, and `current` moves under a tab that
+  did not reload its rows when another tab claims a thread and `loadSessions`
+  follows — so a tab adopted a thread and then saved `items`, which belonged to the
+  previous one. Observed damage: a 68-row thread came back as a single
+  `tool.execution_complete`. `rowsFor` now ties `items` to the conversation they
+  came from, and the save is skipped when they disagree. A transcript whose rows are
+  not a transcript (no `user`/`assistant`/`tool`/`think` row at all) falls back to
+  its saved words — which recovered all 37 messages of the damaged thread — and
+  those rows carry an index id so the keyed list has keys.
+- **docs (drift)**: a test now fails when a tool in `list_tools()` is absent from
+  `docs/reference/tools.mdx`. Generating the prose would mean inventing it; failing
+  on drift buys the same protection for fifteen lines.
+- **stats (memory)**: `webrain_stats` reported `memory: null` off Linux, because it
+  parsed `/proc/meminfo` and nothing else. It now falls back to the same `sysinfo`
+  read the tab budget uses, so Windows and macOS get real numbers and the `reason`
+  line names only what is genuinely Linux-only (load average, process counts).
+- **batch (memory)**: the tab budget is memory-derived instead of core-derived, and
+  `open_tab` refuses past it. 56 MB per tab is measured (`PERF_AUDIT.md` phase 1:
+  32 tabs on a 32 GB box used 1.8 GB and ran *slower* than 16 tabs at 1.0 GB), so
+  the ceiling is `min(cores * 2, free_mb / 2 / 56)` with `WEBRAIN_MAX_TABS` still
+  overriding. Verified live: `WEBRAIN_MAX_TABS=4` with `concurrency: 16` reported
+  `tabs_allowed: 4, effective_concurrency: 4` and still completed every row.
+- **batch (response)**: replies are capped at 8 MiB of row text
+  (`WEBRAIN_RESPONSE_BUDGET` overrides). Rows past the cap keep url/title/error and
+  lose `text`/`data`; `stats` now carries `bytes_returned`, `rows_truncated`,
+  `budget_bytes`, `tabs_allowed` and `mem_available_mb`. A 1,000 row reply used to be
+  assembled whole whatever its size, and MCP has no streaming response in this build,
+  so the ceiling is the only backpressure the transport can deliver.
+- **download (ytdlp)**: `args[]` is now an allowlist of the flags the tool
+  advertises. It was a passthrough, which made `webrain_download` a command runner:
+  yt-dlp's `--exec` runs a shell command on the downloaded file. Verified live:
+  `--exec` is refused by name, `--max-filesize 2M` still passes.
+- **guard (URLs)**: navigate, `fetch_http` and download refuse non-web schemes and
+  link-local / cloud-metadata hosts (`169.254.169.254`, `metadata.google.internal`).
+  Loopback stays allowed on purpose, since a local single-user binary's own dev
+  server, self-hosted CDP endpoint and soak fixture live there.
+- **chat (history)**: switching threads no longer re-downloads a conversation.
+  Three separate costs, measured in the browser before and after: a tab fetched
+  the live conversation **twice** on mount (the ledger and the pane asked for the
+  same URL — 354 KB of JSON apiece), every thread pick was a `GET` followed by a
+  `POST`, and revisiting a thread paid the whole payload again. Now `POST
+  /sessions/<id>` answers with the transcript so a pick is one request, the page
+  keeps what it has read (a revisit is a `?light=1` claim, 28 bytes), and the two
+  boot callers share one in-flight request. Conversation payloads over 2 KB are
+  gzipped when the browser accepts it: the 663 KB example arrives as
+  **201 KB** — `Content-Encoding: gzip`, `Content-Length` of the compressed body.
+  The cache is dropped for the live conversation on every send and every
+  transcript save, which is the only way a stored conversation can change.
+- **chat (loading)**: one motion for "work is happening", shared by the three
+  places that had none. An indeterminate bar rides the app bar's own border while
+  a turn runs **or a thread is being fetched** (absolutely positioned, so nothing
+  reflows), a running tool row draws a 1 px sweep along its summary line, and a
+  source chip whose card is still being fetched shows a sheen instead of sitting
+  there looking dead. All three are one keyframe over a solid block;
+  `prefers-reduced-motion` keeps the bar and drops the two that only say "still
+  going". Verified through the CSSOM after a real render: `glide` at 1.5 s / 1.6 s,
+  mint on the bar and the row, and the bar flush with the header's bottom edge; the
+  bar appears for a delayed open and is gone when the rows land.
+- **chat (streaming)**: the streaming caret breathes with a soft glow instead of
+  hard-blinking on a `steps(2)` timer, and the live step label (`webrain_eval
+  returned · writing`) is keyed on its words so a new step fades in rather than
+  swapping under the cursor. The caret is the one thing that can be animated
+  per-token: `{@html}` replaces the body's nodes on every chunk, so anything
+  attached to the children would restart each frame and flicker.
+- **chat (history)**: link previews are fetched when a row is opened, not when a
+  thread is. Opening a 32-message search thread used to fire one `POST /preview`
+  per source chip on screen — 68 requests, each a server-side page fetch, and 212
+  across the whole thread — for cards sitting inside collapsed rows. A row from
+  disk now primes its links on `ontoggle`; a row that just streamed still does it
+  as it appears. Verified live: thread open **0** requests, one expanded row **8**
+  (its own links), sending a turn in that thread **0** more.
+- **chat (history)**: claiming a thread now makes it the page's live
+  conversation too. `current` was only ever set by the thread list, so after
+  opening an old thread the page still named the previous one — and every frame
+  the turn streamed was dropped as "another conversation's" while the transcript
+  save landed on the wrong id. Verified live: a turn sent after clicking a
+  thread lands in that thread (`messages` 30 → 32, rows 333 → 338 in it).
+- **console (`webrain_console` / `observe what=console`)**: the collector was
+  installed lazily, on the first call, so everything a page logged or threw while
+  it was *loading* was already gone — exactly the case worth asking about ("why is
+  this app blank?"). It now runs at document start
+  (`Page.addScriptToEvaluateOnNewDocument`) and patches `console.error`/`warn` on
+  top of the existing uncaught-error and rejection listeners. Live: a page that
+  calls `console.error("boom-1")` and throws in a timer now answers `count: 2`
+  (`boom-1`, `Uncaught Error: boom-2`), then `0` on the next read, on both Chrome
+  and Moli. Still no `Runtime.enable`, which is the automation leak we avoid, so
+  the capture happens in the page rather than in CDP.
+- **elements (`visible`)**: the interactive-element flag used `offsetParent`, which
+  is `null` for `position:fixed` — a real, clickable button read as hidden — and
+  for every element on an engine that ships compatibility geometry instead of real
+  layout. `getClientRects().length > 0` is the test `wait_selector` already used;
+  the OTP-field probes in `login.rs` and `vault.rs` got the same fix. Measured on
+  Moli's default `LayoutPolicy::Mock`: httpbin's form went from 0/13 visible and
+  `crippled: true` to 13/13 and `crippled: false`, Hacker News 60/60.
+- **chat (rail)**: the thread you click is the thread the rail marks. The row used
+  `class:on={!past && c.id === current}`, and opening a past conversation sets
+  `past` — so **no** row was marked while you were reading one, and `class:reading`
+  (`!!past && c.id !== current`) applied to every *other* row. Pressing a thread
+  looked like it had not taken, and only a reload (which clears `past`) showed what
+  you were in. The marker now follows the row on screen, `viewing || current`.
+  Verified: before a click exactly one row is `on`; after clicking a past thread
+  exactly one row is `on` + `reading`, the one clicked.
+- **chat (rail)**: the live conversation has a row before its first message. An id
+  with nothing in it is not in the store, so the rail listed only old threads and
+  marked none of them — which reads the same as a click that did not register.
+  `GET /sessions` prepends `{"id": current, "title": "(new conversation)", "n": 0}`
+  when the live id is missing, and the meta line says "empty" instead of
+  " · 0 msg".
+- **chat (composer)**: the field no longer goes dead during a turn. It was
+  `disabled={busy}`, so you could not type — which meant `draft` stayed empty, and
+  **add to queue** and **steer with message** are both gated on there being text.
+  Those two buttons could never be pressed, which read as "the buttons do not
+  work". Typing is allowed now; Enter steers and Alt+Enter queues, as the titles
+  already said.
+- **chat (palette)**: ↑/↓ scroll the selected row into view. The list is capped at
+  17rem with 14 rows in it, so arrowing past the fold selected a row nobody could
+  see. Verified: 14 rows in a 272 px box, twelve ArrowDowns → `scrollTop` 184 and
+  the selected row inside the box.
+- **chat (composer)**: an attached image is a 70 px tile you can look at, with its
+  own remove button (visible on hover, and always on touch), instead of a chip
+  with a 24 px thumbnail beside a truncated filename. Non-images stay chips.
+- **chat (composer)**: the agent's todo rows are a rail above the field — above the
+  attachments — while it works, because a list three screens up in the transcript
+  has already scrolled past. The status marker reads the words the model wrote
+  (`done`/`completed`/`in progress`); the runtime hands the status through as free
+  text, not an enum.
+- **chat (theme)**: `#app` is sized in `dvh` as well as `vh` and carries the
+  theme's own surface. `100vh` on a phone is the *largest* viewport, so the
+  composer and the last transcript line sat under the URL bar and the strip below
+  painted the page background rather than the chosen theme's. Verified at 700 px:
+  all four themes paint body, `#app` and the composer from their own palette, and
+  `#app` height equals `innerHeight` exactly.
+- **chat (rail)**: the session rail's open/inert state is derived from the
+  stylesheet's own breakpoint instead of `innerWidth` read once at load. An editor
+  tab switch is enough to resize the window across 860px, and the flag then
+  disagreed with the CSS: above the breakpoint the rail stayed hidden because
+  `panelOpen` was still false from a narrow layout, below it the rail was visible
+  while `inert` said it was not — so every row, tab and button in the left menu
+  ignored clicks until a reload. Verified by resizing 1090 → 700 → 1280: the rail
+  goes inert-and-closed, then open and clickable again, with no reload.
+- **chat (history)**: reading a conversation no longer makes it the live one.
+  `GET /sessions/<id>` mutated the server's current id, and the page reads that
+  route on every load (`seedLive`) — so a second tab, or a reload racing a slow
+  list, stole the live conversation from the tab that owned it and two pages
+  ping-ponged `current` between them. Claiming is now `POST /sessions/<id>`, sent
+  when you pick a thread. Verified: reading `c1794774810531` leaves `current`
+  untouched, the POST moves it.
+- **chat (new chat)**: pressing "new chat" on a conversation nobody has written to
+  reuses it instead of minting another id. It used to leave an empty row in the
+  menu on every press and make the browser store a per-conversation setup key for
+  each one; three presses now produce one conversation. Stale
+  `webrain-chat-setup-*` keys are dropped whenever the thread list loads, so the
+  per-conversation setup cannot accumulate one key per thread that ever existed.
+- **chat (serve)**: a browser closing a socket is no longer printed as a server
+  error. Every reload — and every tab switch, since the `EventSource` is dropped
+  and reopened — buried the real errors under a wall of `· http · An established
+  connection was aborted … (os error 10053)`. Connection-reset, abort, broken-pipe
+  and unexpected-EOF errors are now silent. Verified: three page loads, a viewport
+  resize and a dozen route probes produced no `· http ·` line at all.
+- **chat (settings)**: the settings drawer remembers which tab you last used
+  instead of jumping back to Connection on every open, which reads as "the tab I
+  pressed did not take". The stored value is validated against the tab list so a
+  stale one cannot open an empty panel.
+- **chat (skills)**: `enable_skills` was never set, and `ClientMode::Empty` defaults
+  it to `false` (`session.rs:2189`), so `with_skill_directories` was inert while the
+  `@` menu kept offering skills the runtime could not resolve. Now set beside the
+  directories it enables. Verified live on deepseek: the agent calls `skill` and
+  loads `webrain`, and the first request grows 3 186 → 3 600 tokens because the
+  skill index is finally being sent.
+- **chat (tools)**: the tools dialog now lists every tool the session allows. Two
+  mistakes in `/catalog` hid part of the surface: this binary's own seven tools
+  were labelled `builtin` (they are `custom:` in the allowlist), and `task` and
+  `task_complete` were missing entirely — so delegation had no checkbox and the
+  Runtime tab was the only place to reach it. The page now shows 25 tools plus 4
+  built-ins, exactly the 29 the allowlist admits.
+- **core (launch)**: the ephemeral SERP/CAPTCHA browser is launched with
+  `--incognito` instead of `--guest`. Browse-as-Guest builds a window with no
+  Browser in Chrome's BrowserList, so `Target.createTarget` answered
+  `-32000 "Failed to open new tab - no browser is open"` — which is why every doc
+  and skill said that browser was single-tab. Measured 2026-11-07, Chrome 151 and
+  156, identical launch otherwise: `--guest` refuses both `createTarget` variants,
+  `--incognito` accepts `Target.createTarget` **and**
+  `Target.createBrowserContext`. Incognito is the same ephemerality (cookies and
+  history dropped when the window closes) with a real Browser. The routing rule is
+  unchanged: this browser has two callers (`webrain_serp`'s google/brave flow and
+  the CAPTCHA solve) and bulk work still belongs on a real profile — a queue in the
+  clearance profile is how the clearance gets burned. Docs, skills and the
+  `webrain_guide` text carried the old limitation and are corrected.
+- **serp (serpapi)**: a refused key is reported instead of swallowed. serpapi
+  answers `401 {"error": "Invalid API key. Your API key should be here: …"}`,
+  but ureq treats a non-2xx as an error and drops the body, so a keyed search
+  with a truncated key came back as a short result list with
+  `skipped: ["google (serpapi)"]` — indistinguishable from "this engine has
+  nothing". `skipped` now reads `google (serpapi: HTTP 401: Invalid API key.
+  Your API key should be here: https://serpapi.com/manage-api-key)`, and
+  `auto`'s fill walk stops after the first refusal instead of spending six
+  requests to learn the same thing. New helper:
+  `engines::serp_http_get_allow_error` (no httpcache — a refused reply must
+  never be replayed).
+- **serp (serpapi)**: a google reply where Google served encrypted
+  click-tracking links reported `domain: "google.com"` on **7 of 9** rows and
+  handed the caller `google.com/goto?url=CAES…` as the result URL — a dead end
+  that reads like a result. The token is genuinely opaque (base64-decoded: 114
+  bytes, no URL in them) and serpapi repeats it inside `redirect_link`, so the
+  provider cannot resolve it either. The row is now reported at its **site
+  origin**, taken from Google's own `displayed_link` breadcrumb
+  (`https://tokio.rs › tokio › glossary` → `https://tokio.rs`); a redirect row
+  whose breadcrumb is not a hostname — a view count (`1.8K+ views`), a comment
+  count, or a version string (`0.0.0.4`, which parses as a valid URL host) — has
+  no destination at all and is dropped rather than dressed up. Direct links are
+  never rewritten. Test:
+  `serpapi_encrypted_google_redirects_become_the_site_origin`.
+- **core (batch)**: `wait_selector_state: "visible"` is now satisfied by **any**
+  match instead of only the first one in DOM order. An SPA list page usually
+  renders the same cards twice — a hidden mobile container first, the visible
+  desktop copy second — so the poll locked onto the hidden copy and `visible`
+  never arrived, burning the whole `wait_timeout_secs` on a page that was ready
+  in under a second. Measured on masoutis.gr, 27 search URLs, `concurrency: 6`:
+  `visible` + 30 s = **159.4 s** (`ms_total` 858 s, of which 27 × 30 s = **810 s,
+  94 %,** was pure wait); `attached` + 6 s = **10.1 s** with identical rows. The
+  box test is `getClientRects()`, so `position: fixed` counts as visible and
+  `display: none` does not. Regression test:
+  `the_wait_looks_at_every_match_not_only_the_first`. Docs, the shipped skill and
+  `webrain_guide` now carry the rule (`attached` + 6 s on the repeated card, never
+  on a shell element that exists before the cards).
+
 ## [0.17.1] - 2026-11-06
 
 ### Fixed

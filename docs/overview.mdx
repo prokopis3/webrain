@@ -47,11 +47,13 @@ it directly.
 - **See the page** — `webrain_observe` (a11y / semantic / state), plus vision
   tiles (screenshot → vector store) for tables and charts.
 - **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus
-  `webrain_scrape` for static pages 10–100× faster than a browser.
+  `webrain_scrape` for static pages: one HTTP GET, no browser process.
 - **Or run the loop yourself** — `webrain chat "<prompt>"` runs one Copilot
   agent turn with these tools attached and your own model key (BYOK: seven
   provider rows or any OpenAI-compatible endpoint, including a keyless local
-  server). See [Chat](/guides/chat).
+  server). `--serve` puts the same session behind a loopback page with a
+  transcript, per-step reasoning, approval cards and a conversation rewind.
+  See [Chat](/guides/chat).
 
 ## How it's built
 

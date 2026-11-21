@@ -78,7 +78,14 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_batch      same op across many URLs in parallel tabs (op: fetch|markdown|
                      extract|interact|eval|assets|screenshot|pdf) + cdp_urls
                      per-proxy fan-out
-  webrain_crawl      site traversal (mode: spider|sitemap|scan|validate)
+  webrain_crawl      site traversal (mode: spider|sitemap|scan|validate).
+                     spider: the frontier dedupes on path + sorted query (anchor
+                     ignored, `#/` route kept) so facet permutations are ONE
+                     page; `delay_ms` is per HOST and is a gap between starts
+                     (500 = 2 req/s each); `dedupe_pages` is OFF by default —
+                     set true to collapse pages with identical visible text and
+                     read `duplicates`, but leave it false when every facet or
+                     pagination row must come back.
   webrain_search     web search (duckduckgo|google|bing|brave)
   webrain_serp       STRUCTURED SERP JSON (position/title/url/domain/snippet) — any
                      engine; duckduckgo|bing|auto are pure HTTP (no browser),
@@ -145,16 +152,17 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
   the binary directly from WEBRAIN_BROWSERS_DIR for those. obscura refuses a
   0.0.0.0 bind without OBSCURA_CDP_TOKEN (>=32 bytes). Its /json/version keeps
   advertising the built-in UA — check navigator.userAgent after navigate instead.
-- GUEST CHROME (`--guest`) IS A PURPOSE TOOL, NOT A SCRAPING ENGINE. It exists for
-  `webrain_serp`'s JS-gated engines (google, brave) and for solving an interactive
-  CAPTCHA/Turnstile; its profile (`serp/<profile>`, persisted unless `--fresh`) is
-  what makes the clearance stick for the NEXT call. It refuses new targets —
-  VERIFIED 2026-11-06 on Chrome 156: `PUT /json/new` -> 500 (200 on a normal
-  Chrome), `Target.createTarget` -> `-32000 "Failed to open a new tab"` — so a
-  batch there runs ONE serial tab: `single_target: true, effective_concurrency: 1`
-  (8 URLs in 5.65 s, vs 1.46 s on 9222 with 4 tabs). Bulk `webrain_batch` /
-  `webrain_crawl` / general navigation belong on real Chrome, obscura or
-  lightpanda. Do not "fix" a slow batch by pointing it at guest Chrome.
+- THE EPHEMERAL ("GUEST") CHROME IS A PURPOSE TOOL WITH TWO CALLERS — this SERP
+  fallback and the interactive CAPTCHA/Turnstile solve. Its profile
+  (`serp/<profile>`, persisted unless `--fresh`) is what makes the clearance stick
+  for the NEXT call. It is launched with `--incognito`, not `--guest`: measured
+  2026-11-07 on Chrome 151 and 156, `--guest` answers `Target.createTarget` with
+  `-32000 "Failed to open new tab - no browser is open"` (Browse-as-Guest has no
+  Browser in Chrome's BrowserList), while `--incognito` accepts both
+  `createTarget` and `createBrowserContext`, so the old serial-tab caveat is gone.
+  It is still not an engine: bulk `webrain_batch` / `webrain_crawl` belong on real
+  Chrome, obscura or lightpanda — a queue in the clearance profile is how the
+  clearance gets burned.
 - obscura will NEVER pass a Turnstile/Cloudflare challenge — upstream lists
   "Cloudflare interactive challenges" under "what stealth does not handle". Its
   stealth TLS is a fixed wreq Profile::Chrome145 while navigator reports Chrome/143,
@@ -189,6 +197,21 @@ not a challenge and not a broken site.
 - If a hand-opened tab of the same URL works while yours does not, the difference
   is OUR injection, not the site. Never report the site as frozen.
 
+WAIT ON THE LIST, NOT ON THE FIRST CARD
+`wait_selector` is satisfied by ANY match reaching the state (fixed in this build) — but
+the state is still worth choosing:
+- SPA list pages (masoutis.gr, most Greek e-shops) render the SAME cards twice:
+  a hidden mobile container first, the visible desktop one second. Waiting for
+  `visible` used to lock onto the hidden copy; on 2026-11-06 that cost 30 s per
+  URL (159 s for 27 URLs, `ms_total` 858 s of which 810 s was the timeout). Now
+  the waiter scans every match; the same batch runs in ~10 s.
+- Prefer `wait_selector_state:"attached"` with `wait_timeout_secs:6` when the
+  page may legitimately have zero results (`div.product` never appears on a "no
+  results" search): that row pays the whole timeout, so a big timeout only buys
+  latency. `attached` + 6 s gave byte-identical results to `visible` + 30 s.
+- Do not anchor on a shell element that exists before the cards (`#ProductsClass`
+  returned in 0.2-2.4 s with found=0 everywhere). Anchor on the repeated card.
+
 EXTRACTION MATRIX
 - structured list, schema known    -> extract(mode=schema, base_selector, fields)
 - schema unknown                   -> extract(mode=autoschema) + eval, then mode=schema
@@ -197,6 +220,8 @@ EXTRACTION MATRIX
                                       + next/prev labels (NO hardcoded classes), derive
                                       range, then webrain_batch
 - whole site                       -> crawl(mode=spider, seed_url)
+- whole site, one template repeated -> crawl(mode=spider, dedupe_pages=true)
+                                      → one page per template + `duplicates`
 - emails/phones/prices/patterns    -> extract(mode=regex)
 - JSON-LD / microdata              -> extract(mode=jsonld)
 - tables                           -> extract(mode=table)
@@ -606,7 +631,19 @@ pub fn host_stats() -> Value {
         .and_then(|text| parse_loadavg(&text));
     let memory = std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|text| parse_meminfo(&text));
+        .and_then(|text| parse_meminfo(&text))
+        // No /proc (Windows, macOS): the same sysinfo read the tab budget uses,
+        // so `memory` is no longer three nulls off Linux. Kept as a fallback so
+        // each platform reports from one source.
+        .or_else(|| {
+            let total_mb = webrain_core::backends::cdp::memory_total_mb();
+            (total_mb > 0).then(|| {
+                (
+                    total_mb * 1024,
+                    webrain_core::backends::cdp::memory_available_mb() * 1024,
+                )
+            })
+        });
 
     let mut total = 0_u32;
     let mut browsers = 0_u32;
@@ -642,15 +679,15 @@ pub fn host_stats() -> Value {
         .map(|value| value as u64);
 
     json!({
-        "available": load.is_some() && memory.is_some(),
-        // Say WHY instead of shipping five nulls: on Windows/macOS there is no
-        // /proc, and `available:false` alone reads like a broken tool rather than
-        // an unsupported platform. Process counts stay 0 there for the same reason.
-        "reason": if load.is_some() && memory.is_some() {
+        "available": load.is_some(),
+        // Say WHY instead of shipping nulls: load average and process counts come
+        // from /proc (Linux). Memory now falls back to sysinfo, so only those two
+        // are missing off Linux, and the reason names them.
+        "reason": if load.is_some() {
             Value::Null
         } else {
             json!(format!(
-                "{} has no /proc — host stats are Linux-only by design (no sysinfo dependency, no shell). Pass a cdp_url or use the OS task manager for process counts.",
+                "{} has no /proc: load average and process counts are Linux-only. Memory comes from sysinfo; use the OS task manager for process counts.",
                 std::env::consts::OS
             ))
         },
@@ -661,8 +698,57 @@ pub fn host_stats() -> Value {
             "available_mb": available_kb / 1024,
         })),
         "processes": {"total": total, "browser_processes": browsers},
+        "mcp": {
+            "calls": crate::CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            "errors": crate::CALL_ERRORS.load(std::sync::atomic::Ordering::Relaxed),
+            "retries": crate::RETRIES.load(std::sync::atomic::Ordering::Relaxed),
+        },
         "uptime_s": uptime_s,
     })
+}
+
+/// Ceiling on the rows a batch reply may carry, in bytes of text/data.
+///
+/// MCP has no streaming response in this build, so for 1,000 URLs the reply
+/// body is the memory hog, not the tabs (the driver sits at 11-13 MB across 1
+/// to 32 tabs, PERF_AUDIT.md phase 1). This is the backpressure the transport
+/// can actually deliver: a bounded body with a named count of dropped rows.
+fn response_budget() -> usize {
+    std::env::var("WEBRAIN_RESPONSE_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(8 * 1024 * 1024)
+}
+
+/// Blank `text`/`data` on rows past the budget, keeping url/title/error so the
+/// caller still sees that the row ran. Returns (bytes kept, rows truncated).
+fn apply_response_budget(payload: &mut Value) -> (usize, usize) {
+    let budget = response_budget();
+    let Some(rows) = payload.get_mut("results").and_then(|v| v.as_array_mut()) else {
+        return (0, 0);
+    };
+    let (mut bytes, mut truncated) = (0usize, 0usize);
+    for row in rows.iter_mut() {
+        let len = row
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(str::len)
+            .unwrap_or(0)
+            + row.get("data").map(|v| v.to_string().len()).unwrap_or(0);
+        if bytes + len > budget {
+            if row.get("text").is_some() {
+                row["text"] = json!("");
+            }
+            if let Some(obj) = row.as_object_mut() {
+                obj.remove("data");
+            }
+            truncated += 1;
+        } else {
+            bytes += len;
+        }
+    }
+    (bytes, truncated)
 }
 
 /// Concurrency a batch really had: the tabs it measured, never the number it
@@ -787,6 +873,7 @@ pub fn list_tools() -> Vec<Value> {
                 "selector": {"type": "string", "description": "html: CSS selector to narrow"},
                 "full_page": {"type": "boolean", "default": false, "description": "screenshot: full scrollable page"},
                 "dir": {"type": "string", "default": "screenshots", "description": "screenshot: output dir"},
+                "b64": {"type": "boolean", "default": true, "description": "screenshot: include base64 (that is the image block). false returns only the file path — use it for tall pages and long screenshot runs"},
                 "tile_width": {"type": "number", "default": 800, "description": "pixel: tile width px"},
                 "tile_height": {"type": "number", "default": 800, "description": "pixel: tile height px"},
                 "max_tiles": {"type": "integer", "default": 16, "description": "pixel: max tiles"},
@@ -882,15 +969,15 @@ pub fn list_tools() -> Vec<Value> {
                 "disable_resources": {"type": "boolean", "default": false},
                 "block_trackers": {"type": "boolean", "default": false},
                 "network_idle": {"type": "boolean", "default": false},
-                "wait_selector": {"type": "string"},
+                "wait_selector": {"type": "string", "description": "Poll this CSS selector after navigate; `visible` is satisfied by ANY match, so a hidden mobile copy of a list (common in SPAs) does not stall the wait"},
                 "wait_selectors": {"type": "array", "items": {"type": "string"}, "description": "per-URL wait selector, index-parallel to urls (empty string = no selector). Use when one batch spans HOSTS that render differently; overrides wait_selector per URL."},
                 "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
-                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL"}
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL. A page with no match at all pays this in full — set 6-8s on a list that may legitimately be empty"}
             }, "required": ["op", "urls"]}
         }),
         json!({
             "name": "webrain_crawl",
-            "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]).",
+            "description": "Site traversal. Pick `mode` (required): spider (BFS/DFS/best-first whole-site crawl: seed_url + depth/pages/allow/deny/autothrottle/checkpoint), sitemap (discover URLs from a site's sitemap: url), scan (auto-scroll infinite-scroll: max_scrolls), validate (alive/dead URL probe: urls[]). Spider dedupes the frontier on path + sorted query (anchor fragments ignored, `#/` hash routes kept), so `?a=1&b=2` and `?b=2&a=1` are crawled once.",
             "inputSchema": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": ["spider","sitemap","scan","validate"]},
                 "proxy": {"type": "string", "description": "sitemap/validate ONLY (they are pure HTTP): proxy URL for the fetch. Omit to use the WEBRAIN_PROXIES rotation pool. spider/scan drive a browser, so their exit is set at launch or by the session context instead."},
@@ -912,6 +999,7 @@ pub fn list_tools() -> Vec<Value> {
                 "autothrottle_max_ms": {"type": "integer", "default": 30000},
                 "crawldir": {"type": "string", "description": "spider: checkpoint/resume dir. Persists {queue, seen, results} atomically; a resume (same crawldir) returns prior + new results and never re-fetches. max_pages counts the whole crawldir — raise it on resume to fetch more"},
                 "checkpoint_every": {"type": "integer", "default": 10},
+                "dedupe_pages": {"type": "boolean", "default": false, "description": "spider: drop pages whose visible text repeats an earlier page and report `duplicates`. Off by default — it removes rows, so a caller wanting every facet/pagination row must leave it false"},
                 "concurrency": {"type": "integer", "default": 4, "description": "spider: concurrent page fetches across tabs (real Chrome/obscura multi-target); single-target/lightpanda auto-serializes"},
                 "disable_resources": {"type": "boolean", "default": false, "description": "spider: block fonts/images/media on every page fetch"},
                 "block_trackers": {"type": "boolean", "default": false, "description": "spider: also block the 3500-domain tracker list"},
@@ -986,9 +1074,9 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_session",
-            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url; add `proxy` to route it through a browser context -- re-open the same session_id with a different proxy to switch a LIVE Chrome's egress -- and `keep_identity` to carry the previous session's cookies across that switch), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile, plus port or cdp_url), profiles (vault names), login (auto-login from vault: service+profile+url, plus port or cdp_url), close_launch (stop a launched Chrome: service+profile).",
+            "description": "Browser / auth / session state. Pick `op` (required): open (create named session: session_id+cdp_url; add `proxy` to route it through a browser context -- re-open the same session_id with a different proxy to switch a LIVE Chrome's egress -- and `keep_identity` to carry the previous session's cookies across that switch), close (destroy session), list (active sessions), cookies (export), setcookies (import cookies[]), save_state / restore_state (auth state ↔ state.json: service+profile, plus port or cdp_url), profiles (vault names), login (auto-login from vault: service+profile+url, plus port or cdp_url), captcha (buy a reCAPTCHA-v2 token from the configured paid solver: sitekey+page_url, optional data_s+proxy; returns token+provider -- YOU still inject it into the page and call the callback), close_launch (stop a launched Chrome: service+profile).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["open","close","list","cookies","setcookies","save_state","restore_state","profiles","login","close_launch"]},
+                "op": {"type": "string", "enum": ["open","close","list","cookies","setcookies","save_state","restore_state","profiles","login","captcha","close_launch"]},
                 "session_id": {"type": "string", "description": "open/close: session name"},
                 "proxy": {"type": "string", "description": "open: route THIS session through this proxy by creating a browser context with `proxyServer` (live switch -- re-open the same session_id with a different proxy to move it). Needs Chrome; lightpanda/obscura have no per-context proxy."},
                 "keep_identity": {"type": "boolean", "description": "open (with proxy): copy the previous session's COOKIES into the new context so the login survives the switch. Cookies only -- localStorage/IndexedDB/service workers stay behind. Best-effort: for sites that treat an IP change as fraud, pin one exit per profile instead of switching."},
@@ -998,6 +1086,9 @@ pub fn list_tools() -> Vec<Value> {
                 "profile": {"type": "string", "description": "save/restore_state, login, close_launch: profile"},
                 "port": {"type": "integer", "default": 9222, "description": "state/login: CDP port"},
                 "url": {"type": "string", "description": "login: login page to navigate first"},
+                "sitekey": {"type": "string", "description": "captcha: reCAPTCHA v2 sitekey — read it from the page, e.g. document.querySelector('[data-sitekey]').dataset.sitekey (or the iframe src's `k=`)"},
+                "page_url": {"type": "string", "description": "captcha: the page URL the token must be valid for"},
+                "data_s": {"type": "string", "description": "captcha: Google /sorry's `data-s` challenge secret, when the page has one"},
                 "inline": {"type": "boolean", "description": "save_state: return the state payload instead of writing state.json — for a caller that keeps the durable copy itself, so no credential is left on this worker"},
                 "payload": {"type": "object", "description": "restore_state: the state object to apply (what `save_state inline` returned); used INSTEAD of state.json, which may not exist on a machine that never logged in"}
             }, "required": ["op"]}
@@ -1701,6 +1792,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
                     "restore_state" => "webrain_restore_state",
                     "profiles" => "webrain_profiles",
                     "login" => "webrain_login",
+                    "captcha" => "webrain_captcha",
                     "close_launch" => "webrain_close_launch",
                     _ => return None,
                 },
@@ -1728,6 +1820,10 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
 
 /// Dispatch tool calls to the shared CDP backend.
 /// ponytail: match arm, no registry pattern.
+/// Dispatch one tool call. The span carries the FOLDED tool name, so a
+/// `webrain_observe{what:screenshot}` shows up as `webrain_screenshot` in
+/// `RUST_LOG=debug` — the name that actually did the work.
+#[tracing::instrument(skip_all, fields(tool = %name))]
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
 
@@ -1791,7 +1887,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let opts = nav_opts(args);
             match backend.navigate_opts(url, &opts).await {
                 Ok(s) => {
-                    json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge, "crippled": s.crippled, "chrome_error": s.chrome_error})
+                    json!({"status": "ok", "url": s.url, "title": s.title, "text": s.text, "elements": s.elements, "links": s.links, "challenge": s.challenge, "crippled": s.crippled, "chrome_error": s.chrome_error, "capabilities": backend.caps()})
                 }
                 Err(e) => err(e),
             }
@@ -1833,7 +1929,6 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     };
                     let mut out = json!({
                         "status": "ok",
-                        "screenshot_b64": base64::engine::general_purpose::STANDARD.encode(&img),
                         "mime": mime,
                         "format": if mime == "image/jpeg" { "jpeg" } else { ext },
                         "requested_format": format,
@@ -1853,6 +1948,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             Ok(()) => out["path"] = json!(path),
                             Err(e) => out["path_error"] = json!(e.to_string()),
                         }
+                    }
+                    // The base64 IS the MCP image block's payload (hoist_screenshot
+                    // moves it into one), so it ships by default. `b64:false` trades
+                    // the picture for the file on disk — the caller wants the file.
+                    if args.get("b64").and_then(|v| v.as_bool()).unwrap_or(true) {
+                        out["screenshot_b64"] =
+                            json!(base64::engine::general_purpose::STANDARD.encode(&img));
                     }
                     out
                 }
@@ -2173,7 +2275,30 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .with_concurrency(concurrency)
                 .with_nav_opts(nav_opts(args));
             let t0 = std::time::Instant::now();
-            let results = spider.crawl(backend, seed).await;
+            let mut results = spider.crawl(backend, seed).await;
+            // Opt-in: a paginated or faceted site returns the same template page N
+            // times and the caller pays a token for every copy. Keep the first page
+            // per visible-text hash. An error page is never dropped — its text is
+            // empty, so they would all collide.
+            let mut duplicates = 0usize;
+            if args
+                .get("dedupe_pages")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let mut seen = std::collections::HashSet::new();
+                let before = results.len();
+                results.retain(|r| {
+                    let text = r.page.content.as_deref().unwrap_or("");
+                    if r.page.error.is_some() || text.trim().is_empty() {
+                        return true;
+                    }
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&text, &mut h);
+                    seen.insert(std::hash::Hasher::finish(&h))
+                });
+                duplicates = before - results.len();
+            }
             // ponytail: spider stats — consistent with the batch stats block; the
             // LLM sees elapsed + ok/err at a glance for a long crawl.
             let total_ms = t0.elapsed().as_millis() as u64;
@@ -2182,6 +2307,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let page_ms: u64 = results.iter().map(|r| r.page.duration_ms).sum();
             json!({
                 "status": "ok", "pages": results.len(), "results": results,
+                "duplicates": duplicates,
                 "stats": {"elapsed_ms": total_ms, "pages_ok": ok, "pages_err": errs, "page_ms_total": page_ms}
             })
         }
@@ -2613,13 +2739,25 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 return json!({"status": "error", "message": "urls required"});
             }
             // `.max(1)` BEFORE the cast: a negative i64 `as usize` wraps to a
-            // colossal value, which would hand the semaphore an effectively
-            // unbounded permit count (a client could ask for `concurrency: -1`).
-            let concurrency = crate::clamp_concurrency(
+            // colossal value, which would ask the worker pool for an unbounded
+            // number of tabs (a client could send `concurrency: -1`).
+            //
+            // Screenshot / tile / pdf rows hold a full-frame bitmap per tab, so
+            // the same box buys ~a third of them. The tab budget is what the op
+            // actually costs, not what a text row costs.
+            let cost_mult = match op {
+                "screenshot" | "pixel" | "pdf" => 3,
+                _ => 1,
+            };
+            // Before the work, so the delta answers "did THIS call get throttled".
+            let throttle_t0 =
+                webrain_core::engines::THROTTLE_EVENTS.load(std::sync::atomic::Ordering::Relaxed);
+            let concurrency = crate::clamp_concurrency_for(
                 args.get("concurrency")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(4)
                     .max(1) as usize,
+                cost_mult,
             );
             let opts = nav_opts(args);
             // Wall clock for the whole call: `ms_total` sums per-URL times, so the
@@ -2756,11 +2894,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             // which OOMs on huge jobs. `per_backend_concurrency` bounds tabs per browser
             // (default = concurrency, i.e. current behavior). ponytail: total tabs =
             // per_backend_concurrency × backends; raise it only when memory allows.
-            let per_backend_concurrency = crate::clamp_concurrency(
+            let per_backend_concurrency = crate::clamp_concurrency_for(
                 args.get("per_backend_concurrency")
                     .and_then(|v| v.as_i64())
                     .map(|n| n.max(1) as usize)
                     .unwrap_or(concurrency),
+                cost_mult,
             );
             // Each listed backend opens its OWN pool, so the real tab count is
             // per_backend × backends. Bound that aggregate by the same box budget —
@@ -2768,7 +2907,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let per_backend_concurrency = if cdp_urls.is_empty() {
                 per_backend_concurrency
             } else {
-                per_backend_concurrency.min((crate::tab_budget() / cdp_urls.len()).max(1))
+                per_backend_concurrency
+                    .min((crate::tab_budget_for(cost_mult) / cdp_urls.len()).max(1))
             };
             // per-URL wait selectors. NavOpts is per-call, so group the URLs by
             // their effective selector, dispatch once per group, then restore input
@@ -3032,7 +3172,30 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     "requested_concurrency": concurrency,
                     "effective_concurrency": effective,
                     "single_target": single,
+                    // What the machine allowed, which is not what was asked for
+                    // when memory or cores are the binding constraint. The cost
+                    // multiplier is part of the answer: a screenshot tab is not
+                    // a text tab.
+                    "tabs_allowed": crate::clamp_concurrency_for(concurrency, cost_mult),
+                    "cost_multiplier": cost_mult,
+                    "mem_available_mb": webrain_core::backends::cdp::memory_available_mb(),
+                    "mem_total_mb": webrain_core::backends::cdp::memory_total_mb(),
+                    // One-way valve: true means workers were halved mid-run
+                    // because free memory crossed 12%, so a slow batch has a stated
+                    // reason instead of looking like a slow site.
+                    "throttled_by_memory": webrain_core::engines::THROTTLE_EVENTS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        > throttle_t0,
+                    "capabilities": backend.caps(),
                 });
+            }
+            // Applied after the rows exist: a 1,000 row reply is the memory hog,
+            // not the tabs. Truncated rows keep url/title/error.
+            let (bytes_returned, rows_truncated) = apply_response_budget(&mut payload);
+            if let Some(stats) = payload.get_mut("stats") {
+                stats["bytes_returned"] = json!(bytes_returned);
+                stats["rows_truncated"] = json!(rows_truncated);
+                stats["budget_bytes"] = json!(response_budget());
             }
             payload
         }
@@ -3254,20 +3417,15 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_console" => {
-            // ponytail: lazy listener injection; captures uncaught errors + rejections.
-            let js = r#"
-            (() => {
-                if (!window.__wr_logs) {
-                    window.__wr_logs = [];
-                    window.addEventListener('error', e => { window.__wr_logs.push({type: 'error', text: (e.message || '').slice(0, 300)}); }, true);
-                    window.addEventListener('unhandledrejection', e => { window.__wr_logs.push({type: 'rejection', text: String(e.reason || '').slice(0, 300)}); });
-                }
-                const out = window.__wr_logs;
-                window.__wr_logs = [];
-                return JSON.stringify(out);
-            })()
-            "#;
-            match backend.evaluate(js).await {
+            // The captor is normally already installed at document start (see
+            // CONSOLE_CAPTOR_JS); re-sending it covers a tab attached after load
+            // and engines without addScriptToEvaluateOnNewDocument. `splice(0)`
+            // empties the SAME array the captor pushes into.
+            let js = format!(
+                "{};\nJSON.stringify((window.__wr_logs || []).splice(0))",
+                webrain_core::browser::CONSOLE_CAPTOR_JS
+            );
+            match backend.evaluate(&js).await {
                 Ok(v) => {
                     let arr = parse_json_str(&v);
                     json!({"status": "ok", "count": arr_len(&arr), "logs": arr})
@@ -3408,6 +3566,39 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             Ok(profiles) => json!({"status": "ok", "count": profiles.len(), "profiles": profiles}),
             Err(e) => err(e),
         },
+        "webrain_captcha" => {
+            let sitekey = args.get("sitekey").and_then(|v| v.as_str()).unwrap_or("");
+            let page_url = args.get("page_url").and_then(|v| v.as_str()).unwrap_or("");
+            if sitekey.is_empty() || page_url.is_empty() {
+                return json!({"status": "error", "message": "sitekey and page_url required"});
+            }
+            let Some((name, _)) = webrain_core::captcha::configured_provider() else {
+                return json!({"status": "error", "message": "no CAPTCHA solver configured — set CAPSOLVER_API_KEY, WEBRAIN_2CAPTCHA_KEY or TWOCAPTCHA_API_KEY"});
+            };
+            let sitekey = sitekey.to_string();
+            let page_url = page_url.to_string();
+            let data_s = args
+                .get("data_s")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let proxy = args.get("proxy").and_then(|v| v.as_str()).map(String::from);
+            // The solver sleeps between polls (up to ~2.5 min) — never on the executor.
+            match tokio::task::spawn_blocking(move || {
+                webrain_core::captcha::solve_recaptcha2_auto(
+                    &sitekey,
+                    &page_url,
+                    &data_s,
+                    proxy.as_deref(),
+                )
+            })
+            .await
+            {
+                Ok(Ok(token)) => json!({"status": "ok", "provider": name, "token": token}),
+                Ok(Err(e)) => err(e),
+                Err(e) => json!({"status": "error", "message": e.to_string()}),
+            }
+        }
         "webrain_login" => {
             let service = args
                 .get("service")
@@ -3859,6 +4050,23 @@ mod surface_tests {
         );
         assert_eq!(n, "webrain_nav");
         assert_eq!(a["op"], "forward");
+    }
+
+    #[test]
+    fn folds_session_captcha_op() {
+        let (name, args) = fold(
+            "webrain_session",
+            json!({"op": "captcha", "sitekey": "sk", "page_url": "https://x/sorry"}),
+        );
+        assert_eq!(
+            name, "webrain_captcha",
+            "op=captcha must fold to its own executor"
+        );
+        assert_eq!(args["sitekey"], "sk");
+        assert!(
+            args.get("op").is_none(),
+            "op must be dropped before dispatch"
+        );
     }
 
     #[test]

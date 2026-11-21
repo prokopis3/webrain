@@ -153,6 +153,13 @@ one browser; optionally a shared `--http` instance serving several clients.
   are shipped back inside a JSON reply that finding 2 tokenizes.
 - **Fix:** return `path` alone when a directory was given (keep `screenshot_b64` only
   when no path was written).
+- **Status 2026-11-19 — the fix as written was wrong, and `b64: false` is what landed.**
+  The base64 is not a duplicate: `hoist_screenshot` (`webrain-mcp/src/lib.rs:1389`) moves
+  it into the MCP `image` content block, which is the only way a client can display the
+  picture. Dropping it whenever a path exists would have removed the image from every
+  screenshot call, since `dir` defaults to `screenshots`. `b64: false` now returns the
+  file path alone for callers that only want the file; batch screenshot rows already
+  shipped paths only.
 - **If we skip it:** screenshots stay the second-largest reply after vision tiles.
 
 ### 11. "Renumber positions 1..N" is written five times
@@ -179,7 +186,7 @@ one browser; optionally a shared `--http` instance serving several clients.
 | 7 | Eviction policy | `map.keys().next()` at `:1354-1366`, no age tracking. Holds. |
 | 8 | Is the double work everywhere? | **Corrected:** only on the `auto` merge path; single-engine returns `http_search` output directly. |
 | 9 | Pump cadence | 200 ms `eval_js("1")` loop confirmed at `:1345-1350`. Holds. |
-| 10 | Is base64 still returned with a path? | **Yes** — both are set in the same reply object. Holds. |
+| 10 | Is base64 still returned with a path? | **Answered:** yes by default and deliberately — it is the MCP image block. `b64: false` opts out. |
 | 11 | How many renumber loops? | **Corrected:** five sites, not four. |
 
 Two claims were wrong on the first pass and are corrected above (8 and 11).
@@ -237,3 +244,66 @@ underlying parse error; and because the reader task outlives every command, a
 `Network.requestWillBeSent` burst during a 120 s PDF can no longer stall the
 socket by filling the 64-slot inbound channel — both are strict improvements but
 change failure wording no test currently pins.
+
+---
+
+# Phase 1 baseline — 2026-11-19
+
+First measured numbers for the memory contract (56 MB per tab, saturation at 8
+tabs). Nothing below changed code; this is the line every later change is judged
+against, and the source for the `PER_TAB_MB` constant in
+`webrain-core/src/backends/cdp.rs`.
+
+**Machine:** Windows, 32 GB RAM (32,578 MB total / 17,346 MB free at start), headless
+Chrome (`--headless=new`, port 9222), fixture served from a local `TcpListener`
+(one 4 KB HTML page, distinct `?i=` per row). Release build.
+
+## Extraction, no browser
+
+`cargo bench -p webrain-core --bench extract`
+
+| Benchmark | 1,000 records | 10,000 records |
+| --- | --- | --- |
+| `autoschema_candidates` | 8.83 ms | 92.1 ms |
+| `extract_fields` (4-field schema) | 11.65 ms | 124.9 ms |
+| `bm25_filter` (top_k 20) | ~1.3 ms | ~14 ms |
+
+The zero-LLM path runs at roughly 80–110 K records/s, so 10,000 rows cost about a
+tenth of a second of CPU. Extraction is not where a 1,000 URL batch spends its
+time; the browser is.
+
+## Batch memory and throughput
+
+```
+$env:CDP_URL='http://127.0.0.1:9222'; $env:SOAK_URLS='100'
+cargo run --release --example soak -p webrain-core
+```
+
+| tabs | urls | ok | err | wall ms | rows/s | driver peak MB | browser delta MB | delta/row KB |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 100 | 100 | 0 | 9194 | 10.9 | 11 | 85 | 25.7 |
+| 4 | 100 | 100 | 0 | 3094 | 32.3 | 12 | 271 | 30.4 |
+| 8 | 100 | 100 | 0 | 2994 | 33.4 | 12 | 514 | 32.6 |
+| 16 | 100 | 100 | 0 | 2985 | 33.5 | 13 | 986 | 38.0 |
+| 32 | 100 | 100 | 0 | 4304 | 23.2 | 13 | 1841 | 46.2 |
+
+`browser delta MB` is the summed RSS of browser processes at peak minus the same
+sum before the first level, so it is attributable to these tabs on a machine that
+already has a browser open.
+
+Three things the roadmap can stop guessing:
+
+1. **Throughput saturates at 8 tabs** (33.4 rows/s), and 32 is *slower* than 16
+   (23.2 vs 33.5) while costing 1.8 GB instead of 1.0 GB. Past saturation, tabs
+   buy memory and latency, not speed.
+2. **The browser costs about 56 MB per tab** on this fixture (85 MB at one tab
+   including shared browser overhead, then +55 to +60 MB per added tab). The
+   roadmap's 96 MiB per-tab estimate was too high; phase 2 should seed
+   `tabs_for()` with this measurement and keep it as a tunable constant.
+3. **The driver process is flat** at 11 to 13 MB from 1 to 32 tabs, which is the
+   evidence that batch rows are streamed rather than accumulated per page. The
+   memory that scales is Chrome's, so the tab budget is the only lever worth
+   pulling, and `open_tab` is the right place to enforce it.
+
+Reproduce both tables before and after any phase 2 change.
+

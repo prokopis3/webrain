@@ -17,7 +17,8 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / XDG data dir, i.e. `~/.local/share/webrain/profiles` |
-| `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory | engine default |
+| `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory. Pinning it also **skips the admission refusal** below: an explicit number is a decision, not an estimate | engine default |
+| `WEBRAIN_RESPONSE_BUDGET` | Bytes of row text/data a batch reply may carry before later rows are returned truncated (`rows_truncated`, `bytes_returned`, `budget_bytes` in the reply's `stats`) | `8388608` (8 MiB) |
 | `WEBRAIN_VAULT_DIR` | Encrypted credential vault dir | `%APPDATA%\webrain` / `~/.config/webrain` |
 | `WEBRAIN_USER` / `WEBRAIN_PASS` | Login fallback credentials (env channel) | — |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Cloud STT (transcript) keys, tried GROQ → OPENAI → FIREWORKS. The vision `ask` chain is separate and uses all three too — see [Vision `ask` chain](#vision-ask-chain) | — |
@@ -25,8 +26,9 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | Vision `ask` chain, hop 3 (Claude). Either name works | — |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Vision `ask` chain, hop 4 (Gemini). Either name works | — |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Vision `ask` chain, hop 6 (Qwen / DashScope). Either name works | — |
-| `SERPAPI_API_KEY` | serpapi.com paid Google SERP provider — used by `webrain_serp` when `limit > 10` | — |
+| `SERPAPI_API_KEY` | serpapi.com paid SERP provider for **every engine it serves** (google, bing, duckduckgo, yahoo, baidu, yandex; not brave) — used by `webrain_serp` first when `limit > 10`, as the fallback otherwise, and to fill a deep `auto` request engine by engine (google first) when the free engines fall short. It sends the query in the engine's own parameter (yahoo `p`, yandex `text`, others `q`) | — |
 | `BRAVE_API_KEY` | Brave Search API (`api.search.brave.com`, 20/page) — makes `engine=brave` work **without a browser**, and `auto` uses it for `limit > 20` before any browser render | — |
+| `CAPSOLVER_API_KEY` | Paid reCAPTCHA-v2 solver (api.capsolver.com) for `webrain_core::captcha`. When set, `solve_recaptcha2_auto` uses CapSolver; `WEBRAIN_2CAPTCHA_KEY` — or its alias `TWOCAPTCHA_API_KEY`, same vendor, other spelling — is the older one and is used only when CapSolver is unset. CapSolver is checked first because it is cheaper and faster per solve; with both configured the reply's `provider` says which ran. `2CAPTCHA_API_KEY` is **not** accepted: a name starting with a digit cannot be exported in a POSIX shell (`export 2CAPTCHA_API_KEY=…` is a syntax error), so it would only ever work on Windows. The key travels in the JSON body, never the URL. Reachable from both surfaces: `webrain_session {op:"captcha", sitekey, page_url}` (MCP) and `webrain captcha --sitekey … --url …` (CLI) — both return **the token only**, they do not read the sitekey off the page or inject it, so putting the token in the page is still the caller's `eval` (`skills/webrain/workflows/captcha-solve.md`). A key buys a token, not a solved challenge | — |
 | `WEBRAIN_SKILLS_DIR` | Directory of operator skill files readable via `webrain_guide(topic="skill:<name>")` — ship house rules to the agent without recompiling. Unset means `<engine cache>/skills`, which `webrain install skills` fills and `webrain skills add <url>` extends; an empty directory serves nothing | — (empty) |
 | `WEBRAIN_MCP_TOOLS` | Advertise only these MCP tools — `serp,scrape`, with or without the `webrain_` prefix. The full set is ~8,080 tokens of schema before any prompt, which is over Groq's free 7,000 tokens/minute cap, so trimming the surface is what makes a small tier work at all. An unmatched list falls back to the full surface | all tools |
 | `WEBRAIN_NO_STEALTH` | Set `1` to skip the injected stealth JS + UA override (e.g. the `webrain serp` google flow). `serp` sets it **for itself** — if it leaks into the shell that starts `mcp`, the server boots with all stealth off and every later result is measured against a different identity | off |
@@ -144,3 +146,21 @@ key replaced by `<redacted>` — offline, no runtime needed. See
 
 Binaries are discovered automatically on every OS: **env override → PATH →
 `~/.lightpanda`, `~/.obscura`, `~/.local/bin` → the webrain engine cache**.
+
+## Memory contract
+
+A batch sizes itself from the machine, not from the number you ask for. Three things
+follow from that, and each one shows up in the reply's `stats` so you never have to
+guess why a run was slow or short:
+
+| Field | Meaning |
+|---|---|
+| `tabs_allowed` | Tabs this box may hold, from free memory (~56 MB per tab, measured) capped by cores ×2. `requested_concurrency` above it is clamped, not honoured. |
+| `cost_multiplier` | What one tab of THIS op costs: `3` for `screenshot`, `pixel` and `pdf`, `1` otherwise. The budget is divided by it, so a screenshot batch gets a third of the tabs. |
+| `throttled_by_memory` | Workers were halved mid-run because free memory crossed 12%. It halves once and stays halved for the batch — a slow run with this `true` is the machine, not the site. |
+| `rows_truncated` / `bytes_returned` / `budget_bytes` | The reply hit `WEBRAIN_RESPONSE_BUDGET`; the first `n` later rows keep `url`/`title`/`error` and lost `text`. Re-run the tail or raise the budget. |
+
+A batch whose free memory cannot hold a single tab refuses with one named error per
+URL instead of starting and dying halfway. `mem_available_mb` / `mem_total_mb` in the
+same block are what the decision was made from, and `webrain_stats` adds
+`cdp_latency` (per CDP method) plus `mcp.calls` / `mcp.errors` / `mcp.retries`.

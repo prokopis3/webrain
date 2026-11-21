@@ -19,6 +19,8 @@ mod chat_ui;
 // Only exists with `--features chat`: without it, `webrain chat` still resolves
 // and prints its config, then says how to build the runtime.
 #[cfg(feature = "chat")]
+mod chat_hooks;
+#[cfg(feature = "chat")]
 mod chat_server;
 #[cfg(feature = "chat")]
 mod chat_session;
@@ -50,6 +52,12 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "webrain skills [list]\n    webrain skills add <https://…/SKILL.md | path/to/SKILL.md>\n    webrain skills rm <name>",
         "Operator skills `webrain_guide` serves as topic=\"skill:<name>\". Install one from any URL or file.",
         "A skill is an .md whose frontmatter carries `name:` — that is what the\n  reader looks up, so a file without one is refused instead of installing\n  invisibly. Files over 64 KiB are refused for the same reason.",
+    ),
+    (
+        "captcha",
+        "webrain captcha --sitekey <key> --url <page> [--data-s <s>] [--proxy <url>] [--json]",
+        "Buy a reCAPTCHA-v2 token from the configured paid solver and print it. Nothing injects it — put it in the page yourself.",
+        "Needs CAPSOLVER_API_KEY (preferred: cheaper + faster) or WEBRAIN_2CAPTCHA_KEY\n  (alias TWOCAPTCHA_API_KEY — same vendor, other spelling). `2CAPTCHA_API_KEY`\n  is NOT read: a name starting with a digit cannot be exported in a POSIX shell.\n  The token is bound to --url and, when --proxy is given, to that exit — use the\n  SAME proxy the browser egresses through, or the token is rejected. Reading the\n  sitekey and injecting the token are the caller's steps: `eval` on the live page\n  (document.querySelector('[data-sitekey]'), then set #g-recaptcha-response\n  and fire the callback).",
     ),
     (
         "uninstall",
@@ -151,7 +159,7 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "serp",
         "webrain serp \"query\" [--engine duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto]\n    [--limit N] [--page N] [--safe] [--region R] [--http] [--no-fallback] [--json]\n    [--proxy URL] [--headless] [--fresh] [--pipe] [--hold]",
         "Structured SERP JSON: one query per call, pages fetched sequentially.",
-        "duckduckgo|bing|yahoo|baidu|yandex|auto need no browser. brave uses its keyed\n  API when BRAVE_API_KEY is set, else the connected CDP engine. google auto-launches\n  a Chrome with a persistent profile unless --fresh. --fresh starts a new profile and\n  cookies every run; --pipe makes that launch use --remote-debugging-pipe (no open\n  debugging port); --hold keeps it open afterwards. --http never touches a browser at\n  all: no render, no guest launch, whatever is attached — the plain-HTML engines answer\n  in under a second each that way. Measured ceilings without a browser: bing 10 (its\n  RSS feed and its HTML SERP both ignore paging), duckduckgo ~20 (two distinct pages,\n  then repeats), yahoo 25+ (pages on b=11,21,...  so a deep limit works), baidu 10\n  before its security check. baidu and yandex are the walled two: baidu serves ~7\n  organic rows and then 302s to wappass.baidu.com (百度安全验证 image captcha), and\n  yandex serves a SmartCaptcha page from a datacenter IP — both are reported as\n  challenges, never as \"0 results\". A real Chrome with a warm profile passes the\n  baidu check; a FRESH or headless profile does not (measured 2026-10-26: guest Chrome\n  7 baidu rows / 0 yandex, fresh + headless both walled). For many queries, issue\n  several calls (or webrain_batch over SERP URLs) — the CLI takes one query.",
+        "duckduckgo|bing|yahoo|baidu|yandex|auto need no browser. brave uses its keyed\n  API when BRAVE_API_KEY is set, else the connected CDP engine. google auto-launches\n  a Chrome with a persistent profile unless --fresh. --fresh starts a new profile and\n  cookies every run; --pipe makes that launch use --remote-debugging-pipe (no open\n  debugging port); --hold keeps it open afterwards. --http never touches a browser at\n  all: no render, no guest launch, whatever is attached — the plain-HTML engines answer\n  in under a second each that way. Measured ceilings without a browser: bing 10 (its\n  HTML SERP ignores paging), duckduckgo ~20 (two distinct pages,\n  then repeats), yahoo 25+ (pages on b=11,21,...  so a deep limit works), baidu 10\n  before its security check. baidu and yandex are the walled two: baidu serves ~7\n  organic rows and then 302s to wappass.baidu.com (百度安全验证 image captcha), and\n  yandex serves a SmartCaptcha page from a datacenter IP — both are reported as\n  challenges, never as \"0 results\". A real Chrome with a warm profile passes the\n  baidu check; a FRESH or headless profile does not (measured 2026-10-26: guest Chrome\n  7 baidu rows / 0 yandex, fresh + headless both walled). For many queries, issue\n  several calls (or webrain_batch over SERP URLs) — the CLI takes one query.",
     ),
     (
         "watch",
@@ -716,6 +724,39 @@ fn main() -> anyhow::Result<()> {
             );
             std::fs::write(&out, &png)?;
             println!("Saved: {out} ({} bytes)", png.len());
+        }
+        Some("captcha") => {
+            // `webrain captcha --sitekey K --url U [--data-s S] [--proxy P] [--json]`
+            // Prints the token; injecting it into the page stays the caller's job.
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let sitekey = flag("--sitekey").unwrap_or_default();
+            let page_url = flag("--url").unwrap_or_default();
+            if sitekey.is_empty() || page_url.is_empty() {
+                eprintln!(
+                    "usage: webrain captcha --sitekey <key> --url <page> [--data-s <s>] [--proxy <url>] [--json]"
+                );
+                std::process::exit(2);
+            }
+            let provider = webrain_core::captcha::configured_provider()
+                .map(|(p, _)| p)
+                .unwrap_or("none");
+            let token = webrain_core::captcha::solve_recaptcha2_auto(
+                &sitekey,
+                &page_url,
+                &flag("--data-s").unwrap_or_default(),
+                flag("--proxy").as_deref(),
+            )?;
+            if args.contains(&"--json".to_string()) {
+                println!("{}", json!({"provider": provider, "token": token}));
+            } else {
+                eprintln!("provider: {provider}");
+                println!("{token}");
+            }
         }
         Some("spider") => {
             let seed = args.get(2).map(|s| s.as_str()).unwrap_or("about:blank");

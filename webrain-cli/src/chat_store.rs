@@ -21,6 +21,12 @@ fn db_path() -> PathBuf {
     webrain_core::vault::vault_dir().join("chat.db")
 }
 
+/// `settings.json` beside the chat database — same directory, same override, so
+/// `WEBRAIN_CHAT_DB` redirects both and a sandboxed run touches one place.
+pub fn settings_path() -> PathBuf {
+    db_path().with_file_name("settings.json")
+}
+
 impl Store {
     /// `None` when the file cannot be opened — the caller treats that as "no
     /// history menu" rather than an error.
@@ -68,6 +74,17 @@ impl Store {
                  model    TEXT NOT NULL,
                  key_env  TEXT NOT NULL,
                  created  TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             -- The whole transcript as the page drew it, one row per conversation:
+             -- tool calls with their arguments and results, the steps strip, the
+             -- notes. `messages` is only the words, so reopening a conversation
+             -- from it lost every card that made the answer checkable. Written
+             -- whole because the page owns the shape and a diffed table would be
+             -- a second copy of it to keep in sync.
+             CREATE TABLE IF NOT EXISTS transcript (
+                 convo TEXT PRIMARY KEY,
+                 body  TEXT NOT NULL,
+                 ts    TEXT NOT NULL DEFAULT (datetime('now'))
              );",
         )
         .ok()?;
@@ -204,7 +221,41 @@ impl Store {
                 && db
                     .execute("DELETE FROM turns WHERE convo = ?1", [convo])
                     .is_ok()
+                && db
+                    .execute("DELETE FROM transcript WHERE convo = ?1", [convo])
+                    .is_ok()
         })
+    }
+
+    /// Replace the stored transcript of `convo` with what the page just drew.
+    /// A row that is not a JSON array is refused rather than stored, so replay
+    /// never has to defend against its own database.
+    pub fn save_rows(&self, convo: &str, body: &str) -> bool {
+        if convo.is_empty() || serde_json::from_str::<Value>(body).is_err() {
+            return false;
+        }
+        self.lock().is_some_and(|db| {
+            db.execute(
+                "INSERT INTO transcript (convo, body) VALUES (?1, ?2)
+                 ON CONFLICT(convo) DO UPDATE SET body = excluded.body, ts = datetime('now')",
+                params![convo, body],
+            )
+            .is_ok()
+        })
+    }
+
+    /// The rows to redraw a conversation from, or `None` when it was saved
+    /// before transcripts were kept (those conversations still have `messages`).
+    pub fn rows(&self, convo: &str) -> Option<Value> {
+        let db = self.lock()?;
+        let body: String = db
+            .query_row(
+                "SELECT body FROM transcript WHERE convo = ?1",
+                [convo],
+                |r| r.get(0),
+            )
+            .ok()?;
+        serde_json::from_str::<Value>(&body).ok()
     }
 
     /// Copy the first `upto` messages of `convo` into `into`. A fork is a

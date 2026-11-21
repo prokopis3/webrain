@@ -40,7 +40,7 @@ Cursor, …). Follow `docs/AGENT_DECISION_GUIDE.md` — or just call the
 |---|---|
 | Material / interactive SPA (Google Flights, dropdowns, calendars) — **never obscura/lightpanda** | real Chrome via `cdp_urls:["http://127.0.0.1:9222"]` |
 | Protected / authenticated / Cloudflare / CAPTCHA / Turnstile challenges, real screenshots, rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain login`) |
-| **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **guest Chrome** (`--guest`) — a *purpose tool*: its profile (`serp/<profile>`, persisted unless `--fresh`) carries the solved clearance to the next call. It refuses new targets (`PUT /json/new` → 500; `Target.createTarget` → `-32000 "Failed to open a new tab"`), so a batch there is one serial tab (`single_target: true, effective_concurrency: 1`; 8 URLs 5.65 s vs 1.46 s on 9222). Never route bulk work to it |
+| **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **the ephemeral ("guest") Chrome** — `--incognito` since 2026-11-07; `--guest` cannot open a tab (`-32000 "Failed to open new tab - no browser is open"`, Chrome 151 + 156). A *purpose tool* with exactly two callers: `webrain_serp` and the CAPTCHA solve. Its profile (`serp/<profile>`, persisted unless `--fresh`) carries the clearance to the next call |
 | Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — v0.2.0+ render builds screenshot/PDF; no-render builds have no paint engine; no interactive Material |
 | Lightweight / minimal, want real a11y, no rendering needed | lightpanda — real AX tree, but screenshot = fake placeholder PNG |
 | Static HTML, no JS/auth | `webrain_fetch_http` |
@@ -112,6 +112,18 @@ Material/Google widgets are often NOT `button`: dropdowns are `combobox`,
 menu items `option`, segmented controls `radio`/`tab`. If `role=X` returns [],
 drop the role filter and `filter` on the label text instead (`filter` matches
 name, value, and css_path).
+
+### Waits (`wait_selector`)
+The state is satisfied by **any** match (fixed in this build); before the fix only
+the first DOM match counted, and an SPA list renders the cards twice (hidden
+mobile container first), so `visible` never arrived. Measured on masoutis.gr, 27
+search URLs, `concurrency: 6`: `visible` + 30 s = **159 s** (810 s of `ms_total`
+was pure timeout), `attached` + 6 s = **10 s**, identical rows.
+- Use `wait_selector_state: "attached"` with `wait_timeout_secs: 6` on lists.
+- Anchor on the repeated card (`div.product`), not on a shell element that exists
+  before the cards (`#ProductsClass` answered in 0.2-2.4 s with `found: 0`).
+- A "no results" page never matches the card selector, so it pays the full
+  timeout — keep it short.
 
 ### Extraction
 Prefer `webrain_extract` (`mode=json` with a schema discovered by

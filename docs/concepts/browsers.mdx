@@ -15,7 +15,7 @@ working click and a silent no-op.
 | **Cloudflare / Turnstile / CAPTCHA**, or need **real** rendering for interactive challenges | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only real Chrome passes interactive challenge JS; obscura/lightpanda V8 crash on it. |
 | JS pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material. |
 | Lightweight footprint, want a **real AX tree + semantic tree**, no rendering | **lightpanda** | Fastest, lightest, real a11y. Single-target CDP — `webrain_batch` falls back to sequential single-tab reuse. |
-| Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | 10–100× faster than a browser, zero memory. |
+| Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | No browser process, no render, no JS: one HTTP GET. |
 
 <Warning>
   **Golden rule: don't guess the browser.** `webrain_navigate` returns a
@@ -33,7 +33,7 @@ working click and a silent no-op.
 | Cloudflare / Turnstile / CAPTCHA (native login, persistent profile) | ✅ | ❌ | ❌ | ❌ |
 | a11y tree (`observe` what=a11y) | ✅ | ⚠️ no `option` role | ✅ real AX tree | ❌ |
 | Parallel batch tabs | ✅ | ✅ N tabs | ⚠️ sequential (one context) | n/a |
-| Static HTML speed | slow | fast | fast | ✅ fastest (10-100×) |
+| Static HTML speed | slow | fast | fast | ✅ fastest (no browser at all) |
 | Install | `webrain install` | `webrain install --engine obscura` | binary + `webrain lightpanda` | built-in |
 
 **What still requires real Chrome:** interactive Material/Google widgets

@@ -2,6 +2,9 @@
 name = "webrain-cli"
 version.workspace = true
 edition.workspace = true
+# The crate that carries the `chat` feature, so the crate whose MSRV the SDK
+# forces — inheriting it keeps `cargo metadata` honest about that.
+rust-version.workspace = true
 # Binary crate: never publish to crates.io (path-only workspace deps wouldn't
 # resolve for external consumers anyway).
 publish = false
@@ -30,6 +33,7 @@ chat = [
     "dep:rusqlite",
     "dep:ureq",
     "dep:regex",
+    "dep:flate2",
 ]
 # Opt-in: bake the ~166 MB Copilot runtime into the binary (the SDK's
 # `bundled-cli` default) so `webrain chat` needs no separate install. Off by
@@ -69,6 +73,10 @@ ureq = { version = "3", optional = true }
 # `search_files` matches a regex per line. Already in the tree through
 # webrain-core's extraction layer, so this adds no build cost either.
 regex = { version = "1", optional = true }
+# `--serve` gzips a conversation that the page re-reads. `webrain-core` already
+# links flate2 for its own compressed assets, so the resolved version is in the
+# lockfile and this entry costs no extra compile.
+flate2 = { version = "1", optional = true }
 
 # `chat` reaches `native-tls` through the SDK's `network-forwarding`, which is
 # `openssl-sys` on Linux. A static musl target has no system OpenSSL to link, so

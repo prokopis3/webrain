@@ -268,7 +268,16 @@ fn launch_chrome_opt(
         "--disable-renderer-backgrounding".to_string(),
     ];
     if guest {
-        args.push("--guest".to_string());
+        // `--incognito`, NOT `--guest`. Browse-as-Guest builds a window with no
+        // Browser in Chrome's BrowserList, so CDP `Target.createTarget` answers
+        // `-32000 "Failed to open new tab - no browser is open"` — the tab can
+        // never exist, which is why guest Chrome was documented as single-tab
+        // only. Measured 2026-11-07, Chrome 151, same args otherwise: guest
+        // fails both `newWindow` variants, incognito succeeds on both
+        // createTarget and createBrowserContext. Incognito is the same
+        // ephemerality (cookies/history dropped when the window closes) with a
+        // real Browser, so an ephemeral profile can run more than one tab.
+        args.push("--incognito".to_string());
     }
     if let Some(p) = proxy {
         args.push(format!("--proxy-server={p}"));
@@ -302,10 +311,14 @@ pub fn launch_chrome(
     launch_chrome_opt(service, profile, port, headed, proxy, false)
 }
 
-/// Spawn Chrome in GUEST MODE (`--guest`) — a fresh ephemeral session, no
-/// persisted profile state (no cookies/history/sign-in leak between runs) —
-/// the serp google auto-launch variant. Same CDP semantics as the persistent
-/// launches; `--proxy` still bakes `--proxy-server` when set.
+/// Spawn Chrome in the EPHEMERAL ("guest") mode — a fresh session with no
+/// persisted profile state (no cookies/history/sign-in leak between runs).
+///
+/// **Only two callers exist**: `webrain_serp`'s google/brave flow and the
+/// interactive CAPTCHA solve. Nothing else may route here — batch/crawl belong on
+/// a real profile you control, because this one must keep looking human.
+///
+/// `--proxy` still bakes `--proxy-server` when set.
 /// ponytail: guest is ephemeral, so there's no warm-profile trust to accumulate
 /// — add a persistent guest session (keep Chrome alive across runs) if the
 /// wall returns.

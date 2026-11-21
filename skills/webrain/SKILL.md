@@ -107,6 +107,14 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 - paginated 1..N / many URLs → `webrain_batch(op=extract, urls, base_selector, fields, concurrency=8)`
 - URLs unknown → `eval`: pagination hrefs (current-path + `/<N>` + next/prev) → range → batch
 - whole site → `crawl(mode=spider)`; patterns (emails/prices) → `extract(mode=regex)`
+  - the frontier dedupes on path + sorted query and ignores the anchor, so
+    `?a=1&b=2` and `?b=2&a=1` are crawled once — a facet permutation is not a
+    new page (`#/…` hash routes ARE kept)
+  - `dedupe_pages: true` also drops pages whose visible text repeats and reports
+    `duplicates`. Off by default: it removes rows, so leave it off when every
+    facet or pagination row must come back
+  - `delay_ms` is per host and is the gap between request starts (`500` = 2 req/s
+    for each domain, not 2 shared between them)
 - JSON-LD → `extract(mode=jsonld)`; tables → `extract(mode=table)`
 - a PDF (one, or many, by URL or local path) → `webrain_pdf op=extract`
   (`path` / `paths[]`) or `webrain_batch(op=pdf, urls)` — text + tables, no
@@ -129,13 +137,17 @@ the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the C
 that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
 For an obscura/lightpanda identity, start the binary with `--storage-dir`.
 
-**Guest Chrome (`--guest`) is a purpose tool**: `webrain_serp` engine=google|brave and
-interactive CAPTCHA/Turnstile — its profile (`serp/<profile>`, persisted unless
-`--fresh`) is what keeps the clearance for the next call; a fresh profile gets
-re-captcha'd every launch. It refuses new targets (`PUT /json/new` → 500; `-32000
-"Failed to open a new tab"`), so batch/crawl there run ONE serial tab
-(`single_target: true`; 8 URLs 5.65 s vs 1.46 s on 9222 with `concurrency: 4`).
-Bulk work goes to real Chrome / obscura / lightpanda — never to guest Chrome.
+**The ephemeral Chrome ("guest") is a purpose tool, and it is SERP-only**: `webrain_serp`
+engine=google|brave and interactive CAPTCHA/Turnstile are the only callers — its
+profile (`serp/<profile>`, persisted unless `--fresh`) is what keeps the clearance
+for the next call; a fresh profile gets re-captcha'd every launch. It is launched
+with `--incognito` (it used to be `--guest`, which cannot open a tab at all:
+measured 2026-11-07 on Chrome 151 and 156, `Target.createTarget` answers `-32000
+"Failed to open new tab - no browser is open"` because Browse-as-Guest has no
+Browser in Chrome's BrowserList, while `--incognito` succeeds on both
+`createTarget` and `createBrowserContext`). The tab limit is gone, but that does
+not make it an engine: bulk work stays on real Chrome / obscura / lightpanda, on a
+profile you control.
 Do not re-read the Rust source to learn any of this — it is documented here and in
 `webrain_guide`; read source only to change behavior.
 
@@ -157,6 +169,24 @@ consent pages as target content · write sequential loops when `webrain_batch` e
 - Everything is slow → `webrain_stats` before blaming the site: it reports load,
   memory and the live browser-process count, which separates "this page is heavy"
   from "the machine is out of memory".
+- A batch is slow per URL → check `ms_total` against the real page work before
+  touching `concurrency`: 27 URLs took **159 s** because 27 × 30 s of
+  `wait_selector` timeout was 94 % of the run. `attached` + `wait_timeout_secs: 6`
+  on the same URLs: **10 s**, identical rows.
+
+### Wait on the list, not on the first card
+
+`wait_selector_state: "visible"` is satisfied by **any** match (before the fix
+only the first DOM match counted), and an SPA list page renders the cards
+twice — hidden mobile container first, visible desktop copy second — so `visible`
+never arrived and the poll burned the whole timeout.
+
+- Prefer `wait_selector_state: "attached"` with `wait_timeout_secs: 6`.
+- Anchor on the **repeated card** (`div.product`), never on a shell element that
+exists before the cards: `#ProductsClass` answered in 0.2-2.4 s with `found: 0`
+on every page.
+- A "no results" page never matches the card selector, so that row pays the full
+timeout either way — keep it short.
 
 ### Rendered but never interactive (hydration check — do this first)
 
