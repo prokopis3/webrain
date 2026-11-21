@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"asks":[],"runtime":{"external":[],"permissions":[]}}`,
   `{"trigger_characters":[],"supported":false}`, `400 {"error":"request_id"}`,
   `{"handled":false}` for an unknown id.
+- **chat (session identity)**: `--serve` names its session at creation
+  (`SessionConfig.name = webrain-<convo>`), which is what makes the runtime persist
+  it from the start instead of only after the first turn. `GET /name` and
+  `POST /name` expose the runtime's own name (`session.name.get` / `.set`), and
+  `GET /runtime/sessions` returns `ClientRpc.sessions.list` — the runtime's view,
+  including threads this machine's store never wrote. Together they are the two
+  halves a resume needs that are not the callback set. Verified live:
+  `{"name":"webrain-c1795274324668"}`, a rename round-trip, and the runtime's list
+  reporting the same name with `clientName sdk` and the cwd.
 
 ### Fixed
 

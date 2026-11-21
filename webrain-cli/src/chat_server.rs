@@ -56,9 +56,9 @@ use github_copilot_sdk::rpc::{
     FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
     HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
     McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
-    ModeSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
-    QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
-    TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
+    ModeSetRequest, NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest,
+    QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
+    SkillsEnableRequest, TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
 };
 use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
 use github_copilot_sdk::types::{
@@ -225,6 +225,9 @@ async fn spawn_live(
         provider,
         Some(permission as Arc<dyn PermissionHandler>),
         Some(input as Arc<dyn UserInputHandler>),
+        // The conversation id names the runtime's copy of this session, so the
+        // runtime can list it from creation and a later resume has a handle.
+        Some(format!("webrain-{convo}")),
     )
     .await?;
     let session = Arc::new(session);
@@ -254,7 +257,7 @@ async fn spawn_live(
         }
     });
     Ok(Live {
-        _client: client,
+        client,
         session,
         reader,
         model: std::sync::Mutex::new(provider.model.clone()),
@@ -689,7 +692,9 @@ fn provider_target(state: &State, id: &str) -> Option<(String, Option<String>, &
 /// A session plus everything that must die with it.
 struct Live {
     /// Dropping the client stops its runtime, so it is held here, not in a local.
-    _client: Client,
+    /// Also the handle for client-level reads: `sessions.list` is the runtime's
+    /// answer, where our own store can only answer for this machine.
+    client: Client,
     session: Arc<Session>,
     reader: tokio::task::JoinHandle<()>,
     /// The model this session runs. `set_model` changes it on a live session,
@@ -1893,6 +1898,51 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     "supported": false,
                     "error": e.to_string(),
                 }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // The runtime's name for this session, and a way to set it. The page's
+        // title comes from `session.title_changed`, which the model writes; the
+        // runtime's name is what `sessions.list` keys on and what a resume will
+        // look up, so the two are worth being able to compare.
+        ("GET", "/name") => {
+            let live = state.live.read().await.clone();
+            let out = match live.session.rpc().name().get().await {
+                Ok(r) => json!({ "name": r.name }),
+                Err(e) => json!({ "name": null, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        ("POST", "/name") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .name()
+                .set(NameSetRequest { name: name.clone() })
+                .await
+            {
+                Ok(()) => json!({ "saved": true, "name": name }),
+                Err(e) => json!({ "saved": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // What the runtime itself holds. `GET /sessions` is our database, so a
+        // thread the runtime still has — one this machine's store lost, or one
+        // another client made — is invisible there. This is also the list a
+        // resume works from, which is why it comes before resume, not after.
+        ("GET", "/runtime/sessions") => {
+            let live = state.live.read().await.clone();
+            let out = match live.client.rpc().sessions().list().await {
+                Ok(l) => json!({
+                    "sessions": serde_json::to_value(&l).unwrap_or(Value::Null),
+                }),
+                Err(e) => json!({ "sessions": [], "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
