@@ -26,8 +26,12 @@ use copilot_sdk::types::{
 };
 use copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
-use copilot_sdk::handler::{PermissionHandler, UserInputHandler};
+use copilot_sdk::handler::{
+    AutoModeSwitchHandler, AutoModeSwitchResponse, ExitPlanModeHandler, ExitPlanModeResult,
+    PermissionHandler, UserInputHandler,
+};
 use copilot_sdk::session::Session;
+use copilot_sdk::types::{ExitPlanModeData, RequestId, SessionId};
 
 use super::chat::Args;
 use super::chat_tools;
@@ -232,6 +236,81 @@ fn allowlist(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Leaving plan mode is a question with the plan's own actions as its answers.
+///
+/// 2.0.1 documents the unset behaviour as `requestExitPlanMode: false` — the
+/// runtime never asks — so without this the agent cannot ask to leave and the
+/// human's `/mode` is the only way out.
+struct PlanAsk(Arc<crate::chat_server::WebInput>);
+
+#[async_trait::async_trait]
+impl ExitPlanModeHandler for PlanAsk {
+    async fn handle(
+        &self,
+        _session: SessionId,
+        _request: Option<RequestId>,
+        data: ExitPlanModeData,
+    ) -> ExitPlanModeResult {
+        let mut actions = data.actions.clone();
+        if actions.is_empty() {
+            actions.push(if data.recommended_action.trim().is_empty() {
+                "leave plan mode".to_string()
+            } else {
+                data.recommended_action.clone()
+            });
+        }
+        let summary = data.summary.trim();
+        let question = if summary.is_empty() {
+            "leave plan mode?".to_string()
+        } else {
+            format!("leave plan mode?\n\n{summary}")
+        };
+        match self.0.ask(question, Some(actions)).await {
+            Some((answer, _)) if !answer.trim().is_empty() => ExitPlanModeResult {
+                approved: true,
+                selected_action: Some(answer),
+                feedback: None,
+            },
+            // No answer, or the runtime's own escape hatch: leave it in plan mode.
+            _ => ExitPlanModeResult::default(),
+        }
+    }
+}
+
+/// A rate limit can drop the turn or fall back to the auto model. Without a
+/// handler the SDK sends `requestAutoModeSwitch: false`, so the fallback never
+/// happens and the turn just fails.
+struct AutoAsk(Arc<crate::chat_server::WebInput>);
+
+#[async_trait::async_trait]
+impl AutoModeSwitchHandler for AutoAsk {
+    async fn handle(
+        &self,
+        _session: SessionId,
+        error_code: Option<String>,
+        retry_after_seconds: Option<f64>,
+    ) -> AutoModeSwitchResponse {
+        let mut why = error_code.unwrap_or_else(|| "rate limited".to_string());
+        if let Some(s) = retry_after_seconds {
+            why.push_str(&format!(" · resets in {s:.0}s"));
+        }
+        let question = format!("{why} — retry with the auto model?");
+        match self
+            .0
+            .ask(
+                question,
+                Some(vec!["auto model".to_string(), "no".to_string()]),
+            )
+            .await
+        {
+            Some((answer, _)) if answer.eq_ignore_ascii_case("auto model") => {
+                AutoModeSwitchResponse::Yes
+            }
+            _ => AutoModeSwitchResponse::No,
+        }
+    }
+}
+
 /// Ground `prompt` with webrain's own engines and return the prompt to send.
 /// `http_only`: no browser needed for auto (duckduckgo + bing over pooled
 /// HTTP), and a chat turn should not pay a Chrome launch.
@@ -343,7 +422,9 @@ pub(crate) async fn connect(
     permission: Option<Arc<dyn PermissionHandler>>,
     // `ask_user`: without a handler the runtime puts `requestUserInput: false`
     // on the wire and a turn that asks a question just blocks until its timeout.
-    user_input: Option<Arc<dyn UserInputHandler>>,
+    // The concrete type, not the trait object: plan mode and auto mode are the
+    // same card, so they need the same `ask`.
+    web: Option<Arc<crate::chat_server::WebInput>>,
     // A name is what makes the runtime persist the session from creation, so it
     // can be listed and resumed before its first turn. `None` for the one-shot
     // command, which must leave no state behind.
@@ -420,9 +501,17 @@ pub(crate) async fn connect(
     };
     // Read before the handler is moved into the config: whether a question can
     // be answered decides whether the tool is offered at all.
-    let ask = user_input.is_some();
-    let interaction =
-        user_input.map(|h| SessionInteractionOptions::new().with_on_user_input_request(h));
+    let ask = web.is_some();
+    // Plan mode and auto mode are questions too, so they reuse the same card
+    // `ask_user` uses instead of needing three renderers on the page.
+    let interaction = web.map(|w| {
+        let plan = w.clone();
+        let auto = w.clone();
+        SessionInteractionOptions::new()
+            .with_on_user_input_request(w as Arc<dyn UserInputHandler>)
+            .with_on_exit_plan_mode_request(Arc::new(PlanAsk(plan)))
+            .with_on_auto_mode_switch_request(Arc::new(AutoAsk(auto)))
+    });
     // The boundary the runtime's own tools do not have, plus the workspace's
     // own instruction files at session start. Installed here rather than on the
     // page so `webrain chat "<prompt>"` (one turn, no UI) is fenced identically.

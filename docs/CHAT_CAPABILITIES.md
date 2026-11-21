@@ -33,7 +33,7 @@ managed-settings, `ide.*`, `*_ref` twins). What survives is real:
 
 | # | unhandled events | what the user loses | size |
 |---|---|---|---|
-| 1 | `exit_plan_mode.requested`, `auto_mode_switch.requested`, `auto_mode_recovery.*` | **Not a hang — checked.** The SDK documents the unset behaviour: `requestExitPlanMode: false` / `requestAutoModeSwitch: false` goes on the wire, so the runtime never asks. What is lost is a *capability*: the agent cannot ask to leave plan mode (our `/mode` route only lets the human switch), and a rate-limit fallback to the auto model never happens | M |
+| 1 | `exit_plan_mode.requested`, `auto_mode_switch.requested`, `auto_mode_recovery.*` | **SHIPPED 2026-11-21** — both handlers installed, reusing the existing ask card (`WebInput::ask` was extracted, so plan mode asks with the plan's own actions as buttons and auto mode asks "retry with the auto model?"). Left out: recovery stays off (`auto_mode_recovery` is false, and its default declines) | M |
 | 2 | `elicitation.requested` / `.completed` | structured questions become nothing. Needs a form renderer, because `ElicitationResult.content` must match `requested_schema` | L |
 | 3 | `permission.requested`, `permission.carriedForward` | **carriedForward SHIPPED 2026-11-21** — a note naming the reused decision, because the card for the new request was the only evidence the policy had grown. `permission.requested` stays unhandled on purpose: it is the event twin of the request our own `WebPermission` card already draws, and handling it would show every approval twice | S |
 | 4 | `session.tools_updated`, `session.skills_loaded`, `session.mcp_servers_loaded` | **SHIPPED 2026-11-21** as notes naming what moved and which command re-reads it. Auto-refreshing the drawer would mean exposing the slash-command handler's card builder, which is a refactor, not a fix | S |
@@ -75,9 +75,8 @@ capability, measured. So the order is by cost against what the reader gains:
 
 1. ~~**#3, #4, #8, #9, #10, #11 in one pass** (S each)~~ — **DONE 2026-11-21**: nine
    `case` arms, no new plumbing. What each left out is named in the row above.
-2. **#1 the interaction handlers** (M): exit plan mode, auto-mode switch and its
-   recovery, so the agent can ask instead of being told. Our `/mode` route stays
-   the human half.
+2. ~~**#1 the interaction handlers** (M)~~ — **DONE 2026-11-21**: the agent can ask to
+   leave plan mode and to retry on the auto model; `/mode` stays the human half.
 3. **Resume** (L): reuse `connect()`'s groups on `ResumeSessionOptions`, a
    `POST /resume {convo}` route, and the page calls it when a conversation opens.
 4. **#2 elicitation** (L) once a form renderer exists — it is the prerequisite for

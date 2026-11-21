@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **plan-mode and auto-mode handlers** — the agent can ask to leave plan
+  mode (the card's buttons are the plan's own actions) and to retry a rate-limited
+  turn on the auto model. Both reuse the `ask_user` card; without them the SDK
+  sends `requestExitPlanMode: false` / `requestAutoModeSwitch: false` and the
+  capability is silently absent.
+- `chat`: **nine events the page was dropping** — reused approvals, mid-session
+  tool/skill/MCP changes, spend checkpoints, runtime messages, a failed
+  compaction, and a tool waiting for user input.
 - `chat`: **`parallel_tools` switch** — one turn may ask for several tool calls
   at once (`inference.allow_multiple_tool_calls`, on by default in the Runtime
   tab). Creation-time in the SDK, so flipping it reports `restart: true`.

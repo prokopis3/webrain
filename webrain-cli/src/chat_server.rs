@@ -233,7 +233,8 @@ async fn spawn_live(
         &args,
         provider,
         Some(permission as Arc<dyn PermissionHandler>),
-        Some(input as Arc<dyn UserInputHandler>),
+        // The same card answers `ask_user`, exit-plan-mode and auto-mode.
+        Some(input),
         // The conversation id names the runtime's copy of this session, so the
         // runtime can list it from creation and a later resume has a handle.
         Some(format!("webrain-{convo}")),
@@ -1067,10 +1068,42 @@ fn permission_card(id: &str, req: &Value, managed: bool) -> Value {
     })
 }
 
-struct WebInput {
+pub(crate) struct WebInput {
     bus: Bus,
     pending: Mutex<HashMap<String, oneshot::Sender<(String, bool)>>>,
     seq: AtomicU64,
+}
+
+impl WebInput {
+    /// Ask the page a question and wait for the answer. `ask_user`, exit-plan-mode
+    /// and auto-mode all land here: from the page's side it is always one card.
+    pub(crate) async fn ask(
+        &self,
+        question: String,
+        choices: Option<Vec<String>>,
+    ) -> Option<(String, bool)> {
+        let id = format!("u{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        let ask = json!({
+            "type": "webrain.ask",
+            "data": {
+                "id": id,
+                "question": question,
+                "choices": choices.unwrap_or_default(),
+                "allow_freeform": true,
+            },
+        });
+        let _ = self.bus.send(ask.to_string());
+
+        // Longer than a permission: a person has to read and type an answer.
+        let answer = tokio::time::timeout(INPUT_WAIT, rx).await;
+        self.pending.lock().await.remove(&id);
+        match answer {
+            Ok(Ok(pair)) => Some(pair),
+            _ => None,
+        }
+    }
 }
 
 /// Answers `ask_user`, which is not a permission: it is a question, and a turn
@@ -1084,32 +1117,13 @@ impl UserInputHandler for WebInput {
         _request_id: Option<copilot_sdk::types::RequestId>,
         question: String,
         choices: Option<Vec<String>>,
-        allow_freeform: Option<bool>,
+        _allow_freeform: Option<bool>,
     ) -> Option<UserInputResponse> {
-        let id = format!("u{}", self.seq.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
-        let ask = json!({
-            "type": "webrain.ask",
-            "data": {
-                "id": id,
-                "question": question,
-                "choices": choices.unwrap_or_default(),
-                "allow_freeform": allow_freeform.unwrap_or(true),
-            },
-        });
-        let _ = self.bus.send(ask.to_string());
-
-        // Longer than a permission: a person has to read and type an answer.
-        let answer = tokio::time::timeout(INPUT_WAIT, rx).await;
-        self.pending.lock().await.remove(&id);
-        match answer {
-            Ok(Ok((answer, was_freeform))) => Some(UserInputResponse {
-                answer,
-                was_freeform,
-            }),
-            _ => None,
-        }
+        let (answer, was_freeform) = self.ask(question, choices).await?;
+        Some(UserInputResponse {
+            answer,
+            was_freeform,
+        })
     }
 }
 
