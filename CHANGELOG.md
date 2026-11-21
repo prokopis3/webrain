@@ -16,9 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `chat`: migrated to **`copilot-sdk` 2.0.1** (the successor to the now-deprecated
   `github-copilot-sdk`). `connect()` builds the grouped `CreateSessionOptions`
   instead of the flat 99-field `SessionConfig`, and `ClientOptions` is constructed
-  around an `OwnedRuntimeOptions` + `RuntimeConnection`. Behaviour preserved: the
-  permission predicate, the path fence, the provider token caps, skills, MCP
-  timeout and the memory/session-store defaults all survive the move.
+  around an `OwnedRuntimeOptions` + an explicit `SpawnedStdio` transport. Behaviour
+  preserved: the permission predicate, the path fence, the provider token caps,
+  skills, MCP timeout and the memory/session-store defaults all survive the move.
+- `install`: Copilot runtime pin **1.0.105 → 1.0.114** (what 2.0.1 speaks —
+  protocol 4), and the engine-cache lookup now prefers the newest version
+  directory instead of the first one the filesystem lists.
 
 - **chat (html replies)**: the vocabulary a reply may build with grew the shapes a
   dashboard actually needs, and the standing instruction now hands the model a

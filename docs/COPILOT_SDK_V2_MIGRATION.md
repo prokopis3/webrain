@@ -289,6 +289,68 @@ The measured totals that re-baseline the gaps inventory are in
 `docs/CHAT_SDK_GAPS.md` (fifth pass).
 
 
+## Running it — what the compiler could not tell us
+
+Compiling was half of it. Three defects only appear at startup, and two of them
+are the kind that fail *quietly* in a later code review:
+
+**1. `RuntimeConnection::for_default` picks in-process.** It follows the
+deployment's own build, which here is `Transport::InProcess`, and this build has
+no `in-process` feature:
+
+```
+Error: could not start the Copilot runtime: Transport::InProcess requires the `in-process` Cargo feature
+```
+
+The silent half: `child_process_options_mut()` returns `None` for a runtime that
+is not spawned, so the program path assigned through it is simply never set — the
+code compiles, reads correctly, and does nothing. Fixed by building the transport
+explicitly:
+
+```rust
+let mut spawn = copilot_sdk::SpawnedProcessOptions::new();
+spawn.owned = owned;                     // base directory + idle timeout
+spawn.program = CliProgram::Path(bin);   // webrain install copilot
+options.with_runtime(RuntimeConnection::SpawnedStdio(spawn));
+```
+
+**2. The runtime itself had to move with the SDK.** 2.0.1 pins Copilot CLI
+**1.0.114** (`cli-version.txt` in the crate carries the tag *and* the per-platform
+digests); we were pinned at **1.0.105**:
+
+```
+Error: could not start the Copilot runtime: version mismatch: server=3, supported=4–4
+```
+
+`install.rs` now pins 1.0.114 with those digests, and `find_named` sorts
+candidate directories newest-first — it returned the *first* match in filesystem
+order, so a stale version directory winning was only a matter of listing order,
+which is how a bumped pin looks applied and stays old.
+
+**3. BYOK needs CAPI switched off.** `inference.default_provider` is refused
+outright otherwise:
+
+```
+session construction failed: inference.defaultProvider requires github.capi.enabled to be false
+```
+
+`.with_github(|g| g.with_capi(CapiSessionOptions::new().with_enabled(false)))`.
+
+### What is now verified by actually running it
+
+| claim | evidence |
+|---|---|
+| the session creates on 2.0.1 | `webrain chat ┬╖ serving on http://127.0.0.1:8787/` |
+| routes survive the regroup | `GET /settings` (with `parallel_tools: true`), `/name`, `/mode`, `/jobs` all answered |
+| a turn reaches the provider | `POST /turn` → `{"started":true}`, then `model.model_call_failure` |
+| the token caps survived the move | OpenRouter's 402 quotes **"requested up to 4096 tokens"** — the runtime default is 64000, so `ProviderModelConfig.max_output_tokens` is in force |
+| errors still surface | the provider's message arrived as `model.model_call_failure` plus a `hook.start` of `errorOccurred` |
+
+Still unproven: **the permission path**. The turn died at the provider (402, the
+key is out of credits) before any tool call, so no approval card was raised. That
+is the one thing left to check on a funded key, and it is the one that fails
+silently if `permissions.on_request` were dropped.
+
 ## Evidence notes
 
 - `github_repo` (semantic) answers `404` for `github/copilot-sdk`, and

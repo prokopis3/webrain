@@ -537,6 +537,12 @@ pub(crate) async fn connect(
                 .with_content(system_prompt()),
         )
         .with_mcp(|m| m.with_servers(servers))
+        // BYOK: `inference.default_provider` is rejected unless the Copilot API
+        // path is switched off ("requires github.capi.enabled to be false"), and
+        // our key is the only inference path this session has.
+        .with_github(|g| {
+            g.with_capi(copilot_sdk::types::CapiSessionOptions::new().with_enabled(false))
+        })
         .with_inference(|_| inference)
         .with_events(|_| events)
         .with_state(|_| state)
@@ -580,18 +586,21 @@ pub(crate) async fn connect(
     } else {
         owned.with_session_idle_timeout_seconds(60)
     };
+    // Spawned stdio, not `RuntimeConnection::for_default`: the default follows
+    // the deployment's own build, which here is `Transport::InProcess` — and
+    // this build has no `in-process` feature. It also fails *quietly* first:
+    // `child_process_options_mut()` returns `None` for a non-spawned runtime, so
+    // a program set through it is simply never set.
+    let mut spawn = copilot_sdk::SpawnedProcessOptions::new();
+    spawn.owned = owned;
     // The released binary does not embed a runtime, so point the SDK at the one
     // `webrain install copilot` put in the engine cache (or COPILOT_CLI_PATH).
     // Without this the SDK falls back to its own build-machine cache, which a
     // user who only downloaded the binary does not have.
-    let mut runtime = copilot_sdk::RuntimeConnection::for_default(owned)
-        .map_err(|e| anyhow::anyhow!("could not select a Copilot runtime: {e}"))?;
-    if let Some(bin) = webrain_core::install::find_copilot()
-        && let Some(proc) = runtime.child_process_options_mut()
-    {
-        proc.program = copilot_sdk::CliProgram::Path(bin);
+    if let Some(bin) = webrain_core::install::find_copilot() {
+        spawn.program = copilot_sdk::CliProgram::Path(bin);
     }
-    options = options.with_runtime(runtime);
+    options = options.with_runtime(copilot_sdk::RuntimeConnection::SpawnedStdio(spawn));
     let client = Client::start(options).await.map_err(|e| {
         anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint())
     })?;
