@@ -400,7 +400,13 @@ fn mode_label(mode: SearchMode) -> &'static str {
 /// and `--serve` asks the page. What the wildcard does cost is the path fence
 /// `chat_tools` builds — a built-in `bash` runs anywhere the process can — so
 /// the prompt tells the model to prefer the fenced tools.
-fn tool_filter() -> Vec<String> {
+///
+/// `allow_agents` gates the three agent-definition built-ins. They were already
+/// named in the hide list below but never added here, so delegation could spawn
+/// (`task`) and could not look at what it spawned: `list_agents` was excluded
+/// whether the switch was on or off. `validate_name` only checks the shape of a
+/// name, so a runtime that lacks one ignores it rather than failing the session.
+fn tool_filter(allow_agents: bool) -> Vec<String> {
     let mut allowed = webrain_mcp::tool_names()
         .iter()
         .fold(ToolSet::new(), |set, n| {
@@ -420,9 +426,16 @@ fn tool_filter() -> Vec<String> {
     // 6 972 input tokens, because it sends a schema for every runtime built-in —
     // `bash`, `view`, `edit`, `write`, `glob`, `grep`, `sql`, the agent tools and
     // more — and `chat_tools` already provides the file and shell ones behind
-    // `chat_hooks::Fence`. `add_builtin` validates each name, so a rename in the
-    // runtime is a panic here rather than a silently missing tool.
-    for name in ["task", "task_complete", "ask_user", "skill"] {
+    // `chat_hooks::Fence`. `add_builtin` validates the name's shape, so a typo
+    // here is an error rather than a silently missing tool.
+    let mut builtins = vec!["task", "task_complete", "ask_user", "skill"];
+    // Delegation is only half a feature without these: `task` spawns a worker,
+    // and nothing could list the definitions it picks from, read one, or write
+    // one. The hide list in `connect` already names them for the off case.
+    if allow_agents {
+        builtins.extend(["read_agent", "write_agent", "list_agents"]);
+    }
+    for name in builtins {
         allowed = allowed
             .add_builtin(name)
             .expect("these built-ins exist in the runtime");
@@ -615,7 +628,7 @@ pub(crate) async fn connect(
     //
     // `ToolSet` rather than raw strings: it validates each name at build time
     // and emits the runtime's documented `mcp:<server>-<tool>` form.
-    let tools = tools.with_available_tools(tool_filter());
+    let tools = tools.with_available_tools(tool_filter(args.allow_agents.unwrap_or(true)));
     // Defer the tool schemas. Measured 2026-11-07: the 18 `webrain_*` schemas are
     // 9 820 input tokens on every request, and a turn usually wants one of them.
     // Above `defer_threshold` the runtime offers `tool_search_tool` and the model
@@ -1097,12 +1110,20 @@ mod tests {
 
     #[test]
     fn the_allowlist_names_the_four_builtins_it_uses() {
-        let served = tool_filter();
+        let served = tool_filter(true);
         // Not `builtin:*`: the wildcard cost 6 972 input tokens on every request
         // by sending a schema for every runtime built-in, and `chat_tools` already
         // covers the file and shell ones behind the fence. Measured 2026-11-07.
         assert!(!served.contains(&"builtin:*".to_string()), "{served:?}");
         for name in ["task", "task_complete", "ask_user", "skill"] {
+            assert!(
+                served.contains(&format!("builtin:{name}")),
+                "{name} missing from {served:?}"
+            );
+        }
+        // Delegation needs the definition surface too, or the model can spawn a
+        // worker and never learn what it may pick from.
+        for name in ["read_agent", "write_agent", "list_agents"] {
             assert!(
                 served.contains(&format!("builtin:{name}")),
                 "{name} missing from {served:?}"
@@ -1126,5 +1147,21 @@ mod tests {
             served.iter().any(|f| f.starts_with("mcp:webrain-")),
             "{served:?}"
         );
+    }
+
+    /// The delegate switch is only real if the allowlist agrees: hiding a name
+    /// that was never served hides nothing. That was the state on 2026-11-21.
+    #[test]
+    fn delegates_off_serves_no_agent_tool_at_all() {
+        let served = tool_filter(false);
+        for name in ["read_agent", "write_agent", "list_agents"] {
+            assert!(
+                !served.contains(&format!("builtin:{name}")),
+                "{name} served with delegation off: {served:?}"
+            );
+        }
+        // `task` is the spawn itself; it is hidden by exclusion, not here, so it
+        // stays in the allowlist and the two mechanisms do not fight.
+        assert!(served.contains(&"builtin:task".to_string()), "{served:?}");
     }
 }

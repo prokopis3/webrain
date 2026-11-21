@@ -1328,6 +1328,37 @@
           text: `agent · ${name} ${failed ? "failed" : "done"}${bits.length ? ` — ${bits.join(", ")}` : ""}`,
         });
       }
+      // The parent picked which agent definition to run. Its `tools` list is the
+      // permission answer a reader actually asks about ("what can that worker
+      // touch"), so it becomes one line rather than a dump.
+      case "subagent.selected": {
+        const name = d.agentDisplayName || d.agentName || "agent";
+        const n = Array.isArray(d.tools) ? d.tools.length : 0;
+        return push({
+          kind: "note",
+          text: `delegate: ${name}${n ? ` — ${n} tools` : ""}`,
+        });
+      }
+      // Which model the child will actually run, which is the question behind
+      // "did that delegate use the cheap model". The payload carries no agent
+      // name, so it is attributed only while exactly one worker is running;
+      // with two, guessing would caption the wrong row.
+      case "subagent.configured": {
+        if (agents.length !== 1) return;
+        const [only] = agents;
+        agents = [
+          {
+            ...only,
+            model: d.model || only.model || "",
+            turns: d.multiTurn ? "multi-turn" : "one-shot",
+          },
+        ];
+        return;
+      }
+      // A selection was cleared. The payload is empty by contract, so there is
+      // nothing to name and nothing to read — recognised, not rendered.
+      case "subagent.deselected":
+        return;
       default:
         // A reasoning/thinking stream, if this build emits one. Matched by name
         // because the exact event id is not part of anything we can verify — and
@@ -3882,7 +3913,9 @@
           {#each agents as a (a.name)}
             <div>
               <b>{a.name}</b>
-              {#if a.type || a.mode}<small>{[a.type, a.mode].filter(Boolean).join(" · ")}</small>{/if}
+              {#if a.type || a.mode || a.model || a.turns}
+                <small>{[a.type, a.mode, a.model, a.turns].filter(Boolean).join(" · ")}</small>
+              {/if}
               {#if a.what}<div>{a.what}</div>{/if}
             </div>
           {/each}
