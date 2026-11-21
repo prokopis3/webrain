@@ -2172,17 +2172,32 @@
   // is spelled out and every answer gets a structure, even a one-liner.
   const HTML_HINT =
     "[render: html5] Answer as an HTML5 fragment — never markdown, never inside a code fence. " +
-    "Pick the structure from the content without being asked: " +
-    "a short answer is <p> (add <h3> when there is more than one block); " +
+    "<style>, <script> and style=\"\" are stripped, so the page is the stylesheet: only the class " +
+    "names below are painted, and anything else lands unstyled. " +
+    "Shapes, chosen from the content without being asked — " +
+    "a short answer is <p> (add <h3> once more than one block follows); " +
     "two or more comparable items are div.grid > section.card, one card each; " +
+    "a main column plus a rail is div.grid.wide with two children; " +
     "a number worth reading is div.stat with <b>value</b> and <small>label</small>; " +
-    "sequential work is <ol> inside section.card; a comparison is <table>; " +
+    "a comparison, or several attributes per item, is <table> — wrap a long one in div.table-wrap, " +
+    "give numeric cells class=\"num\", and put a proportion in a cell as <progress value max>; " +
+    "a status is span.pill, toned .ok / .warn / .bad; " +
+    "a sequence is <ol> inside section.card; a caveat is <blockquote>; " +
     "a long aside is details > summary; an image result is figure > img + figcaption; " +
-    "meta facts are span.pill; a live quantity is progress (value/max). " +
-    "Only these class names are styled — anything else lands unstyled, so prefer plain " +
-    "semantic tags (p, h3, ul, ol, table, code, pre, blockquote, b, small, kbd, mark, hr). " +
-    "<script>, <style> and style=\"\" are stripped. Keep the prose inside a block short; " +
-    "the page supplies colour, spacing and type.";
+    "a link alone on its line is a.card with <b>host</b><span>path</span>; " +
+    "a meta line is <p><small>…</small>. " +
+    "A dashboard skeleton that copies correctly: " +
+    "<h3>Subject</h3><p><span class=\"pill ok\">ok</span> <span class=\"pill warn\">warn</span></p>" +
+    "<div class=\"grid\"><section class=\"card\"><div class=\"stat\"><b>162,253</b>" +
+    "<small>bytes</small></div></section><section class=\"card\"><div class=\"stat\">" +
+    "<b>112</b><small>links</small></div></section></div>" +
+    "<div class=\"grid wide\"><section class=\"card\"><h3>Table</h3><table><thead><tr><th>Name</th>" +
+    "<th class=\"num\">Rows</th><th>Share</th></tr></thead><tbody><tr><td>Recipes</td>" +
+    "<td class=\"num\">20</td><td><progress value=\"31\" max=\"100\"></progress></td></tr>" +
+    "</tbody></table></section><section class=\"card\"><h3>Notes</h3><ul><li>point</li></ul>" +
+    "</section></div>" +
+    "Prefer plain semantic tags elsewhere (p, h3, ul, ol, table, code, pre, blockquote, b, small, kbd, " +
+    "mark, hr). Keep the prose inside a block short; the page supplies colour, spacing and type.";
 
   // Three follow-ups per turn, written by the model that just answered. It knows
   // what it left out, which sentence is the shakiest and what the next real
@@ -6035,6 +6050,20 @@
     background: var(--surface-container-highest); color: var(--on-surface-variant);
     font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
     padding: 2px 8px; }
+  /* Tones. A status that cannot be told from another status is decoration, so the
+     pill carries three meanings straight from the theme rather than a new palette. */
+  .md :global(.pill.ok) { color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent); }
+  .md :global(.pill.warn) { color: var(--tertiary);
+    background: color-mix(in srgb, var(--tertiary) 16%, transparent); }
+  .md :global(.pill.bad) { color: var(--error);
+    background: color-mix(in srgb, var(--error) 16%, transparent); }
+  /* A column of numbers reads only when the digits share a face and a right edge. */
+  .md :global(th.num), .md :global(td.num) { text-align: right; font-family: var(--mono);
+    font-variant-numeric: tabular-nums; }
+  /* A dashboard is not a grid of equals: one main column and one rail. */
+  .md :global(.grid.wide) { grid-template-columns: 1.6fr 1fr; align-items: start; }
+  @media (max-width: 34rem) { .md :global(.grid.wide) { grid-template-columns: 1fr; } }
   .md :global(figure) { margin: 0 0 var(--s2); }
   .md :global(figcaption) { color: var(--faint); font-family: var(--mono); font-size: 10px;
     margin-top: 2px; }

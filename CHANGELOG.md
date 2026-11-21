@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **chat (html replies)**: the vocabulary a reply may build with grew the shapes a
+  dashboard actually needs, and the standing instruction now hands the model a
+  copyable skeleton instead of a list of adjectives. `span.pill` gained `.ok` /
+  `.warn` / `.bad` tones (`--primary` / `--tertiary` / `--error` — no new palette),
+  `div.grid.wide` splits a main column from a rail, `th.num` / `td.num` right-align
+  monospaced figures, and a proportion inside a table row is a native `<progress>`
+  (nothing needs an inline width, which the sanitiser strips). `check-html-vocab.mjs`
+  asserts prompt and stylesheet name the same classes in **both** directions — a
+  class the CSS lost renders as bare text, so that drift is silent without it.
+
 ### Fixed
 
 - **mcp**: `webrain_session(op=open|close|list)` over **stdio** answered
