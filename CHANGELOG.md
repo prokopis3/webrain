@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **the runtime's own slash commands** — the composer's `/` menu was ours
+  alone, so `/compact`, `/model`, `/usage` and 26 others existed and were never
+  offered. `GET /catalog` now appends `session.commands.list` after our own
+  entries (deduped by name), and picking one posts to the new `POST /command`,
+  which invokes it and renders the answer: output text, a prompt placed in the
+  composer, or a note that the command wants a surface the page does not have.
+  `commands.execute` is not used — it refused all 29 with `No client found for
+  command`, being the path for a host that registered handlers.
+- `chat`: **agent-definition tools** — `read_agent`, `write_agent` and
+  `list_agents` were in the hide list but never in the allowlist, so they were
+  excluded whether delegation was on or off: `task` could spawn a worker and the
+  model could not see what it may spawn from. They are served with the switch.
+- `chat`: **all six `subagent.*` events** — `selected` becomes a note naming the
+  definition and its tool count, `configured` writes the child's model and turn
+  shape onto the running-agents row, `deselected` is recognised as empty by
+  contract. `check-subagent-events.mjs` keeps the arms equal to the wire ids.
 - `chat`: **resume** — `POST /resume` continues the current conversation on the
   runtime's own session (`sessions.list` → `resume_session`) instead of replaying
   the transcript onto a blank one, so the model gets its context back: plan file,

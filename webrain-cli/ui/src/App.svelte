@@ -2590,6 +2590,29 @@
         } catch {
           push({ kind: "note", text: "quota: the server is not reachable" });
         }
+      } else if (o.runtime) {
+        // One of the runtime's own commands. What comes back is either what to
+        // show, a prompt it wants run as a turn, or nothing it can hand a page.
+        try {
+          const r = await fetch("/command", {
+            method: "POST",
+            body: JSON.stringify({ name: o.name, input: query.trim() }),
+          });
+          const j = await r.json();
+          if (j.error) push({ kind: "err", text: `/${o.name}: ${j.error}` });
+          else if (j.prompt) {
+            // Its own words for the prompt, in the composer: starting a turn the
+            // reader never saw would be the wrong kind of helpful.
+            draft = j.prompt;
+            push({ kind: "note", text: `/${o.name} — ${j.notice || "press enter to run it"}` });
+          } else {
+            // `/env` and friends answer in markdown; `/cwd` does not. The note row
+            // only parses when the runtime said the text was markdown.
+            push({ kind: "note", md: j.markdown, text: `/${o.name}: ${j.text || "ran"}` });
+          }
+        } catch {
+          push({ kind: "err", text: `/${o.name}: the server is not reachable` });
+        }
       } else {
         const named = catalog.items.filter((r) => r.kind !== "cmd").map((r) => r.name);
         push({ kind: "note", text: named.join(" · ") });
@@ -4305,7 +4328,8 @@
           {/each}
         </div>
       {:else if item.kind === "note"}
-        <div class="note">{item.text}</div>
+        <!-- Escaped before it is parsed: command output is not trusted HTML. -->
+        <div class="note">{#if item.md}{@html md(esc(item.text))}{:else}{item.text}{/if}</div>
       {:else if item.kind === "think"}
         <!-- The reasoning that produced the row below it. Folded, because it is
              evidence rather than the answer, and above its tool call because

@@ -16,7 +16,7 @@ number below is a count from the sources, not a recollection.
 
 | surface | SDK offers | we use | gap |
 |---|---|---|---|
-| session rpc namespaces | 65 | 22 | 43 |
+| session rpc namespaces | 65 | 23 | 42 |
 | client rpc namespaces | 44 | 1 (`sessions`) | 43 |
 | event types | 166 | 91 `case` labels | 75 |
 
@@ -53,7 +53,7 @@ managed-settings, `ide.*`, `*_ref` twins). What survives is real:
 | 2 | `elicitation.requested` / `.completed` | structured questions become nothing. Needs a form renderer, because `ElicitationResult.content` must match `requested_schema` | L |
 | 3 | `permission.requested`, `permission.carriedForward` | **carriedForward SHIPPED 2026-11-21** — a note naming the reused decision, because the card for the new request was the only evidence the policy had grown. `permission.requested` stays unhandled on purpose: it is the event twin of the request our own `WebPermission` card already draws, and handling it would show every approval twice | S |
 | 4 | `session.tools_updated`, `session.skills_loaded`, `session.mcp_servers_loaded` | **SHIPPED 2026-11-21** as notes naming what moved and which command re-reads it. Auto-refreshing the drawer would mean exposing the slash-command handler's card builder, which is a refactor, not a fix | S |
-| 5 | `command.queued` / `.execute` / `.completed`, `commands.changed` | the runtime's own slash commands never surface; the page's `/` menu is only ours | M |
+| 5 | `command.queued` / `.execute` / `.completed`, `commands.changed` | **SHIPPED 2026-11-21** — correction: `SessionRpcCommands` **does** exist, and so does `session.commands.list`. The page's `/` menu now carries the runtime's own 29 commands (name, description, `experimental ·` marker) after our own, deduped by name from the same list it builds; picking one posts to `/command`, which invokes it and renders whatever came back — text, a prompt placed in the composer, or "it wants a surface this page does not have yet". `commands.execute` was tried first and refused all 29 with `No client found for command`: that path is for a host that registered handlers | S |
 | 6 | `subagent.selected` / `configured` / `deselected` | **SHIPPED 2026-11-21** for the visible half. All six `subagent.*` events now have an arm: `started` puts a row in the running-agents chip, `selected` becomes a note naming the definition and its tool count, `configured` writes the child's model and turn shape onto that row while exactly one worker runs, and `deselected` is recognised as empty by contract. The allowlist was also the bug behind "a switch with no visible result": it never served `read_agent` / `write_agent` / `list_agents`, so the hide list had nothing to hide and delegation could spawn without ever seeing what it spawned from. Still missing, deliberately: the worker's own turns. The transcript shows the parent's `task` row and a closing cost line, not a nested conversation | L → S shipped, transcript L |
 | 7 | `sampling.requested` (MCP sampling), `external_tool.requested` | an MCP server asking the model for a completion goes unanswered. We answer external *tools* (`POST /pending`), nothing answers sampling | M |
 | 8 | `session.usage_checkpoint`, `session.quota_observation`, `session.session_limits_changed`, `session_limits_exhausted.*` | **usage_checkpoint SHIPPED 2026-11-21** — spend appears as it happens, in AIU (the runtime reports credits; only the provider knows their price). The other three still wait: `quota_observation` carries a provider-shaped `ProviderQuotaState` with no renderer | S |
@@ -91,7 +91,7 @@ So the next pass starts with a step, not a question:
 | row | first step | what it costs |
 |---|---|---|
 | #7 MCP sampling | **The answer path exists**: `mcp.handlePendingSampling` (with `cancelSamplingExecution`). The work is the completion itself — the handler must call the provider and shape the reply | a second provider call path that spends money per request, so it wants a test before it wants a UI |
-| #5 runtime commands | find the namespace that lists them (`SessionRpcCommands` does **not** exist; `commands.changed` / `command.execute` events do), then a `GET /commands` card | one measurement, then S |
+| #5 runtime commands | **done 2026-11-21** — `session.commands.list` for the menu, `session.commands.invoke` for the pick. Verified against the pinned runtime 1.0.114: `/cwd`, `/usage` and `/env` return text, `/model` returns empty text, all four `builtin`. What is *not* wired is acting on the four result kinds that want a surface (model switch, subcommand picker, dialog, timeline entry) | — |
 | #6 agents | **done 2026-11-21** — six event arms, `read_agent`/`write_agent`/`list_agents` served only when delegation is on, and `check-subagent-events.mjs` so a seventh id in a future SDK bump fails the build instead of vanishing. What is left is a *picker*, which is the `agents` group on the config plus an editing surface for `write_agent` | L, and only worth it once a funded key can show a worker running |
 | #2 elicitation | a renderer for `requested_schema`; the answer must be a `content` object matching it, so a textarea that guesses property names submits wrong data | L, and it is the only row where a lazy version is worse than none |
 
@@ -117,8 +117,11 @@ capability, measured. So the order is by cost against what the reader gains:
 4. **#2 elicitation** (L) once a form renderer exists — it is the prerequisite for
    the runtime's structured questions, and `ask_user` already covers the simple
    case.
-5. **#5 / #6 / #7** (M/L) as product decisions: runtime commands, agents, MCP
-   sampling.
+5. ~~**#5 / #6 / #7**~~ — #6 and #5 **DONE 2026-11-21** (agents: six event arms and
+the three definition tools; commands: listed and invokable from `/`). **#7 MCP
+sampling** stays last and stays unbuilt: its answer path is `mcp.handlePendingSampling`,
+and the handler it needs is a second provider call that spends money per request —
+unverifiable while the key is out of credits.
 
 ## What is verified, and what is not
 

@@ -53,12 +53,13 @@ use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use copilot_sdk::rpc::{
-    FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
-    HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
-    McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
-    ModeSetRequest, NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest,
-    QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
-    SkillsEnableRequest, TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
+    CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpDisableRequest,
+    McpEnableRequest, McpListToolsRequest, MetadataContextHeaviestMessagesRequest,
+    MetadataContextInfoRequest, ModeSetRequest, NameSetRequest, PermissionsSetModeRequest,
+    PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest,
+    SkillsDisableRequest, SkillsEnableRequest, SlashCommandInvocationResult,
+    TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
 };
 use copilot_sdk::session_events::{PermissionMode, SessionMode};
 use copilot_sdk::types::{
@@ -2916,13 +2917,87 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             // The four the session actually allows. `task` and `task_complete`
             // were missing here, so delegation had no checkbox at all and the
             // only place to switch it was the Runtime tab.
-            for name in ["ask_user", "skill", "task", "task_complete"] {
+            let mut builtins = vec!["ask_user", "skill", "task", "task_complete"];
+            // `tool_filter` serves these with delegation on, so the checklist
+            // has to agree or the dialog shows a group it cannot tick.
+            let agents_on = state.settings.lock().await.allow_agents;
+            if agents_on {
+                builtins.extend(["read_agent", "write_agent", "list_agents"]);
+            }
+            for name in builtins {
                 items.push(
                     json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}),
                 );
             }
+            // The runtime's own slash commands. `session.commands.list` is the
+            // namespace that lists them — the page's menu was ours alone, so
+            // `/compact` and friends existed and were never offered. Marked
+            // `runtime` so `pick` can tell one from a command this page handles
+            // itself without keeping a second copy of the names.
+            let ours: std::collections::HashSet<String> = items
+                .iter()
+                .filter_map(|i| i["name"].as_str().map(str::to_owned))
+                .collect();
+            let live = state.live.read().await.clone();
+            if let Ok(list) = live.session.rpc().commands().list().await {
+                for c in list.commands {
+                    if ours.contains(&c.name) {
+                        continue;
+                    }
+                    let exp = if c.experimental.unwrap_or(false) {
+                        "experimental · "
+                    } else {
+                        ""
+                    };
+                    items.push(json!({
+                        "name": c.name,
+                        "kind": "cmd",
+                        "runtime": true,
+                        "cmdKind": serde_json::to_value(&c.kind).unwrap_or(Value::Null),
+                        "hint": format!("{exp}{}", c.description),
+                    }));
+                }
+            }
             let body = json!({ "items": items }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Run one of the runtime's slash commands. `commands.execute` refused all
+        // 29 of them ("No client found for command") — that path is for a host
+        // that registered handlers — so this is `invoke`, which returns what to
+        // show: text, a message, or a prompt the host should submit.
+        ("POST", "/command") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let input = v["input"].as_str().unwrap_or_default().to_string();
+            let mut req = CommandsInvokeRequest::default();
+            req.name = name.clone();
+            req.input = (!input.is_empty()).then_some(input);
+            let live = state.live.read().await.clone();
+            let reply = match live.session.rpc().commands().invoke(req).await {
+                Ok(SlashCommandInvocationResult::Text(t)) => {
+                    json!({ "name": name, "text": t.text, "markdown": t.markdown.unwrap_or(false) })
+                }
+                Ok(SlashCommandInvocationResult::Completed(c)) => {
+                    json!({ "name": name, "text": c.message.unwrap_or_default() })
+                }
+                // The command wants a turn run with a prompt it wrote. Handing the
+                // prompt back lets the page put it in the composer rather than
+                // starting a turn the reader never chose.
+                Ok(SlashCommandInvocationResult::AgentPrompt(p)) => json!({
+                    "name": name, "prompt": p.display_prompt, "notice": p.notice,
+                }),
+                // Model switches, subcommand pickers and dialogs each want a
+                // surface this page does not have. Say so instead of pretending.
+                Ok(_) => json!({
+                    "name": name,
+                    "text": "ran — it wants a surface this page does not have yet",
+                }),
+                Err(e) => json!({ "name": name, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
         }
         ("GET", "/search") => {
             let q = param(query, "q").unwrap_or_default();
