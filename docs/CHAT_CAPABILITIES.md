@@ -33,9 +33,9 @@ managed-settings, `ide.*`, `*_ref` twins). What survives is real:
 
 | # | unhandled events | what the user loses | size |
 |---|---|---|---|
-| 1 | `exit_plan_mode.requested`, `auto_mode_switch.requested`, `auto_mode_recovery.*` | **The strongest gap.** Plan mode and auto-mode have their own handlers (`interaction.on_exit_plan_mode_request`, `on_auto_mode_switch_request`) and we install neither. A turn can be waiting for consent the page never draws — indistinguishable from a hang | M |
+| 1 | `exit_plan_mode.requested`, `auto_mode_switch.requested`, `auto_mode_recovery.*` | **Not a hang — checked.** The SDK documents the unset behaviour: `requestExitPlanMode: false` / `requestAutoModeSwitch: false` goes on the wire, so the runtime never asks. What is lost is a *capability*: the agent cannot ask to leave plan mode (our `/mode` route only lets the human switch), and a rate-limit fallback to the auto model never happens | M |
 | 2 | `elicitation.requested` / `.completed` | structured questions become nothing. Needs a form renderer, because `ElicitationResult.content` must match `requested_schema` | L |
-| 3 | `permission.requested`, `permission.carriedForward` | approvals reach the page only through our own `WebPermission` card; a carried-forward approval silently widens what is allowed and no card says so | S |
+| 3 | `permission.requested`, `permission.carriedForward` | approvals reach the page only through our own `WebPermission` card, so what the runtime records as carried-forward is invisible — the card shows the request, not the policy that grew from earlier ones | S |
 | 4 | `session.tools_updated`, `session.skills_loaded`, `session.mcp_servers_loaded` | the `/mcp` and `/skills` drawers are fetched once, so a mid-session change leaves a stale list — the health *banner* covers status, not the set | S |
 | 5 | `command.queued` / `.execute` / `.completed`, `commands.changed` | the runtime's own slash commands never surface; the page's `/` menu is only ours | M |
 | 6 | `subagent.selected` / `configured` / `deselected` | `--allow-agents` is a switch with no visible result; no agent picker or per-agent row | L |
@@ -70,10 +70,16 @@ flags) are the two worth a look.
 
 ## Order I would build it
 
-1. **#1 — the interaction handlers** (M). A turn waiting on consent nobody can
-   give is the only bug in the table; the rest are missing features.
-2. **#3 + #4 + #8 + #9** (S each, one pass): the page stops lying about
-   permissions, tool lists, spend and runtime messages.
+Nothing in this table is a bug — the one row that looked like a hang is a declined
+capability, measured. So the order is by cost against what the reader gains:
+
+1. **#3, #4, #8, #9, #10, #11 in one pass** (S each): the page stops lying about
+   permission policy, tool lists, spend, runtime messages, compaction and tool
+   input. Six small `case` arms, no new plumbing — the events already reach the
+   bus.
+2. **#1 the interaction handlers** (M): exit plan mode, auto-mode switch and its
+   recovery, so the agent can ask instead of being told. Our `/mode` route stays
+   the human half.
 3. **Resume** (L): reuse `connect()`'s groups on `ResumeSessionOptions`, a
    `POST /resume {convo}` route, and the page calls it when a conversation opens.
 4. **#2 elicitation** (L) once a form renderer exists — it is the prerequisite for
