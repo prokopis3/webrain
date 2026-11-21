@@ -1389,7 +1389,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         ("POST", "/stop") => {
             let live = state.live.read().await.clone();
             let reply = match live.session.abort().await {
-                Ok(()) => json!({ "stopped": true }),
+                Ok(()) => {
+                    // The turn's own wait clears this too, but not before the
+                    // abort returns — so a page that stops and immediately sends
+                    // used to race a 409 that said "busy" about a dead turn.
+                    state.busy.store(false, Ordering::SeqCst);
+                    json!({ "stopped": true })
+                }
                 Err(e) => json!({ "stopped": false, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await

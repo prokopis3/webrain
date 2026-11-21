@@ -747,8 +747,23 @@
     }
   }
 
+  // `steered: false` means the runtime kept the prompt in the queue because the
+  // running turn would not yield — which looks exactly like success unless it is
+  // said out loud. If it refused, stopping the turn is the only thing that
+  // forces it, and that is what "send now" promised in the first place.
   async function promote(q) {
-    await queueCall({ id: q.id });
+    let j = await queueCall({ id: q.id });
+    if (j && j.steered === false) {
+      await fetch("/stop", { method: "POST" }).catch(() => {});
+      j = await queueCall({ id: q.id });
+      push({
+        kind: j && j.steered ? "note" : "err",
+        text:
+          j && j.steered
+            ? "queued prompt forced — the turn was stopped"
+            : "queue: still queued after stopping the turn",
+      });
+    }
   }
 
   // A queued prompt you can send but not correct is one you retype in the
@@ -774,6 +789,8 @@
         })
       ).json();
       if (j.error) push({ kind: "note", text: `queue: ${j.error}` });
+      await loadQueue();
+      return j;
     } catch {
       push({ kind: "note", text: "queue: the server is not reachable" });
     }
@@ -2239,6 +2256,18 @@
     } catch (e) {
       push({ kind: "err", text: `stop: ${e.message}` });
     }
+  }
+
+  // Stop, then send: two buttons already existed, but between them sat a turn
+  // that had to die first, and `send()` refuses while `busy` — so the draft just
+  // stayed in the field. `/stop` clears the busy flag now that the abort returns,
+  // which is what makes this one action instead of two.
+  async function stopAndSend() {
+    if (!busy) return;
+    await stopTurn();
+    busy = false;
+    state = "ready";
+    await send();
   }
 
   /// Answer a pending permission request by id, whether or not its card is the
@@ -4899,6 +4928,8 @@
           // While a turn runs, Enter steers it and Alt+Enter queues behind it —
           // the two choices the runtime has that a plain send does not.
           if (e.altKey) return send("queue");
+          // Ctrl+Enter is the third: stop it, then send, in one keystroke.
+          if (busy && e.ctrlKey) return stopAndSend();
           if (busy) return send("steer");
           send();
         }
@@ -4968,6 +4999,23 @@
           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M4 18l6-6 4 3 6-8" />
           <path d="M20 7v5h-5" />
+        </svg>
+      </button>
+      <!-- Steer asks the turn to yield; this one does not ask. It is the only
+           control that stops the turn *and* sends, so it is the one to reach for
+           when the agent is not listening. -->
+      <button
+        class="mini"
+        onclick={stopAndSend}
+        disabled={!draft.trim()}
+        title="stop this turn and send what you typed now — Ctrl+Enter"
+        aria-label="stop and send"
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="8" width="8" height="8" rx="1" fill="currentColor" stroke="none" />
+          <path d="M14 12h7" />
+          <path d="M18 9l3 3-3 3" />
         </svg>
       </button>
       <button aria-label="stop" class="send stop" onclick={stopTurn} title="stop this turn">
@@ -5739,7 +5787,7 @@
           </dl>
           <h3 class="sub-h">keys</h3>
           <dl class="facts">
-            <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn</dd>
+            <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn · Ctrl+Enter stop it and send</dd>
             <dt>Esc</dt><dd>close a menu or dialog · discard a recording</dd>
             <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer</dd>
             <dt>Ctrl K</dt><dd>search every stored message</dd>
