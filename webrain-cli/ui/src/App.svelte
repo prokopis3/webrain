@@ -1595,6 +1595,11 @@
       const r = await fetch(url, { method: "POST" });
       if (!r.ok) return null;
       const j = await r.json();
+      // The claim moved the live conversation; this puts the runtime's own
+      // session back under it, so the next turn continues with context instead
+      // of a blank one. A failure is silent by design: the transcript is still
+      // there and the chat still works, it just starts from scratch.
+      fetch("/resume", { method: "POST" }).catch(() => {});
       if (!light) cache.set(id, j);
       return j;
     } catch {

@@ -2047,6 +2047,8 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // page still draws it); what changes is that the model gets its context
         // back — plan file, rewind points, tool history included.
         ("POST", "/resume") => {
+            // The conversation is whatever `POST /sessions/{id}` last claimed —
+            // that route already owns switching, so this one only restores.
             let convo = state.convo().await;
             let want = format!("webrain-{convo}");
             let live = state.live.read().await.clone();
