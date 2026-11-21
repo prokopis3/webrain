@@ -330,7 +330,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /context` | the runtime's token breakdown and per-message attribution |
 | `GET /todos` | the agent's todo rows |
 | `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
-| `GET /jobs`, `POST /jobs` | the OS processes the agent's own `terminal` tool started and left running — id, command, pid, `running`, `exit`, byte count and a tail of the output — then `{"id":N}` to kill one. Reading it consumes nothing, so a poll here never costs the model its next `terminal read` |
+| `GET /jobs`, `POST /jobs` | the OS processes the agent's own `terminal` tool started and left running — id, command, pid, `running`, `exit`, byte count and a tail of the output — then `{"id":N}` to kill one. Reading it consumes nothing, so a poll here never costs the model its next `terminal read`. A job that ends on its own is pushed to `/events` as `{"type":"webrain.job","data":{"id","command","exit","running":false}}`, because nothing polls the registry on its own |
 | `POST /transcript`, `POST /ledger` | what the page drew, and the instruments of a finished turn, kept with the conversation |
 
 **Conversations**
