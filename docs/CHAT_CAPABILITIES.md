@@ -35,15 +35,15 @@ managed-settings, `ide.*`, `*_ref` twins). What survives is real:
 |---|---|---|---|
 | 1 | `exit_plan_mode.requested`, `auto_mode_switch.requested`, `auto_mode_recovery.*` | **Not a hang — checked.** The SDK documents the unset behaviour: `requestExitPlanMode: false` / `requestAutoModeSwitch: false` goes on the wire, so the runtime never asks. What is lost is a *capability*: the agent cannot ask to leave plan mode (our `/mode` route only lets the human switch), and a rate-limit fallback to the auto model never happens | M |
 | 2 | `elicitation.requested` / `.completed` | structured questions become nothing. Needs a form renderer, because `ElicitationResult.content` must match `requested_schema` | L |
-| 3 | `permission.requested`, `permission.carriedForward` | approvals reach the page only through our own `WebPermission` card, so what the runtime records as carried-forward is invisible — the card shows the request, not the policy that grew from earlier ones | S |
-| 4 | `session.tools_updated`, `session.skills_loaded`, `session.mcp_servers_loaded` | the `/mcp` and `/skills` drawers are fetched once, so a mid-session change leaves a stale list — the health *banner* covers status, not the set | S |
+| 3 | `permission.requested`, `permission.carriedForward` | **carriedForward SHIPPED 2026-11-21** — a note naming the reused decision, because the card for the new request was the only evidence the policy had grown. `permission.requested` stays unhandled on purpose: it is the event twin of the request our own `WebPermission` card already draws, and handling it would show every approval twice | S |
+| 4 | `session.tools_updated`, `session.skills_loaded`, `session.mcp_servers_loaded` | **SHIPPED 2026-11-21** as notes naming what moved and which command re-reads it. Auto-refreshing the drawer would mean exposing the slash-command handler's card builder, which is a refactor, not a fix | S |
 | 5 | `command.queued` / `.execute` / `.completed`, `commands.changed` | the runtime's own slash commands never surface; the page's `/` menu is only ours | M |
 | 6 | `subagent.selected` / `configured` / `deselected` | `--allow-agents` is a switch with no visible result; no agent picker or per-agent row | L |
 | 7 | `sampling.requested` (MCP sampling), `external_tool.requested` | an MCP server asking the model for a completion goes unanswered. We answer external *tools* (`POST /pending`), nothing answers sampling | M |
-| 8 | `session.usage_checkpoint`, `session.quota_observation`, `session.session_limits_changed`, `session_limits_exhausted.*` | cost and remaining budget appear only at shutdown, never while spending | S |
-| 9 | `system.message`, `session.custom_notification` | runtime messages addressed to the user are dropped | S |
-| 10 | `session.compaction_summarized` | the page shows that compaction happened, not what the summary said | S |
-| 11 | `tool.user_requested` | a tool asking for user input has no row of its own | S |
+| 8 | `session.usage_checkpoint`, `session.quota_observation`, `session.session_limits_changed`, `session_limits_exhausted.*` | **usage_checkpoint SHIPPED 2026-11-21** — spend appears as it happens, in AIU (the runtime reports credits; only the provider knows their price). The other three still wait: `quota_observation` carries a provider-shaped `ProviderQuotaState` with no renderer | S |
+| 9 | `system.message`, `session.custom_notification` | **SHIPPED 2026-11-21** — both become notes; the runtime's own words were being dropped | S |
+| 10 | `session.compaction_summarized` | **SHIPPED 2026-11-21** — correction: the event carries no summary text, only `success`/`outcome`/`error`, so what was missing was the *failure*, which is now an error row instead of silence | S |
+| 11 | `tool.user_requested` | **SHIPPED 2026-11-21** — "waiting on <tool> for your input", where the turn previously just looked stuck | S |
 
 Also design-level, not event-shaped: **no citations** (`inference.enable_citations`
 is off and nothing would render them), **no resume** (the strongest capability
@@ -73,10 +73,8 @@ flags) are the two worth a look.
 Nothing in this table is a bug — the one row that looked like a hang is a declined
 capability, measured. So the order is by cost against what the reader gains:
 
-1. **#3, #4, #8, #9, #10, #11 in one pass** (S each): the page stops lying about
-   permission policy, tool lists, spend, runtime messages, compaction and tool
-   input. Six small `case` arms, no new plumbing — the events already reach the
-   bus.
+1. ~~**#3, #4, #8, #9, #10, #11 in one pass** (S each)~~ — **DONE 2026-11-21**: nine
+   `case` arms, no new plumbing. What each left out is named in the row above.
 2. **#1 the interaction handlers** (M): exit plan mode, auto-mode switch and its
    recovery, so the agent can ask instead of being told. Our `/mode` route stays
    the human half.

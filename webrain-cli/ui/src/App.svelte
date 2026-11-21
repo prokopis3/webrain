@@ -1204,6 +1204,54 @@
           kind: "note",
           text: `context cut: ${d.tokensRemovedDuringTruncation} tokens and ${d.messagesRemovedDuringTruncation} messages removed to fit ${d.tokenLimit}`,
         });
+      // The compaction note above says it happened; this one says how it went.
+      // Only a failure is news — and it used to be invisible.
+      case "session.compaction_summarized":
+        if (d.success !== false) return;
+        return push({
+          kind: "err",
+          text: `compaction failed: ${d.failureReason || d.error || d.outcome || "unknown reason"}`,
+        });
+      // A message the runtime addresses to the reader rather than to the model.
+      case "system.message": {
+        const text = typeof d.content === "string" ? d.content.trim() : "";
+        if (!text) return;
+        return push({ kind: "note", text: text.slice(0, 300) });
+      }
+      // A server-side notice we can only name — the payload is opaque to us.
+      case "session.custom_notification":
+        return push({
+          kind: "note",
+          text: `notice · ${d.source || "runtime"}${d.name ? `/${d.name}` : ""}`,
+        });
+      // A tool asking a human something. Without a row the turn just looks stuck.
+      case "tool.user_requested":
+        return push({ kind: "note", text: `waiting on ${d.toolName} for your input` });
+      // An approval reused instead of asked: the policy grew, and only the card
+      // for the new request would have said so.
+      case "permission.carriedForward":
+        return push({
+          kind: "note",
+          text: `approval reused · ${d.decisionSource || "session policy"}`,
+        });
+      // Spend as it happens, not only in the shutdown bill. AIU, not dollars:
+      // the runtime reports credits and only the provider knows their price.
+      case "session.usage_checkpoint": {
+        const aiu = Number(d.totalNanoAiu) / 1e9;
+        if (!(aiu > 0)) return;
+        return push({ kind: "note", text: `spent so far · ${aiu.toFixed(4)} AIU` });
+      }
+      // The tool/skill/MCP set changed mid-session. The drawer re-reads when
+      // asked, so say what moved and how to see it.
+      case "session.tools_updated":
+        return push({
+          kind: "note",
+          text: `tool set changed${d.model ? ` for ${d.model}` : ""} · /mcp re-reads it`,
+        });
+      case "session.mcp_servers_loaded":
+        return push({ kind: "note", text: "tool servers reloaded · /mcp re-reads them" });
+      case "session.skills_loaded":
+        return push({ kind: "note", text: "skills reloaded · /skills re-reads them" });
       // The only evidence a skill was actually resolved from the directories the
       // session registers — without it the `@` menu is an unchecked promise.
       case "skill.invoked":
