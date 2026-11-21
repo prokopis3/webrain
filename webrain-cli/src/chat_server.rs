@@ -2042,6 +2042,63 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
+        // Restore the runtime's own session for this conversation, instead of
+        // replaying our transcript onto a blank one. The transcript stays (the
+        // page still draws it); what changes is that the model gets its context
+        // back — plan file, rewind points, tool history included.
+        ("POST", "/resume") => {
+            let convo = state.convo().await;
+            let want = format!("webrain-{convo}");
+            let live = state.live.read().await.clone();
+            let id = live
+                .client
+                .rpc()
+                .sessions()
+                .list()
+                .await
+                .ok()
+                .and_then(|l| serde_json::to_value(&l).ok())
+                .and_then(|v| v.get("sessions").and_then(Value::as_array).cloned())
+                .and_then(|rows| {
+                    rows.into_iter().find_map(|s| {
+                        (s["name"].as_str() == Some(want.as_str()))
+                            .then(|| s["sessionId"].as_str().map(str::to_string))
+                            .flatten()
+                    })
+                });
+            let Some(id) = id else {
+                let out = json!({
+                    "resumed": false,
+                    "error": "the runtime has no session for this conversation",
+                });
+                return respond(&mut stream, 200, "application/json", &out.to_string()).await;
+            };
+            let provider = state.provider.lock().await.clone();
+            let settings = state.settings.lock().await.clone();
+            let out = match spawn_live(
+                &state.args,
+                &provider,
+                state.permission.clone(),
+                state.input.clone(),
+                state.bus.clone(),
+                state.store.clone(),
+                convo,
+                &settings,
+                Some(SessionId::new(id)),
+            )
+            .await
+            {
+                Ok(fresh) => {
+                    let old = std::mem::replace(&mut *state.live.write().await, Arc::new(fresh));
+                    // Stop the fan-out before the runtime it reads from.
+                    old.reader.abort();
+                    drop(old);
+                    json!({ "resumed": true, "name": want })
+                }
+                Err(e) => json!({ "resumed": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
         // The answer to an `ask_user` question. Same shape as `/permission`, but
         // the payload is free text plus whether it was typed or picked.
         ("POST", "/answer") => {

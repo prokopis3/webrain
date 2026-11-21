@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **resume** — `POST /resume` continues the current conversation on the
+  runtime's own session (`sessions.list` → `resume_session`) instead of replaying
+  the transcript onto a blank one, so the model gets its context back: plan file,
+  rewind points, tool history. The page's transcript is unchanged.
 - `chat`: **plan-mode and auto-mode handlers** — the agent can ask to leave plan
   mode (the card's buttons are the plan's own actions) and to retry a rate-limited
   turn on the auto model. Both reuse the `ask_user` card; without them the SDK

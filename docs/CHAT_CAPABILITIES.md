@@ -25,6 +25,22 @@ surface (`managedsettings`, `plugins*`, `sandbox`, `remote`, `workflow*`,
 `accounts*`, `canvas*`) that the chat deliberately refuses. The next section is
 what is left after that filter.
 
+## The enterprise families — do they apply to this chat?
+
+Asked directly, so answered directly: **no, and the reason is different for each.**
+They are the bulk of the 43 uncalled namespaces, and "uncalled" is not "missing".
+
+| family | why it cannot serve a local BYOK chat |
+|---|---|
+| `managed_settings` / `managed_settings_permissions` | enterprise policy pushed into a session. The source is Copilot's own service (`github.fetch_managed_settings`), which a BYOK session never talks to — there is no policy to receive |
+| `plugins*` / `extensions` / `connectors` / `marketplaces` | an install surface, not a chat capability. Even installed, their tools arrive through MCP, which we already attach |
+| `sandbox` (+ `permissions.sandbox`) | the boundary already exists: `chat_hooks::Fence` plus path-fenced tools. A runtime sandbox duplicates it and needs a host we do not ship |
+| `remote` / cloud sessions | needs a Copilot subscription by definition; this session is BYOK and `capi` is off |
+| `canvas*` | a renderer on the page. `canvases` is reachable in the config, but there is nothing on the panel that can draw one |
+
+So the 43-row gap stays 43 rows, and that number is a feature of the design rather
+than a backlog.
+
 ## Frontend — what a reader cannot see or do today
 
 Measured by diffing the 166 event types against the 91 the page handles, then
@@ -77,15 +93,16 @@ capability, measured. So the order is by cost against what the reader gains:
    `case` arms, no new plumbing. What each left out is named in the row above.
 2. ~~**#1 the interaction handlers** (M)~~ — **DONE 2026-11-21**: the agent can ask to
    leave plan mode and to retry on the auto model; `/mode` stays the human half.
-3. ~~**Resume** (L)~~ — **groundwork DONE 2026-11-21**: `connect()` takes
-   `Option<SessionId>` and resumes through `resume_options`, which copies the
-   groups out of the create config instead of re-deriving them (two of them —
-   `SessionFilesystemOptions`, `SessionInstructionOptions` — are resume-only twins
-   with no `From`, and are copied field by field so nothing is silently dropped).
-   **Remaining**: the `POST /resume {convo}` route (look up the runtime's session
-   id for `webrain-<convo>` through `sessions.list`, then swap `Arc<Live>` the way
-   `reseed` does) and the page command that calls it. Nothing passes `Some(id)`
-   yet, so resume is plumbing until that lands.
+3. ~~**Resume** (L)~~ — **SHIPPED 2026-11-21.** `connect()` takes `Option<SessionId>`
+   and resumes through `resume_options`, which copies the groups out of the create
+   config instead of re-deriving them (two are resume-only twins —
+   `SessionFilesystemOptions`, `SessionInstructionOptions` — so each field we set
+   is copied by name). `POST /resume` finds the runtime's session for
+   `webrain-<convo>` through `sessions.list` and swaps `Arc<Live>` the way
+   `reseed` does. **Verified live**: `{"resumed":true,"name":"webrain-…"}`, and
+   `/name` still answered afterwards, so the swap leaves a working session behind.
+   Not built: opening a *different* conversation's session (the route resumes the
+   one the server is on, which is what the sidebar's current thread is).
 4. **#2 elicitation** (L) once a form renderer exists — it is the prerequisite for
    the runtime's structured questions, and `ask_user` already covers the simple
    case.
