@@ -7,16 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.18.1] - 2026-11-20
-
-### Changed
-
-- **docs**: the README's Chat section now shows the page instead of describing it —
-  a 13-frame recording of one turn (`docs/images/chat-turn.gif`: the prompt, the
-  answer streaming, the closing `… · 0 steps · 6.2s` line, the three follow-up chips)
-  and a still of an `html`-mode answer. Documentation only; no code changed.
-
-## [0.18.0] - 2026-11-20
+## [0.19.0] - 2026-11-21
 
 ### Added
 
@@ -624,6 +615,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned — one parser and one set of failure modes is worth more than the flat
   feed. `parse_bing_rss` and its `tag_text`/`xml_unescape` helpers are deleted;
   `--limit 10` measures 10 rows, `source: bing`, 3/3 live runs.
+- **docs**: the README's Chat section now shows the page instead of describing it —
+  a 13-frame recording of one turn (`docs/images/chat-turn.gif`: the prompt, the
+  answer streaming, the closing `… · 0 steps · 6.2s` line, the three follow-up chips)
+  and a still of an `html`-mode answer. Documentation only.
 
 ### Fixed
 
