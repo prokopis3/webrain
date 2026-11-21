@@ -359,6 +359,23 @@ Tiling is 1.4% of the tiled path and `llama-server` is single-slot, so parallel
 tiling is not the lever — routing is: extract text, then render + vision only the
 pages whose text layer came back empty or short.
 
+### Footprint and per-turn cost
+
+| what | number | where it comes from |
+|---|---|---|
+| default binary | **~22 MB**, zero runtime dependencies | `docs/index.mdx` |
+| with `chat` (runtime installed separately) | ~45 MB | `docs/guides/chat.mdx` |
+| memory per browser tab | **~56 MB** — the figure batch admission sizes itself from | `docs/reference/environment.mdx` |
+| static page fetch, no browser | 427 KB in **266 ms** | changelog |
+| 27 URLs at concurrency 6 | **10 s**, down from **159 s** | `AGENTS.md` |
+| MCP tool schemas sent per request | 9 820 tokens → deferred behind `tool_search` | `chat_session.rs` |
+| `builtin:*` wildcard | 6 972 tokens of runtime schemas → four named built-ins | `chat_session.rs` |
+
+The 159 s → 10 s row is a fixed wait strategy, not a faster network — nobody
+optimised the site. Vendor figures for the small engines (Obscura's 30 MB / 85 ms)
+are theirs, not ours, and are kept that way in
+[docs/comparisons/performance.mdx](docs/comparisons/performance.mdx).
+
 ## Environment Variables
 
 The ones you are most likely to set. **Every variable is read once, at process

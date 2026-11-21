@@ -84,6 +84,17 @@ serves — the honest source for the allowlist we just added) and
 `ClientRpc.host` (version and capabilities from the runtime instead of parsed
 flags) are the two worth a look.
 
+### What each remaining row needs first (measured 2026-11-21)
+
+So the next pass starts with a step, not a question:
+
+| row | first step | what it costs |
+|---|---|---|
+| #7 MCP sampling | **The answer path exists**: `mcp.handlePendingSampling` (with `cancelSamplingExecution`). The work is the completion itself — the handler must call the provider and shape the reply | a second provider call path that spends money per request, so it wants a test before it wants a UI |
+| #5 runtime commands | find the namespace that lists them (`SessionRpcCommands` does **not** exist; `commands.changed` / `command.execute` events do), then a `GET /commands` card | one measurement, then S |
+| #6 agents | the `agents` group on the config (`default`, `selected`, `included_builtin_agents`) plus the three `subagent.*` events as notes — the picker is the L part, the notes are not | S for notes, L for the picker |
+| #2 elicitation | a renderer for `requested_schema`; the answer must be a `content` object matching it, so a textarea that guesses property names submits wrong data | L, and it is the only row where a lazy version is worse than none |
+
 ## Order I would build it
 
 Nothing in this table is a bug — the one row that looked like a hang is a declined
