@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   halves a resume needs that are not the callback set. Verified live:
   `{"name":"webrain-c1795274324668"}`, a rename round-trip, and the runtime's list
   reporting the same name with `clientName sdk` and the cwd.
+- **chat (long-running jobs)**: a process the agent starts with its own `terminal`
+  tool outlived the turn but nothing could see it, and `read` *drained* the buffer,
+  so only one of the two interested readers could ever have the output. The log is
+  now a buffer plus a cursor: `terminal read` still returns only what is new, and
+  the page reads the same bytes from the other end. `GET /jobs` lists id, command,
+  pid, `running`, `exit`, byte count and a 1.5 KB tail; `POST /jobs {id}` kills
+  one without eating the model's unread output. Finished jobs stay readable (the
+  newest 20) and `terminal read` on one now ends with `exited with code N` instead
+  of leaving the model polling a process that will never print. A new
+  `terminal op=list` names every job the session still knows, which is what keeps
+  one started many turns ago usable once the context that named it is gone, and
+  `/jobs` in the composer shows those rows to the user. Verified live: a
+  `cmd.exe` job at `running:true, bytes:151`
+  stayed readable after the model's `read` answered `(no new output)`, `where.exe`
+  reported `running:false, exit:2`, and `POST /jobs` answered
+  `{"stopped":true,"id":1,…}`.
 
 ### Fixed
 

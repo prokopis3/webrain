@@ -330,6 +330,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /context` | the runtime's token breakdown and per-message attribution |
 | `GET /todos` | the agent's todo rows |
 | `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
+| `GET /jobs`, `POST /jobs` | the OS processes the agent's own `terminal` tool started and left running — id, command, pid, `running`, `exit`, byte count and a tail of the output — then `{"id":N}` to kill one. Reading it consumes nothing, so a poll here never costs the model its next `terminal read` |
 | `POST /transcript`, `POST /ledger` | what the page drew, and the instruments of a finished turn, kept with the conversation |
 
 **Conversations**
@@ -475,8 +476,8 @@ session`) rather than quietly showing the smaller one, and `--max-prompt-tokens`
 still overrides the lookup for a model nobody publishes a window for.
 
 In the composer, `/` lists the commands the page itself runs — `/clear`, `/tools`,
-`/undo`, `/rewind`, `/instructions`, `/quota`, `/todos`, `/agents`, `/fleet`,
-`/context`, `/mcp`, `/skills` — `@` lists the shipped skills and `#` lists the MCP
+`/undo`, `/rewind`, `/instructions`, `/quota`, `/todos`, `/jobs`, `/agents`,
+`/fleet`, `/context`, `/mcp`, `/skills` — `@` lists the shipped skills and `#` lists the MCP
 tools. Both menus read from `GET /catalog`, so neither can offer something this
 build does not have. `+` attaches a file, and ↑/↓ walk the menu with the selected
 row scrolled into view. A pick inserts `@name` / `#name` into the prompt; nothing

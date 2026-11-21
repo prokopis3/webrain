@@ -1722,6 +1722,29 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // The other kind of long-running work: OS processes this session started
+        // through its own `terminal` tool and left running. `/tasks` is the
+        // runtime's sub-agents; these are ours, and they are what a dev server or
+        // a build looks like from here. Reading the list consumes nothing, so the
+        // model's own `terminal read` still gets its unread output after a poll.
+        ("GET", "/jobs") => {
+            let body = json!({ "jobs": chat_tools::jobs() }).to_string();
+            respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Killing a process waits on the OS, so it goes off the async task — the
+        // same reason the `terminal` tool wraps every op in `spawn_blocking`.
+        ("POST", "/jobs") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let Some(id) = v["id"].as_u64() else {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"id"}"#).await;
+            };
+            let reply = match tokio::task::spawn_blocking(move || chat_tools::job_stop(id)).await {
+                Ok(Ok(message)) => json!({ "stopped": true, "id": id, "message": message }),
+                Ok(Err(e)) => json!({ "stopped": false, "id": id, "error": e }),
+                Err(e) => json!({ "stopped": false, "id": id, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
         // Agent-to-agent: a word to one of them mid-flight. Same gate as fleet,
         // because a message to a worker is delegation by another name.
         ("POST", "/agents") => {
@@ -2727,6 +2750,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 json!({"name": "instructions", "kind": "cmd", "hint": "the instruction files the model was given, in merge order"}),
                 json!({"name": "quota", "kind": "cmd", "hint": "account credits, when the provider has a plan"}),
                 json!({"name": "todos", "kind": "cmd", "hint": "read the agent's todo list"}),
+                json!({"name": "jobs", "kind": "cmd", "hint": "processes it started and left running — output and exit codes"}),
                 json!({"name": "agents", "kind": "cmd", "hint": "list the agents this session is running"}),
                 json!({"name": "fleet", "kind": "cmd", "hint": "run the last thing you asked as a fleet"}),
                 json!({"name": "context", "kind": "cmd", "hint": "how full the context window is, and where it goes"}),

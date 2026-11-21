@@ -27,6 +27,19 @@ use serde_json::{Value, json};
 /// mean to run. It is killed, and the model is told so.
 const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How much of a running job's output is kept. A dev server left on for an hour
+/// prints more than anyone will read, and the tail is what shows whether it is
+/// still healthy.
+const KEEP: usize = 100_000;
+
+/// How much of that the page gets per poll. The transcript is not a log viewer;
+/// three screens is enough to see a job is alive and roughly on task.
+const TAIL: usize = 1_500;
+
+/// Finished jobs are kept so their output is still readable, but not forever:
+/// twenty is more than a session's worth and bounds the memory at 2 MB.
+const KEEP_DEAD: usize = 20;
+
 /// The names the session's tool allowlist has to carry, in the order the prompt
 /// lists them. A box in the page's tools dialog is checked for each of these.
 pub(crate) const NAMES: [&str; 7] = [
@@ -132,17 +145,20 @@ pub(crate) fn workspace_tools() -> Vec<Tool> {
         ),
         tool(
             "terminal",
-            "A shell that stays alive between calls. `start` spawns it (the \
-             platform shell unless `command` says otherwise) and `send` types a \
-             line and returns what it printed — so a prompt, a REPL or a dev \
-             server is answerable. `read` returns only the output since the last \
-             call; `stop` kills it. Omit `id` to mean the newest terminal.",
+            "A shell that stays alive between calls — the way to run something \
+             long. `start` spawns it (the platform shell unless `command` says \
+             otherwise) and `send` types a line and returns what it printed — so \
+             a prompt, a REPL or a dev server is answerable. `read` returns only \
+             the output since the last call, and ends with the exit code once the \
+             job is over; `list` names every job this session still knows so an \
+             id is not lost between turns; `stop` kills it. Omit `id` to mean the \
+             newest terminal. The user sees the same jobs in `/jobs`.",
             json!({
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["start", "send", "read", "stop"],
-                           "description": "start | send a line and read the reply | read new output | kill it"},
-                    "id": {"type": "integer", "description": "terminal id from `start`; omit for the newest"},
+                    "op": {"type": "string", "enum": ["start", "send", "read", "list", "stop"],
+                           "description": "start | send a line and read the reply | read new output | list the jobs | kill it"},
+                    "id": {"type": "integer", "description": "terminal id from `start` or `list`; omit for the newest"},
                     "command": {"type": "string", "description": "start: program to run, default the platform shell"},
                     "input": {"type": "string", "description": "send: the line to type, Enter is added"},
                     "cwd": {"type": "string", "description": "start: working directory, default `.`"}
@@ -465,12 +481,29 @@ impl ToolHandler for Terminal {
     }
 }
 
+/// What one process has printed, and how much of it the model has been shown.
+///
+/// Two readers with different needs share this: the model wants only what is
+/// new (a replay would cost more context than the tool saves) and the page wants
+/// a tail of everything (it polls while its list is open). A cursor per reader
+/// is cheaper than two buffers and cannot get them out of order.
+#[derive(Default)]
+struct Log {
+    text: String,
+    /// Byte offset into `text` up to which the model has been shown, so
+    /// `terminal read` stays "new output only" without throwing bytes away.
+    shown: usize,
+}
+
 /// A shell that outlives the call that started it. The model's handle is the
 /// number; the process lives here.
 struct Term {
+    /// The program, as the page lists it — the registry does not keep the
+    /// arguments, and a label is what a reader needs to tell two jobs apart.
+    label: String,
     child: Child,
     stdin: ChildStdin,
-    out: Arc<Mutex<String>>,
+    out: Arc<Mutex<Log>>,
 }
 
 #[derive(Default)]
@@ -512,11 +545,19 @@ fn terminal(
             Ok(format!("terminal {id}\n{}", taken(&out)))
         }
         "read" => {
-            let out = {
-                let s = sessions().lock().unwrap();
-                s.all[&which(&s, id)?].out.clone()
+            let (out, exit) = {
+                let mut s = sessions().lock().unwrap();
+                let id = which(&s, id)?;
+                let t = s.all.get_mut(&id).expect("which() returns a live id");
+                (t.out.clone(), t.exit())
             };
-            Ok(taken(&out))
+            let text = taken(&out);
+            // A job that ended has to say so, or the model polls a dead process
+            // for output that will never come.
+            Ok(match exit {
+                Some(code) => format!("{text}\n{}", ended(code)),
+                None => text,
+            })
         }
         "stop" => {
             let (id, mut t) = {
@@ -528,7 +569,34 @@ fn terminal(
             let _ = t.child.wait();
             Ok(format!("terminal {id} stopped\n{}", taken(&t.out)))
         }
-        other => Err(format!("unknown op `{other}`: start | send | read | stop")),
+        // The registry outlives the context window: a job started forty turns ago
+        // is still running, and without this the model cannot name it again.
+        "list" => {
+            let rows: Vec<String> = jobs()
+                .iter()
+                .map(|j| {
+                    let how = if j["running"] == true {
+                        "running".to_string()
+                    } else {
+                        ended(j["exit"].as_i64().map(|c| c as i32))
+                    };
+                    format!(
+                        "#{} {how} · {} · {} bytes",
+                        j["id"],
+                        j["command"].as_str().unwrap_or("?"),
+                        j["bytes"].as_u64().unwrap_or_default()
+                    )
+                })
+                .collect();
+            Ok(if rows.is_empty() {
+                "no jobs — op `start` launches one that outlives the call".to_string()
+            } else {
+                rows.join("\n")
+            })
+        }
+        other => Err(format!(
+            "unknown op `{other}`: start | send | read | list | stop"
+        )),
     }
 }
 
@@ -547,6 +615,81 @@ fn which(s: &Sessions, id: Option<u64>) -> Result<u64, String> {
     }
 }
 
+impl Term {
+    /// `Some(code)` once the process is over, `None` while it runs. `try_wait`
+    /// reports the same status on every later call, so asking repeatedly is
+    /// safe — which is what lets a snapshot be the only thing that notices.
+    fn exit(&mut self) -> Option<Option<i32>> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.code()),
+            _ => None,
+        }
+    }
+}
+
+/// What "over" reads like. A code is a fact; a signal is the absence of one.
+fn ended(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("exited with code {c}"),
+        None => "exited after a signal".to_string(),
+    }
+}
+
+/// Every process this session started, oldest first: what the page's job list
+/// shows. Reading it consumes nothing, so a snapshot and a model read never
+/// race for the same bytes.
+pub(crate) fn jobs() -> Vec<Value> {
+    let mut s = sessions().lock().unwrap();
+    let mut ids: Vec<u64> = s.all.keys().copied().collect();
+    ids.sort_unstable();
+    ids.into_iter()
+        .map(|id| {
+            let t = s.all.get_mut(&id).expect("the id came from this map");
+            let exit = t.exit();
+            let running = exit.is_none();
+            let log = t.out.lock().unwrap();
+            json!({
+                "id": id,
+                "command": t.label,
+                "pid": t.child.id(),
+                "running": running,
+                "exit": exit.flatten(),
+                // Bytes, not characters: the number answers "did it print
+                // anything", it is not a byte-accurate reader.
+                "bytes": log.text.len(),
+                "output": last(&log.text, TAIL),
+            })
+        })
+        .collect()
+}
+
+/// Stop a job by id, on the page's behalf. Unlike `terminal stop` this leaves the
+/// unread output in the log: the model did not ask to read it, so stopping a job
+/// from the page must not eat bytes the model has not been shown.
+pub(crate) fn job_stop(id: u64) -> Result<String, String> {
+    let mut t = {
+        let mut s = sessions().lock().unwrap();
+        let id = which(&s, Some(id))?;
+        s.all.remove(&id).expect("which() returns a live id")
+    };
+    let _ = t.child.kill();
+    let _ = t.child.wait();
+    Ok(format!("stopped {}", t.label))
+}
+
+/// The last `n` bytes, cut on a character boundary — half a multi-byte
+/// character is a broken glyph in the page.
+fn last(text: &str, n: usize) -> String {
+    if text.len() <= n {
+        return text.to_string();
+    }
+    let from = text.len() - n;
+    let from = (from..text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
+    text[from..].to_string()
+}
+
 fn term_start(command: Option<&str>, cwd: &str) -> Result<String, String> {
     let dir = inside(cwd)?;
     let program = command.unwrap_or(if cfg!(windows) { "cmd.exe" } else { "sh" });
@@ -557,7 +700,7 @@ fn term_start(command: Option<&str>, cwd: &str) -> Result<String, String> {
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
     let stdin = child.stdin.take().ok_or("the shell has no stdin")?;
-    let out = Arc::new(Mutex::new(String::new()));
+    let out = Arc::new(Mutex::new(Log::default()));
     if let Some(pipe) = child.stdout.take() {
         drain(pipe, out.clone());
     }
@@ -565,11 +708,22 @@ fn term_start(command: Option<&str>, cwd: &str) -> Result<String, String> {
         drain(pipe, out.clone());
     }
     let mut s = sessions().lock().unwrap();
+    // Finished jobs stay readable, but not forever: this process can run for
+    // hours and every `start` would otherwise leave its log on the heap.
+    let mut dead: Vec<u64> = s.all.keys().copied().collect();
+    dead.retain(|id| s.all.get_mut(id).is_some_and(|t| t.exit().is_some()));
+    if dead.len() > KEEP_DEAD {
+        dead.sort_unstable();
+        for id in dead.drain(..dead.len() - KEEP_DEAD) {
+            s.all.remove(&id);
+        }
+    }
     s.next += 1;
     let id = s.next;
     s.all.insert(
         id,
         Term {
+            label: program.to_string(),
             child,
             stdin,
             out: out.clone(),
@@ -587,36 +741,44 @@ fn term_start(command: Option<&str>, cwd: &str) -> Result<String, String> {
 
 /// Both pipes feed one buffer, so the model reads the screen in the order a
 /// person would, and nothing blocks the caller while a command runs.
-fn drain<R: Read + Send + 'static>(mut pipe: R, out: Arc<Mutex<String>>) {
+fn drain<R: Read + Send + 'static>(mut pipe: R, out: Arc<Mutex<Log>>) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while let Ok(n) = pipe.read(&mut buf) {
             if n == 0 {
                 break;
             }
-            let mut text = out.lock().unwrap();
-            text.push_str(&String::from_utf8_lossy(&buf[..n]));
+            let mut log = out.lock().unwrap();
+            log.text.push_str(&String::from_utf8_lossy(&buf[..n]));
             // shortcut: the last 100 KB of a chatty process, not the whole log;
             // a longer tail is heap nobody reads.
-            if text.len() > 100_000 {
-                let cut = text.len() - 100_000;
-                let cut = (cut..text.len())
-                    .find(|i| text.is_char_boundary(*i))
-                    .unwrap_or(text.len());
-                text.drain(..cut);
+            if log.text.len() > KEEP {
+                let cut = log.text.len() - KEEP;
+                let cut = (cut..log.text.len())
+                    .find(|i| log.text.is_char_boundary(*i))
+                    .unwrap_or(log.text.len());
+                log.text.drain(..cut);
+                // `shown` is an offset into this same string: a trim that ignored
+                // it would make the next read replay from the middle of a line or
+                // panic on a stale index.
+                log.shown = log.shown.saturating_sub(cut);
             }
         }
     });
 }
 
 /// New output only: a terminal that replayed its scrollback on every call would
-/// cost more context than the tool saves.
-fn taken(out: &Arc<Mutex<String>>) -> String {
-    let text = std::mem::take(&mut *out.lock().unwrap());
-    if text.is_empty() {
+/// cost more context than the tool saves. The bytes stay in the log — this moves
+/// the cursor, it does not drain — so the page can still read the tail after the
+/// model has seen everything.
+fn taken(out: &Arc<Mutex<Log>>) -> String {
+    let mut log = out.lock().unwrap();
+    let new = log.text[log.shown..].to_string();
+    log.shown = log.text.len();
+    if new.is_empty() {
         "(no new output)".to_string()
     } else {
-        text
+        new
     }
 }
 
@@ -797,6 +959,15 @@ fn shell(command: &str, cwd: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// The terminal registry is one process-wide singleton, so two tests that
+    /// both start a shell see each other's — and "no terminal running" would
+    /// then be about whichever test happened to be slower.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_path_above_the_working_directory_is_refused() {
         for p in ["../secret", "../../etc/passwd", "a/../../out"] {
@@ -901,6 +1072,7 @@ mod tests {
 
     #[test]
     fn a_terminal_answers_a_line_and_stops() {
+        let _only = one_at_a_time();
         let started = terminal("start", None, None, "", ".").unwrap();
         let id: u64 = started
             .split_whitespace()
@@ -914,5 +1086,60 @@ mod tests {
         assert!(stopped.contains("stopped"), "{stopped}");
         // The registry no longer knows it, so an omitted id finds nothing.
         assert!(terminal("read", None, None, "", ".").is_err());
+    }
+
+    #[test]
+    fn a_job_is_readable_from_both_sides_and_says_when_it_ended() {
+        let _only = one_at_a_time();
+        // A program that prints and exits: one snapshot then shows both the
+        // output and the fact that it is over. `start` takes a program, not a
+        // command line, so this is a binary that runs and returns.
+        let program = if cfg!(windows) { "where.exe" } else { "true" };
+        let started = terminal("start", None, Some(program), "", ".").unwrap();
+        let id: u64 = started
+            .split_whitespace()
+            .nth(1)
+            .expect("`terminal <id> running`")
+            .parse()
+            .expect("the second word is the id");
+
+        // `start` already handed the banner to the model, so this is the page's
+        // view of the same bytes: still there, and it did not eat what the model
+        // has not read yet — that is the whole point of the cursor.
+        let job = wait_until_ended(id);
+        assert_eq!(job["command"], program, "{job}");
+        assert!(job["exit"].is_number(), "{job}");
+        assert!(job["bytes"].as_u64().is_some_and(|b| b > 0), "{job}");
+
+        // The model's read is still "new only", and now it says the job ended
+        // rather than leaving a poll against a process that will never print.
+        let read = terminal("read", Some(id), None, "", ".").unwrap();
+        assert!(read.contains("exited with code"), "{read}");
+
+        // And it can find the job again by name, which is what keeps one started
+        // many turns ago usable after the context that named it is gone.
+        let listed = terminal("list", None, None, "", ".").unwrap();
+        assert!(
+            listed.starts_with('#') && listed.contains(program),
+            "{listed}"
+        );
+
+        // A page-side stop leaves the entry gone, like the tool's own `stop`.
+        assert!(job_stop(id).unwrap().starts_with("stopped"));
+        assert!(jobs().iter().all(|j| j["id"] != id), "still listed: {id}");
+    }
+
+    /// Poll the way the page does: nothing notices a process has exited until
+    /// someone asks, so "it ended" is a fact produced by the next snapshot.
+    fn wait_until_ended(id: u64) -> Value {
+        for _ in 0..60 {
+            if let Some(j) = jobs().into_iter().find(|j| j["id"] == id) {
+                if j["running"] == false {
+                    return j;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("job {id} never ended");
     }
 }

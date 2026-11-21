@@ -2318,6 +2318,33 @@
         // The structured half of "what is it doing". The plan file says what the
         // work is; these rows say how far it got.
         await syncTodos(true);
+      } else if (o.name === "jobs") {
+        // The processes a `terminal start` left behind: a dev server, a build, a
+        // crawl. `run_shell` dies with the turn; these do not, so this is the only
+        // place they are visible. Reading the list does not consume the model's
+        // unread output, so asking here never costs the agent its next read.
+        try {
+          const j = await (await fetch("/jobs")).json();
+          const rows = j.jobs || [];
+          push({
+            kind: "note",
+            text: rows.length
+              ? rows
+                  .map((r) => {
+                    const how = r.running
+                      ? "running"
+                      : r.exit === null || r.exit === undefined
+                        ? "ended"
+                        : `exit ${r.exit}`;
+                    const tail = (r.output || "").trim().split("\n").slice(-3).join("\n");
+                    return `#${r.id} ${how} · ${r.command} · ${r.bytes} bytes${tail ? "\n" + tail : ""}`;
+                  })
+                  .join("\n")
+              : "jobs: nothing running — a long one is started with the terminal tool",
+          });
+        } catch {
+          push({ kind: "note", text: "jobs: the server is not reachable" });
+        }
       } else if (o.name === "agents") {
         // Experimental and untyped on the wire: print what is there rather than
         // pretending to know a shape the SDK does not document.
@@ -5574,7 +5601,7 @@
           <dl class="facts">
             <dt>build</dt><dd>webrain chat --serve</dd>
             <dt>routes</dt>
-            <dd>/events /turn /permission /answer /sessions /fork /catalog /search /attach /providers /settings /todos /fleet /tasks /agents</dd>
+            <dd>/events /turn /permission /answer /sessions /fork /catalog /search /attach /providers /settings /todos /jobs /fleet /tasks /agents</dd>
             <dt>secrets</dt><dd>never stored — a provider row keeps the env var name</dd>
           </dl>
           <h3 class="sub-h">keys</h3>
