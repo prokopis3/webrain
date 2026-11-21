@@ -77,8 +77,15 @@ capability, measured. So the order is by cost against what the reader gains:
    `case` arms, no new plumbing. What each left out is named in the row above.
 2. ~~**#1 the interaction handlers** (M)~~ — **DONE 2026-11-21**: the agent can ask to
    leave plan mode and to retry on the auto model; `/mode` stays the human half.
-3. **Resume** (L): reuse `connect()`'s groups on `ResumeSessionOptions`, a
-   `POST /resume {convo}` route, and the page calls it when a conversation opens.
+3. ~~**Resume** (L)~~ — **groundwork DONE 2026-11-21**: `connect()` takes
+   `Option<SessionId>` and resumes through `resume_options`, which copies the
+   groups out of the create config instead of re-deriving them (two of them —
+   `SessionFilesystemOptions`, `SessionInstructionOptions` — are resume-only twins
+   with no `From`, and are copied field by field so nothing is silently dropped).
+   **Remaining**: the `POST /resume {convo}` route (look up the runtime's session
+   id for `webrain-<convo>` through `sessions.list`, then swap `Arc<Live>` the way
+   `reseed` does) and the page command that calls it. Nothing passes `Some(id)`
+   yet, so resume is plumbing until that lands.
 4. **#2 elicitation** (L) once a form renderer exists — it is the prerequisite for
    the runtime's structured questions, and `ask_user` already covers the simple
    case.
