@@ -2280,7 +2280,7 @@ fn big_stack<T: Send + 'static>(
 /// instead of the ~211 MB one.
 #[cfg(feature = "chat")]
 fn chat_runtime() -> bool {
-    github_copilot_sdk::HAS_BUNDLED_CLI || webrain_core::install::find_copilot().is_some()
+    copilot_sdk::HAS_BUNDLED_CLI || webrain_core::install::find_copilot().is_some()
 }
 #[cfg(not(feature = "chat"))]
 fn chat_runtime() -> bool {

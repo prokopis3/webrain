@@ -14,17 +14,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use github_copilot_sdk::rpc::UsageGetMetricsResult;
-use github_copilot_sdk::session_events::ReasoningSummary;
-use github_copilot_sdk::types::{
+use copilot_sdk::rpc::UsageGetMetricsResult;
+use copilot_sdk::session_events::ReasoningSummary;
+use copilot_sdk::types::{
     InfiniteSessionConfig, LargeToolOutputConfig, McpServerConfig, McpStdioServerConfig,
     MemoryConfiguration, PermissionRequestData, PermissionRequestKind, ProviderConfig,
     SessionConfig, SystemMessageConfig, ToolSearchConfig,
 };
-use github_copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
+use copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
-use github_copilot_sdk::handler::{PermissionHandler, UserInputHandler};
-use github_copilot_sdk::session::Session;
+use copilot_sdk::handler::{PermissionHandler, UserInputHandler};
+use copilot_sdk::session::Session;
 
 use super::chat::Args;
 use super::chat_tools;
@@ -35,7 +35,7 @@ use webrain_core::byok::{ChatProvider, SearchMode};
 /// with `--features chat-bundled`. The SDK's own error names the artifact it
 /// looked for, so append the two ways to supply it.
 fn runtime_hint() -> &'static str {
-    if github_copilot_sdk::HAS_BUNDLED_CLI {
+    if copilot_sdk::HAS_BUNDLED_CLI {
         ""
     } else {
         "\n\nthis build does not embed the Copilot runtime. Run `webrain install copilot` \
@@ -540,7 +540,7 @@ pub(crate) async fn connect(
     // Without this the SDK falls back to its own build-machine cache, which a
     // user who only downloaded the binary does not have.
     if let Some(bin) = webrain_core::install::find_copilot() {
-        options = options.with_program(github_copilot_sdk::CliProgram::Path(bin));
+        options = options.with_program(copilot_sdk::CliProgram::Path(bin));
     }
     // One-shot: the process is about to exit, so a runtime left holding a session
     // is a leak and 60 s of grace is plenty. `--serve` is the opposite — measured,

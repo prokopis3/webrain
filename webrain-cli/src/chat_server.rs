@@ -49,10 +49,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use github_copilot_sdk::handler::{
+use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
-use github_copilot_sdk::rpc::{
+use copilot_sdk::rpc::{
     FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
     HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
     McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
@@ -60,11 +60,11 @@ use github_copilot_sdk::rpc::{
     QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
     SkillsEnableRequest, TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
 };
-use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
-use github_copilot_sdk::types::{
+use copilot_sdk::session_events::{PermissionMode, SessionMode};
+use copilot_sdk::types::{
     DeliveryMode, PermissionRequestData, RequestId, SessionId, SetModelOptions,
 };
-use github_copilot_sdk::{Client, session::Session};
+use copilot_sdk::{Client, session::Session};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1223,7 +1223,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     store.append(&state.convo().await, "user", &raw);
                 }
                 let live = state.live.read().await.clone();
-                let opts = github_copilot_sdk::MessageOptions::new(prompt.as_str()).with_mode(
+                let opts = copilot_sdk::MessageOptions::new(prompt.as_str()).with_mode(
                     if delivery == "steer" {
                         DeliveryMode::Immediate
                     } else {
@@ -1248,7 +1248,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let st = state.clone();
             let plan_mode = mode == "plan";
             tokio::spawn(async move {
-                let wait = github_copilot_sdk::MessageOptions::new(prompt.as_str())
+                let wait = copilot_sdk::MessageOptions::new(prompt.as_str())
                     .with_wait_timeout(Duration::from_secs(st.timeout.load(Ordering::SeqCst)));
                 let turn = live.session.send_and_wait(wait);
                 tokio::pin!(turn);
@@ -1381,7 +1381,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             state.timeout.store(s.timeout_secs, Ordering::SeqCst);
             // The three that do not need a rebuild go into the live session now;
             // `None` means "leave it", so an empty effort sends nothing.
-            let patch = github_copilot_sdk::rpc::SessionUpdateOptionsParams {
+            let patch = copilot_sdk::rpc::SessionUpdateOptionsParams {
                 organization_custom_instructions: Some(s.instructions.clone()),
                 enable_session_store: Some(s.session_store),
                 reasoning_effort: if s.effort.is_empty() {

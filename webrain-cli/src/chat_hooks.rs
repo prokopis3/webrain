@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use github_copilot_sdk::hooks::{
+use copilot_sdk::hooks::{
     HookContext, PreToolUseInput, PreToolUseOutput, SessionHooks, SessionStartInput,
     SessionStartOutput, SubagentStartInput, SubagentStartOutput,
 };

@@ -17,10 +17,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use github_copilot_sdk::Error;
-use github_copilot_sdk::ToolResult;
-use github_copilot_sdk::tool::ToolHandler;
-use github_copilot_sdk::types::{Tool, ToolInvocation};
+use copilot_sdk::Error;
+use copilot_sdk::ToolResult;
+use copilot_sdk::tool::ToolHandler;
+use copilot_sdk::types::{Tool, ToolInvocation};
 use serde_json::{Value, json};
 
 /// A shell command that has not answered by now is a command the user did not
