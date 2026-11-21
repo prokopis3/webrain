@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nothing needs an inline width, which the sanitiser strips). `check-html-vocab.mjs`
   asserts prompt and stylesheet name the same classes in **both** directions — a
   class the CSS lost renders as bare text, so that drift is silent without it.
+- **chat (routes)**: `GET /pending` also reports what the *runtime* is holding —
+  `runtime.external` (external tool calls awaiting a result) and
+  `runtime.permissions` (prompts reconstructed from event history) — beside our
+  own `asks`, in a separate key so an unaware renderer cannot break on them, and
+  `POST /pending {request_id, result|error}` answers one. `GET /completions`
+  answers the host-driven completion probe (`get_trigger_characters`). Both lists
+  and the trigger list come back empty on a local session, so these three routes
+  are instrumentation rather than new surface: they turn "does this capability
+  exist here" from a reading of the SDK into one call. Verified live:
+  `{"asks":[],"runtime":{"external":[],"permissions":[]}}`,
+  `{"trigger_characters":[],"supported":false}`, `400 {"error":"request_id"}`,
+  `{"handled":false}` for an unknown id.
 
 ### Fixed
 

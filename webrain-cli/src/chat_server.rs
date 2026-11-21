@@ -53,12 +53,12 @@ use github_copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use github_copilot_sdk::rpc::{
-    FleetStartRequest, HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest,
-    McpDisableRequest, McpEnableRequest, McpListToolsRequest,
-    MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
-    PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest,
-    QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest, TasksSendMessageRequest,
-    ToolsExecuteRequest, UIEphemeralQueryRequest,
+    FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
+    HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
+    McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
+    ModeSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
+    QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
+    TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
 };
 use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
 use github_copilot_sdk::types::{
@@ -1784,6 +1784,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // The approvals still waiting for an answer. A reload used to lose them:
         // the runtime kept waiting, the page had no card, and the turn sat there
         // until the five-minute timeout rejected it.
+        //
+        // `asks` is OUR store, so it only knows prompts this process asked. Two
+        // more sets can exist in the runtime and were never asked about:
+        // external tool calls it holds for a host to answer, and permission
+        // prompts reconstructed from event history (the ones a suspended or
+        // resumed session carries). They are reported under `runtime`, apart
+        // from `asks`, so a card renderer that does not know them yet cannot
+        // break on them.
         ("GET", "/pending") => {
             let asks: Vec<Value> = state
                 .permission
@@ -1793,8 +1801,100 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .values()
                 .map(|(_, card)| card.clone())
                 .collect();
-            let body = json!({ "asks": asks }).to_string();
-            respond(&mut stream, 200, "application/json", &body).await
+            let live = state.live.read().await.clone();
+            let mut runtime = json!({ "external": [], "permissions": [] });
+            let mut runtime_errors: Vec<String> = Vec::new();
+            match live.session.rpc().tools().list_pending_requests().await {
+                Ok(l) => {
+                    runtime["external"] = json!(
+                        l.items
+                            .iter()
+                            .map(|i| json!({
+                                "request_id": i.request_id,
+                                "tool_call_id": i.tool_call_id,
+                                "tool": i.tool_name,
+                                "arguments": i.arguments,
+                                "agent_id": i.agent_id,
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Err(e) => runtime_errors.push(format!("tools.listPendingRequests: {e}")),
+            }
+            match live.session.rpc().permissions().pending_requests().await {
+                Ok(l) => {
+                    runtime["permissions"] = json!(
+                        l.items
+                            .iter()
+                            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Err(e) => runtime_errors.push(format!("permissions.pendingRequests: {e}")),
+            }
+            let mut out = json!({ "asks": asks, "runtime": runtime });
+            if !runtime_errors.is_empty() {
+                out["runtime"]["errors"] = json!(runtime_errors);
+            }
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // Answer an external tool call the runtime is holding. Our own prompts go
+        // through `/permission` (a channel into `WebPermission`); this is the
+        // other path, where the runtime wants a result rather than a yes/no.
+        ("POST", "/pending") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let request_id = v["request_id"].as_str().unwrap_or_default();
+            if request_id.is_empty() {
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"request_id"}"#,
+                )
+                .await;
+            }
+            let reply = HandlePendingToolCallRequest {
+                request_id: RequestId::new(request_id),
+                result: v.get("result").cloned(),
+                error: v.get("error").and_then(|e| e.as_str()).map(String::from),
+            };
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .tools()
+                .handle_pending_tool_call(reply)
+                .await
+            {
+                Ok(r) => json!({ "handled": r.success }),
+                Err(e) => json!({ "handled": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // Host-driven composer completions: ask the runtime which characters open
+        // them. An empty answer is the whole answer — it is how the SDK says the
+        // host (a local session, in our case) does not advertise completions, and
+        // building ghost text on top of that would be UI over nothing.
+        ("GET", "/completions") => {
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .completions()
+                .get_trigger_characters()
+                .await
+            {
+                Ok(r) => json!({
+                    "trigger_characters": r.trigger_characters,
+                    "supported": !r.trigger_characters.is_empty(),
+                }),
+                Err(e) => json!({
+                    "trigger_characters": [],
+                    "supported": false,
+                    "error": e.to_string(),
+                }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
         // The answer to an `ask_user` question. Same shape as `/permission`, but
         // the payload is free text plus whether it was typed or picked.

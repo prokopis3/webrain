@@ -354,7 +354,7 @@ The 28, and why each is where it is:
 
 |---|---|---|
 
-| `completions` | `get_trigger_characters`, `request` | a candidate, **not a free win**: both methods are marked **Experimental**, and `get_trigger_characters` is *host-advertised* — the docs say empty disables host-driven completions "for local sessions", which is what `webrain chat` configures. **Probe first** (`get_trigger_characters`, one call); if it answers `[]`, the capability does not exist in our deployment and no amount of UI work changes that. If it answers non-empty, the contract is known: `request { offset, text }` in **UTF-16 code units**, back `items[]` of `{ insert_text, label?, kind?, range_start?, range_end? }`, and accepting replaces `[range_start, range_end)` or the token at the cursor |
+| `completions` | `get_trigger_characters`, `request` | **PROBED LIVE 2026-11-21 — absent here.** `GET /completions` on a running `chat --serve` answered `{"trigger_characters":[],"supported":false}`, which is the SDK's documented way of saying a **local session does not advertise host-driven completions**. So the route stays as a probe (it costs one call and re-answers after an SDK bump), and no ghost-text UI was built: it would be interface over an empty list. If a future build answers non-empty, the contract is recorded — `request { offset, text }` in **UTF-16 code units**, back `items[]` of `{ insert_text, label?, kind?, range_start?, range_end? }`, accepting replaces `[range_start, range_end)` or the token at the cursor |
 
 | `name` | `get`, `set`, `set_auto` | the RPC half of Tier 2 #5 — `set` is what makes a session persist *before* its first turn, so it is a prerequisite for resume (#12), not a feature of its own |
 
@@ -380,7 +380,7 @@ worth naming because two methods answer a question the page currently guesses at
 
 |---|---|
 
-| `list_pending_requests`, `handle_pending_tool_call` | the runtime can hold a tool call *it* is waiting on; the page approves through its own `PermissionHandler` and never asks what the runtime still has open. `GET /pending` answers for our store only |
+| `list_pending_requests`, `handle_pending_tool_call` | **SHIPPED 2026-11-21** as a probe plus an answer path. `GET /pending` now also reports what the *runtime* is holding — `runtime.external` from `tools.listPendingRequests` and `runtime.permissions` from `permissions.pendingRequests` — beside our own `asks`, kept in a separate key so a renderer that does not know them cannot break. `POST /pending {request_id, result|error}` answers an external call through `handlePendingToolCall`. Live: `{"asks":[],"runtime":{"external":[],"permissions":[]}}` on a quiet session, `400 {"error":"request_id"}` without an id, and `{"handled":false}` for an unknown one. Both lists are empty *by construction* here — we register no external tools, and our `PermissionHandler` answers prompts in-process — so this is insurance against an observed-but-unexplained wait, not a fix for a reproduced bug |
 
 | `get_current_metadata`, `initialize_and_validate` | the offered tool set as the runtime sees it, versus the `/catalog` list the page menus are built from |
 
@@ -438,13 +438,16 @@ feature:
 
 
 
-Nothing here is scheduled. `completions` is the only row in this third pass that is
-a capability rather than a re-plumbing — and it is conditional on the trigger probe
-above, so it is not the first thing to build.
+Nothing here is scheduled. Both candidate rows from this pass were probed on
+2026-11-21 and neither turned into a feature: `completions` answers an empty
+trigger list on a local session (so there is nothing to complete), and the two
+pending lists answer empty on a quiet session (so the "approval nobody was shown"
+hole is theoretical in this deployment — the routes now report it rather than
+close a reproduced bug).
 
-The first is the one gap here that is a *correctness* hole instead of a feature:
-`session.tools.list_pending_requests` / `handle_pending_tool_call`. `GET /pending`
-answers for `WebPermission`'s store alone, so a tool call the **runtime** is holding
-open is invisible to the page — the same class of defect the MCP-health events fixed
-for tool servers, and the failure mode is a turn waiting on an approval nobody was
-shown. One route, one merge into the existing pending card, no new UI.
+That leaves **resume** (`name` + `ResumeSessionConfig`, with `ClientRpc.sessions`)
+as the first gap that is still purely a capability: we replay a transcript where
+the runtime could restore a session, and until then a thread the runtime still
+holds cannot be offered for continuation. It stays L for the reason already
+recorded — the callback set has to be re-supplied or the resumed session silently
+differs — and it is the only row left worth a design pass.
