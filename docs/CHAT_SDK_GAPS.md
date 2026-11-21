@@ -484,15 +484,32 @@ the last one that can be produced this way.
 authored. `rpc.rs` and `session_events.rs` are 7-line facades over a private
 `generated` module produced at build time, and no schema ships in the crate. The
 "47 namespaces" and "158 events" rows above therefore **cannot be carried forward
-by reading the crate** — they need a build, or the runtime's own schema. Do not
-quote them for 2.0.1 until one of those exists; a fabricated number here would
-repeat the mistake the third pass already had to correct.
+by reading the crate** — they need a build, or the runtime's own schema.
+
+### The build settles it: the 2.0.1 totals
+
+`cargo check` writes the module the facades point at — 18 files, 3.6 MB, `rpc.rs`
+alone 919 KB — so the numbers are countable again, just not before a build.
+Counted 2026-11-21:
+
+| what | 1.0.28 | 2.0.1 |
+|---|---|---|
+| session-config fields | 99, flat | 31, of them 19 groups |
+| client-option fields | 29 | 13 |
+| rpc namespaces | 47 | 44 client + 65 session = 109 |
+| event types | 158 | 167 |
+
+Every row moves in the same direction: the flat config surface shrank and the
+reachable protocol surface grew. 47 → 109 namespaces is not a bigger API to
+learn — the generator now nests, so `SessionRpcMcpConfig` is reachable where
+1.0.28 made you spell the method name — but it does mean "we use 4 of 47" is no
+longer the right way to describe what we leave on the table. That is the
+migration's real cost: we are not losing settings, we are re-filing them.
 
 `SessionConfig` — the 99-field object this whole document is measured against —
-also no longer exists. `CreateSessionOptions` has **31 fields, 19 of them groups**,
-so "fields we set out of N" stops being a meaningful ratio. What replaces it as a
-useful question is: *which group does each setting live in, and which groups do we
-still leave empty*. The mapping is in `docs/COPILOT_SDK_V2_MIGRATION.md`.
+also no longer exists. What replaces it as a useful question is: *which group does
+each setting live in, and which groups do we still leave empty*. The mapping is in
+`docs/COPILOT_SDK_V2_MIGRATION.md`.
 
 ### Capabilities 2.0.1 adds that this document never listed
 

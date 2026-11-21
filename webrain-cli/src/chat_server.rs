@@ -1053,6 +1053,7 @@ impl UserInputHandler for WebInput {
     async fn handle(
         &self,
         _session: SessionId,
+        _request_id: Option<copilot_sdk::types::RequestId>,
         question: String,
         choices: Option<Vec<String>>,
         allow_freeform: Option<bool>,
@@ -1381,13 +1382,23 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             state.timeout.store(s.timeout_secs, Ordering::SeqCst);
             // The three that do not need a rebuild go into the live session now;
             // `None` means "leave it", so an empty effort sends nothing.
+            // 2.0.1 groups the flat patch: instructions / state / inference.
             let patch = copilot_sdk::rpc::SessionUpdateOptionsParams {
-                organization_custom_instructions: Some(s.instructions.clone()),
-                enable_session_store: Some(s.session_store),
-                reasoning_effort: if s.effort.is_empty() {
+                instructions: Some(copilot_sdk::rpc::SessionUpdateInstructionOptions {
+                    organization_text: Some(s.instructions.clone()),
+                    ..Default::default()
+                }),
+                state: Some(copilot_sdk::rpc::SessionUpdateStateOptions {
+                    enable_cross_session_store: Some(s.session_store),
+                    ..Default::default()
+                }),
+                inference: if s.effort.is_empty() {
                     None
                 } else {
-                    Some(s.effort.clone())
+                    Some(copilot_sdk::rpc::SessionUpdateInferenceOptions {
+                        reasoning_effort: Some(s.effort.clone()),
+                        ..Default::default()
+                    })
                 },
                 ..Default::default()
             };
@@ -1597,11 +1608,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let r = if on {
                 mcp.enable(McpEnableRequest {
                     server_name: name.clone(),
+                    // We attach at session creation, so there is no receipt to match.
+                    expected_installation_id: None,
                 })
                 .await
             } else {
                 mcp.disable(McpDisableRequest {
                     server_name: name.clone(),
+                    expected_installation_id: None,
                 })
                 .await
             };

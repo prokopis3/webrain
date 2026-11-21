@@ -91,11 +91,63 @@ errors**, which is the whole call-site surface:
 
 - `NamedProviderConfig` full field list, and whether the old `ProviderConfig`
   nests inside it or was replaced.
-- `SessionUpdateOptionsParams`' grouped fields (the `/settings` patch path).
-- What `expected_installation_id` must carry for `session.mcp.enable/disable`.
-- Whether the generated rpc request types keep their 1.0.28 names; they are
-  produced at build time (private `generated` module), so only the compiler can
-  answer.
+- Whether the generated rpc request types keep their 1.0.28 names.
+
+## Second pass — three call sites fixed, and the builders are not what we assumed
+
+**The generated module becomes readable after a build.** `rpc.rs` and
+`session_events.rs` are facades, but `cargo check` writes the real thing beside
+them: `src/generated/` appears with 18 files (3.6 MB), `api_domain_session.rs`
+799 KB, `rpc.rs` 919 KB, `session_events.rs` 657 KB. So every question of the
+form "what is this type called now" has a cheap answer — compile once, then read
+— and the compiler is no longer the only oracle.
+
+Fixed, from that source:
+
+- `/settings` patch regrouped. `organization_custom_instructions` →
+  `instructions.organization_text`, `enable_session_store` →
+  `state.enable_cross_session_store`, `reasoning_effort` →
+  `inference.reasoning_effort`. The three group structs derive `Default`, so the
+  patch stays a struct-update expression.
+- `McpEnableRequest` / `McpDisableRequest`: `expected_installation_id:
+  Option<String>` — `None` here, because we attach the server at session creation
+  and hold no receipt to match.
+- `UserInputHandler::handle` gained `request_id: Option<RequestId>`
+  (`types::RequestId`). Answered through our own bus, so it is ignored — but it is
+  also how the page *would* answer through `session.ui` if the bus ever goes.
+
+**The builder surface is the real news, and it is worse than the field diff.**
+`CreateSessionOptions` offers 31 builders and every one is group-level:
+`with_system_message_transform`, `with_session_id`, `with_name`, `with_model`,
+`with_client_name`, `with_system_message`, `with_diagnostics`,
+`with_working_directory`, `with_cloud`, `with_inference`, `with_policy`,
+`with_events`, `with_interaction`, `with_tools`, `with_canvases`,
+`with_extensions`, `with_agents`, `with_skills`, `with_mcp`,
+`with_config_directory`, `with_enable_config_discovery`, `with_filesystem`,
+`with_state`, `with_instructions`, `with_hooks`, `with_git`, `with_github`,
+`with_plugins`, `with_permissions`, `with_execution`, `with_experiments`.
+
+These are **gone**, and `connect()` calls every one of them: `with_provider`,
+`with_mcp_servers`, `with_system_message`, `with_infinite_sessions`,
+`with_permission_handler`, `approve_all_permissions`, `approve_permissions_if`,
+`with_user_input_handler`, `with_hooks`, `with_skill_directories`. Plus
+`ClientOptions::with_base_directory` / `with_program`, which no longer exist on a
+client built by a constructor.
+
+So `connect()` is not a rename pass. The 160 lines that build a `SessionConfig`
+by chaining become something that constructs group structs — `SessionMcpOptions
+{ servers }`, `SessionToolOptions { available_tools, excluded_tools, search,
+large_output }`, `SessionEventOptions { streaming,
+include_sub_agent_streaming_events }`, `SessionStateOptions { infinite_sessions,
+memory, enable_cross_session_store }`, `SessionSkillOptions { enabled,
+directories }`, `SessionInstructionOptions { organization_text }`,
+`SessionFilesystemOptions { track_file_changes }`, `SessionPermissionOptions`
+with the "approve everything" mode expressed as data. Two decisions in that block
+are behaviour, not plumbing — the permission mode (the path fence's twin) and the
+`Fence` hook — so they get read before they are retyped, not after.
+
+The upside of the whole pass: the tree is no longer 8 unknowns deep. It is one
+function, and both remaining errors are in it.
 
 ## Status
 
@@ -104,8 +156,11 @@ tree so nothing here can break PR #107.
 
 Done: dependency renamed to `copilot-sdk = "2.0.1"` with the same feature
 posture, `github_copilot_sdk` → `copilot_sdk` at all 22 sites, first compile run
-and its 8 errors catalogued above.
+and its 8 errors catalogued above, then all five call-site fixes from the
+generated sources. **8 errors → 2**, and both survivors are the same line of
+`connect()`: the `SessionConfig` import and `ClientOptions::default()`.
 
-Not done: the `connect()` rewrite, the five call-site fixes, and any runtime
-verification. **This branch does not compile yet** — it is a measured start, not
-a migration.
+Not done: the `connect()` rewrite — blocked on measuring the group structs, not
+on anything external — and any runtime verification. **This branch does not
+compile yet.** The measured totals that re-baseline the gaps inventory are in
+`docs/CHAT_SDK_GAPS.md` (fifth pass).
