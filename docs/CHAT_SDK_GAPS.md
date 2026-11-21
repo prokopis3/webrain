@@ -318,65 +318,133 @@ Also verified by eye during the same live turn: the reasoning block sits above t
 call or answer it explains (`thinking` → tool → `thinking` → answer), which is the
 per-step filing from the previous pass holding up under a real 300-line turn.
 
-## Third pass, 2026-11-20 — what the totals still hide
-
-The numbers in "The totals" were counted by hand and one of them was wrong in the
-direction that matters: **a call chain broken across lines hides a namespace.**
-`POST /tool` is written as `.rpc()` then `.tools().execute(...)`, so a grep for
-`.rpc().tools(` found nothing and `tools` was carried as "used but unmeasured".
-Re-counted here by looking for `.<namespace>()` anywhere in `webrain-cli/src`:
-
-| SessionRpc namespaces | count |
-|---|---|
-| offered by 1.0.28 | 47 |
-| mentioned in the CLI | 19 (`fleet`, `history`, `instructions`, `limit_prediction`, `mcp`, `metadata`, `mode`, `model`, `options`, `permissions`, `plan`, `providers`, `queue`, `quota`, `skills`, `tasks`, `tools`, `ui`, `usage`) |
-| **no call site at all** | **28** |
-
-The 28, and why each is where it is:
-
-| namespace | methods (read from `rpc.rs`) | verdict |
-|---|---|---|
-| `completions` | `get_trigger_characters`, `request` | **the one genuinely new capability**: inline completion inside a session — ghost text in the composer, or a suggestion the page can accept. Nothing we ship does this, and it needs no new plumbing: one route and one `case` |
-| `name` | `get`, `set`, `set_auto` | the RPC half of Tier 2 #5 — `set` is what makes a session persist *before* its first turn, so it is a prerequisite for resume (#12), not a feature of its own |
-| `settings` | not read | unknown; do not claim it buys anything until the methods are read |
-| `visibility` | `get`, `set` | unknown semantics; same rule |
-| `lsp` | not read | a language server inside the session; the agent already has `grep`/`view` tools, so the value is unclear |
-| `debug`, `event_log`, `telemetry` | — | diagnostics-shaped, and the page cannot read them anyway (see Tier 2 #9) |
-| `canvas`, `connectors`, `extensions`, `plugins`, `managed_settings`, `sandbox`, `remote`, `schedule`, `workflow`, `workspaces`, `autopilot_objective`, `agent`, `accounts`, `git_hub_auth`, `content_exclusion`, `customizations`, `provider`, `shell`, `commands` | — | in "Refuse" already: enterprise, a different product, or a renderer we do not ship |
-
-`session.tools` is used, but only its `execute`. The rest of that namespace is
-worth naming because two methods answer a question the page currently guesses at:
-
-| method | what it would change |
-|---|---|
-| `list_pending_requests`, `handle_pending_tool_call` | the runtime can hold a tool call *it* is waiting on; the page approves through its own `PermissionHandler` and never asks what the runtime still has open. `GET /pending` answers for our store only |
-| `get_current_metadata`, `initialize_and_validate` | the offered tool set as the runtime sees it, versus the `/catalog` list the page menus are built from |
-
-### ClientRpc — 34 namespaces, zero calls
-
-Everything webrain chat does is session-level, which is defensible (one process,
-one conversation) and is also why these are all still open. Listed so a later
-"why can't the page do X" has somewhere to start:
-
-`account`, `agent_registry`, `agents`, `azure_ml`, `catalog`, `commands`,
-`connectors`, `content_exclusion`, `environments`, `extensions`, `feature_flags`,
-`git`, `git_hub_owners`, `git_hub_repository`, `global_state`, `hooks`, `host`,
-`instructions`, `llm_inference`, `managed_settings`, `mcp`, `models`,
-`permissions`, `persistence`, `plugins`, `repo`, `runtime`, `sandbox`, `secrets`,
-`session_fs`, `sessions`, `skills`, `tools`, `user`
-
-Three of them are the interesting ones for a chat client, and none is a chat
-feature:
-
-- **`sessions`** — create/list/delete a session from the client rather than
-  letting our store own the list. Today `GET /sessions` is our database, and the
-  runtime's own list is never consulted, which is the reason a thread that the
-  runtime still holds cannot be offered for resume.
-- **`runtime`**, **`host`** — version, capabilities and environment as the
-  runtime reports them, instead of `--json` flags we parse ourselves.
-- **`secrets`** / **`user`** — where a provider key would live if it lived in the
-  runtime instead of our vault. Our vault is deliberate (it is the only store
-  with TOTP for `webrain login`), so this stays refused.
-
-Nothing here is scheduled. The one row worth building is `completions`, and it is
-the only row in this third pass that is a capability rather than a re-plumbing.
+## Third pass, 2026-11-20 — what the totals still hide
+
+
+
+The numbers in "The totals" were counted by hand and one of them was wrong in the
+
+direction that matters: **a call chain broken across lines hides a namespace.**
+
+`POST /tool` is written as `.rpc()` then `.tools().execute(...)`, so a grep for
+
+`.rpc().tools(` found nothing and `tools` was carried as "used but unmeasured".
+
+Re-counted here by looking for `.<namespace>()` anywhere in `webrain-cli/src`:
+
+
+
+| SessionRpc namespaces | count |
+
+|---|---|
+
+| offered by 1.0.28 | 47 |
+
+| mentioned in the CLI | 19 (`fleet`, `history`, `instructions`, `limit_prediction`, `mcp`, `metadata`, `mode`, `model`, `options`, `permissions`, `plan`, `providers`, `queue`, `quota`, `skills`, `tasks`, `tools`, `ui`, `usage`) |
+
+| **no call site at all** | **28** |
+
+
+
+The 28, and why each is where it is:
+
+
+
+| namespace | methods (read from `rpc.rs`) | verdict |
+
+|---|---|---|
+
+| `completions` | `get_trigger_characters`, `request` | a candidate, **not a free win**: both methods are marked **Experimental**, and `get_trigger_characters` is *host-advertised* — the docs say empty disables host-driven completions "for local sessions", which is what `webrain chat` configures. **Probe first** (`get_trigger_characters`, one call); if it answers `[]`, the capability does not exist in our deployment and no amount of UI work changes that. If it answers non-empty, the contract is known: `request { offset, text }` in **UTF-16 code units**, back `items[]` of `{ insert_text, label?, kind?, range_start?, range_end? }`, and accepting replaces `[range_start, range_end)` or the token at the cursor |
+
+| `name` | `get`, `set`, `set_auto` | the RPC half of Tier 2 #5 — `set` is what makes a session persist *before* its first turn, so it is a prerequisite for resume (#12), not a feature of its own |
+
+| `settings` | `snapshot`, `evaluatePredicate` | **not ours to call** — both are `pub(crate)` in 1.0.28, so the SDK publishes no way in and there is nothing to wire. Closed 2026-11-21 by reading `rpc.rs:17657` |
+
+| `visibility` | `get`, `set` | **Refuse** — `visibility.get` reports the Mission Control sharing status (`repo` / `unshared`) and a shareable GitHub URL, i.e. GitHub cloud session sharing, not a chat feature. Closed 2026-11-21 |
+
+| `lsp` | not read | a language server inside the session; the agent already has `grep`/`view` tools, so the value is unclear |
+
+| `debug`, `event_log`, `telemetry` | — | diagnostics-shaped, and the page cannot read them anyway (see Tier 2 #9) |
+
+| `canvas`, `connectors`, `extensions`, `plugins`, `managed_settings`, `sandbox`, `remote`, `schedule`, `workflow`, `workspaces`, `autopilot_objective`, `agent`, `accounts`, `git_hub_auth`, `content_exclusion`, `customizations`, `provider`, `shell`, `commands` | — | in "Refuse" already: enterprise, a different product, or a renderer we do not ship |
+
+
+
+`session.tools` is used, but only its `execute`. The rest of that namespace is
+
+worth naming because two methods answer a question the page currently guesses at:
+
+
+
+| method | what it would change |
+
+|---|---|
+
+| `list_pending_requests`, `handle_pending_tool_call` | the runtime can hold a tool call *it* is waiting on; the page approves through its own `PermissionHandler` and never asks what the runtime still has open. `GET /pending` answers for our store only |
+
+| `get_current_metadata`, `initialize_and_validate` | the offered tool set as the runtime sees it, versus the `/catalog` list the page menus are built from |
+
+
+
+### ClientRpc — 34 namespaces, zero calls
+
+
+
+Everything webrain chat does is session-level, which is defensible (one process,
+
+one conversation) and is also why these are all still open. Listed so a later
+
+"why can't the page do X" has somewhere to start:
+
+
+
+`account`, `agent_registry`, `agents`, `azure_ml`, `catalog`, `commands`,
+
+`connectors`, `content_exclusion`, `environments`, `extensions`, `feature_flags`,
+
+`git`, `git_hub_owners`, `git_hub_repository`, `global_state`, `hooks`, `host`,
+
+`instructions`, `llm_inference`, `managed_settings`, `mcp`, `models`,
+
+`permissions`, `persistence`, `plugins`, `repo`, `runtime`, `sandbox`, `secrets`,
+
+`session_fs`, `sessions`, `skills`, `tools`, `user`
+
+
+
+Three of them are the interesting ones for a chat client, and none is a chat
+
+feature:
+
+
+
+- **`sessions`** — create/list/delete a session from the client rather than
+
+  letting our store own the list. Today `GET /sessions` is our database, and the
+
+  runtime's own list is never consulted, which is the reason a thread that the
+
+  runtime still holds cannot be offered for resume.
+
+- **`runtime`**, **`host`** — version, capabilities and environment as the
+
+  runtime reports them, instead of `--json` flags we parse ourselves.
+
+- **`secrets`** / **`user`** — where a provider key would live if it lived in the
+
+  runtime instead of our vault. Our vault is deliberate (it is the only store
+
+  with TOTP for `webrain login`), so this stays refused.
+
+
+
+Nothing here is scheduled. `completions` is the only row in this third pass that is
+a capability rather than a re-plumbing — and it is conditional on the trigger probe
+above, so it is not the first thing to build.
+
+The first is the one gap here that is a *correctness* hole instead of a feature:
+`session.tools.list_pending_requests` / `handle_pending_tool_call`. `GET /pending`
+answers for `WebPermission`'s store alone, so a tool call the **runtime** is holding
+open is invisible to the page — the same class of defect the MCP-health events fixed
+for tool servers, and the failure mode is a turn waiting on an approval nobody was
+shown. One route, one merge into the existing pending card, no new UI.
