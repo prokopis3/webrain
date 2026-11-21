@@ -17,9 +17,12 @@ use std::time::Duration;
 use copilot_sdk::rpc::UsageGetMetricsResult;
 use copilot_sdk::session_events::ReasoningSummary;
 use copilot_sdk::types::{
+    CreateSessionFilesystemOptions, CreateSessionInstructionOptions, CreateSessionOptions,
     InfiniteSessionConfig, LargeToolOutputConfig, McpServerConfig, McpStdioServerConfig,
-    MemoryConfiguration, PermissionRequestData, PermissionRequestKind, ProviderConfig,
-    SessionConfig, SystemMessageConfig, ToolSearchConfig,
+    MemoryConfiguration, NamedProviderConfig, PermissionRequestData, PermissionRequestKind,
+    ProviderModelConfig, SessionEventOptions, SessionInferenceOptions, SessionInteractionOptions,
+    SessionPermissionOptions, SessionSkillOptions, SessionStateOptions, SessionToolOptions,
+    SystemMessageConfig, ToolSearchConfig,
 };
 use copilot_sdk::{Client, ClientMode, ClientOptions, IndexMap, MessageOptions, ToolSet};
 
@@ -356,109 +359,115 @@ pub(crate) async fn connect(
         }),
     );
 
-    // SDK builders (ProviderConfig::new(..).with_*), so a renamed field is a
-    // compile error rather than a silently-dropped setting.
-    let mut provider_cfg =
-        ProviderConfig::new(provider.base_url.clone()).with_provider_type(provider.provider_type);
+    // 2.0.1 splits the old `ProviderConfig`: the endpoint is a
+    // `NamedProviderConfig` and the model's caps moved to `ProviderModelConfig`
+    // — including the two token limits this block exists for.
+    let mut endpoint = NamedProviderConfig::new("webrain", provider.base_url.clone())
+        .with_provider_type(provider.provider_type);
     if let Some(k) = provider.bearer_token() {
-        provider_cfg = provider_cfg.with_api_key(k);
+        endpoint = endpoint.with_api_key(k);
     }
-    provider_cfg.model_id = Some(provider.model.clone());
-    // Only when the user asked: the runtime already knows the model's real
-    // limit, and overriding it upward makes a small-context model reject the
-    // prompt as too long.
-    provider_cfg.max_prompt_tokens = args.max_prompt_tokens;
     // The runtime's default asks the provider for a 64k-token completion. That
     // is a *reservation* in some billing models: measured on a real turn,
     // OpenRouter refused a request outright ("you requested up to 64000 tokens,
     // but can only afford 171"). A chat answer does not need 64k.
-    provider_cfg.max_output_tokens = Some(i64::from(args.max_output_tokens.unwrap_or(4096)));
-
-    let mut config = SessionConfig::default()
-        .with_model(provider.model.clone())
-        .with_provider(provider_cfg)
-        .with_mcp_servers(servers)
-        .with_system_message(
-            SystemMessageConfig::new()
-                .with_mode("replace")
-                .with_content(system_prompt()),
-        )
-        // A one-shot command must not leave session state behind, but `--serve`
-        // is the opposite: a long conversation, where hitting the context limit
-        // mid-answer is the failure this switch exists to prevent. Compaction is
-        // reported as `session.compaction_*` and already lands in the page.
-        .with_infinite_sessions(infinite_sessions(args));
-    // `config.name` is the field that makes `session.list` able to see this
-    // session at all; without it a thread exists only in our own store until its
-    // first turn, which is why resume had nothing to resume.
-    if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
-        config.name = Some(n);
-    }
-    if let Some(handler) = permission {
-        config = config.with_permission_handler(handler);
+    let model_cfg = ProviderModelConfig::new(&provider.model, "webrain")
+        .with_model_id(provider.model.clone())
+        .with_max_output_tokens(i64::from(args.max_output_tokens.unwrap_or(4096)));
+    // Only when the user asked: the runtime already knows the model's real
+    // limit, and overriding it upward makes a small-context model reject the
+    // prompt as too long.
+    let model_cfg = match args.max_prompt_tokens {
+        Some(n) => model_cfg.with_max_prompt_tokens(n),
+        None => model_cfg,
+    };
+    let mut inference = SessionInferenceOptions::new()
+        .with_providers(vec![endpoint])
+        .with_default_provider("webrain")
+        .with_models(vec![model_cfg])
+        // A turn that reads three files stops being three round-trips. On by
+        // default: it only ever shortens the turn, and 2.0.1 is where the
+        // option exists at all.
+        .with_allow_multiple_tool_calls(args.parallel_tools.unwrap_or(true));
+    // A one-shot command must not leave session state behind, but `--serve` is
+    // the opposite: a long conversation, where hitting the context limit
+    // mid-answer is the failure this switch exists to prevent. Compaction is
+    // reported as `session.compaction_*` and already lands in the page.
+    let state = SessionStateOptions::new().with_infinite_sessions(infinite_sessions(args));
+    let events = SessionEventOptions::new();
+    let tools = SessionToolOptions::new();
+    let skills_cfg = SessionSkillOptions::new();
+    let session_name = name;
+    // The name is the field that makes `session.list` able to see this session
+    // at all; without it a thread exists only in our own store until its first
+    // turn, which is why resume had nothing to resume.
+    let session_name = session_name.filter(|n| !n.trim().is_empty());
+    let permissions = if let Some(handler) = permission {
+        SessionPermissionOptions::new().with_on_request(handler)
     } else if args.yes {
-        config = config.approve_all_permissions();
+        SessionPermissionOptions::new().approve_all_permissions()
     } else {
-        config = config.approve_permissions_if(not_destructive);
-    }
+        SessionPermissionOptions::new().approve_permissions_if(not_destructive)
+    };
     // Read before the handler is moved into the config: whether a question can
     // be answered decides whether the tool is offered at all.
     let ask = user_input.is_some();
-    if let Some(handler) = user_input {
-        config = config.with_user_input_handler(handler);
-    }
+    let interaction =
+        user_input.map(|h| SessionInteractionOptions::new().with_on_user_input_request(h));
     // The boundary the runtime's own tools do not have, plus the workspace's
     // own instruction files at session start. Installed here rather than on the
     // page so `webrain chat "<prompt>"` (one turn, no UI) is fenced identically.
-    config = config.with_hooks(std::sync::Arc::new(crate::chat_hooks::Fence::new(
+    let fence = std::sync::Arc::new(crate::chat_hooks::Fence::new(
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    )));
+    ));
     // The same directory the page's `@` menu lists, so a skill named there can
     // actually be loaded. Discovery-only: the runtime reads a skill when the
     // model asks for it, it is not inlined into every prompt.
     let skills = webrain_core::skills::dir();
     // empty mode forces this off when unset, so the directories below stay inert.
-    config.enable_skills = Some(true);
-    if skills.is_dir() {
-        config = config.with_skill_directories([skills]);
-    }
+    let skills_cfg = skills_cfg.with_enabled(true);
+    let skills_cfg = if skills.is_dir() {
+        skills_cfg.with_directories(vec![skills])
+    } else {
+        skills_cfg
+    };
     // `--serve` always streams: the page paints deltas, and without them a turn
     // shows nothing until it is over. The CLI keeps `--stream` opt-in because
     // there stdout *is* the answer, not a progress bar.
-    config.streaming = Some(args.stream || args.serve);
+    let events = events.with_streaming(args.stream || args.serve);
     // on the session, so turn one reasons as asked instead of at the runtime's default.
     if let Some(e) = args.effort.as_deref()
         && !e.is_empty()
         && e != "off"
     {
-        config.reasoning_effort = Some(e.to_string());
-        // The page has a thinking panel, so ask for the summary explicitly: what
-        // a model emits is otherwise the runtime's call, and a provider that
+        // The summary is explicit because the page has a thinking panel: what a
+        // model emits is otherwise the runtime's call, and a provider that
         // supports summaries stays silent without this.
-        config.reasoning_summary = Some(ReasoningSummary::Concise);
+        inference = inference
+            .with_reasoning_effort(e)
+            .with_reasoning_summary(ReasoningSummary::Concise);
     }
     // without this a delegated worker stays silent until it finishes.
-    config.include_sub_agent_streaming_events = Some(true);
+    let events = events.with_include_sub_agent_streaming_events(true);
     // Captures what each turn changed on disk, which is the half of "undo" the
     // conversation cannot give back — `session.history.listRewindPoints` answers
     // `fileChangeTrackingEnabled: false` for a session that never opted in.
-    config.enable_file_change_tracking = Some(args.serve);
+    let filesystem = CreateSessionFilesystemOptions::new().with_track_file_changes(args.serve);
     // The runtime's cross-session store: off unless the page switched it on,
     // because writing session state is not something a scraping command should
     // do behind the user's back, and the `todos` table the plan view reads lives
     // in that database.
-    config.enable_session_store = Some(args.session_store.unwrap_or(false));
     // One turn, no memory writes: the runtime's memory feature is on by default
     // in CLI mode and would accumulate state a one-shot command never reads.
     // `--serve` may turn it on, which is the only path to remembering anything
     // across conversations.
-    config.memory = Some(if args.memory.unwrap_or(false) {
-        MemoryConfiguration::enabled()
-    } else {
-        MemoryConfiguration::disabled()
-    });
-    // Nothing about this turn is Copilot's to measure.
-    config.enable_session_telemetry = Some(false);
+    let state = state
+        .with_enable_cross_session_store(args.session_store.unwrap_or(false))
+        .with_memory(if args.memory.unwrap_or(false) {
+            MemoryConfiguration::enabled()
+        } else {
+            MemoryConfiguration::disabled()
+        });
     // Keep the agent's reachable surface to our own tools. Note what this does
     // NOT do: measured 2026-11-07 on a one-word prompt (`webrain chat`, deepseek,
     // the printed `tokens N in`) the turn still carries ~19.8k input tokens before
@@ -470,14 +479,13 @@ pub(crate) async fn connect(
     //
     // `ToolSet` rather than raw strings: it validates each name at build time
     // and emits the runtime's documented `mcp:<server>-<tool>` form.
-    config.enable_config_discovery = Some(false);
-    config.available_tools = Some(tool_filter());
+    let tools = tools.with_available_tools(tool_filter());
     // Defer the tool schemas. Measured 2026-11-07: the 18 `webrain_*` schemas are
     // 9 820 input tokens on every request, and a turn usually wants one of them.
     // Above `defer_threshold` the runtime offers `tool_search_tool` and the model
     // loads a schema when it asks for it. The runtime default is 30, which our 18
     // MCP tools sit below — hence the explicit 1.
-    config.tool_search = Some(
+    let tools = tools.with_search(
         ToolSearchConfig::new()
             .with_enabled(true)
             .with_defer_threshold(1),
@@ -499,9 +507,11 @@ pub(crate) async fn connect(
             hidden.push(format!("builtin:{tool}"));
         }
     }
-    if !hidden.is_empty() {
-        config.excluded_tools = Some(hidden);
-    }
+    let tools = if hidden.is_empty() {
+        tools
+    } else {
+        tools.with_excluded_tools(hidden)
+    };
     // A tool result over 50 KB is spilled to a file and the model is handed a
     // preview. The CLI's default directory is the OS temp dir, which our own path
     // fence (`chat_hooks::Fence`) refuses — so the preview named a file the agent
@@ -509,13 +519,39 @@ pub(crate) async fn connect(
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let spill = workdir.join(".webrain").join("tool-output");
     let _ = std::fs::create_dir_all(&spill);
-    config.large_output = Some(LargeToolOutputConfig::new().with_output_directory(spill));
+    let tools = tools.with_large_output(LargeToolOutputConfig::new().with_output_directory(spill));
     // The page's standing instructions, applied by the runtime rather than pasted
     // onto every prompt: this survives a restart and costs no tokens per turn.
-    if let Some(text) = args.instructions.as_deref()
-        && !text.trim().is_empty()
-    {
-        config.organization_custom_instructions = Some(text.trim().to_string());
+    let instructions = match args.instructions.as_deref().map(str::trim) {
+        Some(text) if !text.is_empty() => {
+            CreateSessionInstructionOptions::new().with_organization_text(text)
+        }
+        _ => CreateSessionInstructionOptions::new(),
+    };
+    let mut config = CreateSessionOptions::default()
+        .with_model(provider.model.clone())
+        .with_working_directory(workdir.clone())
+        .with_system_message(
+            SystemMessageConfig::new()
+                .with_mode("replace")
+                .with_content(system_prompt()),
+        )
+        .with_mcp(|m| m.with_servers(servers))
+        .with_inference(|_| inference)
+        .with_events(|_| events)
+        .with_state(|_| state)
+        .with_tools(|_| tools)
+        .with_skills(|_| skills_cfg)
+        .with_filesystem(|_| filesystem)
+        .with_instructions(|_| instructions)
+        .with_permissions(|_| permissions)
+        .with_hooks(|h| h.with_handlers(fence))
+        .with_enable_config_discovery(false);
+    if let Some(n) = session_name {
+        config = config.with_name(n);
+    }
+    if let Some(interaction) = interaction {
+        config = config.with_interaction(|_| interaction);
     }
 
     // A process that exits must not leave the runtime holding a session: reap
@@ -532,26 +568,30 @@ pub(crate) async fn connect(
     let home = std::env::var_os("WEBRAIN_CHAT_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("webrain-copilot-home"));
-    let mut options = ClientOptions::default()
-        .with_mode(ClientMode::Empty)
-        .with_base_directory(home);
-    // The released binary does not embed a runtime, so point the SDK at the one
-    // `webrain install copilot` put in the engine cache (or COPILOT_CLI_PATH).
-    // Without this the SDK falls back to its own build-machine cache, which a
-    // user who only downloaded the binary does not have.
-    if let Some(bin) = webrain_core::install::find_copilot() {
-        options = options.with_program(copilot_sdk::CliProgram::Path(bin));
-    }
+    let mut options = ClientOptions::new(ClientMode::Empty);
+    let owned = copilot_sdk::OwnedRuntimeOptions::new().with_base_directory(home);
     // One-shot: the process is about to exit, so a runtime left holding a session
     // is a leak and 60 s of grace is plenty. `--serve` is the opposite — measured,
     // a minute of reading the answer and the runtime cleans the session up, which
     // reads as "the runtime shut down" on a page nobody closed. It lives until the
     // process does.
-    if !args.serve {
-        options = options.with_session_idle_timeout_seconds(60);
+    let owned = if args.serve {
+        owned
+    } else {
+        owned.with_session_idle_timeout_seconds(60)
+    };
+    // The released binary does not embed a runtime, so point the SDK at the one
+    // `webrain install copilot` put in the engine cache (or COPILOT_CLI_PATH).
+    // Without this the SDK falls back to its own build-machine cache, which a
+    // user who only downloaded the binary does not have.
+    let mut runtime = copilot_sdk::RuntimeConnection::for_default(owned)
+        .map_err(|e| anyhow::anyhow!("could not select a Copilot runtime: {e}"))?;
+    if let Some(bin) = webrain_core::install::find_copilot()
+        && let Some(proc) = runtime.child_process_options_mut()
+    {
+        proc.program = copilot_sdk::CliProgram::Path(bin);
     }
-    options.working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
+    options = options.with_runtime(runtime);
     let client = Client::start(options).await.map_err(|e| {
         anyhow::anyhow!("could not start the Copilot runtime: {e}{}", runtime_hint())
     })?;

@@ -267,13 +267,27 @@ tree so nothing here can break PR #107.
 Done: dependency renamed to `copilot-sdk = "2.0.1"` with the same feature
 posture, `github_copilot_sdk` → `copilot_sdk` at all 22 sites, first compile run
 and its 8 errors catalogued above, then all five call-site fixes from the
-generated sources. **8 errors → 2**, and both survivors are the same line of
-`connect()`: the `SessionConfig` import and `ClientOptions::default()`.
+generated sources, then `connect()` itself.
 
-Not done: the `connect()` rewrite — now fully measured (see "The plan"), so it is
-scheduled rather than blocked — and any runtime verification. **This branch does
-not compile yet.** The measured totals that re-baseline the gaps inventory are in
+**It compiles: `cargo check` exit 0, no warnings, and the 58 CLI tests pass.**
+That is the migration's gate met, not its verification — no live turn has run on
+2.0.1 yet, which is step 2 of the plan below.
+
+What the rewrite actually turned on, in `connect()`: the ten groups replaced the
+flat config one-for-one, and every group is `#[non_exhaustive]`, so the group
+builders are the only door (no struct literals, and the parent's
+`with_<group>` setters take a closure: `.with_mcp(|m| m.with_servers(servers))`).
+An earlier draft of this note said `approve_permissions_if` was gone — it is
+not: `SessionPermissionOptions` kept it, which is why no predicate adapter was
+needed.
+
+One capability came with the migration: `inference.allow_multiple_tool_calls`,
+now a Runtime-tab switch (`parallel_tools`, default on, creation-time so a flip
+reports `restart: true`).
+
+The measured totals that re-baseline the gaps inventory are in
 `docs/CHAT_SDK_GAPS.md` (fifth pass).
+
 
 ## Evidence notes
 

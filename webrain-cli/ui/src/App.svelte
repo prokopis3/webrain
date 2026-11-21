@@ -371,6 +371,7 @@
     memory: false,
     session_store: false,
     allow_agents: true,
+    parallel_tools: true,
     max_output_tokens: 4096,
     timeout_secs: 300,
     compact_at: 80,
@@ -5552,6 +5553,11 @@
               <input type="checkbox" bind:checked={rt.allow_agents} />
               <span class="box" aria-hidden="true"></span>
               <span>let the agent delegate to sub-agents</span>
+            </label>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rt.parallel_tools} />
+              <span class="box" aria-hidden="true"></span>
+              <span>let one turn ask for several tools at once</span>
             </label>
             <label class="sfld">
               <span>completion budget</span>

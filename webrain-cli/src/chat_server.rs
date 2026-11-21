@@ -789,6 +789,9 @@ struct RuntimeSettings {
     /// Standing instructions for every turn, applied by the runtime. Empty means
     /// none.
     instructions: String,
+    /// One turn may ask for several tool calls at once. Creation-time only, so
+    /// flipping it costs a restart — the trade nobody minds for a faster turn.
+    parallel_tools: bool,
 }
 
 impl Default for RuntimeSettings {
@@ -802,6 +805,7 @@ impl Default for RuntimeSettings {
             compact_at: 80,
             effort: String::new(),
             instructions: String::new(),
+            parallel_tools: true,
         }
     }
 }
@@ -835,6 +839,7 @@ impl RuntimeSettings {
                 .clamp(COMPACT_PCT.0, COMPACT_PCT.1),
             effort: v["effort"].as_str().unwrap_or_default().to_string(),
             instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
+            parallel_tools: v["parallel_tools"].as_bool().unwrap_or(d.parallel_tools),
         }
     }
 
@@ -848,6 +853,7 @@ impl RuntimeSettings {
             "compact_at": self.compact_at,
             "effort": self.effort,
             "instructions": self.instructions,
+            "parallel_tools": self.parallel_tools,
         })
     }
 
@@ -858,7 +864,15 @@ impl RuntimeSettings {
         // and `instructions` are all reachable through `session.options.update`,
         // and rebuilding the session for them threw away the prompt cache for a
         // save that is usually just a wording change.
-        let session = |s: &Self| (s.memory, s.allow_agents, s.max_output_tokens, s.compact_at);
+        let session = |s: &Self| {
+            (
+                s.memory,
+                s.allow_agents,
+                s.max_output_tokens,
+                s.compact_at,
+                s.parallel_tools,
+            )
+        };
         let before = session(self);
         if let Some(b) = v["memory"].as_bool() {
             self.memory = b;
@@ -888,6 +902,9 @@ impl RuntimeSettings {
         if let Some(t) = v["instructions"].as_str() {
             self.instructions = t.to_string();
         }
+        if let Some(b) = v["parallel_tools"].as_bool() {
+            self.parallel_tools = b;
+        }
         before != session(self)
     }
 
@@ -911,6 +928,7 @@ impl RuntimeSettings {
         // empty is "unset", which is what `connect` already treats as the default.
         args.effort = Some(self.effort.clone());
         args.instructions = Some(self.instructions.clone());
+        args.parallel_tools = Some(self.parallel_tools);
     }
 }
 
@@ -3938,6 +3956,11 @@ mod tests {
         assert_eq!(s.compact_at, 60);
         s.merge(&json!({"compact_at": 5}));
         assert_eq!(s.compact_at, COMPACT_PCT.0);
+        // Parallel tool calls are creation-time in 2.0.1, so the switch is a
+        // session field too — on by default, and a flip rebuilds.
+        assert!(s.parallel_tools);
+        assert!(s.merge(&json!({"parallel_tools": false})));
+        assert!(!s.merge(&json!({"parallel_tools": false})));
         // And the stamp is what `connect` actually reads.
         let mut args = Args::default();
         s.stamp(&mut args);

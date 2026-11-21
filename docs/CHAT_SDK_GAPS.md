@@ -520,7 +520,7 @@ compile yet.
 
 | group field | what it buys our chat | work |
 |---|---|---|
-| `inference.allow_multiple_tool_calls` | parallel tool calls — a turn that reads three files stops being three round-trips | M |
+| `inference.allow_multiple_tool_calls` | parallel tool calls — a turn that reads three files stops being three round-trips | **SHIPPED 2026-11-21** as the Runtime tab's `parallel_tools` switch (default on; creation-time, so a flip answers `restart: true`). Verified by the unit test that the flag gates a restart and by the 58 CLI tests — not by a live turn, because the migration below only just compiled |
 | `interaction.on_elicitation_request` + `interaction.ask_user_variant` | the structured-question row from Tier 2 #4; the card shape already exists as `askcard`/`askCard` | M |
 | `execution.limits` | the runaway-turn cap Tier 2 #6 was dropped for — in 1.0.28 the only field was a Copilot-plan budget | M |
 | `agents.default` / `agents.selected` / `agents.included_builtin_agents` | a real agent picker, where 1.0.28 needed `custom_agents` built by hand | L |

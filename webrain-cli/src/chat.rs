@@ -53,6 +53,9 @@ pub struct Args {
     pub memory: Option<bool>,
     pub session_store: Option<bool>,
     pub allow_agents: Option<bool>,
+    /// `--serve`: let one turn ask for several tool calls at once instead of
+    /// serially. `None` means on — it only ever shortens a turn.
+    pub parallel_tools: Option<bool>,
     /// Where the runtime starts rewriting history, as a percentage of the context
     /// window. `None` leaves the runtime's own 80/95 pair alone; naming a value
     /// sets the blocking threshold 15 points above it, so the background pass

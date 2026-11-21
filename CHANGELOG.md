@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **`parallel_tools` switch** — one turn may ask for several tool calls
+  at once (`inference.allow_multiple_tool_calls`, on by default in the Runtime
+  tab). Creation-time in the SDK, so flipping it reports `restart: true`.
+
+### Changed
+- `chat`: migrated to **`copilot-sdk` 2.0.1** (the successor to the now-deprecated
+  `github-copilot-sdk`). `connect()` builds the grouped `CreateSessionOptions`
+  instead of the flat 99-field `SessionConfig`, and `ClientOptions` is constructed
+  around an `OwnedRuntimeOptions` + `RuntimeConnection`. Behaviour preserved: the
+  permission predicate, the path fence, the provider token caps, skills, MCP
+  timeout and the memory/session-store defaults all survive the move.
 
 - **chat (html replies)**: the vocabulary a reply may build with grew the shapes a
   dashboard actually needs, and the standing instruction now hands the model a
