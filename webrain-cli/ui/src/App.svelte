@@ -1071,6 +1071,10 @@
             d.exit === null || d.exit === undefined ? "ended" : `exit ${d.exit}`
           }`,
         });
+      case "webrain.note":
+        // A line the server has to say outside a turn: a declined elicitation, an
+        // MCP server asking to spend credits. Not an error — it is information.
+        return push({ kind: "note", text: d.text });
       case "webrain.error":
       case "model.call_failure":
       case "session.error":

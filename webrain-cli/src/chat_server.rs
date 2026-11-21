@@ -60,8 +60,11 @@ use copilot_sdk::rpc::{
     PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest,
     SkillsDisableRequest, SkillsEnableRequest, SlashCommandInvocationResult,
     TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
+    UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
 };
-use copilot_sdk::session_events::{PermissionMode, SessionMode};
+use copilot_sdk::session_events::{
+    ElicitationRequestedData, PermissionMode, SamplingRequestedData, SessionMode,
+};
 use copilot_sdk::types::{
     DeliveryMode, PermissionRequestData, RequestId, SessionId, SetModelOptions,
 };
@@ -239,7 +242,7 @@ async fn spawn_live(
         provider,
         Some(permission as Arc<dyn PermissionHandler>),
         // The same card answers `ask_user`, exit-plan-mode and auto-mode.
-        Some(input),
+        Some(input.clone()),
         // The conversation id names the runtime's copy of this session, so the
         // runtime can list it from creation and a later resume has a handle.
         Some(format!("webrain-{convo}")),
@@ -251,6 +254,9 @@ async fn spawn_live(
     let session = Arc::new(session);
     let mut events = session.subscribe();
     let out = bus;
+    let asked = input.clone();
+    // The reader owns a clone: the session itself is handed back in `Live`.
+    let reader_session = session.clone();
     let reader = tokio::spawn(async move {
         while let Ok(event) = events.recv().await {
             // The final text per reply, written once — the deltas before it are
@@ -260,6 +266,22 @@ async fn spawn_live(
                 && let Some(store) = &store
             {
                 store.append(&convo, "assistant", text);
+            }
+            // Two events that block a turn until someone answers them. Stacked
+            // off the loop rather than awaited in it: the answer is a person's,
+            // and the loop is the only drain for every other event.
+            if event.event_type == "elicitation.requested" {
+                let s = reader_session.clone();
+                let w = asked.clone();
+                let o = out.clone();
+                let d = event.data.clone();
+                tokio::spawn(async move { answer_elicitation(&s, &w, d, &o).await });
+            }
+            if event.event_type == "sampling.requested" {
+                let s = reader_session.clone();
+                let o = out.clone();
+                let d = event.data.clone();
+                tokio::spawn(async move { refuse_sampling(&s, d, &o).await });
             }
             let frame = json!({
                 // Which conversation this belongs to. There is exactly one live
@@ -1134,6 +1156,166 @@ impl UserInputHandler for WebInput {
             was_freeform,
         })
     }
+}
+
+/// The type an elicitation field declares, or `""` when this page cannot type it.
+/// A nested object, an array or an unrecognised type is not guessed at.
+fn prop_kind(prop: &Value) -> &'static str {
+    match prop.get("type").and_then(Value::as_str) {
+        Some("boolean") => "boolean",
+        Some("integer") => "integer",
+        Some("number") => "number",
+        Some("string") => "string",
+        _ => "",
+    }
+}
+
+/// Coerce a typed answer to what the schema declares. The card's only input is
+/// freeform text, so this is where "yes" becomes `true` and "3" becomes `3` — a
+/// string in a boolean field is a form the server rejects, not a near miss.
+fn coerce(kind: &str, answer: &str) -> Option<Value> {
+    let a = answer.trim();
+    match kind {
+        "boolean" => match a.to_ascii_lowercase().as_str() {
+            "yes" | "true" | "y" => Some(Value::Bool(true)),
+            "no" | "false" | "n" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        "integer" => a.parse::<i64>().ok().map(Value::from),
+        "number" => a
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        "string" => Some(Value::String(a.to_string())),
+        _ => None,
+    }
+}
+
+/// A form the runtime could not fill in itself.
+///
+/// The reply must be a `content` object matching `requestedSchema`, so every
+/// field is coerced to the type it declares and anything this page cannot type
+/// declines the whole request. A near-miss form is worse than a refusal: the
+/// server would act on values it never validated.
+async fn answer_elicitation(session: &Arc<Session>, input: &Arc<WebInput>, data: Value, out: &Bus) {
+    let Ok(req) = serde_json::from_value::<ElicitationRequestedData>(data) else {
+        return;
+    };
+    let who = req
+        .elicitation_source
+        .clone()
+        .unwrap_or_else(|| "the agent".to_string());
+    let note = |text: String| {
+        let _ = out.send(json!({ "type": "webrain.note", "data": { "text": text } }).to_string());
+    };
+    note(format!("{who} asks: {}", req.message));
+
+    let mut content = serde_json::Map::new();
+    let mut no: Option<String> = None;
+    if let Some(url) = req.url.clone() {
+        no = Some(format!("it wants a browser at {url}"));
+    } else if let Some(schema) = req.requested_schema.clone() {
+        // A HashMap has no order; a form does, so the questions are stable.
+        let mut props: Vec<(String, Value)> = schema.properties.into_iter().collect();
+        props.sort_by(|a, b| a.0.cmp(&b.0));
+        let required = schema.required.unwrap_or_default();
+        for (name, prop) in props {
+            let kind = prop_kind(&prop);
+            if kind.is_empty() {
+                no = Some(format!("`{name}` is not a field the page can draw"));
+                break;
+            }
+            let choices: Vec<String> = prop
+                .get("enum")
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|e| e.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let label = prop
+                .get("title")
+                .or_else(|| prop.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or(&name)
+                .to_string();
+            let Some((answer, _)) = input
+                .ask(label, (!choices.is_empty()).then_some(choices))
+                .await
+            else {
+                no = Some(format!("no answer for `{name}`"));
+                break;
+            };
+            let typed = if answer.trim().is_empty() {
+                prop.get("default").cloned()
+            } else {
+                coerce(kind, &answer)
+            };
+            match typed {
+                Some(v) if !v.is_null() => {
+                    content.insert(name, v);
+                }
+                _ => {
+                    no = Some(format!("`{name}` is not a {kind}"));
+                    break;
+                }
+            }
+        }
+        if no.is_none()
+            && let Some(missing) = required.iter().find(|n| !content.contains_key(*n))
+        {
+            no = Some(format!("`{missing}` is required"));
+        }
+    } else {
+        no = Some("it asked for nothing the page can fill".to_string());
+    }
+
+    let body = match no {
+        Some(why) => {
+            note(format!("elicitation declined — {why}"));
+            json!({ "requestId": req.request_id, "result": { "action": "decline" } })
+        }
+        None => json!({
+            "requestId": req.request_id,
+            "result": { "action": "accept", "content": content },
+        }),
+    };
+    let Ok(params) = serde_json::from_value::<UIHandlePendingElicitationRequest>(body) else {
+        return;
+    };
+    if let Err(e) = session.rpc().ui().handle_pending_elicitation(params).await {
+        note(format!("elicitation: {e}"));
+    }
+}
+
+/// An MCP server asking the model for a completion.
+///
+/// There is no answer to give it from here. `UIHandlePendingSamplingResponse` is
+/// an empty struct, so a completion we ran could not be returned, and the
+/// runtime's own runner takes `McpExecuteSamplingRequest`, also empty — the raw
+/// MCP messages are explicitly opaque at the schema layer. So the request is
+/// declined, which the protocol allows and the server understands, instead of
+/// being left to hang until its timeout and stall the turn.
+async fn refuse_sampling(session: &Arc<Session>, data: Value, out: &Bus) {
+    let Ok(req) = serde_json::from_value::<SamplingRequestedData>(data) else {
+        return;
+    };
+    let _ = out.send(
+        json!({ "type": "webrain.note", "data": { "text": format!(
+            "mcp sampling: {} asked the model for a completion — declined, it would spend your credits \
+             and this client cannot carry the answer back",
+            req.server_name,
+        ) } })
+        .to_string(),
+    );
+    let Ok(params) = serde_json::from_value::<UIHandlePendingSamplingRequest>(
+        json!({ "requestId": req.request_id }),
+    ) else {
+        return;
+    };
+    let _ = session.rpc().ui().handle_pending_sampling(params).await;
 }
 
 async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<()> {
@@ -3957,6 +4139,42 @@ fn safe_name(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The elicitation answer is validated by the server against its own schema,
+    /// so a coerced value that is merely close is a rejected form. These are the
+    /// shapes a card can actually produce.
+    #[test]
+    fn an_elicitation_answer_becomes_the_type_the_schema_declares() {
+        assert_eq!(coerce("boolean", "yes"), Some(Value::Bool(true)));
+        assert_eq!(coerce("boolean", " NO "), Some(Value::Bool(false)));
+        assert_eq!(coerce("integer", "42"), Some(json!(42)));
+        assert_eq!(coerce("number", "1.5"), Some(json!(1.5)));
+        assert_eq!(coerce("string", "  hi  "), Some(json!("hi")));
+        // What cannot be typed is refused, never guessed: "maybe" is not false,
+        // and a number is not a string just because it parses as one.
+        assert_eq!(coerce("boolean", "maybe"), None);
+        assert_eq!(coerce("integer", "3.5"), None);
+        assert_eq!(coerce("", "anything"), None);
+    }
+
+    /// A field this page cannot draw must not become an empty string in the
+    /// form: the request is declined instead of submitting a value the server
+    /// never asked for.
+    #[test]
+    fn only_the_four_field_types_a_card_can_draw_are_recognised() {
+        for (t, kind) in [
+            ("boolean", "boolean"),
+            ("integer", "integer"),
+            ("number", "number"),
+            ("string", "string"),
+        ] {
+            assert_eq!(prop_kind(&json!({ "type": t })), kind, "{t}");
+        }
+        for t in ["object", "array", "null"] {
+            assert_eq!(prop_kind(&json!({ "type": t })), "", "{t}");
+        }
+        assert_eq!(prop_kind(&json!({ "enum": ["a", "b"] })), "");
+    }
 
     #[test]
     fn only_a_conversation_id_is_a_page() {

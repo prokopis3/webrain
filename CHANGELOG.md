@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **elicitation** — a structured question from the agent or an MCP server is
+  now answered instead of dropped. The JSON schema's fields are asked one at a time
+  on the existing `ask_user` card (`enum` → buttons, `boolean` → yes/no,
+  `integer`/`number` → parsed, `string` → freeform) and coerced to the declared
+  type before `ui.handlePendingElicitation` accepts them. A field a card cannot
+  draw — an object, an array — declines the whole request rather than submitting
+  a value the server never asked for.
+- `chat`: **MCP sampling is no longer a hang** — `sampling.requested` is resolved
+  with the protocol's reject and a note naming the server that asked. Answering it
+  is impossible on this SDK: `UIHandlePendingSamplingResponse` and
+  `McpExecuteSamplingRequest` are both empty structs, so neither a completion we
+  ran nor the raw MCP messages can cross the typed boundary.
 - `chat`: **the runtime's own slash commands** — the composer's `/` menu was ours
   alone, so `/compact`, `/model`, `/usage` and 26 others existed and were never
   offered. `GET /catalog` now appends `session.commands.list` after our own
