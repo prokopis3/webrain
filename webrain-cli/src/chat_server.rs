@@ -3079,6 +3079,18 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 json!({"name": "mcp", "kind": "cmd", "hint": "the MCP server this session attached to, and its tools"}),
                 json!({"name": "skills", "kind": "cmd", "hint": "installed skills and which ones the agent used"}),
             ];
+            // Reachability, not inventory. A skill switched off contributes no
+            // tools, so offering it in the `@` menu is offering a dead end — and
+            // the runtime, not the disk, is what knows which are on.
+            let live = state.live.read().await.clone();
+            let mut off: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Ok(l) = live.session.rpc().skills().list().await {
+                for s in l.skills {
+                    if !s.enabled {
+                        off.insert(s.name);
+                    }
+                }
+            }
             for name in skill_names() {
                 // A reference chapter is a `.md` with no frontmatter `name:`, and
                 // `skills::list` names it after the folder holding it — so without
@@ -3087,6 +3099,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 let Some(hint) = skill_hint(&name) else {
                     continue;
                 };
+                if off.contains(&name) {
+                    continue;
+                }
                 items.push(json!({"name": name, "kind": "skill", "hint": hint}));
             }
             for (name, hint) in webrain_mcp::tool_briefs() {
@@ -3126,7 +3141,6 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .iter()
                 .filter_map(|i| i["name"].as_str().map(str::to_owned))
                 .collect();
-            let live = state.live.read().await.clone();
             if let Ok(list) = live.session.rpc().commands().list().await {
                 for c in list.commands {
                     if ours.contains(&c.name) {

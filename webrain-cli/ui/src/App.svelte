@@ -158,7 +158,10 @@
       want === null
         ? catalog.items
         : catalog.items.filter((r) => r.kind === want || (want === "tool" && r.kind === "builtin"));
-    return rows.filter((r) => r.name.toLowerCase().includes(q));
+    // A builtin the Runtime tab switched off is not offered in `#`: that menu is
+    // what the model can reach this session, not a catalogue of what exists.
+    const usable = rows.filter((r) => !(r.kind === "builtin" && builtinOff.includes(r.name)));
+    return usable.filter((r) => r.name.toLowerCase().includes(q));
   });
   // The header counts what matched, the list shows the first screenful of it —
   // a menu that says "14" when 27 matched is a menu that hides the rest.
@@ -7206,13 +7209,19 @@
     font-family: var(--mono); font-size: 12px; }
   .facts :global(dt) { color: var(--on-surface-variant); }
   .facts :global(dd) { margin: 0; color: var(--on-surface); word-break: break-all; }
-  .card.settings { display: grid; grid-template-columns: 9rem 1fr; gap: var(--s4); }
-  /* Settings navigates vertically, so its tabs are a rail, not an underline strip. */
-  .stabs { display: flex; flex-direction: column; gap: 2px;
-    border-right: 1px solid var(--outline-variant); padding-right: var(--s3); }
-  .stabs .tab { text-align: left; border-radius: var(--shape-full); width: 100%;
-    border-bottom: 0; min-height: 2.2rem; padding: var(--s2) var(--s3); }
-  .stabs .tab.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+  .card.settings { display: grid; grid-template-columns: 1fr; gap: var(--s4); }
+  /* The same strip the provider picker uses: one row of 12px labels with a 2px
+     underline for the active one, scrolling sideways instead of wrapping — eight
+     tabs do not fit a phone, and a wrapped tab bar pushes the body down twice. */
+  .stabs { display: flex; gap: var(--s1); overflow-x: auto; scrollbar-width: none;
+    border-bottom: 1px solid var(--outline-variant); padding-right: 0; }
+  .stabs::-webkit-scrollbar { display: none; }
+  .stabs .tab { flex: 0 0 auto; width: auto; text-align: left; background: none;
+    border: 0; border-bottom: 2px solid transparent; color: var(--on-surface-variant);
+    font: inherit; font-size: 12px; min-height: 2.4rem; padding: var(--s2) var(--s3);
+    border-radius: var(--shape-xs) var(--shape-xs) 0 0; cursor: pointer; }
+  .stabs .tab:hover { color: var(--on-surface); }
+  .stabs .tab.on { background: none; color: var(--on-surface); border-bottom-color: var(--primary); }
   .sbody { min-height: 9rem; }
 
   /* Settings > Skills / MCP: one row per thing, one switch per row. The track is
@@ -7382,8 +7391,8 @@
     .palette { left: var(--s3); right: var(--s3); }
     .card { padding: var(--s4); }
     .card.settings { grid-template-columns: 1fr; }
-    .stabs { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--outline-variant); }
-    .stabs .tab { width: auto; }
+    /* The strip is already horizontal and scrolls; a phone only needs it shorter. */
+    .stabs .tab { padding: var(--s2); }
     /* One column of boxes: three across a phone is a wall of 11px labels. */
     .card.tools { width: min(100%, 38rem); }
     .tchecks { grid-template-columns: 1fr; padding-left: var(--s2); }
