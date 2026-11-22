@@ -1550,6 +1550,9 @@
       kind: "usage",
       text: [
         `${u.model} · ${u.input} in / ${u.output} out · ${u.requests} request(s)`,
+        // The cached share is the number that explains a cheap long turn, and it
+        // was in the payload and never printed.
+        u.cached ? `${u.cached} cached` : "",
         `${speed} tok/s`,
         cost,
         // Always counted, even at zero: "0 steps" is the fact that the turn was

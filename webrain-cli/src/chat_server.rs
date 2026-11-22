@@ -172,6 +172,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         timeout: AtomicU64::new(settings.timeout_secs),
         settings: Mutex::new(settings),
         busy: AtomicBool::new(false),
+        usage_at: Mutex::new(None),
         store,
         convo: Mutex::new(convo),
         provider: Mutex::new(provider.clone()),
@@ -990,6 +991,11 @@ struct State {
     /// `POST /settings`.
     settings: Mutex<RuntimeSettings>,
     busy: AtomicBool,
+    /// The runtime's usage counters as they stood when the running turn began.
+    /// `usage.get_metrics` is session-cumulative, so the closing line has to
+    /// subtract this to describe the turn — otherwise the page showed a session
+    /// total next to a per-turn panel and both said "this turn".
+    usage_at: Mutex<Option<(i64, i64, i64, i64, f64, i64)>>,
     store: Option<Arc<chat_store::Store>>,
     /// The conversation new turns are stored in. Mutable: opening a past
     /// conversation moves it, so a continued chat lands where the page shows it.
@@ -1548,16 +1554,33 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 // inventing one.
                 if let Ok(m) = live.session.rpc().usage().get_metrics().await {
                     let t = chat_session::totals_of(&m);
+                    // `get_metrics` counts the whole session. The difference from
+                    // when this turn began is the turn; without it the closing
+                    // line reported every earlier turn too, next to a panel that
+                    // measured only this one — two numbers, one label.
+                    let mut prev = st.usage_at.lock().await;
+                    let base = prev.unwrap_or((0, 0, 0, 0, 0.0, 0));
+                    *prev = Some((t.input, t.output, t.requests, t.api_ms, t.nano_aiu, t.cached));
+                    drop(prev);
+                    let d = |now: i64, was: i64| (now - was).max(0);
+                    let input = d(t.input, base.0);
+                    let output = d(t.output, base.1);
+                    let api_ms = d(t.api_ms, base.3);
+                    let cached = d(t.cached, base.5);
                     let _ = st.bus.send(
                         json!({"type": "webrain.usage", "data": {
                             "model": live.model(),
-                            "input": t.input,
-                            "output": t.output,
-                            "cached": t.cached,
-                            "requests": t.requests,
-                            "api_ms": t.api_ms,
-                            "tokens_per_sec": t.tokens_per_sec(),
-                            "nano_aiu": t.nano_aiu,
+                            "input": input,
+                            "output": output,
+                            "cached": cached,
+                            "requests": d(t.requests, base.2),
+                            "api_ms": api_ms,
+                            "tokens_per_sec": if api_ms > 0 {
+                                output as f64 / (api_ms as f64 / 1000.0)
+                            } else {
+                                0.0
+                            },
+                            "nano_aiu": (t.nano_aiu - base.4).max(0.0),
                         }})
                         .to_string(),
                     );
