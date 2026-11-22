@@ -9,15 +9,15 @@ that is built and has never been run.
 
 | # | what | today | first step | size |
 |---|---|---|---|---|
-| 1 | `session.quota_observation`, `session.session_limits_changed`, `session_limits_exhausted.*` | nothing on the page; `usage_checkpoint` already shows spend as it happens | a renderer for `ProviderQuotaState`, which is provider-shaped and has no shared vocabulary yet | S each |
+| 1 | `session.quota_observation`, `session.session_limits_changed` | **`session_limits_exhausted.requested` SHIPPED 2026-11-22** — the runtime stopping to ask for more credits now says so (`used X of Y`) instead of ending a turn for no visible reason. The other two still wait: their payload is provider-shaped (`ProviderQuotaState`) and its field names are not in the typed surface I could read, so rendering them now would be a guess | measure the payload from a real provider first | S each |
 | 2 | the worker's own turns | a delegated agent leaves a chip while it runs and one closing cost line; the transcript shows the parent's `task` row, not what the worker said | a nested transcript per `toolCallId` — the events carry the id, the page has no second stream to paint | L |
 | 3 | agent picker | `read_agent`/`write_agent`/`list_agents` are served, so the model can manage definitions, but a person cannot | the `agents` group on the config (`default`, `selected`, `included_builtin_agents`) plus an editing surface | L |
-| 4 | `/command` results that want a surface | `SetModel`, `SelectSubcommand`, `ShowDialog`, `AddTimelineEntry` come back as "it wants a surface this page does not have yet" | one at a time; `SetModel` is the only one with an existing route (`/settings`) | M each |
+| 4 | `/command` results that want a surface | **CLOSED 2026-11-22** — all eight variants are handled: `Text`/`Completed` → note, `AgentPrompt` → composer, `SetModel` → the existing `/switch` (which knows whether the context survives), `AddTimelineEntry` → note plus its `prefill`, `ShowDialog` → opens the picker the page already has, `SelectSubcommand` → its options listed with the parent left in the field, `SetPlanModel` → note. Measured on a BYOK session: `/model` answers `Text`, because a model that is not registered cannot be routed — the `SetModel` variant is a Copilot-plan path, not this one | — |
 | 5 | MCP sampling, *answered* | handled as the protocol's reject — the hang is gone, the completion is not run | a non-empty `UIHandlePendingSamplingResponse` upstream, or the raw-call route to `session.mcp.executeSampling` with the event's params forwarded whole | M, and it spends credits |
 | 6 | citations | `inference.enable_citations` is off and nothing would render a citation | turn it on *and* build the renderer, in that order | M |
-| 7 | model picker | switching model rebuilds the session | `ClientRpc.models` — the honest source for the allowlist the Runtime tab already has | M |
 | 8 | `permissionspaths` / `permissionsurls` / `permissionsfoldertrust` / `permissionsadditionaldirectories` | our handler answers approve/deny per request, so there is no "always allow this directory" that survives the turn | pick one; they are four namespaces for one idea | M |
-| 9 | `mcpprompts` / `mcpresources`, `dynamiccontext` | an MCP server's own prompts and resources are not first-class; per-turn context needs a rebuild | lower value than the rows above | M |
+| 9 | `mcpprompts` / `mcpresources` | **SHIPPED 2026-11-22** — `GET /mcp/items` asks every connected server through `mcp.prompts().list()` / `mcp.resources().list()` and the MCP tab renders whatever comes back, read-only (a prompt is invoked by the model, not by a switch). Measured: our own server answers `MCP error -32601: Unknown method`, which is an *absence* rather than a failure, so it is not reported — the route returns `{prompts: [], resources: [], errors: []}` | — |
+| 10 | `dynamic_context` | read as "per-turn context" in the old audit — it is not: `set_config` takes `{branch, repository, store_path}`, a **context board** for a repository | nothing to build for a chat; drop the row if it ever resurfaces | — |
 
 The remaining ~42 uncalled session namespaces are not a backlog: they are
 `managedsettings`, `plugins*`, `sandbox`, `remote`, `canvas*`, `workflow*` and
@@ -33,6 +33,10 @@ Two deliberate non-rows, so nobody "fixes" them:
 - `/command` uses `session.commands.invoke`, not `execute`. `execute` answers
   `No client found for command` for all 29 built-ins; it is the path for a host
   that registered handlers.
+- "Model picker" is **not** an open row, corrected 2026-11-22: the page carries a
+  live per-provider catalogue (`/models`, `loadModels`) and `/switch` keeps the
+  context when the endpoint is the same. Switching *provider* still rebuilds the
+  session, which is not a gap — another endpoint is another session.
 
 ## What is verified, and what is not
 

@@ -1047,6 +1047,13 @@
       case "session.usage_info":
         ctx = { used: d.currentTokens ?? 0, limit: d.tokenLimit ?? 0 };
         return;
+      // The runtime stopping to ask for more credits. It is a stop with a reason,
+      // and the only thing that explains a turn ending early with no error row.
+      case "session_limits_exhausted.requested":
+        return push({
+          kind: "err",
+          text: `credits: ${Math.round(d.usedAiCredits ?? 0)} of ${Math.round(d.maxAiCredits ?? 0)} used — the turn is waiting on a limit decision`,
+        });
       case "webrain.permission": {
         // An approval is a row in the transcript, not a modal over it: the
         // arguments it is asking about belong beside the tool calls they follow,
@@ -2636,15 +2643,27 @@
           });
           const j = await r.json();
           if (j.error) push({ kind: "err", text: `/${o.name}: ${j.error}` });
-          else if (j.prompt) {
+          else if (j.set_model) {
+            // It chose a model. `pickModel` is the route that knows whether that
+            // keeps this transcript's context or replaces the session.
+            await pickModel(activeProvider.id, j.set_model);
+          } else if (j.open === "model-picker") {
+            // A dialog the page already has: the picker, not a second one.
+            modelOpen = true;
+          } else if (j.prompt) {
             // Its own words for the prompt, in the composer: starting a turn the
             // reader never saw would be the wrong kind of helpful.
             draft = j.prompt;
             push({ kind: "note", text: `/${o.name} — ${j.notice || "press enter to run it"}` });
+          } else if (j.pick) {
+            // A parent command: the reader names the subcommand, not a guess.
+            draft = `/${o.name} `;
+            push({ kind: "note", text: j.text || `/${o.name}: pick a subcommand` });
           } else {
             // `/env` and friends answer in markdown; `/cwd` does not. The note row
             // only parses when the runtime said the text was markdown.
             push({ kind: "note", md: j.markdown, text: `/${o.name}: ${j.text || "ran"}` });
+            if (j.prefill) draft = j.prefill;
           }
         } catch {
           push({ kind: "err", text: `/${o.name}: the server is not reachable` });
@@ -3474,12 +3493,15 @@
   // Settings > Skills / MCP read the same two routes the `/skills` and `/mcp`
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
-  let manage = $state({ skills: [], mcp: [] });
+  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [] });
   async function loadManage() {
     try {
-      const [s, m] = await Promise.all([
+      const [s, m, items] = await Promise.all([
         fetch("/skills").then((r) => r.json()),
         fetch("/mcp").then((r) => r.json()),
+        fetch("/mcp/items")
+          .then((r) => r.json())
+          .catch(() => ({})),
       ]);
       manage = {
         skills: (s.skills || [])
@@ -3489,6 +3511,15 @@
           name: typeof x === "string" ? x : x.name,
           on: typeof x !== "string" && x.status === "connected",
           note: typeof x === "string" ? "" : x.status,
+        })),
+        // A server's own prompts and resources, which only ever reached the model.
+        prompts: (items.prompts || []).map((p) => ({
+          name: p.name,
+          note: p.description || "",
+        })),
+        resources: (items.resources || []).map((r) => ({
+          name: r.name || r.uri,
+          note: r.uri || "",
         })),
       };
     } catch {
@@ -5763,6 +5794,25 @@
                   </li>
                 {/each}
               </ul>
+            {/if}
+            {#if !isSkills}
+              <!-- What else a server ships. Read-only here because a prompt is
+                   invoked by the model, not by a switch: the list is the answer
+                   to "does this server have anything beyond tools". -->
+              {#each [["prompts", "prompts"], ["resources", "resources"]] as [key, label] (key)}
+                {#if manage[key].length}
+                  <div class="sfld">
+                    <span>{label}</span>
+                    <ul class="mng">
+                      {#each manage[key] as row (row.name)}
+                        <li>
+                          <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              {/each}
             {/if}
           </div>
         {:else if setTab === "chat"}

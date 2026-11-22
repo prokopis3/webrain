@@ -55,12 +55,12 @@ use copilot_sdk::handler::{
 use copilot_sdk::rpc::{
     CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpDisableRequest,
-    McpEnableRequest, McpListToolsRequest, MetadataContextHeaviestMessagesRequest,
-    MetadataContextInfoRequest, ModeSetRequest, NameSetRequest, PermissionsSetModeRequest,
-    PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest,
-    SkillsDisableRequest, SkillsEnableRequest, SlashCommandInvocationResult,
-    TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
-    UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
+    McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
+    MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
+    NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
+    QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
+    SlashCommandInvocationResult, TasksSendMessageRequest, ToolsExecuteRequest,
+    UIEphemeralQueryRequest, UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
 };
 use copilot_sdk::session_events::{
     ElicitationRequestedData, PermissionMode, SamplingRequestedData, SessionMode,
@@ -1793,6 +1793,71 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // An MCP server's own prompts and resources. Both have been namespaces
+        // since the migration (`session.mcp.prompts` / `.resources`) and were
+        // never read, so a server that ships a slash command or a document was
+        // invisible: only its tools ever reached the page.
+        ("GET", "/mcp/items") => {
+            let live = state.live.read().await.clone();
+            let mcp = live.session.rpc().mcp();
+            // Every connected server is asked, not just ours: measured, our own
+            // answers `-32601 Unknown method` to both, and a third-party one may
+            // not. That code is an absence, not a failure, so it is not reported.
+            let mut prompts: Vec<Value> = Vec::new();
+            let mut resources: Vec<Value> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+            if let Ok(list) = mcp.list().await {
+                for s in list.servers {
+                    let name = s.name.clone();
+                    match mcp
+                        .prompts()
+                        .list(McpPromptsListRequest {
+                            server_name: name.clone(),
+                            cursor: None,
+                        })
+                        .await
+                    {
+                        Ok(r) => {
+                            for p in r.prompts {
+                                let mut v = serde_json::to_value(&p).unwrap_or(Value::Null);
+                                v["server"] = json!(name);
+                                prompts.push(v);
+                            }
+                        }
+                        Err(e) if !e.to_string().contains("-32601") => {
+                            errors.push(format!("{name} prompts: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                    match mcp
+                        .resources()
+                        .list(McpResourcesListRequest {
+                            server_name: name.clone(),
+                            cursor: None,
+                        })
+                        .await
+                    {
+                        Ok(r) => {
+                            for p in r.resources {
+                                let mut v = serde_json::to_value(&p).unwrap_or(Value::Null);
+                                v["server"] = json!(name);
+                                resources.push(v);
+                            }
+                        }
+                        Err(e) if !e.to_string().contains("-32601") => {
+                            errors.push(format!("{name} resources: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            let body = json!({
+                "prompts": prompts,
+                "resources": resources,
+                "errors": errors,
+            });
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
         // Which skills exist is one question, which ones the agent used is
         // another — an unused skill is a prompt problem, not a missing file.
         ("GET", "/skills") => {
@@ -3191,12 +3256,36 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 Ok(SlashCommandInvocationResult::AgentPrompt(p)) => json!({
                     "name": name, "prompt": p.display_prompt, "notice": p.notice,
                 }),
-                // Model switches, subcommand pickers and dialogs each want a
-                // surface this page does not have. Say so instead of pretending.
-                Ok(_) => json!({
-                    "name": name,
-                    "text": "ran — it wants a surface this page does not have yet",
+                // It switched the model itself. The page owns the switch route
+                // because only that one knows whether it keeps this context.
+                Ok(SlashCommandInvocationResult::SetModel(m)) => json!({
+                    "name": name, "set_model": m.model, "effort": m.reasoning_effort,
                 }),
+                // A row for the conversation, in the command's own words.
+                Ok(SlashCommandInvocationResult::AddTimelineEntry(a)) => json!({
+                    "name": name, "text": a.entry.text, "url": a.entry.url,
+                    "prefill": a.prefill_input,
+                }),
+                // The model picker is a surface this page already has.
+                Ok(SlashCommandInvocationResult::ShowDialog(_)) => {
+                    json!({ "name": name, "open": "model-picker" })
+                }
+                // A parent command that needs its subcommand named. The list goes
+                // back so the page can put the parent in the field and let the
+                // reader pick, instead of contributing a guess.
+                Ok(SlashCommandInvocationResult::SelectSubcommand(s)) => json!({
+                    "name": name,
+                    "pick": s.options.iter().map(|o| json!({
+                        "name": o.name, "hint": o.description,
+                    })).collect::<Vec<_>>(),
+                    "text": format!("/{} wants one of: {}", s.command,
+                        s.options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>().join(" · ")),
+                }),
+                // Plan-model switches only mean something in plan mode, and the
+                // runtime applies those itself; a note keeps them from vanishing.
+                Ok(SlashCommandInvocationResult::SetPlanModel(_)) => {
+                    json!({ "name": name, "text": "the plan model changed" })
+                }
                 Err(e) => json!({ "name": name, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
