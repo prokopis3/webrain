@@ -142,11 +142,24 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
   obscura (--user-agent, 4/4 cookies, 46s wait) both stayed on "Just a moment...",
   while the Chrome that minted the cookie returned 200. Batch gated pages on THAT
   Chrome (batch with cdp_urls=["http://127.0.0.1:9222"]); do not call it a cookie bug.
+- A COOKIE BRIDGE IS PER-CONNECTION. `setcookies` fills the jar of the connection
+  that wrote it: a CLI `webrain setcookies --port N` and the MCP session are two
+  different jars, so the page bounces to /login while the shell HTML still answers
+  200. Import on the session that will navigate (`webrain_session(op=setcookies,
+  session_id=X)` then navigate with session_id=X) and VERIFY with an authenticated
+  endpoint (200 vs 403) — `readback: N` only describes the writer's jar. MEASURED
+  2026-11-21, serper.dev on obscura :9224: 8 cookies set on one connection, a fresh
+  connection read 0 and /auth/me/ answered 403; the same cookies imported through
+  the navigating session answered 200 with the dashboard.
+- WEDGED ENGINE IS NOT A BLOCKED SITE. If /json/version and /json/list answer but
+  Target.getTargets is [] and Page.navigate / Runtime.evaluate hang, the engine is
+  wedged: restart it with the same flags and re-import cookies in-session. Do not
+  re-run the same call.
 - ENGINE IDENTITY (profiles exist beyond Chrome):
     obscura     serve --host 127.0.0.1 --port 9224 --stealth [--user-agent UA]
-                [--storage-dir DIR]     # DIR is a real profile: persists cookies
-                                        # across server restarts, and lifts per-conn
-                                        # jar isolation
+                [--storage-dir DIR]     # DIR persists the jar ACROSS RESTARTS only
+                                        # (load at boot / save); it does NOT lift per-conn
+                                        # jar isolation while the server is running
     lightpanda  serve [--user-agent UA] [--cookie in.json] [--cookie-jar out.json]
   `webrain obscura` passes ONLY --stealth (no --storage-dir/--user-agent) — launch
   the binary directly from WEBRAIN_BROWSERS_DIR for those. obscura refuses a

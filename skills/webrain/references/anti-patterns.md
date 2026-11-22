@@ -12,6 +12,22 @@ DO NOT:
 - claim a bypass succeeded without verification (verify the target content)
 - extract challenge/login/consent pages as target content
 - create sequential loops when `webrain_batch`/`webrain_crawl` exist
+- re-run a failing browser call more than once without changing state: name the
+  symptom first (wedged engine? wrong engine? cookies on another connection?)
+- treat `setcookies` `readback: N` as proof the next call is authenticated - prove
+  it with an authenticated endpoint (403 vs 200)
+- import cookies on one connection (CLI `--port N`) and expect them on another:
+  obscura jars are per-connection; bridge in-session
+- assume two `session_id`s are two engines: the last `op=open` decides the engine
+  for every handle (probe `webgl`), so open the one you want LAST
+- move cookies with `restore_state` on obscura: `Network.setCookies` is not
+  implemented there, and its `cdp_url` path fills that connection's jar only
+- copy the whole jar when the session cookie is enough (one httpOnly `connect.sid`
+  authenticated a cold-start obscura)
+- compare two `session_id`s without an identity probe (`webgl`, UA) - identical
+  page state means one browser, i.e. a "verified" bridge on the wrong engine
+- rely on obscura `--storage-dir` for live cookie sharing (restart-time disk
+  persistence only; measured: 0 cookies on a fresh connection)
 - dump raw HTML to the model when `observe`/`extract` give text/structure cheaper
 - wait 30 s for `visible` on an SPA list instead of `attached` + 6 s on the card
   selector (measured: 159 s → 10 s for 27 URLs, same rows)

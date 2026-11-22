@@ -28,6 +28,18 @@ using the `mcp_webrain-*` tools.
    `WEBRAIN_STEALTH_NOISE=0` (set at attach time; needs a fresh tab). Detail:
    `docs/AGENT_DECISION_GUIDE.md` §2b.
 
+8. **Know which engine answered, and bridge cookies in-session.** Probe identity
+   before diagnosing: `webgl:false` + UA Chrome/143 = obscura, `webgl:true` +
+   Chrome/15x = real Chrome. Two `session_id`s showing identical page state are
+   one browser, not a working bridge. A cookie import fills the jar of the
+   connection that wrote it, so import on the session that navigates and verify
+   with an authenticated endpoint (200 vs 403) - never with `set: N / readback: N`.
+9. **One retry, then diagnose.** Two identical failures mean state, not luck:
+   wedged engine, jar on another connection, unattached target. Wedged-obscura
+   signature: `/json/version` + `/json/list` answer, `Target.getTargets` is empty,
+   `Page.navigate`/`Runtime.evaluate` hang -> restart the engine with the same
+   flags and re-import cookies in-session. Do not re-run the same call.
+
 ## Webrain = portable MCP scraping tool
 
 `webrain-mcp` exposes browser/scraping tools over MCP. It is meant to be
