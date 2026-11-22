@@ -122,6 +122,10 @@
   let asksIn = $state([]); // ask_user questions, first one shown
   let freeAnswer = $state("");
   let call = $state(null); // the model call in flight, from `assistant.usage`
+  // A turn is several model calls (plan, tools, answer), and each one reports its
+  // own usage. The panel says "this turn", so it reads this running total — not
+  // the last call, which made the numbers jump backwards mid-turn.
+  let turnUse = $state(null);
   // Restored, because an accidental reload mid-prompt should not cost the prompt.
   let draft = $state(recall("draft", ""));
   let copiedId = $state(-1);
@@ -609,23 +613,28 @@
   // the numbers stop changing to the live one's the moment you open history.
   const ledger = $derived(past ? pastTurns : turns);
   const stats = $derived.by(() => {
-    // While a call is in flight `assistant.usage` is exact — including cache
-    // reads — where the 900 ms sample is only approximate. Cost is computed from
-    // the provider's published per-token price when there is one; the SDK's own
-    // `nano_aiu` is 0 on BYOK turns, where the key pays the provider.
-    if (call) {
-      const speed = call.duration > 0 ? (call.outputTokens / (call.duration / 1000)).toFixed(1) : "—";
+    // While a turn runs the panel's own label is "this turn", so it reads the
+    // running total of every call in it. Reading `call` here is what made the
+    // numbers flicker: each new call replaced the last one's figures, so the
+    // cost and the counts appeared to jump backwards as the turn progressed.
+    // Cost is computed from the provider's published per-token price when there
+    // is one; the SDK's own `nano_aiu` is 0 on BYOK turns, where the key pays.
+    if (turnUse) {
+      const speed =
+        turnUse.duration > 0 ? (turnUse.outputTokens / (turnUse.duration / 1000)).toFixed(1) : "—";
       return {
-        model: call.model || "—",
-        tok: `${call.inputTokens} / ${call.outputTokens}`,
+        model: turnUse.model || "—",
+        tok: `${turnUse.inputTokens} / ${turnUse.outputTokens}`,
         speed,
-        // The share of this call's input the provider served from its prompt
+        // The share of this turn's input the provider served from its prompt
         // cache. `inputTokens` already includes the cached part, so this is a
         // ratio of that, not an addition to it.
-        hit: call.inputTokens > 0
-          ? `${Math.round(((call.cacheReadTokens ?? 0) / call.inputTokens) * 100)}%`
-          : "—",
-        cost: money(spend(call.inputTokens, call.outputTokens, call.cacheReadTokens ?? 0)),
+        hit:
+          turnUse.inputTokens > 0
+            ? `${Math.round(((turnUse.cacheReadTokens ?? 0) / turnUse.inputTokens) * 100)}%`
+            : "—",
+        cost: money(spend(turnUse.inputTokens, turnUse.outputTokens, turnUse.cacheReadTokens ?? 0)),
+        calls: turnUse.calls > 1 ? `${turnUse.calls} calls` : "",
       };
     }
     const t = ledger[0];
@@ -635,7 +644,7 @@
   });
   // Nothing measured yet: the header and the panel say so once, instead of
   // printing six em-dashes and calling it data.
-  const measured = $derived(!!call || ledger.length > 0);
+  const measured = $derived(!!turnUse || ledger.length > 0);
 
   // What the model is doing right now, in one line, read off the events already
   // on screen: the tool that is running, the reasoning stream, or the wait for
@@ -1037,8 +1046,10 @@
         return; // the 900 ms live sample; superseded by assistant.usage when it lands
       case "assistant.usage":
         // Exact per-call numbers, straight from the runtime: tokens, cache reads,
-        // reasoning tokens, TTFT, wall duration.
+        // reasoning tokens, TTFT, wall duration. Summed into the turn as well,
+        // because the panel's label is "this turn" and a turn is many calls.
         call = d;
+        turnUse = addUse(turnUse, d);
         return;
       case "webrain.usage":
         return usage(d);
@@ -2223,8 +2234,9 @@
       viewing = "";
       busy = true;
       state = "running";
-      // A new turn starts with a fresh reasoning block, open again: last turn's
-      // collapse does not carry over to a turn the user has not seen yet.
+      // A new turn starts with no spend, and with a fresh reasoning block, open
+      // again: last turn's collapse does not carry over to a turn not yet seen.
+      turnUse = null;
       think = "";
       thinkMs = null;
       thinkAt = 0;
@@ -3038,6 +3050,31 @@
     if (n == null || !Number.isFinite(n)) return "n/a";
     if (n === 0) return "$0";
     return n < 0.01 ? `$${n.toFixed(5)}` : `$${n.toFixed(3)}`;
+  }
+
+  // One model call added to a turn's running total. `assistant.usage` arrives
+  // once per call, and a turn that uses tools makes several — so a "this turn"
+  // figure has to be a sum, and the sum only grows. `model` is taken from the
+  // latest call: a turn that switched models is described by where it ended.
+  function addUse(acc, u) {
+    if (!acc) {
+      return {
+        model: u.model || "",
+        inputTokens: u.inputTokens || 0,
+        outputTokens: u.outputTokens || 0,
+        cacheReadTokens: u.cacheReadTokens || 0,
+        duration: u.duration || 0,
+        calls: 1,
+      };
+    }
+    return {
+      model: u.model || acc.model,
+      inputTokens: acc.inputTokens + (u.inputTokens || 0),
+      outputTokens: acc.outputTokens + (u.outputTokens || 0),
+      cacheReadTokens: acc.cacheReadTokens + (u.cacheReadTokens || 0),
+      duration: acc.duration + (u.duration || 0),
+      calls: acc.calls + 1,
+    };
   }
 
   // Providers publish per-token prices; a per-million figure is the one a person
