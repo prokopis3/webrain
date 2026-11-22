@@ -10,15 +10,18 @@
   const esc = (s) =>
     String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
-  // The sigils the composer understands, tinted where they are typed. Only
-  // `#tool` and `@skill` — those are the two the runtime resolves by name, and a
-  // sigil at the start of a word is the same rule the palette uses.
+  // The sigils the composer understands, tinted where they are typed. `/` only
+  // counts at the start of the draft — the same rule the palette uses, and the
+  // reason a picked command was the one kind that never got a tint — while `#`
+  // and `@` stay word-anchored so a handle mid-sentence is still prose.
   function markInput(s) {
-    return esc(s).replace(
-      /(^|[\s(])([#@])([\w.-]+)/g,
-      (_, lead, sig, name) =>
-        `${lead}<mark class="${sig === "#" ? "mt" : "ms"}">${sig}${name}</mark>`,
-    );
+    return esc(s)
+      .replace(/(^)(\/)([\w.:-]+)/, '<mark class="mc">$2$3</mark>')
+      .replace(
+        /(^|[\s(])([#@])([\w.-]+)/g,
+        (_, lead, sig, name) =>
+          `${lead}<mark class="${sig === "#" ? "mt" : "ms"}">${sig}${name}</mark>`,
+      );
   }
 
   // Markdown is a dynamic import. `marked` + DOMPurify are the largest things in
@@ -165,7 +168,13 @@
     // A builtin the Runtime tab switched off is not offered in `#`: that menu is
     // what the model can reach this session, not a catalogue of what exists.
     const usable = rows.filter((r) => !(r.kind === "builtin" && builtinOff.includes(r.name)));
-    return usable.filter((r) => r.name.toLowerCase().includes(q));
+    // What the draft already names is not offered again — a pick always writes
+    // `@name `, so the trailing space is the boundary that keeps `@web` from
+    // hiding `@webrain`. The menu answers "what can I still add".
+    const inDraft = (r) => draft.includes(`${SIGIL[r.kind]}${r.name} `);
+    // The hint is searched too: "compact" is how you find `/compact` when you
+    // remember what it does rather than what it is called.
+    return usable.filter((r) => !inDraft(r) && `${r.name} ${r.hint || ""}`.toLowerCase().includes(q));
   });
   // The header counts what matched, the list shows the first screenful of it —
   // a menu that says "14" when 27 matched is a menu that hides the rest.
@@ -264,6 +273,29 @@
   let instructions = $state(recall("instructions", ""));
   let language = $state(recall("language", ""));
   let suggest = $state(readJson("suggest", true));
+  // The composer's keys, settable from Settings → Chat because a keyboard is the
+  // one thing this page cannot guess. Enter always sends and Shift+Enter is
+  // always a newline; everything else is a preference.
+  const KEY_ACTIONS = [
+    ["complete", "complete a / @ # name", "Tab"],
+    ["stopSend", "stop the turn and send", "Ctrl+Enter"],
+    ["queue", "queue behind the running turn", "Alt+Enter"],
+  ];
+  let keys = $state({
+    ...Object.fromEntries(KEY_ACTIONS.map(([id, , dflt]) => [id, dflt])),
+    ...readJson("keys", {}),
+  });
+  let capturing = $state("");
+
+  // "Ctrl+Shift+K" and "Tab", never "Enter" from a modifier that was not asked
+  // for: the comparison is against this string, so it has to be canonical.
+  function keyName(e) {
+    const mod = [e.ctrlKey && "Ctrl", e.metaKey && "Meta", e.altKey && "Alt", e.shiftKey && "Shift"]
+      .filter(Boolean)
+      .join("+");
+    const k = e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    return mod ? `${mod}+${k}` : k;
+  }
   let modelOpen = $state(false);
   let providers = $state([]);
   let provTab = $state(0);
@@ -2478,6 +2510,16 @@
     palette = { trigger: m[2], query: m[3], index: 0 };
   }
 
+  // Tab writes the name into the draft and stops there. Enter is the key that
+  // runs something: a completion key that executes a command is one you cannot
+  // finish typing, which is why `/clear` never needed a second keystroke.
+  function fillIn(o) {
+    const q = palette.query;
+    palette = null;
+    draft = `${draft.slice(0, draft.length - (q.length + 1))}${SIGIL[o.kind]}${o.name} `;
+    document.querySelector("textarea")?.focus();
+  }
+
   async function pick(o) {
     const query = palette.query;
     palette = null;
@@ -3351,6 +3393,7 @@
       localStorage.setItem("webrain-chat-rawhtml", JSON.stringify(rawHtml));
       localStorage.setItem("webrain-chat-allow", JSON.stringify(autoTools));
       localStorage.setItem("webrain-chat-settab", setTab);
+      localStorage.setItem("webrain-chat-keys", JSON.stringify(keys));
       // The half-written message is the one thing a reload would otherwise eat,
       // and it costs a few hundred bytes: losing a pasted prompt is worse than
       // the store. Attachments are not part of it — the file is on disk already,
@@ -5018,7 +5061,7 @@
     <div class="palette" role="listbox" bind:this={paletteEl}>
       <div class="head">
         {palette.trigger === "/" ? "everything" : palette.trigger === "@" ? "skills" : "tools"}
-        <span class="dim"
+        <span class="count"
           >{options.length}{menuRows.length < options.length ? " · " + menuRows.length + " shown" : ""}</span
         >
       </div>
@@ -5031,7 +5074,8 @@
           onclick={() => pick(o)}
           onmouseenter={() => (palette.index = i)}
         >
-          <b>{SIGIL[o.kind]}{o.name}</b>
+          <i class="sig" aria-hidden="true">{SIGIL[o.kind]}</i>
+          <b>{o.name}</b>
           {#if o.hint}<span class="dim">{o.hint}</span>{/if}
         </button>
       {/each}
@@ -5141,10 +5185,18 @@
             });
             return;
           }
-          if (e.key === "Enter" || e.key === "Tab") {
+          if (e.key === "Enter") {
             e.preventDefault();
             return pick(menuRows[palette.index]);
           }
+          if (keyName(e) === keys.complete) {
+            e.preventDefault();
+            return fillIn(menuRows[palette.index]);
+          }
+        }
+        if (e.key === "Escape" && palette) {
+          e.preventDefault();
+          return (palette = null);
         }
         if (e.key === "Escape" && listening) {
           e.preventDefault();
@@ -5152,11 +5204,11 @@
         }
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
-          // While a turn runs, Enter steers it and Alt+Enter queues behind it —
+          // While a turn runs, Enter steers it and the queue key sends behind it —
           // the two choices the runtime has that a plain send does not.
-          if (e.altKey) return send("queue");
-          // Ctrl+Enter is the third: stop it, then send, in one keystroke.
-          if (busy && e.ctrlKey) return stopAndSend();
+          if (keyName(e) === keys.queue) return send("queue");
+          // Stop, then send, in one keystroke.
+          if (busy && keyName(e) === keys.stopSend) return stopAndSend();
           if (busy) return send("steer");
           send();
         }
@@ -6046,6 +6098,36 @@
               <span class="box" aria-hidden="true"></span>
               <span>suggest next steps after a turn</span>
             </label>
+            <!-- A keyboard is the one preference this page cannot read, so the
+                 three keys the composer listens for are captured rather than
+                 guessed. Enter stays send and Shift+Enter stays a newline. -->
+            <div class="sfld">
+              <span>shortcut keys</span>
+              {#each KEY_ACTIONS as [id, label, dflt] (id)}
+                <div class="krow">
+                  <span>{label}</span>
+                  <button
+                    class="ghost kbd"
+                    class:capturing={capturing === id}
+                    aria-label={`${label} — press to change`}
+                    onclick={(e) => {
+                      capturing = id;
+                      e.currentTarget.focus();
+                    }}
+                    onkeydown={(e) => {
+                      if (capturing !== id) return;
+                      e.preventDefault();
+                      keys = { ...keys, [id]: keyName(e) };
+                      capturing = "";
+                    }}
+                  >{capturing === id ? "press a key…" : keys[id] || dflt}</button>
+                </div>
+              {/each}
+              <small>
+                Tab completes a <code>/</code>, <code>@</code> or <code>#</code> name into the
+                field and leaves it there; Enter is what runs it. Enter and Shift+Enter are fixed.
+              </small>
+            </div>
             <div class="sfld">
               <span>reply rendering</span>
               <div class="seg">
@@ -6164,7 +6246,7 @@
           <dl class="facts">
             <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn · Ctrl+Enter stop it and send</dd>
             <dt>Esc</dt><dd>close a menu or dialog · discard a recording</dd>
-            <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer</dd>
+            <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer; <kbd>Tab</kbd> fills the name, <kbd>Enter</kbd> runs it</dd>
             <dt>Ctrl K</dt><dd>search every stored message</dd>
           </dl>
           <button class="linky danger" onclick={resetSettings}>reset every setting</button>
@@ -6238,6 +6320,15 @@
     --secondary-container: #1f3a30;
     --on-secondary-container: #b8d9c9;
     --tertiary: #e8c268; /* warnings, queued work */
+    /* One hue per composer sigil, so `/` `#` `@` are three colours everywhere
+       they are drawn — the field's tint and the menu's badge read the same
+       token. Kept beside the roles because a theme that changes one has to
+       change the other two, or mint and cyan collide. */
+    --m-cmd: #4edea3;
+    --m-tool: #7fd3ff;
+    /* Violet, not the amber this used to be: amber sat next to the mint tint and
+       read as a warning highlight, and `--error` already owns peach. */
+    --m-skill: #c3a6ff;
     --error: #ffb4a9;
     --on-error-container: #ffdad5;
     --error-container: #3d1512;
@@ -6303,6 +6394,7 @@
     --outline: #6e6e6e; --outline-variant: #3c3c3c;
     --secondary-container: #1f3347; --on-secondary-container: #b8d4ea;
     --tertiary: #d7ba7d; --error: #f48771;
+    --m-cmd: #4daafc; --m-tool: #4ec9b0; --m-skill: #b48ee8;
     --on-error-container: #ffd7cf; --error-container: #5a1d1d;
     --faint: #6e6e6e; --scroll-thumb: #424242;
   }
@@ -6319,6 +6411,7 @@
     --outline: #7c7f6d; --outline-variant: #3b3c34;
     --secondary-container: #4a2340; --on-secondary-container: #f9a8c4;
     --tertiary: #fd971f; --error: #ff6188;
+    --m-cmd: #a6e22e; --m-tool: #66d9ef; --m-skill: #ae81ff;
     --on-error-container: #ffd6e2; --error-container: #4d1024;
     --faint: #7c7f6d; --scroll-thumb: #4a4b41;
   }
@@ -6335,6 +6428,7 @@
     --outline: #8e8e93; --outline-variant: #dcdcdf;
     --secondary-container: #dbe9f7; --on-secondary-container: #123a5c;
     --tertiary: #8a5300; --error: #b3261e;
+    --m-cmd: #0060b0; --m-tool: #0f766e; --m-skill: #6d4aa8;
     --on-error-container: #410e0b; --error-container: #fbe2e0;
     /* the M3 state layers are white alpha; on white they have to be black */
     --state-hover: #0000000f; --state-focus: #0000001a; --state-press: #00000024;
@@ -7208,17 +7302,46 @@
     padding: var(--s3) clamp(1rem, 4vw, 3rem) 0; }
   textarea { flex: 1; min-width: 0; resize: none; min-height: 2.6rem; max-height: 200px; background: none;
     color: var(--on-surface); border: 0; border-radius: 0; padding: var(--s2) 0; font: inherit;
-    font-size: 14px; caret-color: var(--primary); }
+    caret-color: var(--primary);
+    /* Above the tint layer: an absolutely positioned sibling paints over in-flow
+       text, so a token whose tint was opaque hid its own letters. */
+    position: relative; z-index: 1; }
   /* The tint layer. It repeats the draft in transparent ink — same padding,
      font, size and wrapping as the field — and paints only the token's
-     background, so the letters you read are always the textarea's own. */
-  .markwrap { position: relative; flex: 1; min-width: 0; display: flex; }
+     background, so the letters you read are always the textarea's own. Every
+     effect here is colour: no padding, no weight, nothing that would move a
+     glyph out from under the caret.
+     The size lives on this wrapper, not on either layer: when the two were set
+     apart (field 15px, tint 14px) every box was narrower than its word and the
+     tint slid into the next one. */
+  .markwrap { position: relative; flex: 1; min-width: 0; display: flex; font-size: 14px; }
   .marks { position: absolute; inset: 0; overflow: hidden; pointer-events: none;
-    padding: var(--s2) 0; font: inherit; font-size: 14px; color: transparent;
+    padding: var(--s2) 0; font: inherit; color: transparent;
     white-space: pre-wrap; overflow-wrap: break-word; }
-  .marks :global(mark) { color: transparent; border-radius: 3px; }
-  .marks :global(mark.mt) { background: color-mix(in srgb, var(--primary) 24%, transparent); }
-  .marks :global(mark.ms) { background: color-mix(in srgb, var(--tertiary) 26%, transparent); }
+  /* `<mark>` ships a UA background that is literally yellow, and it survives a
+     rule that only sets `background-image` — that is what painted every token
+     as a highlighter. Cleared here, the gradient is the only paint. */
+  .marks :global(mark) { color: transparent; background-color: transparent; border-radius: 0.34em;
+    -webkit-box-decoration-break: clone; box-decoration-break: clone;
+    background-image: linear-gradient(var(--tint), var(--tint));
+    background-repeat: no-repeat; background-position: 0 94%;
+    /* 62% of the mark's own box, which is its line box: the pill covers the
+       letters and not the leading, so it fits the word at any zoom, font size
+       or device pixel ratio — nothing here is a pixel value. */
+    background-size: 100% 62%;
+    animation: tintin 180ms var(--ease) both; }
+  /* One tint per sigil — the same three tokens the palette's badge uses, so a
+     `/`, `#` or `@` is the same colour wherever it is drawn. A hairline ring in
+     the same hue does the work an opaque fill used to: it reads as a token at a
+     glance without turning the line into a highlighter. */
+  .marks :global(mark.mc) { --tint: color-mix(in srgb, var(--m-cmd) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-cmd) 38%, transparent); }
+  .marks :global(mark.mt) { --tint: color-mix(in srgb, var(--m-tool) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-tool) 38%, transparent); }
+  .marks :global(mark.ms) { --tint: color-mix(in srgb, var(--m-skill) 24%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-skill) 40%, transparent); }
+  /* The wipe: the pill grows up from the baseline. Only the paint moves. */
+  @keyframes tintin { from { background-size: 100% 0; } to { background-size: 100% 62%; } }
   textarea:focus { outline: none; }
   textarea::placeholder { color: var(--faint); }
   .send { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--s1);
@@ -7251,26 +7374,47 @@
   .ghost.on { background: var(--secondary-container); color: var(--on-secondary-container);
     border-color: transparent; }
 
-  /* The command palette floats above the composer, inside it. */
+  /* The command palette floats above the composer, inside it. Rows are pills
+     rather than bands: the menu is scanned in a glance, so the gap between
+     choices is what makes one findable, and the sigil carries the kind as a
+     coloured badge instead of a tint on the whole word. */
   .palette { position: absolute; bottom: calc(100% + var(--s2)); left: clamp(1rem, 4vw, 3rem);
     right: clamp(1rem, 4vw, 3rem); max-height: 17rem; overflow-y: auto; z-index: 5;
-    background: var(--surface-container-high); border-radius: var(--shape-md);
-    box-shadow: 0 8px 24px #000a; animation: pop var(--motion-short) var(--ease); }
-  .palette .head { position: sticky; top: 0; display: flex; justify-content: space-between;
-    padding: var(--s1) var(--s3); background: var(--surface-container-high);
-    border-bottom: 1px solid var(--outline-variant); color: var(--faint);
-    font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.16em; }
-  .opt { display: flex; gap: var(--s2); align-items: baseline; width: 100%; text-align: left;
-    background: none; border: 0; color: var(--on-surface); font: inherit; font-size: 13px;
-    padding: var(--s1) var(--s3); cursor: pointer; min-height: 0; }
-  .opt.on { background: var(--secondary-container); }
-  .opt b { color: var(--primary); font-family: var(--mono); font-weight: 500; white-space: nowrap; }
-  /* The sigil carries the kind, so the three lists are told apart at a glance:
-     / command is the signal colour, @ skill is the warning colour, # tool is mint. */
-  .opt.k-skill b { color: var(--tertiary); }
-  .opt.k-tool b { color: var(--on-secondary-container); }
-  .opt .dim { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
+    padding: 4px 0 6px; background: var(--surface-container-high);
+    border: 1px solid var(--outline-variant); border-radius: 16px;
+    box-shadow: 0 18px 42px -14px #000d, 0 2px 6px #0004;
+    animation: pop var(--motion-short) var(--ease); scrollbar-width: thin; }
+  .palette .head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center;
+    justify-content: space-between; padding: var(--s1) var(--s3) var(--s2);
+    background: linear-gradient(var(--surface-container-high) 78%, transparent);
+    color: var(--faint); font-family: var(--mono); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.16em; }
+  .palette .count { padding: 1px 7px; border-radius: 999px; letter-spacing: 0.04em;
+    background: var(--surface-container); color: var(--on-surface); text-transform: none; }
+  .opt { display: grid; grid-template-columns: 20px auto 1fr; align-items: center;
+    gap: var(--s2); width: calc(100% - 10px); margin: 1px 5px; text-align: left;
+    background: none; border: 0; border-radius: 10px; color: var(--on-surface);
+    font: inherit; font-size: 13px; padding: 5px 9px; cursor: pointer; min-height: 0;
+    transition: background var(--motion-short) var(--ease); }
+  .opt:hover { background: var(--state-hover); }
+  .opt.on { background: color-mix(in srgb, var(--primary) 16%, transparent); }
+  /* One accent per kind, used by both the badge and the selected row, from the
+     same three tokens the field's tint uses — `/` `#` `@` are one colour each,
+     menu and composer alike. */
+  .opt.k-skill.on { background: color-mix(in srgb, var(--m-skill) 16%, transparent); }
+  .opt.k-tool.on, .opt.k-builtin.on { background: color-mix(in srgb, var(--m-tool) 16%, transparent); }
+  .opt .sig { display: grid; place-items: center; width: 20px; height: 20px;
+    border-radius: 7px; font-family: var(--mono); font-size: 11px; font-style: normal;
+    background: color-mix(in srgb, var(--m-cmd) 18%, transparent); color: var(--m-cmd); }
+  .opt.k-skill .sig { background: color-mix(in srgb, var(--m-skill) 18%, transparent); color: var(--m-skill); }
+  .opt.k-tool .sig, .opt.k-builtin .sig {
+    background: color-mix(in srgb, var(--m-tool) 18%, transparent); color: var(--m-tool); }
+  .opt b { color: var(--on-surface); font-family: var(--mono); font-weight: 500; white-space: nowrap; }
+  .opt.on b { color: var(--m-cmd); }
+  .opt.k-skill.on b { color: var(--m-skill); }
+  .opt.k-tool.on b, .opt.k-builtin.on b { color: var(--m-tool); }
+  .opt .dim { font-size: 11px; color: var(--faint); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   /* ── dialogs ───────────────────────────────────────────────────────────
      A dialog interrupts, so it is the only surface allowed an elevation
      shadow. Everything else is tone. */
@@ -7452,6 +7596,13 @@
   .sfld textarea::placeholder, .sfld input::placeholder { color: var(--faint); }
   .sub-h { margin: var(--s4) 0 var(--s2); font-family: var(--mono); font-size: 9px;
     text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); }
+  /* A shortcut row: what it does on the left, the key as a keycap on the right. */
+  .krow { display: flex; align-items: center; justify-content: space-between;
+    gap: var(--s3); width: 100%; font-size: 12px; color: var(--on-surface-variant); }
+  .kbd { font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 7px;
+    border: 1px solid var(--outline-variant); background: var(--surface-container-highest);
+    color: var(--on-surface); min-width: 5.5rem; }
+  .kbd.capturing { border-color: var(--primary); color: var(--primary); }
   .linky.danger { color: var(--error); }
   .facts { display: grid; grid-template-columns: 8rem 1fr; gap: var(--s2) var(--s3); margin: 0;
     font-family: var(--mono); font-size: 12px; }
@@ -7665,6 +7816,7 @@
   @media (prefers-reduced-motion: reduce) {
     .msg, .card, .starter, #modal, #tools-modal, .palette { animation: none; }
     .caret, .rec-stop, .tool.run::after, .tool.run summary::before { animation: none; }
+    .marks :global(mark) { animation: none; }
     /* Loading keeps its shape and loses the travel: a bar that jumps is worse
        than a bar that sits still. The two sweeps that only say "still going" go
        away entirely — the running marker and the pill already say it in words. */
@@ -7678,7 +7830,8 @@
      Type and hit targets, raised together. A UI feels expensive when nothing is
      small enough to squint at; these override the sizes above and nothing here
      changes a layout rule, only its measure. */
-  textarea { font-size: 15px; min-height: 3rem; }
+  .markwrap { font-size: 15px; }
+  textarea { min-height: 3rem; }
   .md { font-size: 15px; }
   .md :global(pre) { font-size: 13.5px; }
   .md :global(h1) { font-size: 1.24em; }
