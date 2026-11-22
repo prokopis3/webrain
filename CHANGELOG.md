@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the process stays up.
 
 ### Added
+- `chat`: **add an MCP server from the page** — the MCP tab could list and switch
+  servers and had no way to add one. `POST /mcp/new` writes it with
+  `mcp.config.add` (the public user-config RPC, not the internal
+  `reloadWithConfig` shape), follows with `mcp.config.reload`, and the tab re-reads
+  the list and says which of the two happened. Proven end to end: the entry landed
+  in `mcp-config.json` in the runtime home, the next start listed it as
+  `source: user, status: connected`, and a bad name or non-JSON config is a 400.
 - `chat`: **elicitation** — a structured question from the agent or an MCP server is
   now answered instead of dropped. The JSON schema's fields are asked one at a time
   on the existing `ask_user` card (`enum` → buttons, `boolean` → yes/no,

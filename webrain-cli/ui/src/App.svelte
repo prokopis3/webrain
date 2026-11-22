@@ -3607,11 +3607,38 @@
   // skill: the directory was readable and never writable from the page.
   let agentNew = $state({ name: "", description: "", instructions: "" });
   let skillNew = $state({ name: "", description: "", instructions: "" });
+  let mcpNew = $state({
+    name: "",
+    config: '{\n  "command": "npx",\n  "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]\n}',
+  });
   async function createAgent() {
     await createIn("/agents/new", agentNew, (t) => (agentNew = t));
   }
   async function createSkill() {
     await createIn("/skills/new", skillNew, (t) => (skillNew = t));
+  }
+  // Different promise from the other two: the config is persisted by the runtime,
+  // and whether this session sees the tools depends on its reload, so the note
+  // reports what came back instead of assuming.
+  async function createMcp() {
+    try {
+      const r = await fetch("/mcp/new", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(mcpNew),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/mcp/new: ${j.error}`, "err");
+      mcpNew = { ...mcpNew, name: "" };
+      await loadManage();
+      toast(
+        j.reloaded
+          ? `${j.added} added and reloaded — its tools are offered from the next turn`
+          : `${j.added} saved to the user config; this session keeps what it attached, so it arrives on the next start`,
+      );
+    } catch {
+      toast("/mcp/new: the server is not reachable", "err");
+    }
   }
   async function createIn(route, form, clear) {
     try {
@@ -5875,7 +5902,7 @@
                   is on — adding one is <code>webrain install skills</code>, which puts it there.
                 {:else}
                   The servers this session attached. A stopped server is why a turn suddenly
-                  has no tools; adding one is a config line and a restart.
+                  has no tools; adding one writes it to the runtime's user configuration.
                 {/if}
               </small>
             </div>
@@ -5908,6 +5935,21 @@
                 <textarea rows="4" bind:value={skillNew.instructions} placeholder="its instructions"></textarea>
                 <button onclick={createSkill} disabled={!skillNew.name.trim()}>create skill</button>
                 <small>The file lands in the skills directory; the runtime loads it at session start.</small>
+              </label>
+            {:else}
+              <!-- The config is the runtime's own shape (stdio `command` or a
+                   remote `url`), so it is pasted rather than rebuilt as two
+                   half-correct forms. -->
+              <label class="sfld">
+                <span>add one</span>
+                <input bind:value={mcpNew.name} placeholder="name — e.g. filesystem" maxlength="64" />
+                <textarea rows="5" bind:value={mcpNew.config} spellcheck="false"></textarea>
+                <button onclick={createMcp} disabled={!mcpNew.name.trim() || !mcpNew.config.trim()}>add server</button>
+                <small>
+                  Written to the runtime's user MCP configuration with <code>mcp.config.add</code>.
+                  A tool only reaches this session if the reload after it connects — the list
+                  above is re-read either way, so the note under it says which happened.
+                </small>
               </label>
             {/if}
             {#if !isSkills}

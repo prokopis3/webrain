@@ -54,7 +54,8 @@ use copilot_sdk::handler::{
 };
 use copilot_sdk::rpc::{
     AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
-    HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpDisableRequest,
+    HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpConfigAddRequest,
+    McpDisableRequest,
     McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
     NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
@@ -1914,6 +1915,39 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .and_then(|()| std::fs::write(&path, doc))
                 .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
                 .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // Persist an MCP server into the runtime's **own** user configuration —
+        // `mcp.config.add`, not the internal `reloadWithConfig` shape. A running
+        // session keeps what it attached, so the reply says whether the reload
+        // it asks for afterwards actually took; the page reloads its list either
+        // way instead of claiming a tool that is not there yet.
+        ("POST", "/mcp/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let raw = match &v["config"] {
+                Value::String(s) => serde_json::from_str::<Value>(s.trim()).unwrap_or(Value::Null),
+                other => other.clone(),
+            };
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            if !named || !raw.is_object() {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer (letters, digits, - _ .); config must be a JSON object" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let live = state.live.read().await.clone();
+            let mcp = live.client.rpc().mcp().config();
+            let out = match mcp.add(McpConfigAddRequest { config: raw, name: name.clone() }).await {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(()) => {
+                    let reloaded = mcp.reload().await.is_ok();
+                    json!({ "added": name, "reloaded": reloaded })
+                }
+            };
             let code = if out.get("error").is_some() { 500 } else { 200 };
             respond(&mut stream, code, "application/json", &out.to_string()).await
         }
