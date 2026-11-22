@@ -3468,6 +3468,59 @@
     }
   }
 
+  // Settings > Skills / MCP read the same two routes the `/skills` and `/mcp`
+  // cards read, into rows `flip` already knows how to act on — one toggle
+  // implementation whether the switch is in the transcript or in the panel.
+  let manage = $state({ skills: [], mcp: [] });
+  async function loadManage() {
+    try {
+      const [s, m] = await Promise.all([
+        fetch("/skills").then((r) => r.json()),
+        fetch("/mcp").then((r) => r.json()),
+      ]);
+      manage = {
+        skills: (s.skills || [])
+          .filter((x) => typeof x !== "string")
+          .map((x) => ({ name: x.name, on: x.enabled, note: x.source })),
+        mcp: (m.servers || []).map((x) => ({
+          name: typeof x === "string" ? x : x.name,
+          on: typeof x !== "string" && x.status === "connected",
+          note: typeof x === "string" ? "" : x.status,
+        })),
+      };
+    } catch {
+      /* a panel with no rows beats one that lies about what is installed */
+    }
+  }
+
+  // A line from a conversation that is not on screen. The transcript cannot show
+  // it — the rows belong to another thread — so it lands here and goes away.
+  let toasts = $state([]);
+  let toastSeq = 0;
+  function toast(text, kind = "note") {
+    const id = ++toastSeq;
+    toasts = [...toasts.slice(-3), { id, text, kind }];
+    setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 6000);
+  }
+
+  /// Which frames from another conversation are worth a snackbar. Deltas, tool
+  /// rows and thinking chunks are not: they would turn the corner into a ticker.
+  function notify(f) {
+    const d = f.data || {};
+    const bad = /error|fail/.test(f.type);
+    const text =
+      f.type === "webrain.job"
+        ? `job #${d.id} ${d.command} — ${d.exit == null ? "ended" : `exit ${d.exit}`}`
+        : f.type === "permission.requested" || f.type === "webrain.permission"
+          ? `${d.tool || d.name || "a tool"} is waiting for approval in that chat`
+          : bad
+            ? `error in that chat: ${d.message || f.type}`
+            : f.type === "assistant.idle" || f.type === "session.idle"
+              ? "that chat finished its turn"
+              : "";
+    if (text) toast(text, bad ? "err" : "note");
+  }
+
   // The runtime signals that its todo table was written and leaves the rows to a
   // separate read. Announcing only a *changed* list is what keeps a chatty agent
   // from printing the same three lines after every step; the `/todos` command
@@ -3524,8 +3577,12 @@
         // forever with nothing running.
         const ends =
           f.type === "assistant.idle" || f.type === "session.idle" || f.type === "session.shutdown";
-        if (f.convo && current && f.convo !== current && !ends) {
-          runningIn = f.convo;
+        if (f.convo && current && f.convo !== current) {
+          // Not this thread's rows, so they cannot join its transcript — but a
+          // permission waiting in it or a job that ended there is exactly what a
+          // snackbar is for. Dropping them read as "nothing happened".
+          runningIn = ends ? "" : f.convo;
+          notify(f);
           return;
         }
         if (ends) runningIn = "";
@@ -4900,7 +4957,7 @@
       <textarea
         bind:value={draft}
         onscroll={(e) => marksEl && (marksEl.scrollTop = e.currentTarget.scrollTop)}
-      placeholder="Ask, scrape, extract — / commands, @ skills, # tools, + attach"
+      placeholder="Ask, scrape, extract…"
       oninput={() => scanMenu()}
       onpaste={onPaste}
       onkeydown={(e) => {
@@ -5609,6 +5666,22 @@
   </div>
 {/if}
 
+{#if toasts.length}
+  <!-- A snackbar, not a modal: it reports what another thread did and never asks
+       for an answer. Above the composer so it cannot cover the field. -->
+  <div class="toasts" role="status" aria-live="polite">
+    {#each toasts as t (t.id)}
+      <div class="toast" class:bad={t.kind === "err"}>
+        <span>{t.text}</span>
+        <button
+          class="linky"
+          onclick={() => (toasts = toasts.filter((x) => x.id !== t.id))}
+          aria-label="dismiss">×</button>
+      </div>
+    {/each}
+  </div>
+{/if}
+
 {#if settingsOpen}
   <div
     id="modal"
@@ -5617,8 +5690,16 @@
   >
     <div class="card settings">
       <div class="stabs">
-        {#each [["instructions", "Instructions"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
-          <button class="tab" class:on={setTab === k} onclick={() => (setTab = k)}>{label}</button>
+        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
+          <button
+            class="tab"
+            class:on={setTab === k}
+            onclick={() => {
+              setTab = k;
+              // The two live lists are read when shown, not when the panel
+              // opens: a server that died since then must not still look up.
+              if (k === "skills" || k === "mcp") loadManage();
+            }}>{label}</button>
         {/each}
       </div>
       <div class="sbody">
@@ -5641,6 +5722,45 @@
               <input maxlength="40" bind:value={language} placeholder="English" />
               <small>Becomes “reply in …”. Empty lets the model choose.</small>
             </label>
+          </div>
+        {:else if setTab === "skills" || setTab === "mcp"}
+          {@const isSkills = setTab === "skills"}
+          {@const rows = isSkills ? manage.skills : manage.mcp}
+          {@const item = isSkills ? { route: "/skills", key: "name" } : { route: "/mcp", key: "server" }}
+          <div class="form">
+            <div class="sfld">
+              <span>{isSkills ? "available skills" : "mcp servers"}</span>
+              <small>
+                {#if isSkills}
+                  Read from the skills directory. A skill's tools are offered only while it
+                  is on — adding one is <code>webrain install skills</code>, which puts it there.
+                {:else}
+                  The servers this session attached. A stopped server is why a turn suddenly
+                  has no tools; adding one is a config line and a restart.
+                {/if}
+              </small>
+            </div>
+            {#if !rows.length}
+              <p class="mngempty">{isSkills ? "no skills installed" : "no servers reported"}</p>
+            {:else}
+              <ul class="mng">
+                {#each rows as row (row.name)}
+                  {@const on = toggles[`${item.route}:${row.name}`] ?? row.on}
+                  <li>
+                    <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
+                    <button
+                      class="mswitch"
+                      class:on
+                      onclick={() => flip(item, row)}
+                      role="switch"
+                      aria-checked={on}
+                      aria-label={`${row.name} ${on ? "on" : "off"}`}
+                      title={on ? "switch off" : "switch on"}
+                    ><i aria-hidden="true"></i></button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           </div>
         {:else if setTab === "chat"}
           <div class="form">
@@ -7094,6 +7214,44 @@
     border-bottom: 0; min-height: 2.2rem; padding: var(--s2) var(--s3); }
   .stabs .tab.on { background: var(--secondary-container); color: var(--on-secondary-container); }
   .sbody { min-height: 9rem; }
+
+  /* Settings > Skills / MCP: one row per thing, one switch per row. The track is
+     34×20 but the button is 44px, so a thumb finds it on a phone and a mouse
+     still gets a target bigger than the paint. */
+  .mng { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .mng li { display: flex; align-items: center; gap: var(--s3); min-height: 44px;
+    padding: 0 var(--s1) 0 var(--s2); border-radius: var(--shape-md);
+    transition: background var(--motion-short) var(--ease); }
+  .mng li:hover { background: var(--state-hover); }
+  .mngname { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .mngname b { font-weight: 600; font-size: 13.5px; letter-spacing: 0.1px; }
+  .mngname small { color: var(--dim); font-size: 11.5px; }
+  .mngempty { margin: var(--s3) var(--s2); color: var(--dim); font-size: 13px; }
+  .mswitch { flex: none; width: 44px; height: 44px; display: grid; place-items: center;
+    border: 0; background: none; cursor: pointer; border-radius: var(--shape-full); }
+  .mswitch i { width: 34px; height: 20px; border-radius: var(--shape-full);
+    border: 2px solid var(--outline); position: relative; display: block;
+    transition: background var(--motion-short) var(--ease),
+      border-color var(--motion-short) var(--ease); }
+  .mswitch i::after { content: ""; position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%; background: var(--outline);
+    transition: transform var(--motion-short) var(--ease),
+      background var(--motion-short) var(--ease); }
+  .mswitch.on i { background: var(--secondary-container); border-color: var(--secondary-container); }
+  .mswitch.on i::after { transform: translateX(14px); background: var(--on-secondary-container); }
+
+  /* Snackbar: a line from another thread. Bottom-left, above the composer, so it
+     never covers the field it is reporting about. */
+  .toasts { position: fixed; left: var(--s4); bottom: 7.5rem; z-index: 70;
+    display: flex; flex-direction: column; gap: var(--s2);
+    max-width: min(26rem, calc(100vw - 2 * var(--s4))); }
+  .toast { display: flex; align-items: center; gap: var(--s3);
+    padding: var(--s2) var(--s2) var(--s2) var(--s4);
+    border-radius: var(--shape-md); font-size: 13px;
+    background: var(--surface-container-highest); color: var(--on-surface);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); }
+  .toast.bad { background: var(--error-container); color: var(--on-error-container); }
+  .toast span { flex: 1; }
 
   /* Provider tab body: the live catalogue, filterable, one row per model. It is
      the provider's own list — not a copy of the default model in the config. */
