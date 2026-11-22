@@ -3559,13 +3559,16 @@
   // Settings > Skills / MCP read the same two routes the `/skills` and `/mcp`
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
-  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [] });
+  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [] });
   async function loadManage() {
     try {
-      const [s, m, items] = await Promise.all([
+      const [s, m, items, ag] = await Promise.all([
         fetch("/skills").then((r) => r.json()),
         fetch("/mcp").then((r) => r.json()),
         fetch("/mcp/items")
+          .then((r) => r.json())
+          .catch(() => ({})),
+        fetch("/agents")
           .then((r) => r.json())
           .catch(() => ({})),
       ]);
@@ -3587,6 +3590,9 @@
           name: r.name || r.uri,
           note: r.uri || "",
         })),
+        // Agent definitions, which `read_agent`/`list_agents` give the model and
+        // nothing gave a person — `/env` only ever said "no custom agents loaded".
+        agents: ag.agents || [],
       };
     } catch {
       /* a panel with no rows beats one that lies about what is installed */
@@ -5790,15 +5796,15 @@
   >
     <div class="card settings">
       <div class="stabs">
-        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
+        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["agents", "Agents"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
           <button
             class="tab"
             class:on={setTab === k}
             onclick={() => {
               setTab = k;
-              // The two live lists are read when shown, not when the panel
-              // opens: a server that died since then must not still look up.
-              if (k === "skills" || k === "mcp") loadManage();
+              // The live lists are read when shown, not when the panel opens: a
+              // server that died since then must not still look up.
+              if (k === "skills" || k === "mcp" || k === "agents") loadManage();
             }}>{label}</button>
         {/each}
       </div>
@@ -5879,6 +5885,36 @@
                   </div>
                 {/if}
               {/each}
+            {/if}
+          </div>
+        {:else if setTab === "agents"}
+          <div class="form">
+            <div class="sfld">
+              <span>agent definitions</span>
+              <small>
+                What the runtime can delegate to. Choosing one is a session option
+                (<code>agents.selected</code>), so a picker would mean a restart —
+                this list is what tells you whether there is anything to pick.
+              </small>
+            </div>
+            {#if !manage.agents.length}
+              <p class="mngempty">
+                none found — a definition added to the workspace or the user
+                configuration appears here, and the model can write one with
+                <code>write_agent</code>
+              </p>
+            {:else}
+              <ul class="mng">
+                {#each manage.agents as row (row.id)}
+                  <li>
+                    <span class="mngname">
+                      <b>{row.title || row.name}</b>
+                      {#if row.description}<small>{row.description}</small>{/if}
+                    </span>
+                    {#if row.manual_only}<small class="dim">manual only</small>{/if}
+                  </li>
+                {/each}
+              </ul>
             {/if}
           </div>
         {:else if setTab === "chat"}

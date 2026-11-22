@@ -53,7 +53,7 @@ use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use copilot_sdk::rpc::{
-    CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    AgentsDiscoverRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpDisableRequest,
     McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
@@ -1971,6 +1971,53 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let body = match r.get_mode().await {
                 Ok(m) => json!({ "mode": mode_name(&m.mode) }),
                 Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // What the runtime can delegate to. `read_agent`/`write_agent`/`list_agents`
+        // let the *model* manage definitions; nothing let a person see them, and
+        // `/env` only says "no custom agents loaded". Selection is creation-time
+        // (`agents.selected`), so this is the list, not a picker.
+        ("GET", "/agents") => {
+            let live = state.live.read().await.clone();
+            let body = match live
+                .client
+                .rpc()
+                .agents()
+                .discover(AgentsDiscoverRequest {
+                    // The workspace is where a definition is most likely to be;
+                    // without it discovery only looks at whatever the runtime
+                    // considers its own configuration.
+                    project_paths: Some(vec![
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ]),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(list) => {
+                    let mut rows: Vec<Value> = list
+                        .agents
+                        .iter()
+                        .map(|a| {
+                            json!({
+                                "id": a.id,
+                                "name": a.name,
+                                "title": a.display_name,
+                                "description": a.description,
+                                // An agent the model may not pick on its own is the
+                                // interesting one: it can only be chosen by a person.
+                                "manual_only": a.disable_model_invocation.unwrap_or(false),
+                            })
+                        })
+                        .collect();
+                    rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                    json!({ "agents": rows })
+                }
+                Err(e) => json!({ "agents": [], "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
