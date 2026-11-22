@@ -1054,6 +1054,35 @@
           kind: "err",
           text: `credits: ${Math.round(d.usedAiCredits ?? 0)} of ${Math.round(d.maxAiCredits ?? 0)} used — the turn is waiting on a limit decision`,
         });
+      // The provider's own balance. `usage_checkpoint` counts what we spent; this
+      // says how much is left, when the provider reports it. A zero quantity does
+      // not mean exhausted — the runtime says so separately — so the verdict is
+      // printed beside the number instead of being inferred from it.
+      case "session.quota_observation": {
+        const q = d.observation || {};
+        const left = q.availableQuantity;
+        const of = q.entitledQuantity;
+        if (left == null && !q.capacityState) return;
+        const bits = [];
+        if (left != null) {
+          // -1 is the runtime's unlimited sentinel, not a quantity.
+          if (of != null && of >= 0) bits.push(`${left} of ${of} left`);
+          else bits.push(left < 0 ? "unlimited" : `${left} left`);
+        }
+        if (q.capacityState) bits.push(`capacity ${q.capacityState}`);
+        if (q.accessState && q.accessState !== "allowed") bits.push(`access ${q.accessState}`);
+        const who = q.provider?.name || q.provider?.id;
+        if (who) bits.push(who);
+        return push({ kind: "note", text: `quota: ${bits.join(" · ")}` });
+      }
+      // The session's own credit ceiling moved — the number is the whole point.
+      case "session.session_limits_changed": {
+        const max = d.sessionLimits?.maxAiCredits;
+        return push({
+          kind: "note",
+          text: max == null ? "session credit limit: none" : `session credit limit: ${max}`,
+        });
+      }
       case "webrain.permission": {
         // An approval is a row in the transcript, not a modal over it: the
         // arguments it is asking about belong beside the tool calls they follow,

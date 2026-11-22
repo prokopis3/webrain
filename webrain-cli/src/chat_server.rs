@@ -1974,6 +1974,19 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // What the runtime will accept as an approval rule, and what it holds now.
+        // A per-request approve/deny has no "always" — that is `modifyRules`, and
+        // writing a rule without knowing the kind vocabulary would be a guess that
+        // either does nothing or allows more than it says.
+        ("GET", "/permission-rules") => {
+            let live = state.live.read().await.clone();
+            let caps = live.session.rpc().permissions().get_capabilities().await;
+            let body = match caps {
+                Ok(c) => json!({ "capabilities": serde_json::to_value(c).unwrap_or(Value::Null) }),
+                Err(e) => json!({ "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
         ("POST", "/permission-mode") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let want = v["mode"].as_str().unwrap_or("manual");
