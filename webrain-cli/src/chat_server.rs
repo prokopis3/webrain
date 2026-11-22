@@ -3819,6 +3819,33 @@ fn mode_word(m: &SessionMode) -> &'static str {
     }
 }
 
+/// A URL `ureq` can parse, or `None`.
+///
+/// `ureq::get()` **panics** on a malformed port (`InvalidPort` in its url parser)
+/// instead of returning an error, so a single bad link — or a provider base_url
+/// with a typo — took the whole server down. The check has to happen before the
+/// call; there is no error to catch afterwards.
+fn http_url(raw: &str) -> Option<String> {
+    let (scheme, rest) = raw.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // A bracketed IPv6 host contains colons of its own; only a port after `]`.
+    let port = match host_port.find(']') {
+        Some(i) => host_port[i + 1..].strip_prefix(':'),
+        None => host_port.rsplit_once(':').map(|(_, p)| p),
+    };
+    match port {
+        Some(p) => {
+            let n: u32 = p.parse().ok()?;
+            (n > 0 && n <= 65535).then(|| raw.to_string())
+        }
+        None => Some(raw.to_string()),
+    }
+}
+
 /// `interactive` for anything unrecognised: it is the mode that asks before it
 /// acts, and the alternative is putting the agent in autopilot by typo.
 fn session_mode_of(name: &str) -> SessionMode {
@@ -3836,10 +3863,9 @@ fn session_mode_of(name: &str) -> SessionMode {
 /// Only `http`/`https` is followed — the URL arrives from the page, and a
 /// `file:` or `data:` preview would turn a link into a local read.
 async fn link_preview(url: &str) -> Value {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let Some(owned) = http_url(url) else {
         return json!({ "url": url, "error": "not an http(s) url" });
-    }
-    let owned = url.to_string();
+    };
     let got = tokio::task::spawn_blocking(move || -> Result<String, String> {
         let body = ureq::get(&owned)
             .header("accept", "text/html,application/xhtml+xml")
@@ -4118,6 +4144,10 @@ async fn list_models(
     typ: &'static str,
 ) -> Result<Vec<Value>, String> {
     let url = format!("{}/models", base.trim_end_matches('/'));
+    // A base_url with a typo in the port would panic inside ureq, not error.
+    let Some(url) = http_url(&url) else {
+        return Err("provider base url is not http(s) with a valid port".to_string());
+    };
     let key = key.map(str::to_string);
     let call = tokio::task::spawn_blocking(move || {
         let mut req = ureq::get(&url).header("Accept", "application/json");
@@ -4840,5 +4870,23 @@ mod tests {
         assert_eq!(op["peak"], json!([[1, 4], [6, 10]]));
         assert_eq!(op["days"], json!([1, 2, 3, 4, 5]));
         assert!(off_peak("openrouter").is_null());
+    }
+
+    /// `ureq` panics on these rather than returning an error, so the guard is the
+    /// only thing between a stray link and a dead server.
+    #[test]
+    fn http_url_refuses_what_ureq_would_panic_on() {
+        assert_eq!(http_url("https://x.dev/a"), Some("https://x.dev/a".into()));
+        assert_eq!(http_url("http://x.dev:8080/a?b#c"), Some("http://x.dev:8080/a?b#c".into()));
+        assert_eq!(http_url("http://[::1]:9222/json"), Some("http://[::1]:9222/json".into()));
+        assert_eq!(http_url("https://u:p@x.dev/v1"), Some("https://u:p@x.dev/v1".into()));
+        assert_eq!(http_url("http://[::1]/x"), Some("http://[::1]/x".into()));
+        assert_eq!(http_url("https://x.dev:abc/v1"), None, "InvalidPort");
+        assert_eq!(http_url("https://x.dev:0/v1"), None, "port 0");
+        assert_eq!(http_url("https://x.dev:70000/v1"), None, "port overflow");
+        assert_eq!(http_url("https://x.dev:/v1"), None, "empty port");
+        assert_eq!(http_url("file:///etc/passwd"), None);
+        assert_eq!(http_url("javascript:alert(1)"), None);
+        assert_eq!(http_url("x.dev/a"), None);
     }
 }

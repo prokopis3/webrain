@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `chat`: **a bad port in a URL no longer kills the server.** `ureq::get()` panics
+  inside its URL parser on `https://host:abc/`, so one link preview — or a provider
+  `base_url` with a typo — took the whole `chat --serve` process down with
+  `parsed url: InvalidPort`. Both call sites (`/preview`, the model-list probe) now
+  pass through a scheme + host + port guard first and answer with an error instead.
+  Verified live: three malformed ports answer `{"error":"not an http(s) url"}` and
+  the process stays up.
+
 ### Added
 - `chat`: **elicitation** — a structured question from the agent or an MCP server is
   now answered instead of dropped. The JSON schema's fields are asked one at a time
