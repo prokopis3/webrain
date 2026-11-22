@@ -2,7 +2,7 @@
   // `tick` is the one thing runes do not give for free: arrowing through the
   // palette has to scroll the row that is now selected, and the class it looks
   // for only exists after the render flush.
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   // webrain chat · Svelte 5 runes.
   // Wire contract: GET /events (SSE), POST /turn, POST /permission,
   // GET /sessions (+ /sessions/<id>). Unknown runtime events are shown, never
@@ -230,7 +230,8 @@
     removeEventListener("pointercancel", gripUp);
     gripDrag = null;
   }
-  // A separator that only answers to a mouse is not a separator: arrows move it.
+  // A handle that only answers to a mouse is not a handle: the arrow keys step
+  // the same number the drag sets, which is what the slider role promises.
   function gripKey(which, e) {
     const d = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
     if (!d) return;
@@ -499,8 +500,10 @@
   ];
   let theme = $state(recall("theme", "mint"));
   // Applied here, not only in the effect below, so the saved palette is on the
-  // document before the first paint instead of flashing the default.
-  document.documentElement.dataset.theme = theme;
+  // document before the first paint instead of flashing the default. `untrack`
+  // says the one-shot read is the point: a reactive read here would re-run the
+  // statement as a derived value, which is not what a pre-paint assignment is.
+  document.documentElement.dataset.theme = untrack(() => theme);
   let themeOpen = $state(false);
   let themeEl = $state(null);
   $effect(() => {
@@ -5048,21 +5051,31 @@
   </aside>
 
   <!-- The two handles. Absolutely placed because what they resize is the grid
-       columns themselves, and they follow the same two vars the grid does. -->
+       columns themselves, and they follow the same two vars the grid does.
+       `slider`, not `separator`: what these own is a number between two bounds,
+       dragged by pointer and stepped by the arrow keys — which is the slider
+       contract, and it is why the tabindex and the two listeners are correct
+       here rather than the a11y heuristic's usual defect. -->
   <div
     class="grip l"
-    role="separator"
-    aria-orientation="vertical"
+    role="slider"
+    aria-orientation="horizontal"
     aria-label="resize the sessions rail"
+    aria-valuemin={W_MIN}
+    aria-valuemax={W_MAX}
+    aria-valuenow={railW}
     tabindex="0"
     onpointerdown={(e) => gripDown("rail", e)}
     onkeydown={(e) => gripKey("rail", e)}
   ></div>
   <div
     class="grip r"
-    role="separator"
-    aria-orientation="vertical"
+    role="slider"
+    aria-orientation="horizontal"
     aria-label="resize the session instruments"
+    aria-valuemin={W_MIN}
+    aria-valuemax={W_MAX}
+    aria-valuenow={instW}
     tabindex="0"
     onpointerdown={(e) => gripDown("inst", e)}
     onkeydown={(e) => gripKey("inst", e)}
@@ -5621,6 +5634,8 @@
         >
         <div
           class="tabs"
+          role="group"
+          aria-label="providers"
           use:measureTabs
           onscroll={tabsSync}
           onpointerdown={tabsDown}
