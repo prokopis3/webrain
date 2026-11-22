@@ -575,6 +575,10 @@
   // than the on ones means a tool added to the binary later is available without
   // anyone re-ticking it, and the default state needs no seeding.
   let builtinOff = $state(readJson("tools-builtin-off", []));
+  // The runtime's own account of what it disabled for this session, verbatim
+  // from its `configuration` event. Shown in the tools checklist because a list
+  // of what the model *has* cannot explain a tool that never appears.
+  let runtimeOff = $state("");
   const builtinOn = (name) => !builtinOff.includes(name);
   function toggleBuiltin(name) {
     builtinOff = builtinOn(name)
@@ -969,6 +973,15 @@
   function handle(f) {
     const d = f.data || {};
     switch (f.type) {
+      // What the runtime switched off, in its own words. This is why the
+      // checklist has no `edit` or `view` row: the session's tool set is fixed
+      // when it is created, and the ones it withheld are named here rather than
+      // silently missing from a list that only shows what it kept.
+      case "configuration": {
+        const said = d.message || d.reason || "";
+        runtimeOff = String(said).trim() || JSON.stringify(d).slice(0, 600);
+        return activity(f.type, d);
+      }
       // The agent's own one-line description of what it is doing. Cheaper than a
       // guess and better than "working", so it replaces the spinner's label.
       case "assistant.intent":
@@ -3674,10 +3687,10 @@
       if (j.error) return toast(`/mcp/new: ${j.error}`, "err");
       mcpNew = { ...mcpNew, name: "" };
       await loadManage();
+      // Measured: `mcp.config.reload` answers ok and the running session still
+      // does not attach the server, so the note never promises this session.
       toast(
-        j.reloaded
-          ? `${j.added} added and reloaded — its tools are offered from the next turn`
-          : `${j.added} saved to the user config; this session keeps what it attached, so it arrives on the next start`,
+        `${j.added} saved to the user config — a running session keeps what it attached, so it arrives on the next start`,
       );
     } catch {
       toast("/mcp/new: the server is not reachable", "err");
@@ -5566,6 +5579,12 @@
         <p class="note">
           Sent as a prompt instruction — the runtime's tool set is fixed when the session starts.
         </p>
+        {#if runtimeOff}
+          <!-- The runtime disabled these before the page ever drew a checkbox.
+               Nothing here can switch them on, which is exactly why they are
+               quoted instead of listed as options. -->
+          <p class="note off">runtime disabled · {runtimeOff}</p>
+        {/if}
         <div class="row">
           <span class="dim tcount"
             >{draftCount + builtinOnCount} of {toolRows.length + builtinAll.length} preferred</span
@@ -6958,6 +6977,11 @@
   .tfoot { display: grid; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3);
     border-top: 1px solid var(--outline-variant); }
   .tfoot .note { margin: 0; }
+  /* The runtime's own sentence about what it withheld: quoted in mono, boxed,
+     and scrollable, because it can name thirty tools. */
+  .tfoot .note.off { font-family: var(--mono); font-size: 10px; line-height: 1.5;
+    color: var(--on-surface-variant); max-height: 5.5rem; overflow-y: auto;
+    padding: 5px 8px; border-radius: 8px; background: var(--surface-container-highest); }
   .tfoot .row { justify-content: flex-end; gap: var(--s2); align-items: center; }
   /* The count moved here from the header: it describes what Save will send, so
      it belongs beside Save, not floating over the list it counts. */
