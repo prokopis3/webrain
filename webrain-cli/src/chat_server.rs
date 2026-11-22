@@ -53,7 +53,7 @@ use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use copilot_sdk::rpc::{
-    AgentsDiscoverRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpDisableRequest,
     McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
@@ -1858,6 +1858,42 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             });
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // Write a skill into the directory the `@` menu already reads. Measured
+        // against the runtime: the skill's own tools arrive when the runtime next
+        // lists the directory, and one switched off can be switched on from here.
+        ("POST", "/skills/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let description = v["description"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .replace(['\n', '\r'], " ");
+            let instructions = v["instructions"].as_str().unwrap_or_default().to_string();
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ');
+            if !named || instructions.len() > 32 * 1024 || description.len() > 200 {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer, no dots or slashes; instructions under 32 KB" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let slug: String = name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let dir = webrain_core::skills::dir().join(&slug);
+            let path = dir.join("SKILL.md");
+            let doc = format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let out = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, doc))
+                .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
+                .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
         // Which skills exist is one question, which ones the agent used is
         // another — an unused skill is a prompt problem, not a missing file.
         ("GET", "/skills") => {
@@ -2019,7 +2055,73 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 }
                 Err(e) => json!({ "agents": [], "error": e.to_string() }),
             };
+            // Where the runtime actually looks. Without this the empty state is a
+            // guess about a directory the runtime never named.
+            let paths = match live
+                .client
+                .rpc()
+                .agents()
+                .get_discovery_paths(AgentsGetDiscoveryPathsRequest {
+                    project_paths: Some(vec![
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ]),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(p) => serde_json::to_value(p.paths).unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            };
+            let mut body = body;
+            body["paths"] = paths;
             respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Create an agent definition. The runtime ships `write_agent` for the
+        // model and nothing for a person, which is why this tab could only ever
+        // say "none". The file goes where discovery already looks — the
+        // workspace's `.github/agents` — so the next `discover` finds it.
+        //
+        // Everything a filename may contain is decided here, not by the caller:
+        // no separators, no dots, no `..`, and a byte cap on the body. A route
+        // that writes a file from a web request is a trust boundary.
+        ("POST", "/agents/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let description = v["description"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .replace(['\n', '\r'], " ");
+            let instructions = v["instructions"].as_str().unwrap_or_default().to_string();
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ');
+            if !named || instructions.len() > 32 * 1024 || description.len() > 200 {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer, no dots or slashes; instructions under 32 KB" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let slug: String = name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let dir = std::env::current_dir()
+                .unwrap_or_default()
+                .join(".github")
+                .join("agents");
+            let path = dir.join(format!("{slug}.md"));
+            let doc = format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let out = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, doc))
+                .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
+                .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // What the runtime will accept as an approval rule, and what it holds now.
         // A per-request approve/deny has no "always" — that is `modifyRules`, and

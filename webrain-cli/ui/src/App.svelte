@@ -3599,6 +3599,36 @@
     }
   }
 
+  // A definition this page can write. The runtime gives the model `write_agent`
+  // and gave a person nothing, so the tab could only ever say "none". Same for a
+  // skill: the directory was readable and never writable from the page.
+  let agentNew = $state({ name: "", description: "", instructions: "" });
+  let skillNew = $state({ name: "", description: "", instructions: "" });
+  async function createAgent() {
+    await createIn("/agents/new", agentNew, (t) => (agentNew = t));
+  }
+  async function createSkill() {
+    await createIn("/skills/new", skillNew, (t) => (skillNew = t));
+  }
+  async function createIn(route, form, clear) {
+    try {
+      const r = await fetch(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`${route}: ${j.error}`, "err");
+      clear({ name: "", description: "", instructions: "" });
+      await loadManage();
+      // A skill is on disk and in the menus immediately; the runtime loads it when
+      // it lists the directory again, which is a session start.
+      toast(`${j.name} written — /catalog has it now, the runtime loads it at session start`);
+    } catch {
+      toast(`${route}: the server is not reachable`, "err");
+    }
+  }
+
   // A line from a conversation that is not on screen. The transcript cannot show
   // it — the rows belong to another thread — so it lands here and goes away.
   let toasts = $state([]);
@@ -5867,6 +5897,16 @@
                 {/each}
               </ul>
             {/if}
+            {#if isSkills}
+              <label class="sfld">
+                <span>add one</span>
+                <input bind:value={skillNew.name} placeholder="name — e.g. price-watch" maxlength="64" />
+                <input bind:value={skillNew.description} placeholder="one line: when to reach for it" maxlength="200" />
+                <textarea rows="4" bind:value={skillNew.instructions} placeholder="its instructions"></textarea>
+                <button onclick={createSkill} disabled={!skillNew.name.trim()}>create skill</button>
+                <small>The file lands in the skills directory; the runtime loads it at session start.</small>
+              </label>
+            {/if}
             {#if !isSkills}
               <!-- What else a server ships. Read-only here because a prompt is
                    invoked by the model, not by a switch: the list is the answer
@@ -5916,6 +5956,17 @@
                 {/each}
               </ul>
             {/if}
+            <label class="sfld">
+              <span>add one</span>
+              <input bind:value={agentNew.name} placeholder="name — e.g. page-auditor" maxlength="64" />
+              <input bind:value={agentNew.description} placeholder="one line: what it is for" maxlength="200" />
+              <textarea rows="4" bind:value={agentNew.instructions} placeholder="its instructions: what to do, what to avoid"></textarea>
+              <button onclick={createAgent} disabled={!agentNew.name.trim()}>create agent</button>
+              <small>
+                Written to <code>.github/agents/&lt;name&gt;.md</code>. The list above is
+                the runtime's own read, so a definition it refuses shows up as nothing.
+              </small>
+            </label>
           </div>
         {:else if setTab === "chat"}
           <div class="form">
