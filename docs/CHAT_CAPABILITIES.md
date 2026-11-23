@@ -5,36 +5,17 @@ Measured against `copilot-sdk` 2.0.1 on `feat/copilot-sdk-v2`, last pass
 file holds only what is still missing, and it is short because most of it turned
 out to be blocked upstream rather than unbuilt.
 
-**Five of the seven rows below closed, and three closed differently than they were
-written.** `citations` (#5) was listed as impossible on a premise that is false for
-2.0.1 — the typed payload is there, so the switch, the transport and the sources
-strip now exist. `agent picker` (#2) needed no restart path at all: the SDK's
-`session.agent.select` works on a live session. `approvals` (#6) deliberately does
-not use the SDK's rule vocabulary, which still has no documented `kind`; it stores
-the two fields a card actually carries. `attaching an MCP server` (#3) was written
-off as blocked on a doc comment about an *internal* config shape — the session-scoped
-`startServer` call does the job the internal one was being read for, and it is
-measured working. `prompts and resources` (#7) were listed and never usable: a
-prompt is text, so a person can invoke one too.
+**What is open, and nothing else.** Seven rows were on this list; five shipped and are
+described in `CHANGELOG.md` and the git history, so they are not repeated here. Two
+remain, and both are blocked by the SDK rather than by this repo — the evidence for
+that is the symbol table below, not a hunch.
 
 ## Open
 
 | # | what | why it is still open |
 |---|---|---|
 | 1 | the worker's own transcript | `assistant.message_delta` carries only `{deltaContent, messageId}` — no agent or parent id — so a streamed line cannot be attributed *while it streams*. It is not blocked, it is deferred: `delta.messageId` joins to `assistant.message.turnId`, and `assistant.turn_end` carries `parentTaskToolCallId`, so a child's text can be re-filed under its `task` row when that turn **ends**. Doing that means buffering per-message text on the hottest path in the page, so it stays open until that is worth its risk |
-| 3 | attaching an MCP server to a *running* session | adding and removing are both shipped; attachment is not. `session.mcp.reloadWithConfig`'s config field is documented as **"marked internal: an in-process runtime shape (reloadMcpServers throws over the wire)"**, so a new server reaches the session at its next start. `/mcp/remove` says so in its `attached` field rather than implying a live detach |
 | 4 | MCP sampling, *answered* | handled as the protocol's reject, so the hang is gone and the completion is not run. The typed path cannot carry it: `McpExecuteSamplingRequest` is an **empty struct** ("treated as opaque at the schema layer") while the params that matter — the MCP `createMessage` messages — are what it would have to hold, so `executeSampling` would ask the runtime to run an inference with no prompt. Answering needs either a non-empty struct upstream or a hand-built raw call, which spends credits per request |
-
-## Closed in the last pass
-
-| # | what | how |
-|---|---|---|
-| 3 | attaching an MCP server to a *running* session | **Closed, and the old claim was wrong.** `mcp.config.reload` re-reads the config and attaches nothing — but `session.mcp.startServer` with **no config** starts the already-registered server *in this session*. `/mcp/new` now calls it and reports `{added, reloaded, attached}`. Measured on a session that had never seen the server: `GET /mcp` went from 2 servers to 3, with `webrain-self status=connected`, no restart |
-| 2 | agent picker | `session.agent.select` moves the selection on a **live** session, so the picker needed no restart path — only a list that says what is chosen now. `GET /agents` now carries `current`, `POST /agents/select {"name"}` switches (or `default`/empty to deselect), and the Agents tab draws "in use" instead of a "use" button on the running one. Verified: select a missing name → `{"selected":false,"error":"Custom agent 'does-not-exist' not found"}`; deselect → `{"selected":false,"current":null}` |
-| 5 | citations | The premise was **wrong for 2.0.1**: `AssistantMessageData.citations` is a typed payload (`Citations { sources[], spans[] }`, `CitationSource { id, provider, title?, url?, path? }`), not just the `String` on the memory-store request. `SessionInferenceOptions::with_enable_citations(true)` turns it on, the server already forwards `event.data` untouched, and the page draws a `sources` strip under a cited answer. Off by default: the SDK marks it experimental and asking for markers spends output tokens. Creation-time only (the live `options.update` shape has no such field), so flipping it reports `restart: true` |
-| 6 | approvals that survive the turn | `permissions.get_capabilities()` still has no rule vocabulary and `modify_rules`'s `kind` is still documented only by example — so this does **not** use it. A "always allow" answer is stored as `server:tool` (the two fields the card carries, never the runtime's `kind`, which calls nearly everything `tool`) in `approvals.json` beside the settings, and `WebPermission` answers a matching prompt before raising a card. A *managed* approval is never answered from the store: the runtime is saying a policy requires a human. The Approvals tab lists and revokes; the auto-answer posts a `webrain.note` so a standing grant stays visible |
-| 3 | removing an MCP server | `GET /mcp/items` listed servers and nothing could forget one, so a server added by mistake stayed in every new session. `POST /mcp/remove {"name"}` calls `mcp.config.remove` + `reload` and reports `{removed, reloaded, attached}`, where `attached` is the honest answer to "is it gone from *this* session" |
-| 7 | a prompt or a resource you can **use** | `GET /mcp/items` listed both and stopped there — the code comment said as much ("only ever reached the model"). A prompt is text, so `POST /mcp/prompt {server, name, arguments}` renders its messages and `POST /mcp/resource {server, uri}` returns its text, and each row's `use` puts the result in the composer. Verified against a stdio fixture that ships one of each (nothing else here exposes a prompt): `{"text":"Hello Rust from the fixture"}` with an argument, and `{"text":"fixture document body"}` |
 
 ## What the SDK actually offered
 
@@ -71,37 +52,10 @@ not exist in the file it printed.
 
 ## What is verified, and what is not
 
-Verified by running it: the session creates on 2.0.1; `/settings`, `/name`,
-`/mode`, `/jobs`, `/runtime/sessions`, `/catalog` (with the runtime's 29 commands),
-`/command` (`/cwd`, `/usage`, `/env` returned text), `/queue`, `/resume`,
-`/mcp/items`, `/permission-rules` and `GET /agents` all answer; `POST /agents/new`
-wrote a definition that the runtime's own `discover()` then listed; `POST
-/skills/new` wrote a skill that `/catalog` showed immediately and that a
-`../escape` name was refused for; and the provider's 402 quoting "requested up to
-4096 tokens" proves the migrated model caps are in force.
-
-The four routes this pass added were exercised against a running `--serve` on a
-sandboxed store (`WEBRAIN_CHAT_DB=output/chatcap/chat.db`):
-
-| route | measured |
-|---|---|
-| `GET /approvals` | `{"approved":[]}` on a fresh store |
-| `POST /approvals {"key":"webrain:navigate","on":true}` | `{"saved":true,"approved":["webrain:navigate"]}`, and `approvals.json` on disk held the same list |
-| `POST /approvals … on:false` | `{"approved":[]}` — revoking is a save of the shorter list |
-| `POST /agents/select {"name":"default"}` | `{"selected":false,"current":null}` |
-| `POST /agents/select {"name":"does-not-exist"}` | `{"selected":false,"error":"Custom agent 'does-not-exist' not found"}` |
-| `POST /mcp/remove {"name":"nope-not-real"}` | `{"removed":false,"error":"… MCP server 'nope-not-real' not found."}` |
-| `POST /mcp/new` on a session that never had the server | `{"added":"webrain-self","reloaded":true,"attached":true,"status":"connected"}`, and `GET /mcp` then listed three servers — `filesystem`, `webrain`, `webrain-self` all `status=connected` — with no restart |
-| `POST /mcp/new` with a command that cannot spawn | `{"added":"broken-test","reloaded":true,"attached":false,"status":"failed","attach_error":"… program not found"}` — the first version of this reply said `attached: true` because it checked presence in the list rather than the status, which is the failure-that-reads-as-success shape; `attached` now means connected |
-| `POST /mcp/remove` of an attached server | `{"removed":true,"reloaded":true,"attached":true}` — `attached` is true because the live session keeps it, which is what that field is for |
-| `POST /settings {"citations":true}` | `{"saved":true,"restart":true}` — creation-time, so the flag is honest about costing a rebuild; `/settings` and `settings.json` both then read `true` |
-| `POST /mcp/prompt {"server":"fixture","name":"greet","arguments":{"who":"Rust"}}` | `{"messages":1,"text":"Hello Rust from the fixture"}`, and the page's `use` put that in the composer |
-| `PATCH /sessions/<live id> {"title":"budget review"}` | `{"renamed":true,"runtime":{"saved":true,"name":"budget review"}}`, and the runtime's own list then read `"name": "budget review"` — before this it still said `webrain-<id>` |
-| `PATCH /sessions/<stored, not live>` | `{"renamed":true,"runtime":null}` — renaming an old row must not rename the one live session |
-
-`/agents/select` reported `selected: true` for a **deselect** on its first live
-run: the reply echoed the request's name instead of reading back what the session
-now runs. It reads `current` now, which is why the table above says `false`.
+The per-route measurements for everything that shipped live in the commits that
+shipped it (each `CHANGELOG.md` entry carries the reply it was measured by), so
+they are not repeated here. What is left is what has **never** been seen working,
+which is the part that matters when deciding whether to trust this page:
 
 Not verified, in order of how much it matters:
 
@@ -110,8 +64,8 @@ Not verified, in order of how much it matters:
    2.0.1. Until a funded key raises one, treat `permissions.on_request` as
    compiled-but-unproven — it is the failure that looks like success. This is also
    why the standing-approval store is proven by unit tests (key shape, file round
-   trip, managed-never-auto-answered) and by the routes above, but not yet by a
-   card that was actually skipped.
+   trip, managed-never-auto-answered) and by its routes, but not yet by a card
+   that was actually skipped.
 2. **Citations on a real turn.** The switch, the restart report, the persisted
    value and the page's strip are in place; no funded turn has run with it on, so
    `Citations` has not been seen populated by a provider. The BYOK providers here
