@@ -3808,6 +3808,9 @@
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
   let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [], agentCurrent: null });
+  // The settings lists are the model picker's list, so they get its filter too —
+  // the cross-tool skill tree alone can be hundreds of rows.
+  let skillFilter = $state("");
   async function loadManage() {
     try {
       const [s, m, items, ag] = await Promise.all([
@@ -3823,7 +3826,9 @@
       manage = {
         skills: (s.skills || [])
           .filter((x) => typeof x !== "string")
-          .map((x) => ({ name: x.name, on: x.enabled, note: x.source })),
+          // `live: false` is the cross-tool tree (`~/.agents/skills`): on disk, in
+          // the list, and not loadable by this session — so it gets no switch.
+          .map((x) => ({ name: x.name, on: x.enabled, note: x.source, live: x.live !== false })),
         mcp: (m.servers || []).map((x) => ({
           name: typeof x === "string" ? x : x.name,
           on: typeof x !== "string" && x.status === "connected",
@@ -6212,6 +6217,10 @@
         {:else if setTab === "skills" || setTab === "mcp"}
           {@const isSkills = setTab === "skills"}
           {@const rows = isSkills ? manage.skills : manage.mcp}
+          {@const needle = skillFilter.trim().toLowerCase()}
+          {@const shown = needle
+            ? rows.filter((r) => `${r.name} ${r.note || ""}`.toLowerCase().includes(needle))
+            : rows}
           {@const item = isSkills ? { route: "/skills", key: "name" } : { route: "/mcp", key: "server" }}
           <div class="form">
             <div class="sfld">
@@ -6220,17 +6229,30 @@
                 {#if isSkills}
                   Read from the skills directory. A skill's tools are offered only while it
                   is on — adding one is <code>webrain install skills</code>, which puts it there.
+                  Rows from <code>~/.agents/skills</code> are the skills installed for every
+                  agent on this machine; this session never loaded them, so they carry no switch.
                 {:else}
                   The servers this session attached. A stopped server is why a turn suddenly
                   has no tools; adding one writes it to the runtime's user configuration.
                 {/if}
               </small>
             </div>
-            {#if !rows.length}
-              <p class="mngempty">{isSkills ? "no skills installed" : "no servers reported"}</p>
+            <input
+              class="mfilter"
+              placeholder="filter {rows.length} {isSkills ? "skills" : "servers"}"
+              bind:value={skillFilter}
+            />
+            {#if !shown.length}
+              <p class="mngempty">
+                {needle
+                  ? `nothing matches “${skillFilter.trim()}”`
+                  : isSkills
+                    ? "no skills installed"
+                    : "no servers reported"}
+              </p>
             {:else}
               <ul class="mng">
-                {#each rows as row (row.name)}
+                {#each shown as row (row.name)}
                   {@const on = toggles[`${item.route}:${row.name}`] ?? row.on}
                   <li>
                     <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
@@ -6241,15 +6263,19 @@
                         title="forget this server from the runtime's user config"
                       >remove</button>
                     {/if}
-                    <button
-                      class="mswitch"
-                      class:on
-                      onclick={() => flip(item, row)}
-                      role="switch"
-                      aria-checked={on}
-                      aria-label={`${row.name} ${on ? "on" : "off"}`}
-                      title={on ? "switch off" : "switch on"}
-                    ><i aria-hidden="true"></i></button>
+                    <!-- A skill from the cross-tool tree has no switch: the session
+                         never loaded it, so a switch here could only fail. -->
+                    {#if row.live !== false}
+                      <button
+                        class="mswitch"
+                        class:on
+                        onclick={() => flip(item, row)}
+                        role="switch"
+                        aria-checked={on}
+                        aria-label={`${row.name} ${on ? "on" : "off"}`}
+                        title={on ? "switch off" : "switch on"}
+                      ><i aria-hidden="true"></i></button>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -7900,7 +7926,10 @@
   /* Settings > Skills / MCP: one row per thing, one switch per row. The track is
      34×20 but the button is 44px, so a thumb finds it on a phone and a mouse
      still gets a target bigger than the paint. */
-  .mng { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .mng { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px;
+    /* The same window as the model picker's list: a long registry scrolls inside
+       its box instead of pushing the form (and the Save under it) off the card. */
+    max-height: 40vh; overflow-y: auto; }
   .mng li { display: flex; align-items: center; gap: var(--s3); min-height: 44px;
     padding: 0 var(--s1) 0 var(--s2); border-radius: var(--shape-md);
     transition: background var(--motion-short) var(--ease); }
@@ -7928,6 +7957,13 @@
     border-radius: var(--shape-full); color: var(--dim); font: inherit; font-size: 12.5px;
     transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
   .mact:hover { background: var(--state-hover); color: var(--on-surface, inherit); }
+  /* The form's own action — create skill, add server, create agent — is the same
+     button the dialogs use for theirs (`Save`, `apply`). It was a bare <button>,
+     which read as a quieter, different thing two tabs away from Save. */
+  .sfld > button { background: var(--primary); color: var(--on-primary); border: 0;
+    border-radius: var(--shape-full); padding: 0 var(--s4); font: inherit; font-weight: 600;
+    cursor: pointer; min-height: 2.4rem; }
+  .sfld > button:disabled { opacity: 0.5; cursor: default; }
 
   /* The snackbar lives in Toasts.svelte: one more presentational scope out of
      this file, and its styles with it. */

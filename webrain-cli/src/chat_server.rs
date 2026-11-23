@@ -2227,12 +2227,41 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let live = state.live.read().await.clone();
             let list = live.session.rpc().skills().list().await;
             let invoked = live.session.rpc().skills().get_invoked().await;
-            let body = match (list, invoked) {
-                (Ok(l), Ok(i)) => json!({ "skills": l.skills, "invoked": i.skills }),
-                (Ok(l), Err(e)) => {
-                    json!({ "skills": l.skills, "invoked": [], "error": e.to_string() })
+            // The runtime knows only its own directory. The cross-tool tree the
+            // `npx`-style installers write (`~/.agents/skills`) is a second root,
+            // so a skill installed for every other agent on this machine is listed
+            // rather than invisible — off, and marked not-live, because a tool this
+            // session did not load cannot be switched on from the page.
+            let mut skills: Vec<Value> = match &list {
+                Ok(l) => l
+                    .skills
+                    .iter()
+                    .map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let mut taken: std::collections::HashSet<String> = skills
+                .iter()
+                .filter_map(|s| s["name"].as_str().map(str::to_owned))
+                .collect();
+            if let Some(dir) = webrain_core::skills::agents_dir() {
+                for (name, _) in webrain_core::skills::list(&dir) {
+                    if taken.insert(name.clone()) {
+                        skills.push(json!({
+                            "name": name,
+                            "enabled": false,
+                            "live": false,
+                            "source": "~/.agents/skills · not loaded by this session",
+                        }));
+                    }
                 }
-                (Err(e), _) => json!({ "skills": [], "invoked": [], "error": e.to_string() }),
+            }
+            let body = match (list, invoked) {
+                (Ok(_), Ok(i)) => json!({ "skills": skills, "invoked": i.skills }),
+                (Ok(_), Err(e)) => {
+                    json!({ "skills": skills, "invoked": [], "error": e.to_string() })
+                }
+                (Err(e), _) => json!({ "skills": skills, "invoked": [], "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }

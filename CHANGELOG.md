@@ -80,6 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not a broken renderer.
 
 ### Added
+- `chat`: **Settings → Skills lists the cross-tool tree, `~/.agents/skills`.** That is
+  where the `npx`-style skill installers put their work, and the runtime reads only its
+  own directory — so a skill installed for every other agent on the machine was in no
+  list at all. `GET /skills` now answers with both: the runtime's rows, then every name
+  under that tree the runtime did not already report, as `enabled: false, live: false`
+  with `~/.agents/skills · not loaded by this session` as its note. `live: false` is what
+  keeps a switch off those rows — a toggle there could only fail. Measured on this
+  machine: **1 live skill + 896 from the cross-tool tree**, and exactly one switch in the
+  list. Because that many rows needs a way in, the Skills and MCP tabs took the model
+  picker's filter box (`filter 897 skills`; typing `figma` leaves `figma-automation`),
+  and the empty state says when a filter is what emptied it.
+  `webrain_core::skills::agents_dir()` is the read-only resolver — `HOME`, else
+  `USERPROFILE`, and only when the directory exists — with a unit test for each of those
+  three cases.
 - `chat`: **the composer's menus are the session's, not a hard-coded sample.** `GET
   /catalog` asks the runtime for its own built-in descriptors
   (`session.tools.getBuiltinDescriptors`) instead of assuming four names, so `#` lists
@@ -374,6 +388,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   painted *under* it; the composer is 12 now, above the button and below both drawers
   (30) and the dialogs (40). Verified with `elementFromPoint` inside the overlap: the
   point resolves to the panel.
+- `chat`: **settings lists scroll inside their box, and the form's action buttons match
+  the dialogs'.** The Skills / MCP / Agents / Approvals lists (`.mng`) had no height cap,
+  so a long registry pushed the form — and the button under it — out of the card; they
+  now take the same `max-height: 40vh; overflow-y: auto` window the model picker's
+  `.mlist` uses (measured: both compute to 360px at a 900px window). `create skill` /
+  `add server` / `create agent` were bare `<button>`s inside the form, so they read as a
+  quieter thing two tabs away from a dialog's `Save`; they are the same primary pill now
+  — measured identical to `Save · deepseek-flash`: `rgb(78,222,163)`, radius `999px`,
+  weight 600, 38px tall — with the disabled state dimmed rather than restyled.
 - `docs`: **the streaming baseline is now a real provider turn, not a mock.**
   `PERF_AUDIT.md` → *Re-measuring* records a measured `deepseek-flash` turn
   (1,201 output tokens, page footer `129.9 tok/s · 9.3s`): a `MutationObserver`

@@ -122,6 +122,24 @@ fn dir_or(override_dir: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
+/// The cross-tool skill tree the `npx`-style installers write to:
+/// `~/.agents/skills`. Read as a *second* root, never written.
+///
+/// The runtime reads only its own directory, so a skill installed for every other
+/// agent on this machine was in no list at all — which is why the settings list
+/// shows it (off, with the reason) instead of pretending it is not there.
+pub fn agents_dir() -> Option<PathBuf> {
+    agents_dir_or(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")))
+}
+
+fn agents_dir_or(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let home = home.filter(|v| !v.is_empty())?;
+    let dir = PathBuf::from(home).join(".agents").join("skills");
+    // Only when it exists: an empty answer and "there is no such tree" are the
+    // same thing to a list, and nobody needs a path to a directory that is not there.
+    dir.is_dir().then_some(dir)
+}
+
 /// First `name:` inside the YAML frontmatter. `None` when the file has none —
 /// which is how a reference chapter is told apart from a skill.
 pub fn frontmatter_name(text: &str) -> Option<String> {
@@ -364,6 +382,27 @@ mod tests {
             frontmatter_name("\u{feff}---\nname: bom\n---\n").as_deref(),
             Some("bom")
         );
+    }
+
+    #[test]
+    fn the_cross_tool_tree_is_found_only_when_it_exists() {
+        // No home, or an empty one, is "no tree" — not the current directory.
+        assert_eq!(agents_dir_or(None), None);
+        assert_eq!(agents_dir_or(Some(std::ffi::OsString::new())), None);
+
+        let home = std::env::temp_dir().join(format!("webrain-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // A home without `.agents/skills` is still nothing: a path to a missing
+        // directory would end up in a list as an empty source.
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(agents_dir_or(Some(home.clone().into_os_string())), None);
+
+        std::fs::create_dir_all(home.join(".agents").join("skills")).unwrap();
+        assert_eq!(
+            agents_dir_or(Some(home.clone().into_os_string())),
+            Some(home.join(".agents").join("skills"))
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
