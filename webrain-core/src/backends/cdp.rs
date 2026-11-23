@@ -674,6 +674,95 @@ const NET_LOG_CAP: usize = 2048;
 /// Cap on one response body handed to an agent (~200 KB of text).
 const NET_BODY_CAP: usize = 200_000;
 
+/// HAR 1.2 from captured rows. A free function so the format is unit-tested
+/// without a browser, and shared by `op=har`.
+fn har_from_entries(entries: &[NetEntry]) -> Value {
+    let list: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "startedDateTime": iso8601_ms(e.at),
+                "time": e.ms.round(),
+                "request": {
+                    "method": e.method,
+                    "url": e.url,
+                    "httpVersion": "",
+                    "cookies": [],
+                    "headers": [],
+                    "queryString": query_pairs(&e.url),
+                    "headersSize": -1,
+                    "bodySize": -1,
+                },
+                "response": {
+                    "status": e.status,
+                    "statusText": "",
+                    "httpVersion": "",
+                    "cookies": [],
+                    "headers": [],
+                    "content": {"size": e.bytes, "mimeType": e.mime},
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": e.bytes,
+                },
+                "cache": {},
+                "timings": {"send": 0.0, "wait": e.ms.round(), "receive": 0.0},
+                // HAR's `_`-prefixed extension fields are the documented place
+                // for what the spec has no slot for.
+                "_resourceType": e.kind,
+                "_failed": e.failed,
+                "_requestId": e.id,
+            })
+        })
+        .collect();
+    json!({
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "webrain", "version": env!("CARGO_PKG_VERSION")},
+            "entries": list,
+        }
+    })
+}
+
+/// `?a=1&b=2` → `[{"name":"a","value":"1"},…]`. Values stay percent-encoded:
+/// decoding them here would invent a truth (`%2F` is not `/` to every consumer)
+/// and HAR calls the field the *decoded* form, so the raw text is the honest one.
+fn query_pairs(url: &str) -> Vec<Value> {
+    let Some(q) = url.split_once('?').map(|(_, q)| q.split('#').next().unwrap_or(q)) else {
+        return Vec::new();
+    };
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            json!({"name": k, "value": v})
+        })
+        .collect()
+}
+
+/// Epoch ms → `1970-01-01T00:00:00.000Z`. HAR requires ISO-8601 and the crate
+/// carries no date library, so this is Hinnant's civil-from-days, which is exact
+/// for every date a request can carry.
+fn iso8601_ms(epoch_ms: f64) -> String {
+    let ms = epoch_ms.max(0.0) as i64;
+    let (secs, millis) = (ms.div_euclid(1000), ms.rem_euclid(1000));
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{millis:03}Z")
+}
+
 struct CdpConnection {
     /// JSON payloads out to the browser (WS Text frame, or pipe length-framed).
     write: tokio::sync::mpsc::Sender<String>,
@@ -881,6 +970,60 @@ mod net_tests {
             );
         }
         assert_eq!(full.len(), NET_LOG_CAP);
+    }
+
+    #[test]
+    fn har_carries_the_measured_fields_and_marks_the_unknowns() {
+        let mut log = Vec::new();
+        absorb(
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "9.1", "type": "XHR", "wallTime": 1_709_164_800.0,
+                "timestamp": 10.0,
+                "request": {"url": "https://x/api/p?page=2&sort=a", "method": "GET"}
+            }),
+            &mut log,
+        );
+        absorb(
+            "Network.responseReceived",
+            &json!({"requestId": "9.1", "response": {"status": 200, "mimeType": "application/json"}}),
+            &mut log,
+        );
+        absorb(
+            "Network.loadingFinished",
+            &json!({"requestId": "9.1", "encodedDataLength": 512.0, "timestamp": 10.25}),
+            &mut log,
+        );
+
+        let har = har_from_entries(&log);
+        assert_eq!(har["log"]["version"], "1.2");
+        assert_eq!(har["log"]["creator"]["name"], "webrain");
+        let e = &har["log"]["entries"][0];
+        assert_eq!(e["request"]["method"], "GET");
+        assert_eq!(e["request"]["url"], "https://x/api/p?page=2&sort=a");
+        assert_eq!(e["response"]["status"], 200);
+        assert_eq!(e["response"]["content"]["mimeType"], "application/json");
+        assert_eq!(e["response"]["content"]["size"], 512.0);
+        assert_eq!(e["time"], 250.0);
+        assert_eq!(e["timings"]["wait"], 250.0);
+        // Not measured is the HAR "unknown", never a plausible zero.
+        assert_eq!(e["request"]["headersSize"], -1);
+        assert_eq!(e["request"]["headers"], json!([]));
+        assert_eq!(e["_resourceType"], "XHR");
+        assert_eq!(e["_requestId"], "9.1");
+        // 2024-02-29T00:00:00Z — a leap day, the case a naive formatter breaks.
+        assert_eq!(e["startedDateTime"], "2024-02-29T00:00:00.000Z");
+        assert_eq!(e["request"]["queryString"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn iso8601_handles_the_epoch_and_a_leap_day() {
+        assert_eq!(iso8601_ms(0.0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso8601_ms(1_709_164_800_000.0), "2024-02-29T00:00:00.000Z");
+        // a negative (pre-epoch) clock must not panic or wrap
+        assert_eq!(iso8601_ms(-1.0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(query_pairs("https://x/a").len(), 0);
+        assert_eq!(query_pairs("https://x/a?q=1#frag")[0]["name"], "q");
     }
 }
 
@@ -2274,6 +2417,20 @@ impl CdpBackend {
 
     pub async fn network_clear(&self) {
         self.net_log.lock().await.clear();
+    }
+
+    /// HAR 1.2 of the last capture, for a tool that speaks HAR (DevTools import,
+    /// a proxy replay, a test fixture). Built from the same rows `op=requests`
+    /// returns, so the two can never tell different stories.
+    ///
+    /// What Chrome would need for a fuller log is not read here: request/response
+    /// **headers** and cookies are events we do not subscribe to, so they are the
+    /// HAR "unknown" value (`[]` with `headersSize: -1`) rather than invented, and
+    /// `timings` carries only what was measured (`wait` = the request's duration;
+    /// send/receive are 0 because the split is not in these events).
+    pub async fn network_har(&self) -> Value {
+        let entries = self.net_log.lock().await.clone();
+        har_from_entries(&entries)
     }
 
     /// One response body by requestId. `Network.getResponseBody` only answers

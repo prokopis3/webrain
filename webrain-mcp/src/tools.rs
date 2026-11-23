@@ -906,9 +906,9 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_network",
-            "description": "The page's OWN HTTP traffic — every request the app makes, not just what it paints. op=log arms CDP Network capture (optionally navigating first with url, then capturing for wait_ms) and returns entries: id, url, method, type, status, mime, bytes, at (epoch ms), ms, failed. The arm stays on afterwards, so log → interact (a click) → requests reads one buffer. op=request returns ONE response body by that id — this is how a JS app with no visible data gets scraped; ask while the renderer still holds it, and note an entry with bytes:0 has no body to give. op=requests re-reads the buffer; op=clear empties it. Narrow with filter (URL substring), type, status, limit.",
+            "description": "The page's OWN HTTP traffic — every request the app makes, not just what it paints. op=log arms CDP Network capture (optionally navigating first with url, then capturing for wait_ms) and returns entries: id, url, method, type, status, mime, bytes, at (epoch ms), ms, failed. The arm stays on afterwards, so log → interact (a click) → requests reads one buffer. op=request returns ONE response body by that id — this is how a JS app with no visible data gets scraped; ask while the renderer still holds it, and note an entry with bytes:0 has no body to give. op=requests re-reads the buffer; op=har exports the same rows as HAR 1.2 (headers/cookies are not captured, so they are HAR's -1/[] unknowns); op=clear empties it. Narrow with filter (URL substring), type, status, limit.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["log","requests","request","clear"]},
+                "op": {"type": "string", "enum": ["log","requests","request","har","clear"]},
                 "url": {"type": "string", "description": "log: navigate first and capture the whole load"},
                 "wait_ms": {"type": "integer", "default": 0, "description": "log: keep capturing this long after load, for late XHR"},
                 "id": {"type": "string", "description": "request: the id from op=log"},
@@ -2536,7 +2536,13 @@ async fn call_extract(backend: &CdpBackend, name: &str, args: &Value) -> Value {
         }
         "webrain_table" => {
             // browsemind extract_table: HTML tables -> JSON rows, zero LLM.
-            let js = r#"JSON.stringify(Array.from(document.querySelectorAll('table')).slice(0,20).map(t => { const headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim()); const rows = Array.from(t.querySelectorAll('tr')).slice(headers.length ? 1 : 0).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.textContent.trim())); return headers.length ? rows.map(r => Object.fromEntries(headers.map((h,i) => [h, r[i] ?? null]))) : rows; }))"#;
+            // Header cells are object KEYS, so their whitespace is normalised:
+            // HTML pads headers with `&nbsp;` (U+00A0) for layout, and
+            // `trim()` only strips the ends, which left `row["First\u00a0appeared"]`
+            // — a key that looks right and is not. Verified on a Wikipedia
+            // infobox: the key is now `First appeared` (U+0020). Cell values are
+            // left verbatim, because a <br> in a cell is real structure.
+            let js = r#"JSON.stringify(Array.from(document.querySelectorAll('table')).slice(0,20).map(t => { const headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.replace(/\s+/g, ' ').trim()); const rows = Array.from(t.querySelectorAll('tr')).slice(headers.length ? 1 : 0).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.textContent.trim())); return headers.length ? rows.map(r => Object.fromEntries(headers.map((h,i) => [h, r[i] ?? null]))) : rows; }))"#;
             match backend.evaluate(js).await {
                 Ok(v) => {
                     let arr = parse_json_str(&v);
@@ -3619,7 +3625,17 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
             let pack = |op: &str, all: Vec<Value>| {
                 let total = all.len();
                 let rows: Vec<Value> = all.into_iter().filter(|e| keep(e)).take(limit).collect();
-                json!({"status": "ok", "op": op, "total": total, "count": rows.len(), "requests": rows})
+                let mut out = json!({"status": "ok", "op": op, "total": total, "count": rows.len(), "requests": rows});
+                // A capture that saw nothing is either a page with no traffic or an
+                // engine that does not emit Network events (lightpanda/obscura are
+                // unverified). Say so — a bare `total: 0` reads as "this page made
+                // no requests", which is the wrong conclusion.
+                if op == "log" && total == 0 {
+                    out["note"] = json!(
+                        "no Network events captured — the page made no requests, or this engine does not implement the CDP Network domain (verified on Chrome only)"
+                    );
+                }
+                out
             };
             match op {
                 "request" => {
@@ -3646,6 +3662,23 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     json!({"status": "ok", "op": "clear", "cleared": true})
                 }
                 "requests" => pack("requests", backend.network_entries().await),
+                // `har` with a url/`wait_ms` captures first: the buffer lives on
+                // the connection, so a one-shot CLI call (`log` then `har`) would
+                // otherwise export an empty log from a fresh process.
+                "har" => {
+                    if args.get("url").is_some() || args.get("wait_ms").is_some() {
+                        let wait_ms = args
+                            .get("wait_ms")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        let url = args.get("url").and_then(|v| v.as_str()).filter(|u| !u.is_empty());
+                        if let Err(e) = backend.network_log(url, wait_ms).await {
+                            return err(e);
+                        }
+                    }
+                    backend.network_har().await
+                }
                 _ => {
                     let wait_ms = args
                         .get("wait_ms")

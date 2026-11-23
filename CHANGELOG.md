@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mcp`: **`webrain_network op=har`** — the same captured rows as a **HAR 1.2**
+  document, for a tool that speaks HAR (DevTools import, a proxy replay, a test
+  fixture). Headers and cookies are events this server does not subscribe to, so
+  they are HAR's own *unknown* values (`[]` with `headersSize: -1`) rather than
+  invented, and `timings` carries only what was measured (`wait`; send/receive 0).
+  `startedDateTime` is real ISO-8601 from Hinnant's civil-from-days — the crate
+  carries no date library — tested on the epoch and on a leap day. Verified live:
+  2 entries with status, mime, wait and type, on Chrome and on Obscura.
+  `op=har` also captures when given `url`/`wait_ms`, because the buffer lives on
+  the connection and a one-shot CLI call would otherwise export an empty log from
+  a fresh process.
+- `core`: **the network plane now states what each engine delivers**, measured
+  rather than assumed: Chrome 157 gives log + HAR + body; **Obscura 0.2.5 gives
+  log + HAR but no body** (`-32601 No response body found for requestId …`); and
+  Lightpanda is unverified. An empty capture now carries a `note` — "the page made
+  no requests, or this engine does not implement the CDP Network domain" — because
+  a bare `total: 0` reads as the wrong conclusion.
 - `cli`: **`webrain tool` — the whole MCP surface from a shell, with no model in
   the loop.** A user without an LLM key could drive 7 webrain commands and could
   not extract anything structured: `docs/reference/cli.mdx` said "for CSS
@@ -265,6 +282,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"stopped":true,"id":1,…}`.
 
 ### Fixed
+- `mcp`: **table headers no longer carry `&nbsp;` into the JSON keys.**
+  `webrain_extract mode=table` used `th.textContent.trim()`, and `trim()` only
+  strips the *ends*, so a header padded with `&nbsp;` for layout became the key
+  `"First\u00a0appeared"` — a key that looks right and is not (`row["First
+  appeared"]` is `undefined`). Header cells are keys, so their whitespace is now
+  collapsed to single spaces; cell values stay verbatim, because a `<br>` inside a
+  cell is real structure. Verified on a Wikipedia infobox: the key measures
+  `U+0020`. (The `┬á` I reported earlier as mojibake was my terminal rendering
+  `C2 A0` in CP437 — the bytes were correct all along; the real defect was the
+  interior NBSP, not the encoding.)
 - `chat`: **the settings checkboxes have their box back.** Moving the tools
   chooser out of `App.svelte` took the `.tcheck`/`.box` rules with it, and the
   five settings checkboxes (Runtime tab) kept rendering as bare native inputs —

@@ -33,7 +33,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 |---|---|---|
 | `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
 | `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · assets (every link internal+external+non-http, images incl. CSS `background-image`, video sources+embeds in one pass; `only`+`max`) · console · flatten · fit · clean · screenshot (`format`+`quality`) · pixel (`tiles_dir`) · page_info · annotate · media | ✅ CDP |
-| `webrain_network` (`op=…`) | log (arm capture, optional `url`+`wait_ms` → every request with id/method/type/status/mime/bytes/ms) · request (`id` → that response body) · requests (last log) · clear | ✅ CDP |
+| `webrain_network` (`op=…`) | log (arm capture, optional `url`+`wait_ms` → every request with id/method/type/status/mime/bytes/ms) · request (`id` → that response body) · requests (last log) · har (HAR 1.2) · clear | ✅ CDP |
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
@@ -162,11 +162,28 @@ whose content arrives after mount: log the requests, then read the one that has 
 - `op=requests` re-reads the buffer; `op=clear` empties it. **The arm stays on after
   `log`**, so the sequence that matters for a search UI — `log`, then a click through
   `webrain_interact`, then `op=requests` — reads one continuous buffer.
+- `op=har` exports the same rows as **HAR 1.2** for a tool that speaks HAR (DevTools
+  import, a proxy replay, a test fixture). Headers and cookies are events this server
+  does not subscribe to, so they are HAR's own *unknown* values (`[]` with
+  `headersSize: -1`) rather than invented, and `timings` carries only what was
+  measured (`wait` = the request's duration).
 - Narrow with `filter` (URL substring), `type`, `status`, `limit` (default 200).
 
 A redirect chain is one row, not one per hop, and the buffer caps at 2,048 entries so a
 chatty page cannot grow it without bound. Bodies are never buffered — they are fetched on
 request — which is why the log stays small enough to return whole.
+
+**What each engine actually delivers** (measured, not assumed):
+
+| engine | `op=log` | `op=har` | `op=request` (body) |
+|---|---|---|---|
+| Chrome 157 | ✅ 2 requests, ids like `21376.21` | ✅ HAR 1.2 | ✅ 577-char body |
+| Obscura 0.2.5 | ✅ 2 requests, ids like `loader-<uuid>` | ✅ HAR 1.2 | ❌ `-32601 No response body found for requestId …` — the engine keeps no body, and the reply says so rather than returning empty |
+| Lightpanda | not verified (not installed) | — | — |
+
+So on obscura this is a request **log** and a HAR export; the body half needs Chrome.
+An empty log is reported with a `note` saying the page may have made no requests *or*
+the engine may not emit Network events, because a bare `total: 0` reads as the wrong one.
 </Accordion>
 
 <Accordion title="webrain_screenshot">
