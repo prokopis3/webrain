@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `cli`: **`webrain tool` — the whole MCP surface from a shell, with no model in
+  the loop.** A user without an LLM key could drive 7 webrain commands and could
+  not extract anything structured: `docs/reference/cli.mdx` said "for CSS
+  selectors use the MCP tools instead", which needs a client and a model. `webrain
+  tool <name> '<json>' [--url URL] [--raw]` delegates to `webrain_mcp::call_tool`,
+  so all 19 tools are reachable on an argv and a tool added to the server is
+  reachable the same day — there is no second dispatch table to drift. Bare
+  `webrain tool` lists the names; `--url` navigates first (most tools read the
+  current page); `@file.json` passes args from a file; `*_b64` fields in a reply
+  are replaced by their size unless `--raw` (a screenshot reply was 46 KB of
+  base64 at a terminal). Exit 1 when the tool reports an error.
+  Verified live: `webrain_extract mode=table` returned 13 tables from a Wikipedia
+  page, `webrain_network op=log` returned the request rows for a URL, and
+  `webrain_observe what=state` navigated and answered. One bug found and pinned
+  by test while writing it: the first non-flag argument was taken as the JSON, so
+  `--url <u>` fed a URL to `serde_json` and every call with `--url` and no
+  explicit args died with "expected value at line 1 column 1" — the split is now a
+  pure `parse_tool_argv` with four tests.
+- `cli`: **`webrain pdf <file|url> [--json]`** — a PDF's text as markdown, and a
+  stderr line naming the pages the text layer cannot deliver (`15 pages, 3
+  image(s), vision needed on 5,6,7,…,15` on a 15-page paper). Browserless like
+  `diff`: `pdf_extract` opens the file or fetches the URL itself. Verified with
+  `CDP_URL` pointed at a dead port, which is the proof it needs no engine.
+- `docs`: `reference/cli` gains a **No key, no model** table — the twelve jobs the
+  binary does alone (fetch, extract, network log + body, assets, console, crawl,
+  serp, screenshot, pdf, diff, watch, batch) with the exact command for each, and
+  the three `webrain tool` recipes that replace the old "use the MCP tools
+  instead" sentence. Its opening claim that "every engine and tool has a CLI twin"
+  was false for 12 of the 19 tools and is now true via `tool`.
+
+### Added
 - `mcp`: **`webrain_network` — the page's own HTTP traffic, with bodies.** The
   commonest way to scrape a JavaScript app is to stop reading the DOM and read the
   XHR that holds the JSON; the server subscribed to no network events at all, so an

@@ -5,7 +5,8 @@ description: Every webrain subcommand and flag.
 
 # CLI Reference
 
-Drive webrain by hand — every engine and tool has a CLI twin.
+Drive webrain by hand — every engine has a CLI twin, and `webrain tool` reaches the
+whole MCP surface when you want no model in the loop.
 
 ## Help
 
@@ -39,6 +40,8 @@ flags.
 | `webrain spider <url> [--depth N --pages N --respect-robots --json-urls --dfs --bestfirst --keywords k1,k2 --no-same-domain --discover-only]` | Crawl |
 | `webrain serp "query" [--engine duckduckgo\|bing\|google\|brave\|yahoo\|baidu\|yandex\|auto] [--limit N] [--page N] [--safe] [--region R] [--http] [--no-fallback] [--json] [--proxy URL] [--headless] [--fresh] [--pipe] [--hold]` | Structured SERP JSON (`position`/`title`/`url`/`domain`/`snippet`) — the CLI twin of `webrain_serp`. `duckduckgo`/`bing`/`yahoo`/`baidu`/`yandex`/`auto` are pure HTTP (yahoo keeps a cookie jar; baidu and yandex report a challenge page as a failure, never as `0 results`); `google` auto-launches a warm persistent-profile Chrome, `brave` uses the connected CDP engine. `--http` never touches a browser at all (no render, no guest launch, even when `CDP_URL` is set) — the mode for `--engine bing --limit 50`, which otherwise pays a Chrome launch for the same rows. `--limit` clamps 1..=100, `--page` is 0-based. `--fresh` starts a brand-new profile (forces the consent modal), `--pipe` launches it with no open debugging port, `--hold` keeps the browser open after the search. `--stealth` is accepted for compat and is a no-op |
 | `webrain click <i>` / `webrain type <i> <text>` / `webrain eval <js>` | Drive the `CDP_URL` backend |
+| `webrain tool [<name>] ['<json>'] [--url URL] [--raw]` | Run **any** of the 19 MCP tools from the shell — no model, no client. Bare `webrain tool` lists them; `--url` navigates first; `@file.json` passes args; base64 images in a reply are elided unless `--raw`. Exit 1 when the tool reports an error |
+| `webrain pdf <file.pdf \| url> [--json]` | A PDF's text as markdown, with a stderr line naming the pages the text layer cannot deliver. No browser, no model |
 | `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend` |
 
 ## Index-driven interaction
@@ -56,10 +59,41 @@ webrain eval 'document.querySelector("#email").value'
 
 Get the element list from the MCP side (`webrain_observe` `what=state` or
 `what=a11y` returns `elements[]` with these indices), or run
-`webrain fetch <url>` to load a page and see its element count. For CSS
-selectors use the MCP tools instead: `webrain_observe what=html` accepts a
-`selector`, `webrain_extract mode=schema` is driven entirely by selectors, and
-`webrain_interact action=wait` accepts a `selector`.
+`webrain fetch <url>` to load a page and see its element count. For CSS selectors
+there is no separate verb — `webrain tool` is the way in:
+
+```bash
+webrain tool webrain_observe '{"what":"html","selector":"main"}' --url https://example.com
+webrain tool webrain_extract '{"mode":"schema","base_selector":"div.product","fields":[{"name":"title","selector":"h2"},{"name":"price","selector":".price"}]}' --url <url>
+webrain tool webrain_interact '{"action":"wait","selector":"div.product"}'
+```
+
+## No key, no model
+
+Nothing below needs an LLM key, a local model, or an MCP client — it is the binary
+doing the work, on an argv.
+
+| Job | Command |
+|---|---|
+| Read one page (text + interactive elements) | `webrain fetch <url>` |
+| Structured rows from a page (CSS schema, tables, JSON-LD, autoschema) | `webrain tool webrain_extract '{"mode":"table"}' --url <url>` |
+| The JSON an app fetched, and the body of one response | `webrain tool webrain_network '{"op":"log","url":"<url>","wait_ms":3000}'` then `webrain tool webrain_network '{"op":"request","id":"<id>"}'` |
+| Every link, image and video on a page | `webrain tool webrain_observe '{"what":"assets"}' --url <url>` |
+| Page errors and uncaught exceptions | `webrain tool webrain_observe '{"what":"console"}'` |
+| Crawl a site | `webrain spider <url> --depth 3 --pages 200` |
+| Search results as JSON | `webrain serp "query" --engine bing --limit 20 --http` |
+| A page as a screenshot | `webrain screenshot <url>` |
+| A PDF as markdown | `webrain pdf <file-or-url>` |
+| What changed on a page | `webrain diff <a> <b>` (exit 1 on change — cron-friendly) |
+| A video's transcript + frames | `webrain watch <url-or-file>` |
+| Many URLs at once | `webrain tool webrain_batch '{"op":"extract","urls":[...],"schema":{...}}'` |
+| Authenticated scraping | `webrain launch`, `webrain login`, `webrain cookies`, `webrain setcookies`, `webrain vault` |
+
+What still needs a model is judgement, not capability: choosing selectors, reading
+an unstructured page, and deciding what to extract next. `webrain tool` gives the
+agent-less user the same verbs an agent would call, one JSON blob at a time — and
+because it delegates to `webrain_mcp::call_tool`, a tool added to the server is
+reachable from the shell the same day.
 
 ## `webrain doctor`
 

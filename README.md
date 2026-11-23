@@ -183,6 +183,8 @@ webrain fetch <url>                                # attach to CDP_URL and fetch
 webrain screenshot <url>                           # full-page screenshot (always full page)
 webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
+webrain tool <name> '<json>' [--url U]             # ANY of the 19 MCP tools, no model needed
+webrain pdf <file-or-url> [--json]                 # PDF text as markdown (no browser)
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
 webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
 webrain install watch|whisper [--model NAME]       # ffmpeg + yt-dlp + whisper (STT)
@@ -193,8 +195,9 @@ webrain diff <a> <b> [--max N] [--json]           # what changed between two pag
 webrain chat "<prompt>" [--provider P] [--search] # one agent turn on your own model key
 ```
 
-The 18-tool MCP surface is discovered dynamically — `webrain_guide` lists
-it for the LLM (see [MCP Tools](#mcp-tools)).
+The 19-tool MCP surface is discovered dynamically — `webrain_guide` lists
+it for the LLM (see [MCP Tools](#mcp-tools)) — and `webrain tool` runs any one of
+them from a shell, so an extraction or a network log needs no model and no key.
 
 ## Chat
 

@@ -27,6 +27,10 @@ pub fn tool_names() -> Vec<String> {
         .collect()
 }
 
+/// The MCP dispatcher, for a caller that is not a transport: `webrain tool`
+/// reuses it so the CLI surface cannot drift from the MCP one.
+pub use tools::call_tool;
+
 /// `(name, hint)` per tool, for a menu that has to fit on one row. The hint is
 /// the first sentence of the description — `webrain_pdf` and `webrain_vision`
 /// read alike as names and nothing alike as sentences. A first sentence too
