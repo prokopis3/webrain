@@ -28,21 +28,35 @@ load-bearing files, zero functional gain, and a review surface that would hide t
 real diffs if it landed beside a fix. It is a readability project with its own
 change window.
 
-### 2. The chat page is still one 7.6k-line component (frontend)
+### 2. The chat page is still one 7.4k-line component (frontend)
 
-`webrain-cli/ui/src/App.svelte` (7,863 lines). Two slices are out so far — the
-composer's palette (`Palette.svelte`) and the snackbar (`Toasts.svelte`) — which
-proved the pattern: each takes its markup *and* its styles, and its keyframes with
-it, because Svelte scopes both to the defining component.
+`webrain-cli/ui/src/App.svelte` (7,540 lines, from 7,863). Three slices are out —
+the composer's palette (`Palette.svelte`), the snackbar (`Toasts.svelte`) and the
+tools chooser (`ToolsDialog.svelte`) — which proved the pattern: each takes its
+markup *and* its styles, and its keyframes with it, because Svelte scopes both to
+the defining component. The third slice also showed the catch: a child that needs
+the *shell* (a `#modal` backdrop, `.card`, a primary button) has to redeclare it,
+because `App`'s rules never reach the child's DOM.
 
 **Fix:** continue with the remaining presentational blocks, in this order:
-the tools chooser (`#tools-modal`), the settings panel, the model dialog, then the
-transcript rows. The rows are last and hardest: one `{#each}` with a dozen locals
-(`previews`, `editArgs`, `toggles`, `item`), so they need a real prop contract rather
-than a move.
+the settings panel, the model dialog, then the transcript rows. The rows are last
+and hardest: one `{#each}` with a dozen locals (`previews`, `editArgs`, `toggles`,
+`item`), so they need a real prop contract rather than a move.
 
-**Cost so far, measured:** the two component boundaries cost +0.2 KB gzipped each
-(74.2 → 75.2 KB for `chat.js`), inside the 80 KB ceiling.
+**Cost so far, measured:** palette +0.8 KB gzipped, snackbar +0.2 KB, tools
+chooser +2.8 KB (`chat.js` 74.2 → 75.2 → 77.96 KB; `chat.css` 13.0 → 13.86 KB).
+The chooser was expensive because it is a whole dialog: backdrop, card, footer
+buttons and three keyframes had to be copied. Extracting the settings panel will
+cost the same again, so the 80 KB ceiling is now the binding constraint on this
+project — either the shared shell moves into one component both dialogs use, or
+the ceiling moves with a written reason. Decide before the next slice, not during.
+
+**Verified after the tools-chooser slice:** open → 2 groups / 32 boxes / footer
+`8 of 32 preferred`; search `nav` → 1 group, 1 box; fold `builtin` → 25 boxes
+left, `aria-expanded=false`; tick → Save writes `webrain-chat-tools`; reopen shows
+the tick with folds reset; tick → **Close** discards it. The dialog's shell still
+paints (`card` `rgb(26,35,30)`, backdrop `rgba(0,0,0,.667)`), which is the check a
+scoped-CSS break would have failed.
 
 ### 3. Nothing yet measures *painting*
 

@@ -7,6 +7,7 @@
   // for the selected row — that was the only reason `tick` was imported here.
   import Palette from "./Palette.svelte";
   import Toasts from "./Toasts.svelte";
+  import ToolsDialog from "./ToolsDialog.svelte";
   // webrain chat · Svelte 5 runes.
   // Wire contract: GET /events (SSE), POST /turn, POST /permission,
   // GET /sessions (+ /sessions/<id>). Unknown runtime events are shown, never
@@ -474,10 +475,6 @@
   // The tools chooser is a dialog, not a strip of chips: a dozen tools is a list,
   // and a list you cannot search or fold by server is a list you scroll.
   let toolsOpen = $state(false);
-  let toolsDraft = $state([]); // staged — Save commits, Close drops
-  let toolsQuery = $state("");
-  let searchOpen = $state(false);
-  let toolsClosed = $state([]); // servers whose checklist is folded away
   // Agent / plan / ask was three buttons taking a third of the dock; it is one
   // choice, so it reads as one control that opens.
   let modeOpen = $state(false);
@@ -2178,81 +2175,17 @@
 
   const toolRows = $derived(catalog.items.filter((r) => r.kind === "tool"));
 
-  // Tools by the server that owns them, so the checklist folds. `webrain-navigate`
-  // is server `webrain`, tool `navigate`; a second server gets its own section
-  // without this code changing.
-  const toolGroups = $derived.by(() => {
-    const q = toolsQuery.trim().toLowerCase();
-    const groups = new Map();
-    for (const { name: full } of toolRows) {
-      // Tool names come off the MCP server as `webrain_navigate`; the checklist
-      // reads better without the server's own prefix inside its own section.
-      const bare = full.replace(/^webrain[-_]/, "");
-      const cut = bare.indexOf("-");
-      const server = cut > 0 ? bare.slice(0, cut) : "webrain";
-      const name = cut > 0 ? bare.slice(cut + 1) : bare;
-      if (q && !full.toLowerCase().includes(q) && !server.toLowerCase().includes(q)) continue;
-      if (!groups.has(server)) groups.set(server, []);
-      groups.get(server).push({ full, name });
-    }
-    return [...groups].map(([server, tools]) => ({ server, tools }));
-  });
-
-  const draftCount = $derived(toolsDraft.length);
-
   // Every builtin this build installs, unfiltered — the footer count has to add
   // them to the MCP ones or "18 of 18" contradicts the 9 boxes below it.
   const builtinAll = $derived(
     catalog.items.filter((r) => r.kind === "builtin").map((r) => r.name),
   );
-  // Same search box filters both lists.
-  const builtinShown = $derived.by(() => {
-    const q = toolsQuery.trim().toLowerCase();
-    return builtinAll.filter((n) => !q || n.toLowerCase().includes(q));
-  });
   const builtinOnCount = $derived(builtinAll.filter(builtinOn).length);
 
-  // The search field opens from a click, so it should already have the caret.
-  // `autofocus` on the element would also fire on first paint, which is the
-  // wrong moment and an a11y complaint; an action runs where it is used.
-  const focusNow = (node) => node.focus();
-
-  function openTools() {
-    toolsDraft = [...toolsSel];
-    toolsQuery = "";
-    searchOpen = false;
-    toolsOpen = true;
-  }
-
-  function toggleDraft(full) {
-    toolsDraft = toolsDraft.includes(full)
-      ? toolsDraft.filter((t) => t !== full)
-      : [...toolsDraft, full];
-  }
-
-  // A server row ticks all of its children, or clears them — the same two
-  // gestures VS Code's tool picker has, because that is the one people know.
-  function allOf(server, on) {
-    const names = toolGroups.find((g) => g.server === server)?.tools.map((t) => t.full) || [];
-    toolsDraft = on
-      ? [...new Set([...toolsDraft, ...names])]
-      : toolsDraft.filter((t) => !names.includes(t));
-  }
-
-  // The builtin list is the inverse of `builtinOff`, and it is a fold like any
-  // server: `toolsClosed` holds server names, so "builtin" is the one key that
-  // is not a server.
-  function allBuiltin(on) {
-    builtinOff = on
-      ? builtinOff.filter((n) => !builtinShown.includes(n))
-      : [...new Set([...builtinOff, ...builtinShown])];
-  }
-
-  function toggleClosed(server) {
-    toolsClosed = toolsClosed.includes(server)
-      ? toolsClosed.filter((s) => s !== server)
-      : [...toolsClosed, server];
-  }
+  // The checklist itself lives in `ToolsDialog`: its query, its folds and its
+  // draft are nobody else's business. What stays here is the open flag and the
+  // two persisted sets the dialog reports back.
+  const openTools = () => (toolsOpen = true);
 
   const lastUser = $derived([...shown].reverse().find((i) => i.kind === "user")?.text || "");
 
@@ -5434,172 +5367,23 @@
 <!-- The tools chooser. A preference the prompt states, not a switch the runtime
      obeys: the tool set is fixed when the session is created. Staged until Save,
      so closing the dialog is the same as changing your mind. -->
-{#if toolsOpen}
-  <div
-    id="tools-modal"
-    onclick={(e) => e.target === e.currentTarget && (toolsOpen = false)}
-    role="presentation"
-  >
-    <div class="card tools">
-      <div class="thead">
-        <span class="ttitle">tools</span>
-        <div class="tsearch" class:open={searchOpen}>
-          {#if searchOpen}
-            <input
-              bind:value={toolsQuery}
-              placeholder="search tools"
-              aria-label="search tools"
-              use:focusNow
-              onkeydown={(e) => {
-                if (e.key === "Escape") {
-                  toolsQuery = "";
-                  searchOpen = false;
-                }
-              }}
-            />
-            {#if toolsQuery}
-              <button class="clearx" onclick={() => (toolsQuery = "")} aria-label="clear search">
-                <span class="gi" aria-hidden="true">{@html ICON.x}</span>
-              </button>
-            {/if}
-          {/if}
-          <button
-            class="ico"
-            onclick={() => (searchOpen = !searchOpen)}
-            title="search tools"
-            aria-label="search tools"
-            aria-expanded={searchOpen}
-          >
-            <span class="gi" aria-hidden="true">{@html ICON.search}</span>
-          </button>
-        </div>
-      </div>
-      <div class="tlist">
-        {#if builtinShown.length}
-          {@const onCount = builtinShown.filter(builtinOn).length}
-          {@const closed = toolsClosed.includes("builtin")}
-          <div class="tgroup">
-            <div class="trow">
-              <button
-                class="tfold"
-                onclick={() => toggleClosed("builtin")}
-                aria-expanded={!closed}
-                title="tools this build installs itself; unticking one asks the agent to prefer the others"
-              >
-                <span class="tcaret" aria-hidden="true"
-                  >{@html closed ? ICON.right : ICON.down}</span
-                >
-                builtin
-                <span class="dim">{onCount} of {builtinShown.length} on</span>
-              </button>
-              <button class="linky" onclick={() => allBuiltin(true)}>all</button>
-              <button class="linky" onclick={() => allBuiltin(false)}>none</button>
-            </div>
-            {#if !closed}
-              <div class="tchecks">
-                {#each builtinShown as name (name)}
-                  <label
-                    class="tcheck"
-                    title="a tool this build installs itself — unticking only tells the agent to prefer others"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={builtinOn(name)}
-                      onchange={() => toggleBuiltin(name)}
-                    />
-                    <span class="box" aria-hidden="true"></span>
-                    <span>{name}</span>
-                  </label>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-        {#each toolGroups as g (g.server)}
-          {@const picked = g.tools.filter((t) => toolsDraft.includes(t.full)).length}
-          {@const closed = toolsClosed.includes(g.server)}
-          <div class="tgroup">
-            <div class="trow">
-              <button
-                class="tfold"
-                onclick={() => toggleClosed(g.server)}
-                aria-expanded={!closed}
-              >
-                <span class="tcaret" aria-hidden="true"
-                  >{@html closed ? ICON.right : ICON.down}</span
-                >
-                {g.server}
-                <span class="dim">{picked} of {g.tools.length}</span>
-              </button>
-              <button class="linky" onclick={() => allOf(g.server, true)}>all</button>
-              <button class="linky" onclick={() => allOf(g.server, false)}>none</button>
-            </div>
-            {#if !closed}
-              <div class="tchecks">
-                {#each g.tools as t (t.full)}
-                  {@const key = `${g.server}:${t.name}`}
-                  <!-- One cell per tool: what it is, and whether this page may
-                       approve it without asking. The second half is the policy
-                       the "Always allow" button on a card writes into. -->
-                  <div class="tcell">
-                    <label class="tcheck">
-                      <input
-                        type="checkbox"
-                        checked={toolsDraft.includes(t.full)}
-                        onchange={() => toggleDraft(t.full)}
-                      />
-                      <span class="box" aria-hidden="true"></span>
-                      <span>{t.name}</span>
-                    </label>
-                    <button
-                      class="tallow"
-                      class:on={autoTools.includes(key)}
-                      onclick={() => toggleAllow(key)}
-                      aria-pressed={autoTools.includes(key)}
-                      title={autoTools.includes(key)
-                        ? "approved without asking — click to be asked again"
-                        : "approve this tool without asking"}
-                    >
-                      {autoTools.includes(key) ? "always" : "ask"}
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/each}
-        {#if !toolGroups.length && !builtinShown.length}
-          <p class="none">no tool matches “{toolsQuery}”</p>
-        {/if}
-      </div>
-      <div class="tfoot">
-        <p class="note">
-          Sent as a prompt instruction — the runtime's tool set is fixed when the session starts.
-        </p>
-        {#if runtimeOff}
-          <!-- The runtime disabled these before the page ever drew a checkbox.
-               Nothing here can switch them on, which is exactly why they are
-               quoted instead of listed as options. -->
-          <p class="note off">runtime disabled · {runtimeOff}</p>
-        {/if}
-        <div class="row">
-          <span class="dim tcount"
-            >{draftCount + builtinOnCount} of {toolRows.length + builtinAll.length} preferred</span
-          >
-          <button class="deny" onclick={() => (toolsOpen = false)}>Close</button>
-          <button
-            onclick={() => {
-              toolsSel = toolsDraft;
-              toolsOpen = false;
-            }}
-          >
-            Save · {draftCount}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-{/if}
+<ToolsDialog
+  open={toolsOpen}
+  tools={toolRows}
+  builtin={builtinAll}
+  off={builtinOff}
+  allow={autoTools}
+  sel={toolsSel}
+  {runtimeOff}
+  icons={ICON}
+  onclose={() => (toolsOpen = false)}
+  onsave={(d) => {
+    toolsSel = d;
+    toolsOpen = false;
+  }}
+  onoff={(next) => (builtinOff = next)}
+  onallow={(key) => toggleAllow(key)}
+/>
 
 {#if modelOpen}
   <div
@@ -6897,89 +6681,12 @@
      glyph coverage differs per OS and some of them simply do not exist. */
   .gi { display: inline-grid; place-items: center; flex: 0 0 auto; line-height: 0; }
   .gi :global(svg) { width: 15px; height: 15px; display: block; }
-  .mini .gi :global(svg), .clearx .gi :global(svg), .clearq .gi :global(svg),
-  .jump .gi :global(svg), .tcaret :global(svg) { width: 12px; height: 12px; }
+  .mini .gi :global(svg), .clearq .gi :global(svg), .jump .gi :global(svg) {
+    width: 12px; height: 12px; }
 
-  /* The tools chooser. A list, so it is a dialog with a fold per server, a
-     search that opens on demand, and one Save — not a strip of chips that
-     rewrites the setting on every stray click. */
-  .card.tools { width: min(38rem, 92vw); display: grid; gap: 0; padding: 0; }
-  .thead { display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2); }
-  .ttitle { font-family: var(--mono); font-size: 9px; text-transform: uppercase;
-    letter-spacing: 0.16em; color: var(--faint); }
-  .tsearch { margin-left: auto; display: flex; align-items: center; gap: var(--s1); }
-  /* The field grows out of the icon instead of appearing: width, fill and the
-     caret's own fade on one curve, so it reads as one motion. The colours are
-     set here because a bare <input> inherits the browser's white fill. */
-  .tsearch input { width: 0; min-width: 0; opacity: 0; padding: 0; border: 1px solid transparent;
-    border-radius: var(--shape-full); background: var(--surface-container-highest);
-    color: var(--on-surface); font: inherit; font-size: 13px; caret-color: var(--primary);
-    transition: width 260ms var(--ease), opacity 160ms var(--ease), padding 260ms var(--ease),
-      border-color 200ms var(--ease); }
-  .tsearch input::placeholder { color: var(--faint); }
-  /* Open, it takes the whole row: the field is the only thing you are reading
-     at that moment, and 15rem of it in a 38rem dialog is a postage stamp. */
-  .tsearch.open { flex: 1; }
-  .tsearch.open input { width: 100%; opacity: 1; padding: 0 var(--s3);
-    min-height: 2.2rem; border-color: var(--outline-variant); }
-  .tsearch.open input:focus { outline: none; border-color: var(--primary); }
-  .tsearch .ico { transition: color var(--motion-short) var(--ease),
-    background var(--motion-short) var(--ease), transform 260ms var(--ease); }
-  .tsearch.open .ico { transform: scale(0.92); color: var(--primary); }
-  .clearx { background: none; border: 0; color: var(--faint); cursor: pointer; font: inherit;
-    font-size: 11px; padding: 0 var(--s1); }
-  .clearx:hover { color: var(--on-surface); }
-  .tlist { max-height: min(58vh, 30rem); overflow-y: auto; padding: 0 var(--s2) var(--s2); }
-  .tgroup { border-top: 1px solid var(--outline-variant); }
-  .trow { display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s1) var(--s1) 0; }
-  .tfold { background: none; border: 0; color: var(--on-surface); font: inherit; font-size: 12px;
-    display: flex; align-items: center; gap: var(--s2); flex: 1; cursor: pointer; text-align: left;
-    padding: var(--s1) 0; }
-  .tcaret { color: var(--primary); width: 1rem; display: grid; place-items: center; flex: 0 0 auto; }
-  .tchecks { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-    gap: var(--s1) var(--s2); padding: 0 0 var(--s2) calc(1rem + var(--s2)); }
-  .tcheck { position: relative; display: flex; align-items: center; gap: var(--s2);
-    font-family: var(--mono); font-size: 11px; color: var(--on-surface-variant); cursor: pointer;
-    min-height: 2rem; animation: rise 160ms var(--ease); }
-  .tcheck:hover { color: var(--on-surface); }
-  .tcell { display: flex; align-items: center; gap: var(--s1); min-width: 0; }
-  .tcell .tcheck { flex: 1; min-width: 0; }
-  .tallow { flex: none; border: 0; background: none; cursor: pointer; padding: 0 var(--s1);
-    font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
-    color: var(--faint); border-radius: var(--shape-xs); }
-  .tallow:hover { color: var(--on-surface); background: var(--state-hover); }
-  .tallow.on { color: var(--primary); }
-  /* The real input stays in the tab order and the a11y tree; the box beside it is
-     the picture. A drawn box beats `appearance: none` on the input itself because
-     the tick can then animate on its own curve. */
-  .tcheck input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0;
-    pointer-events: none; }
-  .tcheck .box { flex: 0 0 auto; width: 1.05rem; height: 1.05rem; border-radius: 6px;
-    border: 1.5px solid var(--outline); background: var(--surface-container);
-    display: grid; place-items: center;
-    transition: background 170ms var(--ease), border-color 170ms var(--ease),
-      box-shadow 200ms var(--ease); }
-  .tcheck .box::after { content: ""; width: 0.52rem; height: 0.28rem; margin-top: -2px;
-    border-left: 2px solid var(--on-primary); border-bottom: 2px solid var(--on-primary);
-    transform: rotate(-45deg) scale(0.3); opacity: 0;
-    transition: transform 180ms var(--ease), opacity 140ms var(--ease); }
-  .tcheck:hover .box { border-color: var(--primary); }
-  .tcheck input:checked + .box { background: var(--primary); border-color: var(--primary); }
-  .tcheck input:checked + .box::after { transform: rotate(-45deg) scale(1); opacity: 1; }
-  .tcheck input:focus-visible + .box { box-shadow: 0 0 0 3px var(--primary-container); }
-  .tfoot { display: grid; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3);
-    border-top: 1px solid var(--outline-variant); }
-  .tfoot .note { margin: 0; }
-  /* The runtime's own sentence about what it withheld: quoted in mono, boxed,
-     and scrollable, because it can name thirty tools. */
-  .tfoot .note.off { font-family: var(--mono); font-size: 10px; line-height: 1.5;
-    color: var(--on-surface-variant); max-height: 5.5rem; overflow-y: auto;
-    padding: 5px 8px; border-radius: 8px; background: var(--surface-container-highest); }
-  .tfoot .row { justify-content: flex-end; gap: var(--s2); align-items: center; }
-  /* The count moved here from the header: it describes what Save will send, so
-     it belongs beside Save, not floating over the list it counts. */
-  .tcount { margin-right: auto; font-family: var(--mono); font-size: 11px;
-    font-variant-numeric: tabular-nums; }
+  /* The tools chooser's stylesheet moved with it to ToolsDialog.svelte: scoped
+     CSS cannot reach a child's DOM, so leaving it here would have styled
+     nothing. */
 
   .chips { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); }
   .chip { background: var(--surface-container-high); color: var(--on-surface-variant);
@@ -7403,7 +7110,7 @@
      taller than the window is clipped at both ends with nothing to scroll, so
      the action row at the bottom of a long dialog was unreachable. This centres
      while the card fits and scrolls the backdrop when it does not. */
-  #modal, #tools-modal { position: fixed; inset: 0; background: #000a;
+  #modal { position: fixed; inset: 0; background: #000a;
     display: flex; overflow-y: auto; padding: var(--s4);
     backdrop-filter: blur(3px); animation: fade var(--motion-short) var(--ease); z-index: 40; }
   .card { margin: auto; }
@@ -7759,11 +7466,6 @@
     .card.settings { grid-template-columns: 1fr; }
     /* The strip is already horizontal and scrolls; a phone only needs it shorter. */
     .stabs .tab { padding: var(--s2); }
-    /* One column of boxes: three across a phone is a wall of 11px labels. */
-    .card.tools { width: min(100%, 38rem); }
-    .tchecks { grid-template-columns: 1fr; padding-left: var(--s2); }
-    .tfoot .row { flex-wrap: wrap; }
-    .tcount { width: 100%; margin: 0 0 var(--s1); }
     .ghost { padding: 0 var(--s2); }
     .dock { justify-content: flex-start; }
   }
@@ -7773,15 +7475,13 @@
     .dock { gap: var(--s1); }
     .dock .modelbtn { margin-left: 0; flex: 1 1 100%; }
     .modemenu { min-width: 0; width: min(88vw, 17rem); }
-    .card.tools { border-radius: var(--shape-md); }
     .card { padding: var(--s4); border-radius: var(--shape-md); }
-    .tlist { max-height: min(52vh, 24rem); }
-    #modal, #tools-modal { padding: var(--s2); }
+    #modal { padding: var(--s2); }
   }
 
   /* Motion is decoration here: none of it carries meaning. */
   @media (prefers-reduced-motion: reduce) {
-    .msg, .card, .starter, #modal, #tools-modal { animation: none; }
+    .msg, .card, .starter, #modal { animation: none; }
     .caret, .rec-stop, .tool.run::after, .tool.run summary::before { animation: none; }
     .marks :global(mark) { animation: none; }
     /* Loading keeps its shape and loses the travel: a bar that jumps is worse

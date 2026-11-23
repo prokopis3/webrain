@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `chat`: **the tools chooser is its own component.** `ToolsDialog.svelte` now
+  owns the checklist's markup, styles, search field, folds and the unsaved draft,
+  so `App.svelte` keeps only the open flag and the two persisted sets it reports
+  back (`tools`, `tools_off`). Closing discards the draft, opening reseeds it —
+  verified live: tick → Close → reopen keeps the previous tick; tick → Save writes
+  `webrain-chat-tools`; search narrows 32 boxes to 1; folding `builtin` leaves 25.
+  Costs ~2.8 KB gzipped (chat.js 78.0 vs 75.2 KB, css 13.9 vs 13.1) for the
+  boundary — the child has to redeclare the dialog shell (`#tools-modal`, `.card`,
+  the footer buttons) because scoped CSS cannot cross a component — still inside
+  the 80 KB budget, but this is the slice that shows the ceiling approaching.
 - `chat`: **the composer's palette is its own component.** `Palette.svelte` now
   owns the menu's markup, its styles and the scroll-into-view for the selected
   row, so the field no longer holds a DOM handle into a child (the `tick()`
