@@ -55,6 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwritten a complete transcript with its tail. Verified end to end against a
   local slow model: 2 rows mid-turn, 38 after idle, zero duplicate rows, and a
   plain reload still seeds without duplicating.
+- `chat`: **nothing remote is fetched until you ask for it.** Two shapes, both about a
+  reopened conversation doing network work nobody requested:
+  - **The sources list is a disclosure now, and opening it is the fetch.**
+    `<section class="evidence">` became `<details>`: collapsed by default, and
+    `ontoggle` is what calls `primePreviews`, so each source's title and favicon is
+    asked for only then. The rows render with the host and fill in the real title as
+    the previews arrive. Measured on a 33-tool-row thread: collapsed, **0**
+    `/preview` requests; one click on the summary, 5 requests and the first chip's
+    text changing from `google.com` to the fetched page title.
+  - **Model-written images are lazy.** A reply can point an `<img>` at any host, and
+    reopening a thread used to fetch every one of them at paint time. The sanitiser's
+    own hook now sets `loading="lazy"` + `decoding="async"` on every image it passes,
+    markdown and raw HTML alike. Measured: two images in a seeded reply, **0**
+    requests to their host while lazy — and forcing `loading="eager"` on the same two
+    elements fires both requests, which is what shows the gate is the attribute and
+    not a broken renderer.
 
 ### Added
 - `chat`: **five capabilities the page could describe but not use, closed against

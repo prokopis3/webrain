@@ -4953,19 +4953,27 @@
 
     <!-- Every url any tool returned, deduplicated across the whole turn. It is
          the same data as the chips on each tool row, collected where you can
-         actually count it. -->
+         actually count it. Collapsed by default, and that is not only a layout
+         choice: opening it is what asks the server for each source's title and
+         image, so a reopened scrape does not spend 200 round trips painting a
+         list nobody opened. -->
     {#if sources.length}
-      <section class="evidence">
-        <h3>sources <span class="dim">{sources.length}</span></h3>
+      <details
+        class="evidence"
+        ontoggle={(e) => e.currentTarget.open && primePreviews(sources.map((s) => s.url))}
+      >
+        <summary><h3>sources <span class="dim">{sources.length}</span></h3></summary>
         <ol>
           {#each sources as s (s.url)}
+            {@const p = previews[s.url]}
             <li>
-              <a href={s.url} target="_blank" rel="noopener noreferrer">{host(s.url)}</a>
+              {#if p?.image}<img class="fav" src={p.image} alt="" loading="lazy" />{/if}
+              <a href={s.url} target="_blank" rel="noopener noreferrer">{p?.title || host(s.url)}</a>
               <span class="dim">{s.tool}</span>
             </li>
           {/each}
         </ol>
-      </section>
+      </details>
     {/if}
 
     <!-- Next steps are derived from what this turn actually did — a failed
@@ -7168,15 +7176,23 @@
      Both are derived from the turn, never generated: the sources are the urls
      tools returned, the suggestions are what those results make possible. */
   .evidence { margin-top: var(--s4); border-top: 1px solid var(--rule); padding-top: var(--s3); }
-  .evidence h3 { display: flex; gap: var(--s2); align-items: baseline; margin: 0 0 var(--s2);
+  /* A disclosure whose header is the old heading: the marker is replaced by the
+     chevron below, so the row reads as one line whether it is open or shut. */
+  .evidence > summary { display: flex; align-items: center; gap: var(--s2); cursor: pointer;
+    list-style: none; }
+  .evidence > summary::-webkit-details-marker { display: none; }
+  .evidence > summary::before { content: "▸"; font-size: 9px; color: var(--faint); }
+  .evidence[open] > summary::before { content: "▾"; }
+  .evidence h3 { display: flex; gap: var(--s2); align-items: baseline; margin: 0;
     font-family: var(--mono); font-size: 9px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.18em; color: var(--faint); }
-  .evidence ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px;
+  .evidence ol { margin: var(--s2) 0 0; padding: 0; list-style: none; display: grid; gap: 2px;
     font-family: var(--mono); font-size: 11.5px; }
   .evidence li { display: flex; gap: var(--s2); align-items: baseline; }
   .evidence li a { color: var(--primary); text-decoration: none; }
   .evidence li a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .evidence li .dim { font-size: 10px; }
+  .evidence li .fav { width: 1.15rem; height: 1.15rem; object-fit: cover; border-radius: 3px; }
   .next { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
   .eyebrow { font-family: var(--mono); font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.18em; color: var(--faint); }

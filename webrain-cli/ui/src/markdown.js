@@ -101,6 +101,15 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
     node.setAttribute("target", "_blank");
     node.setAttribute("rel", "noopener noreferrer");
   }
+  // A reply can point an image at any host. Without this, reopening a thread
+  // fetches every one of them at paint time — from third parties, for rows the
+  // reader has not scrolled to. Lazy loading is the platform's own answer: the
+  // request happens when the row enters the viewport, including inside a
+  // collapsed `details`, which fetches nothing until it is opened.
+  if (node.tagName === "IMG") {
+    node.setAttribute("loading", "lazy");
+    node.setAttribute("decoding", "async");
+  }
 });
 
 // Everything forbidden here is already dropped by DOMPurify's defaults; naming it
