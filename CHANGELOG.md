@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `webrain-mcp`: **`handle_rpc` is protocol again.** Its `tools/call` arm was
+  1,078 lines — the whole browser-connection, surface-folding, no-state guard and
+  token-cost path inside a `match` — and it is now `handle_tools_call`, with
+  `handle_rpc` down to **33 lines** (initialize, ping, tools/list, unknown). The
+  body was copied range-exactly: the diff against the original arm is empty, and
+  the workspace suite (176 tests) is unchanged. `handle_http_conn` (~720 lines of
+  hand-rolled routing) is the last of the three and stays open in `PERF_AUDIT.md`.
 - `webrain-mcp`: **`call_tool` is a dispatcher again.** Its 61 tool arms moved
   verbatim into nine family functions — `call_page`, `call_session`, `call_crawl`,
   `call_extract`, `call_interact`, `call_read`, `call_batch`, `call_media`,

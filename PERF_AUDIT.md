@@ -22,10 +22,11 @@ tool arms moved into nine family functions (`call_page`, `call_session`,
 diffing the moved blocks against the originals (byte-identical), by asserting all
 61 names dispatch once, and by the workspace test suite.
 
-Still open: `webrain-mcp/src/lib.rs` — `handle_rpc` (831 lines) and
-`handle_http_conn` (270). `handle_rpc` is one `match` over every JSON-RPC method
-with the connection's state in scope, so the same treatment applies: cut contiguous
-method arms into `rpc_*` functions, keep the loop.
+Still open: `webrain-mcp/src/lib.rs` — ~~`handle_rpc` (831 lines)~~ **done** (its
+1,078-line `tools/call` arm is `handle_tools_call`; `handle_rpc` is 33 lines of
+protocol) and `handle_http_conn` (~720 lines), which is a hand-rolled HTTP router
+with the response written inline, not a `match` — it needs routing separated from
+response building, which is a different cut from the two above.
 
 **Why the rest is not done yet:** ~1100 moved lines across the two most
 load-bearing files, zero functional gain, and a review surface that would hide the
