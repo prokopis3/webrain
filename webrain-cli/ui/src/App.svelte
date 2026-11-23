@@ -2,7 +2,10 @@
   // `tick` is the one thing runes do not give for free: arrowing through the
   // palette has to scroll the row that is now selected, and the class it looks
   // for only exists after the render flush.
-  import { tick, untrack } from "svelte";
+  import { untrack } from "svelte";
+  // The composer's menu lives in Palette.svelte, which owns the scroll-into-view
+  // for the selected row — that was the only reason `tick` was imported here.
+  import Palette from "./Palette.svelte";
   // webrain chat · Svelte 5 runes.
   // Wire contract: GET /events (SSE), POST /turn, POST /permission,
   // GET /sessions (+ /sessions/<id>). Unknown runtime events are shown, never
@@ -179,7 +182,6 @@
   // The header counts what matched, the list shows the first screenful of it —
   // a menu that says "14" when 27 matched is a menu that hides the rest.
   const menuRows = $derived(options.slice(0, 14));
-  let paletteEl = $state(null);
 
   // The session panel is a column on a desktop and a drawer on a phone, so it
   // starts open only where there is room for it.
@@ -5083,30 +5085,15 @@
 </div>
 
 <div id="composer" use:measureComposer>
-  {#if palette && options.length}
-    <div class="palette" role="listbox" bind:this={paletteEl}>
-      <div class="head">
-        {palette.trigger === "/" ? "everything" : palette.trigger === "@" ? "skills" : "tools"}
-        <span class="count"
-          >{options.length}{menuRows.length < options.length ? " · " + menuRows.length + " shown" : ""}</span
-        >
-      </div>
-      {#each menuRows as o, i (o.kind + o.name)}
-        <button
-          class="opt k-{o.kind}"
-          class:on={i === palette.index}
-          role="option"
-          aria-selected={i === palette.index}
-          onclick={() => pick(o)}
-          onmouseenter={() => (palette.index = i)}
-        >
-          <i class="sig" aria-hidden="true">{SIGIL[o.kind]}</i>
-          <b>{o.name}</b>
-          {#if o.hint}<span class="dim">{o.hint}</span>{/if}
-        </button>
-      {/each}
-    </div>
-  {/if}
+  <Palette
+    {palette}
+    selected={palette?.index ?? 0}
+    {options}
+    rows={menuRows}
+    sigil={SIGIL}
+    onpick={pick}
+    onselect={(i) => palette && (palette.index = i)}
+  />
   <!-- The agent's todo rows, above the field and above the attachments: during a
        long run this is what says what it is doing, and a row three screens up in
        the transcript has already scrolled past. -->
@@ -5202,13 +5189,9 @@
             e.preventDefault();
             const n = menuRows.length;
             const d = e.key === "ArrowDown" ? 1 : -1;
+            // The Palette keeps the selected row in view itself; the field only
+            // has to move the index the two halves share.
             palette.index = (palette.index + d + n) % n;
-            // The list is taller than the box it sits in, so a row past the fold
-            // was selected without being visible. Scroll it into view after the
-            // flush, when the selected class has actually moved.
-            tick().then(() => {
-              paletteEl?.querySelector(".opt.on")?.scrollIntoView({ block: "nearest" });
-            });
             return;
           }
           if (e.key === "Enter") {
@@ -7421,47 +7404,8 @@
   .ghost.on { background: var(--secondary-container); color: var(--on-secondary-container);
     border-color: transparent; }
 
-  /* The command palette floats above the composer, inside it. Rows are pills
-     rather than bands: the menu is scanned in a glance, so the gap between
-     choices is what makes one findable, and the sigil carries the kind as a
-     coloured badge instead of a tint on the whole word. */
-  .palette { position: absolute; bottom: calc(100% + var(--s2)); left: clamp(1rem, 4vw, 3rem);
-    right: clamp(1rem, 4vw, 3rem); max-height: 17rem; overflow-y: auto; z-index: 5;
-    padding: 4px 0 6px; background: var(--surface-container-high);
-    border: 1px solid var(--outline-variant); border-radius: 16px;
-    box-shadow: 0 18px 42px -14px #000d, 0 2px 6px #0004;
-    animation: pop var(--motion-short) var(--ease); scrollbar-width: thin; }
-  .palette .head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center;
-    justify-content: space-between; padding: var(--s1) var(--s3) var(--s2);
-    background: linear-gradient(var(--surface-container-high) 78%, transparent);
-    color: var(--faint); font-family: var(--mono); font-size: 9px;
-    text-transform: uppercase; letter-spacing: 0.16em; }
-  .palette .count { padding: 1px 7px; border-radius: 999px; letter-spacing: 0.04em;
-    background: var(--surface-container); color: var(--on-surface); text-transform: none; }
-  .opt { display: grid; grid-template-columns: 20px auto 1fr; align-items: center;
-    gap: var(--s2); width: calc(100% - 10px); margin: 1px 5px; text-align: left;
-    background: none; border: 0; border-radius: 10px; color: var(--on-surface);
-    font: inherit; font-size: 13px; padding: 5px 9px; cursor: pointer; min-height: 0;
-    transition: background var(--motion-short) var(--ease); }
-  .opt:hover { background: var(--state-hover); }
-  .opt.on { background: color-mix(in srgb, var(--primary) 16%, transparent); }
-  /* One accent per kind, used by both the badge and the selected row, from the
-     same three tokens the field's tint uses — `/` `#` `@` are one colour each,
-     menu and composer alike. */
-  .opt.k-skill.on { background: color-mix(in srgb, var(--m-skill) 16%, transparent); }
-  .opt.k-tool.on, .opt.k-builtin.on { background: color-mix(in srgb, var(--m-tool) 16%, transparent); }
-  .opt .sig { display: grid; place-items: center; width: 20px; height: 20px;
-    border-radius: 7px; font-family: var(--mono); font-size: 11px; font-style: normal;
-    background: color-mix(in srgb, var(--m-cmd) 18%, transparent); color: var(--m-cmd); }
-  .opt.k-skill .sig { background: color-mix(in srgb, var(--m-skill) 18%, transparent); color: var(--m-skill); }
-  .opt.k-tool .sig, .opt.k-builtin .sig {
-    background: color-mix(in srgb, var(--m-tool) 18%, transparent); color: var(--m-tool); }
-  .opt b { color: var(--on-surface); font-family: var(--mono); font-weight: 500; white-space: nowrap; }
-  .opt.on b { color: var(--m-cmd); }
-  .opt.k-skill.on b { color: var(--m-skill); }
-  .opt.k-tool.on b, .opt.k-builtin.on b { color: var(--m-tool); }
-  .opt .dim { font-size: 11px; color: var(--faint); overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
+  /* The command palette lives in Palette.svelte: it is the piece the page
+     redraws on every keystroke, and its styles belong beside it. */
   /* ── dialogs ───────────────────────────────────────────────────────────
      A dialog interrupts, so it is the only surface allowed an elevation
      shadow. Everything else is tone. */
@@ -7834,7 +7778,6 @@
     .dock { padding-inline: var(--s3); gap: var(--s1) var(--s2); }
     footer { padding: var(--s2) var(--s3) 0; }
     .attached { padding-inline: var(--s3); }
-    .palette { left: var(--s3); right: var(--s3); }
     .card { padding: var(--s4); }
     .card.settings { grid-template-columns: 1fr; }
     /* The strip is already horizontal and scrolls; a phone only needs it shorter. */
@@ -7861,7 +7804,7 @@
 
   /* Motion is decoration here: none of it carries meaning. */
   @media (prefers-reduced-motion: reduce) {
-    .msg, .card, .starter, #modal, #tools-modal, .palette { animation: none; }
+    .msg, .card, .starter, #modal, #tools-modal { animation: none; }
     .caret, .rec-stop, .tool.run::after, .tool.run summary::before { animation: none; }
     .marks :global(mark) { animation: none; }
     /* Loading keeps its shape and loses the travel: a bar that jumps is worse
@@ -7911,7 +7854,6 @@
   .readout { font-size: 12px; }
   .readout :global(dt) { font-size: 10px; }
   .tool summary, .act summary, .think summary { font-size: 13px; padding: var(--s1) 0; }
-  .opt { font-size: 14px; }
   .empty h1 { font-size: clamp(1.9rem, 3.8vw, 2.7rem); }
   .empty .lede { font-size: 15px; max-width: 32rem; }
   .starter { font-size: 14px; padding: var(--s3) var(--s4); }

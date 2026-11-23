@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `chat`: **the composer's palette is its own component.** `Palette.svelte` now
+  owns the menu's markup, its styles and the scroll-into-view for the selected
+  row, so the field no longer holds a DOM handle into a child (the `tick()`
+  scroll dance in the keydown handler is gone). It is the first slice of the
+  7.9k-line `App.svelte`: the piece the page redraws on every keystroke gets its
+  own reactive scope and its CSS leaves the shared bucket. Costs ~0.8 KB gzipped
+  (75.0 vs 74.2 KB) for the component boundary — inside the 80 KB budget.
 - `chat`: **the transcript skips what is off screen.** Tool cards, runtime rows,
   notes and step strips now carry `content-visibility: auto` with
   `contain-intrinsic-size: auto 3rem`, so a 120-row thread lays out only the rows
