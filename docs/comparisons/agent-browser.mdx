@@ -23,10 +23,10 @@ from `webrain-core/src/backends/cdp.rs` — not from memory.
 
 | Capability | agent-browser | webrain | Verdict |
 |---|---|---|---|
-| Fetch a URL as markdown, no browser | `read` — `Accept: text/markdown`, `.md` retry, walks to the nearest `llms.txt`, `--outline`, `--filter` | `webrain_scrape` / `fetch_http`: plain HTTP, text capped at 3000 chars | **gap** — ours never negotiates markdown or reads `llms.txt` |
+| Fetch a URL as markdown, no browser | `read` — `Accept: text/markdown`, `.md` retry, walks to the nearest `llms.txt`, `--outline`, `--filter` | `webrain read <url>` — `Accept: text/markdown` first, then `<path>.md` / `<path>/index.md`, then the page converted by the same `htmd` converter the batch path uses (`source` says which); nearest `llms.txt` reported, `--outline`, `--filter`, and the same verb reads the `llms.txt` itself | equivalent — measured on docs.sentry.io (`markdown`), docs.perplexity.ai (`html` + `llms.txt`), astro.build (`html`) |
 | See the requests a page made | `network requests`, `network request <id>`, `network har start/stop` | `webrain_network`: `op=log` buffers `requestWillBeSent` / `responseReceived` / `loadingFinished` (id, method, type, status, mime, bytes, ms, failed), `op=request` returns the body — base64-decoded, JSON re-parsed — and `op=har` exports HAR 1.2 (headers/cookies are our `-1`/`[]` unknowns, not invented) | **equivalent**, minus header capture |
 | Block resource types | `network route --abort --resource-type script` | `Network.setBlockedURLs` via `disable_resources` / `block_trackers` on navigate and batch | equivalent |
-| Save a page as PDF | `pdf <path>` (CLI) | `webrain_pdf{op:page}` (MCP only) | **gap** — no CLI verb |
+| Save a page as PDF | `pdf <path>` (CLI) | `webrain pdf <file-or-url>` (CLI) and `webrain_pdf{op:page}` (MCP) | equivalent |
 | Download a file | `download <sel> <path>` (click triggers it) + `wait --download` | `webrain_download` takes a URL; no click→download, no `Page.setDownloadBehavior` | **gap** |
 | Emulate a viewport / device / location | `set viewport`, `set device`, `set geo`, `set media` | `Emulation.setTimezoneOverride` + `setLocaleOverride` only | **gap** |
 | Keep a background tab at full speed | `tab keep live` (opt-in, documented CPU cost) | `Emulation.setFocusEmulationEnabled` is set on **every** attach, unconditionally | we match it, without the opt-in |
@@ -42,20 +42,21 @@ from `webrain-core/src/backends/cdp.rs` — not from memory.
 
 ## The gaps worth closing, in order
 
-1. **A `read` verb: markdown negotiation + `llms.txt`.** Cheap — all HTTP, no
-   browser — and squarely in scope: `Accept: text/markdown`, retry with `.md`,
-   walk ancestors for the nearest `llms.txt`, `--outline` a heading list,
-   `--filter` a section. Docs sites increasingly serve this directly, and a
-   markdown body is a fraction of the tokens of extracted text.
-2. **Click-triggered download.** `Page.setDownloadBehavior` + a wait for the file,
+1. **Click-triggered download.** `Page.setDownloadBehavior` + a wait for the file,
    so "click the CSV button, give me the file" works. Ours only fetches a URL.
-3. **Viewport / device / geo emulation.** Three CDP calls next to the timezone and
+2. **Viewport / device / geo emulation.** Three CDP calls next to the timezone and
    locale we already set. It is how you get a mobile layout, or localised results.
-4. **Frame-scoped snapshot and extraction.** `eval_in_frame` proves frame
+3. **Frame-scoped snapshot and extraction.** `eval_in_frame` proves frame
    addressing works; `observe` and `extract` should accept the same selector.
-6. **`--if-changed` screenshots.** Hash the bytes, return `unchanged`, so a
+4. **`--if-changed` screenshots.** Hash the bytes, return `unchanged`, so a
    repeated capture does not spend image tokens.
-7. **CLI `pdf`.** The MCP tool exists; the verb does not.
+
+## Closed since the first pass
+
+- **`read`** shipped as `webrain read` (CLI, no browser, no model) — negotiation,
+  `.md` retry, `llms.txt` walk, `--outline`, `--filter`. See the row above for
+  what was measured.
+- **CLI `pdf`** shipped as `webrain pdf <file-or-url> [--json]`.
 
 ## Not gaps
 

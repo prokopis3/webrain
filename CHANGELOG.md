@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `cli`: **`webrain read <url>` — a page as markdown, over HTTP, with no browser
+  and no model.** The last capability the agent-browser comparison called a gap:
+  `webrain_scrape` returned raw HTML, so a docs page cost markup tokens and a
+  caller who wanted prose had to look elsewhere. The request now asks for
+  `text/markdown` first (docs.sentry.io answers it — measured `source:
+  "markdown"`), retries `<path>.md` then `<path>/index.md`, and only then converts
+  the page — through the same `htmd` converter `webrain_batch op=markdown` uses,
+  so both paths produce identical markdown (measured: docs.perplexity.ai and
+  astro.build convert, each reporting its nearest `llms.txt`). `source` in the
+  reply says which of the three happened, because that is the number that
+  explains the token count. `--outline` prints the heading tree (an outline that
+  prints nothing now says `0 heading(s)` rather than looking broken), `--filter`
+  returns one section, and a heading that does not exist lists the page's own
+  instead of answering an empty section. The `llms.txt` walk goes up the path
+  segments to the root and reports the nearest non-empty hit — reading it is
+  another `read`, since it is plain text.
+  One ordering defect was found by running it, not by the tests: `--filter` was
+  applied after `--max`, so a cap could hide every heading and the command
+  answered "no heading contains …" on a page that contained it. Selection now
+  happens on the whole body and only the result is capped.
 - `mcp`: **`webrain_network op=har`** — the same captured rows as a **HAR 1.2**
   document, for a tool that speaks HAR (DevTools import, a proxy replay, a test
   fixture). Headers and cookies are events this server does not subscribe to, so

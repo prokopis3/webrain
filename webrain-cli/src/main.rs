@@ -174,6 +174,12 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "",
     ),
     (
+        "read",
+        "webrain read <url> [--outline] [--filter TEXT] [--max N] [--json] [--proxy URL]",
+        "A page as markdown over plain HTTP — negotiated, `.md` retried, nearest llms.txt reported.",
+        "No browser and no model. The request asks for text/markdown first, so a docs site that\n  already publishes markdown sends it and nothing is converted; otherwise the page is asked\n  for as `.md` (and `<path>/index.md`), also HTTP only. When neither exists the HTML is\n  converted by the same converter `webrain_batch op=markdown` uses, and `source` in the\n  stderr line says which of the three happened. --outline prints the heading tree instead of\n  the body (20 lines instead of 40 000 chars) and --filter returns one section, stopping at\n  the next heading of the same or a higher level; a heading that does not exist lists the\n  page's own instead of answering an empty section. The nearest non-empty llms.txt above the\n  page is reported, and `webrain read <that url>` reads it — it is plain text. Relative links\n  stay as the page wrote them: resolve them against `fetched_url`.",
+    ),
+    (
         "pdf",
         "webrain pdf <file.pdf | url> [--json]",
         "Extract a PDF's text as markdown — no browser, no model.",
@@ -920,6 +926,78 @@ fn main() -> anyhow::Result<()> {
             {
                 std::process::exit(1);
             }
+        }
+        Some("read") => {
+            // Browserless and model-free, like `diff` and `pdf`: markdown
+            // negotiation, a `.md` retry, and the nearest llms.txt — all HTTP.
+            let target = args.get(2).cloned().unwrap_or_default();
+            if target.is_empty() || target.starts_with("--") {
+                print!("{}", help_page("read"));
+                std::process::exit(2);
+            }
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let opts = webrain_core::read::ReadOpts {
+                outline_only: args.contains(&"--outline".to_string()),
+                filter: flag("--filter"),
+                max_chars: flag("--max").and_then(|v| v.parse().ok()).unwrap_or(0),
+                proxy: flag("--proxy"),
+            };
+            let v = webrain_core::read::read_url(&target, &opts)?;
+            if args.contains(&"--json".to_string()) {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if opts.outline_only {
+                for h in v
+                    .get("outline")
+                    .and_then(|o| o.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    let level = h.get("level").and_then(|l| l.as_u64()).unwrap_or(1) as usize;
+                    println!(
+                        "{}{}",
+                        "  ".repeat(level.saturating_sub(1)),
+                        h.get("title").and_then(|t| t.as_str()).unwrap_or("")
+                    );
+                }
+            } else {
+                println!(
+                    "{}",
+                    v.get("text").and_then(|t| t.as_str()).unwrap_or("")
+                );
+            }
+            // How the body arrived is the number that explains the token count:
+            // negotiated markdown was never converted, and the `.md` fallback is
+            // one request the caller did not have to write.
+            eprintln!(
+                "-- {} ({}), {} chars{}{}",
+                v.get("source").and_then(|s| s.as_str()).unwrap_or("?"),
+                v.get("fetched_url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or(&target),
+                v.get("chars").and_then(|c| c.as_u64()).unwrap_or(0),
+                // An outline that printed nothing has to say why: no headings is
+                // a fact about the page, not a failure of the command.
+                if opts.outline_only {
+                    format!(
+                        ", {} heading(s)",
+                        v.get("headings").and_then(|h| h.as_u64()).unwrap_or(0)
+                    )
+                } else {
+                    String::new()
+                },
+                v.get("llms_txt")
+                    .and_then(|l| l.get("url"))
+                    .and_then(|u| u.as_str())
+                    .map(|u| format!(", llms.txt: {u}"))
+                    .unwrap_or_default()
+            );
         }
         Some("pdf") => {
             // Browserless, like `diff`: the extractor opens the file or fetches

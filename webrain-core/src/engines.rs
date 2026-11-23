@@ -3089,9 +3089,29 @@ pub fn http_fetch_capped_proxied(
 /// nearly every real page -- silently, since an empty result is a valid answer
 /// and nothing would look broken.
 fn http_get_full(url: &str, proxy: Option<&str>) -> anyhow::Result<(u16, String, String)> {
+    http_get_accept(url, None, proxy)
+}
+
+/// `http_get_full` with a caller-chosen `Accept` header.
+///
+/// `None` keeps the browser header set exactly as every other HTTP path sends
+/// it. A caller that passes one is negotiating a representation: content
+/// negotiation is only honest if the request says what it accepts, and the
+/// browser default (`text/html,...`) would make a server send HTML even when it
+/// has markdown for that URL.
+pub fn http_get_accept(
+    url: &str,
+    accept: Option<&str>,
+    proxy: Option<&str>,
+) -> anyhow::Result<(u16, String, String)> {
+    guard_url(url)?;
     // Same rule as every other HTTP path: an explicit exit wins, and the agent
     // pool keeps one keep-alive connection per proxy instead of one per call.
-    let resp = browser_req(http_agent(proxy)?.get(url)).call()?;
+    let mut req = browser_req(http_agent(proxy)?.get(url));
+    if let Some(a) = accept {
+        req = req.header("accept", a);
+    }
+    let resp = req.call()?;
     let status = resp.status().as_u16();
     let content_type = resp
         .headers()
