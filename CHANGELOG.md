@@ -80,6 +80,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not a broken renderer.
 
 ### Added
+- `chat`: **a picture in an answer is a picture, not a link.** Two sentences a model
+  actually writes now render — a link whose target is an image (`[…/x.jpg](https://…
+  /x.jpg)`), and inline code naming a file this machine already has
+  (`` `output/shots/shot_*.jpg` ``). Both become the same `figure > a > img` +
+  `figcaption` frame `![]()` already used: caption is the only name the model gave,
+  capped at 22 rem so a 1080×1920 screenshot cannot own the column, `loading="lazy"`
+  unchanged. A link is only upgraded for a real destination (`http(s)://`, `/`, `./`)
+  — `javascript:alert(1).png` ends in a picture's extension and is not one — and only
+  `.png/.jpg/.jpeg/.gif/.webp/.avif/.bmp`; `svg` is out because the frame's own link
+  opens the file as a document. Measured in the browser: the reported
+  `resize.indiatvnews.com/.../retrtytytyaaadd-1685528317.jpg` link rendered as a
+  figure at **199×352** from a **1080×1920** source, and a local
+  `output/shots/shot_1795457900851.jpg` at **354×352** from 929×925.
+- `chat`: **`GET /local?p=<relative path>`**, so that second case has something to
+  load. Three fences, because this is the one route that reads a path a model chose:
+  relative only, still inside the directory the chat was started in *after*
+  `canonicalize` (which collapses `..` and resolves a symlink to its real target), and
+  an image by `mime_of` — that match is the whole allow-list, so JSON, CSV and HTML
+  cannot be read back out. 32 MB cap checked before the read, `nosniff` on the reply.
+  Verified against the running server: the two real artifacts returned `200
+  image/jpeg` (83,173 and 607,823 bytes), while `notes.txt`, `../Cargo.toml`, a
+  directory, an empty `p` and `C:\Windows\win.ini` all returned `404`. Unit test
+  `a_local_picture_is_readable_and_nothing_else_is` pins the same set, including the
+  same picture reached across the tree boundary.
+  A path that only *looks* like a picture but is not there costs the frame and
+  nothing else: one capture-phase `error` listener puts the `<code>` back in its
+  place, so the sentence the path sits in survives the miss.
 - `chat`: **the last turn can be edited, the way ChatGPT and the VS Code chat do it.**
   `retry` existed (send the same prompt again) but there was no way to change the
   wording. An `edit` button beside it reads the runtime's newest **rewind point**,

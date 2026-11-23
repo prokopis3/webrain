@@ -3990,6 +3990,58 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 }
             }
         }
+        // A file this machine already has — a screenshot a batch wrote, a
+        // download — at the relative path an answer named it by. The page marks
+        // such a path itself (a picture's extension plus a separator), so this is
+        // the model's suggestion, not the model's authority: `local_image` decides,
+        // and it only ever answers with a picture inside the directory the chat
+        // was started in.
+        ("GET", "/local") => {
+            let rel = param(query, "p").unwrap_or_default();
+            let root = std::env::current_dir().and_then(|d| d.canonicalize()).ok();
+            let Some(path) = root.as_deref().and_then(|r| local_image(r, &rel)) else {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            };
+            // 32 MB is a screenshot many times over; past that it is not something
+            // anyone reads inside a transcript. Checked before the read, so a huge
+            // file is refused without being pulled into memory.
+            let fits = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.is_file() && m.len() <= 32 * 1024 * 1024)
+                .unwrap_or(false);
+            if !fits {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            };
+            respond_bytes(
+                &mut stream,
+                200,
+                mime_of(&path),
+                &[("X-Content-Type-Options", "nosniff")],
+                &bytes,
+            )
+            .await
+        }
         // Dictation. The take arrives as raw bytes, ffmpeg turns it into the
         // 16 kHz mono WAV the recognizer needs, the recognizer runs locally, and
         // both temp files are deleted: what someone says into a microphone is not
@@ -4201,6 +4253,21 @@ fn mime_of(path: &std::path::Path) -> &'static str {
         "xml" => "application/xml",
         _ => "text/plain; charset=utf-8",
     }
+}
+
+/// The picture a `/local` request names, or `None` if it names anything else.
+/// Three fences, because this is the one route that reads a path a model chose:
+/// relative only, still inside `root` after `canonicalize` (which collapses `..`
+/// and resolves a symlink to wherever it really points), and an image by
+/// `mime_of` — that match is the whole allow-list, so JSON, CSV and HTML cannot be
+/// read back out through here.
+fn local_image(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    let asked = std::path::Path::new(rel);
+    if rel.is_empty() || asked.is_absolute() {
+        return None;
+    }
+    let path = root.join(asked).canonicalize().ok()?;
+    (path.starts_with(root) && mime_of(&path).starts_with("image/")).then_some(path)
 }
 
 /// One path segment of a stored upload. No slash, no `..`, and a dot only where
@@ -5213,6 +5280,38 @@ mod tests {
             mime_of(std::path::Path::new("1700-a.md")),
             "text/plain; charset=utf-8"
         );
+    }
+
+    #[test]
+    fn a_local_picture_is_readable_and_nothing_else_is() {
+        let tag = std::process::id();
+        let dir = std::env::temp_dir().join(format!("webrain-local-{tag}"));
+        let out = std::env::temp_dir().join(format!("webrain-outside-{tag}"));
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(dir.join("shots/shot.png"), b"png").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"secret").unwrap();
+        std::fs::write(out.join("secret.png"), b"png").unwrap();
+        let root = dir.canonicalize().unwrap();
+
+        // What an answer names: a picture, by a path inside the tree the chat was
+        // started in.
+        assert!(local_image(&root, "shots/shot.png").is_some());
+
+        // A name with no file behind it, text (the whole allow-list is `mime_of`),
+        // a directory, the same picture reached by leaving the tree, an absolute
+        // path, and nothing at all — every one of them none.
+        assert_eq!(local_image(&root, "shots/nope.png"), None);
+        assert_eq!(local_image(&root, "notes.txt"), None, "text is not a picture");
+        assert_eq!(local_image(&root, "shots"), None);
+        let sibling = out.file_name().unwrap().to_str().unwrap().to_string();
+        assert_eq!(local_image(&root, &format!("../{sibling}/secret.png")), None);
+        let absolute = out.join("secret.png");
+        assert_eq!(local_image(&root, absolute.to_str().unwrap()), None);
+        assert_eq!(local_image(&root, ""), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

@@ -2547,6 +2547,23 @@
     }
   }
 
+  // A path in an answer only became a picture because it *looked* like one, and
+  // the file may not be there. The `<code>` the parser would have produced is put
+  // back in the frame's place, so a miss costs the picture and nothing else.
+  // `error` does not bubble, so this is the capture phase; the mark is on the tag,
+  // set by the renderer, so no other image on the page can be caught by it.
+  addEventListener(
+    "error",
+    (e) => {
+      const img = e.target;
+      if (!(img instanceof HTMLImageElement) || !img.hasAttribute("data-local")) return;
+      const code = document.createElement("code");
+      code.textContent = img.getAttribute("alt") || "";
+      (img.closest("figure.fig") ?? img).replaceWith(code);
+    },
+    true,
+  );
+
   // Model output is untrusted: it can carry HTML, and this page can approve
   // shell commands. The sanitiser lives in the markdown chunk, so until that
   // lands this returns escaped text — never model HTML.
@@ -6847,6 +6864,13 @@
     background: var(--surface-container-high); cursor: zoom-in; }
   .md :global(img:hover) { border-color: var(--primary); }
   .md :global(a img) { border-color: transparent; }
+  /* A framed picture — `![]()`, a link to an image, or a path to one on this
+     machine — is capped: a 1080×1920 screenshot is a screen and a half tall, and
+     an answer is read, not scrolled through. The caption under it is the file, so
+     the frame never claims to be something it is not. */
+  .md :global(figure.fig img) { max-height: 22rem; width: auto; max-width: 100%; }
+  .md :global(figure.fig figcaption) { font-family: var(--mono); font-size: 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   /* ── html5 replies ─────────────────────────────────────────────────────
      In `html` mode the model lays the answer out itself. Inline `style` is
      stripped by the sanitiser — `position:fixed;inset:0` over the approval card
