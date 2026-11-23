@@ -5,17 +5,15 @@ Measured against `copilot-sdk` 2.0.1 on `feat/copilot-sdk-v2`, last pass
 file holds only what is still missing, and it is short because most of it turned
 out to be blocked upstream rather than unbuilt.
 
-**What is open, and nothing else.** Seven rows were on this list; five shipped and are
-described in `CHANGELOG.md` and the git history, so they are not repeated here. Two
-remain, and both are blocked by the SDK rather than by this repo — the evidence for
-that is the symbol table below, not a hunch.
+**What is open, and nothing else.** Two rows, and both are blocked by the SDK rather
+than by this repo — the evidence for that is the symbol table below, not a hunch.
 
 ## Open
 
 | # | what | why it is still open |
 |---|---|---|
 | 1 | the worker's own transcript | `assistant.message_delta` carries only `{deltaContent, messageId}` — no agent or parent id — so a streamed line cannot be attributed *while it streams*. It is not blocked, it is deferred: `delta.messageId` joins to `assistant.message.turnId`, and `assistant.turn_end` carries `parentTaskToolCallId`, so a child's text can be re-filed under its `task` row when that turn **ends**. Doing that means buffering per-message text on the hottest path in the page, so it stays open until that is worth its risk |
-| 4 | MCP sampling, *answered* | handled as the protocol's reject, so the hang is gone and the completion is not run. The typed path cannot carry it: `McpExecuteSamplingRequest` is an **empty struct** ("treated as opaque at the schema layer") while the params that matter — the MCP `createMessage` messages — are what it would have to hold, so `executeSampling` would ask the runtime to run an inference with no prompt. Answering needs either a non-empty struct upstream or a hand-built raw call, which spends credits per request |
+| 2 | MCP sampling, *answered* | handled as the protocol's reject, so the hang is gone and the completion is not run. The typed path cannot carry it: `McpExecuteSamplingRequest` is an **empty struct** ("treated as opaque at the schema layer") while the params that matter — the MCP `createMessage` messages — are what it would have to hold, so `executeSampling` would ask the runtime to run an inference with no prompt. Answering needs either a non-empty struct upstream or a hand-built raw call, which spends credits per request |
 
 ## What the SDK actually offered
 
@@ -27,13 +25,32 @@ not exist in the file it printed.
 
 | Symbol | What it settled |
 |---|---|
-| `McpStartServerRequest { config: Option<Value>, expected_installation_id, server_name }` + `session.mcp.start_server` | `config: None` starts a server **with the already-registered configuration**, in the live session. This is what closed #3 — `mcp.config.reload` only re-reads the file, and the "marked internal" note that row was blocked on belongs to a different call |
+| `McpStartServerRequest { config: Option<Value>, expected_installation_id, server_name }` + `session.mcp.start_server` | `config: None` starts a server **with the already-registered configuration**, in the live session. This is what made attaching possible at all — `mcp.config.reload` only re-reads the file, and the "marked internal" note that looked like a blocker belongs to a different call |
 | `McpServerStatus` (`connected` / `failed` / `needs-auth` / `pending` / `disabled` / `stopped` / `not_configured`) | Why `attached` must compare `status == "connected"`: a spawn failure still appears in `list()`, so a presence check reports success |
-| `session.agent.select` / `deselect` / `agent.get_current` | Selection moves on a **live** session, so #2 needed no restart path — and `get_current` is what the reply must read back, not the request's name |
-| `SessionInferenceOptions::with_enable_citations` + `AssistantMessageData.citations: Option<Citations>` | The typed payload exists (`Citations { sources[], spans[] }`), which is what made #5 possible instead of "markers nothing can parse" |
-| `McpExecuteSamplingRequest {}` (empty) + `McpExecuteSamplingResult = HashMap<String, Value>` | Why #4 is still open: the *result* is free-form but the *request* is empty, so the MCP `createMessage` messages have nowhere to go. The runtime's own conversion needs params the typed struct cannot carry |
-| `AssistantMessageDeltaData { delta_content, message_id }`, `AssistantTurnEndData.parent_task_tool_call_id` | The exact join behind #1's deferral: `delta.messageId` → `assistant.message.turnId` → `turn_end.parentTaskToolCallId` |
-| `permissions.get_capabilities()`, `modify_rules { kind, argument }` | No rule vocabulary, and `kind` is documented only by example — which is why #6 stores what the card carries instead |
+| `session.agent.select` / `deselect` / `agent.get_current` | Selection moves on a **live** session, so switching agents needs no restart path — and `get_current` is what the reply must read back, not the request's name |
+| `SessionInferenceOptions::with_enable_citations` + `AssistantMessageData.citations: Option<Citations>` | The typed payload exists (`Citations { sources[], spans[] }`), which is what makes the toggle possible instead of "markers nothing can parse" |
+| `session.history.compact` / `compact_with_params` / `truncate` / `list_rewind_points` (`HistoryCompactResult { tokens_removed, messages_removed, summary_content, context_window, success }`) | The `history()` namespace is both the rewind surface the page uses and the compaction surface it never touches. Compaction already reaches us two ways — the `compact_at` session threshold and the runtime's own commands served into the composer's `/` menu (`commands.list`) — so a third, route-shaped trigger was declined: the typed result would only restate what the `session.compaction_*` events already say |
+| `McpExecuteSamplingRequest {}` (empty) + `McpExecuteSamplingResult = HashMap<String, Value>` | Why sampling *answered* is still open: the *result* is free-form but the *request* is empty, so the MCP `createMessage` messages have nowhere to go. The runtime's own conversion needs params the typed struct cannot carry |
+| `AssistantMessageDeltaData { delta_content, message_id }`, `AssistantTurnEndData.parent_task_tool_call_id` | The exact join behind the worker-transcript deferral: `delta.messageId` → `assistant.message.turnId` → `turn_end.parentTaskToolCallId` |
+| `permissions.get_capabilities()`, `modify_rules { kind, argument }` | No rule vocabulary, and `kind` is documented only by example — which is why the approval store keeps what the card carries instead |
+
+## What the graph answered
+
+`check_index_coverage` reports `no_recorded_issue` for the four chat sources and
+**`parse_unusable`, ranges 1–7764** for `webrain-cli/ui/src/App.svelte`, so every page
+claim here is read from source; the graph cannot answer for the component. What it can
+answer, it answers flatly, and it settles what the next phase is *not*:
+
+- **48 `Route` nodes, 124 `HTTP_CALLS` edges, and every route has a caller in the
+  page** (the `OPTIONAL MATCH … count(a) = 0` query returns nothing). There is no
+  orphan route, so "the page is missing a route" is not the next gap.
+- **No function in `chat_server.rs` has zero callers** — 92 functions, smallest caller
+  count 1 — so there is no handler left behind for a route that was dropped.
+- `Route` and `EnvVar` nodes project no `file`, so the graph enumerates the surface
+  but cannot cite a line; every line number in this file was read from source.
+
+The next phase is therefore not new surface. It is the seven behaviours below that
+compile and have never run.
 
 ## Not rows, deliberately
 
@@ -80,3 +97,6 @@ Not verified, in order of how much it matters:
 6. **The turn totals.** `webrain.usage` now sends the difference from the snapshot
    taken at the previous turn's end, and the panel sums per-call usage; both are
    one turn's worth, but neither has been compared against a funded turn's bill.
+7. **Manual compaction.** No route calls `session.history.compact`; a manual
+   compaction can only arrive through the runtime's own command list (`/command` →
+   `session.commands.invoke`), and nobody has invoked one here.
