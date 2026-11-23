@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `chat`: **the tab has an icon.** `/favicon.ico` was a 404 on every load. The
+  server now answers it — and `/favicon.png` — with the docs site's own logo
+  (`docs/images/webrain-logo-rounded.png`), downscaled to 64×64 and stripped to
+  **5,100 bytes**; the served shell declares it, so a fresh load never reaches the
+  implicit `.ico` request at all. Carried with `include_bytes!` rather than added to
+  the verified asset set: it is a picture, it cannot ask anyone to approve anything,
+  and the digest machinery exists for the page that can.
 - `chat`: **the running state now belongs to the conversation that owns the turn.**
   `runningConvo` was derived from `current`, which moves the moment you open another
   thread — so with a turn running in one chat, every chat you opened showed the Stop

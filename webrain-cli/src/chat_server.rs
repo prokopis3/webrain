@@ -95,6 +95,9 @@ const PERMISSION_WAIT: Duration = Duration::from_secs(120);
 /// `ask_user` gets longer than a permission: it needs a typed answer.
 const INPUT_WAIT: Duration = Duration::from_secs(300);
 
+/// The tab icon: the docs site's own logo, downscaled to 64×64 and stripped.
+const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
+
 pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{}", args.port);
     // Before the port is taken and before a runtime is started: a page that
@@ -1466,6 +1469,17 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         }
         ("GET", "/chat.css") => {
             respond(&mut stream, 200, "text/css; charset=utf-8", &state.ui.css).await
+        }
+        // The tab icon, from the same artwork the docs site uses
+        // (`docs/images/webrain-logo-rounded.png`, downscaled to 64×64). Embedded
+        // with `include_bytes!` rather than added to the verified asset set: it is
+        // 5 KB, it is not code, and it cannot ask anyone to approve anything — the
+        // reason the page itself is digested and read from disk does not apply to a
+        // picture. Browsers ask for `/favicon.ico` by themselves; `/favicon.png` is
+        // what the page's own `rel="icon"` points at, so a fresh load never reaches
+        // the implicit request at all.
+        ("GET", "/favicon.ico") | ("GET", "/favicon.png") => {
+            respond_bytes(&mut stream, 200, "image/png", &[], FAVICON).await
         }
         // The markdown renderer's chunk. `chat.js` imports it dynamically, so the
         // first paint never parses `marked` or DOMPurify; the page warms it when
