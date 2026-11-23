@@ -351,6 +351,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sdk` in the runtime's own session list (`client_name`).
 
 ### Changed
+- `chat`: **the two drawers are exclusive.** On a narrow screen both rails are overlays,
+  and opening one left the other behind it — a tap on the sessions button could land on
+  the instruments drawer. Each door now closes the other: the deck carries `open` or
+  `instopen`, never both. Verified at 560 px by class after each click — `deck` →
+  `deck open` → `deck instopen` → `deck open` → `deck instopen`.
+
+### Changed
 - `docs`: **the chat guide and the README now say what the page actually does.** Synced
   from the entries above: the picture frames and `GET /local`, `POST /command` and the
   session-info panel it drives (grouped percentages, the reservation as a count, compact

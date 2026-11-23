@@ -4515,7 +4515,11 @@
 <header class="topbar">
   <button
     class="icon"
-    onclick={() => (panelOpen = !panelOpen)}
+    onclick={() => {
+      panelOpen = !panelOpen;
+      // Two overlays, one screen: opening this one puts the other away.
+      if (panelOpen) instOpen = false;
+    }}
     aria-expanded={panelOpen}
     aria-label="toggle sessions"
     title="sessions"
@@ -4529,7 +4533,11 @@
        door there, and hidden above the breakpoint where the rail is the door. -->
   <button
     class="icon instbtn"
-    onclick={() => (instOpen = !instOpen)}
+    onclick={() => {
+      instOpen = !instOpen;
+      // The mirror of the sessions door: one drawer at a time.
+      if (instOpen) panelOpen = false;
+    }}
     aria-expanded={instOpen}
     aria-label="toggle session instruments"
     title="session instruments"
