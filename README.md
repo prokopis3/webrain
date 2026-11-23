@@ -184,6 +184,7 @@ webrain screenshot <url>                           # full-page screenshot (alway
 webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain tool <name> '<json>' [--url U]             # ANY of the 19 MCP tools, no model needed
+webrain read <url> [--outline|--filter T]          # a page as markdown over HTTP (no browser)
 webrain pdf <file-or-url> [--json]                 # PDF text as markdown (no browser)
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
 webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
