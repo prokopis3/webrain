@@ -13,102 +13,74 @@ measure in the running page before calling anything a performance problem.
 
 ## Open
 
-### 1. Two RPC loops still do the work of twenty (backend)
+### 1. `handle_tools_call` is one 1,069-line function (backend)
 
-~~`webrain-mcp/src/tools.rs:926-2322` (`call_tool`, ~1400 lines)~~ — **done**: 61
-tool arms moved into nine family functions (`call_page`, `call_session`,
-`call_crawl`, `call_extract`, `call_interact`, `call_read`, `call_batch`,
-`call_media`, `call_toolbox`); the dispatcher is 74 lines of routing. Verified by
-diffing the moved blocks against the originals (byte-identical), by asserting all
-61 names dispatch once, and by the workspace test suite.
+`webrain-mcp/src/lib.rs:280-1348`. It is out of `handle_rpc` — that was the fix
+for "one `match` answers four methods" — but it still does four jobs in sequence:
+fold the intent surface, run the no-state / no-browser guards, connect (and retry)
+a backend, then call and post-process whatever came back.
 
-Still open: `webrain-mcp/src/lib.rs` — ~~`handle_rpc` (831 lines)~~ **done** (its
-1,078-line `tools/call` arm is `handle_tools_call`; `handle_rpc` is 33 lines of
-protocol) and `handle_http_conn` (~720 lines), which is a hand-rolled HTTP router
-with the response written inline, not a `match` — it needs routing separated from
-response building, which is a different cut from the two above.
+**Fix:** cut at those seams — `guards`, `connect`, `execute`, `postprocess`, each
+returning `Value` — so a change to the retry policy stops being a change to the
+same function as a change to the guards.
 
-**Why the rest is not done yet:** ~1100 moved lines across the two most
-load-bearing files, zero functional gain, and a review surface that would hide the
-real diffs if it landed beside a fix. It is a readability project with its own
-change window.
+**Why open:** the body is byte-identical to the arm it came from, this is the path
+every transport ends in, and the payoff is reviewability rather than speed. It
+needs its own change window, the way the first two cuts did.
 
-### 2. The chat page is still one 7.5k-line component (frontend, readability)
+### 2. `handle_http_conn` is a 724-line router that writes responses inline (backend)
 
-`webrain-cli/ui/src/App.svelte`, 7,540 lines. The palette, the snackbar and the
+`webrain-mcp/src/lib.rs:1780-2503`. Unlike `call_tool` and `handle_rpc` this is not
+a `match`: it parses the request line and headers, answers `/health`, enforces the
+optional bearer token, reads the body, dispatches, and formats each response in
+place — so a route's logic and its HTTP framing are the same twenty lines.
+
+**Fix:** separate routing (`path + method → Option<route>`) from response building
+(`fn reply(status, body) -> String`, `fn sse_chunk(..)`).
+
+**Why open:** it is the transport every HTTP client depends on; a byte-level slip
+here is a client outage, not a bad line number.
+
+### 3. The chat page is still one 7.5k-line component (frontend, readability)
+
+`webrain-cli/ui/src/App.svelte`, 7,523 lines. The palette, the snackbar and the
 tools chooser are out (see `CHANGELOG.md`); each took its markup, styles and
 keyframes with it, because Svelte scopes all three to the defining component, and
 the chooser also had to redeclare the dialog shell (`#modal` backdrop, `.card`,
 primary button) because `App`'s rules never reach a child's DOM.
 
-**This is not a performance item, and the measurement says so** (see item 3):
-opening the settings panel and stepping through all nine tabs produces **zero**
-long tasks. The reason to split is that 7,540 lines is hard to review.
+**This is not a performance item, and the measurement says so:** opening the
+settings panel and stepping through all nine tabs produces **zero** long tasks,
+and scrolling a 55-message thread holds 16.7 ms frames. The reason to split is
+that 7,523 lines is hard to review.
 
 **A boundary is not free — measured, not assumed:** palette `+0.8 KB` gzipped,
 snackbar `+0.2`, tools chooser `+2.8` (it copied the dialog shell), and a
 `Dialog.svelte` shared shell written to remove that duplication cost **`+0.73`
 with only one consumer** — it was reverted rather than shipped. Call it ~0.7 KB
-per component boundary, so a full split of the remaining 7,540 lines lands
+per component boundary, so a full split of the remaining 7,523 lines lands
 somewhere near `+7 KB`.
 
 **Decision (recorded, so it stops being re-discovered):** the 80 KB ceiling is a
 *bug detector*, not a decomposition budget. If the page is split further, the
 ceiling moves to 88 KB in the same commit that crosses 80, with this paragraph as
 the reason — and the split goes **per tab**, not per panel: the settings card is
-nine tabs in one 355-line block over ~40 shared values (`manage`, `toggles`,
+nine tabs in one 353-line block over ~40 shared values (`manage`, `toggles`,
 `skillNew`, `mcpNew`, `providers`, …), so a whole-panel move would need a
 40-prop component, which is worse code than what it replaces. One tab per
-component, each with a handful of props, measured after each.
+component, each with a handful of props, measured after each. The shared atoms
+those tabs draw are in `ui/src/app.css`, so a tab costs its markup and no form CSS.
 
 The transcript rows stay last: one `{#each}` with a dozen locals, and the
-measurement below shows they are already cheap to scroll.
+measurement shows they are already cheap to scroll.
 
-**Prerequisite, now shipped:** the atoms those tabs draw (checkbox, `.linky`,
-`.dim`, `.none`, icon, round button) are in `ui/src/app.css` instead of a
-component's scoped `<style>`, so a tab component costs its markup and no form CSS.
-The relocation also fixed a regression it exposed — the settings checkboxes had
-lost their drawn box when the tools dialog moved out.
+### 4. A streaming turn is still unmeasured (frontend)
 
-### 3. Painting is now measured, and the transcript is not the problem
-
-Measured 2026-11-23 on a 55-message thread (`c1794890501696`: 33 `.msg`, 82
-`content-visibility` rows, 9,972 px of transcript in a 603 px viewport), debug
-build, headless Chrome, via `PerformanceObserver` on `longtask` plus a
-`requestAnimationFrame` delta loop while scrolling 30 steps top→bottom:
-
-| Interaction | Long tasks | Longest | TBT | Frames | P50 / P95 | Slow (>34 ms) |
-|---|---:|---:|---:|---:|---|---:|
-| First scroll after opening the thread | 1 | **134 ms** | 84 ms | 67 | 16.7 / 16.8 ms | 1 |
-| Second scroll | 0 | — | 0 | 30 | 16.7 ms | 0 |
-| Third scroll | 0 | — | 0 | 30 | 16.7 ms | 0 |
-| Settings open + all 9 tabs | 0 | — | 0 | — | — | — |
-
-**Reading:** the 134 ms task is the first layout of the rows that
-`content-visibility: auto` had been skipping — it happens once per thread, and
-never again on the same thread. Steady-state scrolling is a locked 60 fps, and
-the settings panel does not block the main thread at all, which is the evidence
-that item 2 is readability work rather than a performance fix.
-
-**Declined on the record: virtualising the transcript.** One 134 ms task on the
-first view of a 55-message thread, paid once, is under the ~200 ms a deliberate
-navigation can absorb, and a virtual list would add scroll restoration, anchoring
-and `find in page` regressions to buy back 84 ms of blocking time. Revisit if a
-thread reaches the hundreds of messages, or if the first-view task crosses 200 ms.
-
-**Still unmeasured:** a *streaming* turn (per-token DOM insertion plus markdown
-re-parse) — the provider was out of credits, so no live turn could be recorded.
-That is the one place a chat can stutter, and it needs a funded key, not code.
-
-**Reproducing** (paste in the served page's console, DevTools open):
-
-```js
-const t = [], po = new PerformanceObserver((l) => l.getEntries().forEach((e) => t.push(e.duration)));
-po.observe({ entryTypes: ["longtask"] });
-const sc = [...document.querySelectorAll("*")].find((e) => e.scrollHeight > e.clientHeight + 300 && !e.classList.contains("rail"));
-for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeight) * i) / 30; await new Promise(requestAnimationFrame); }
-console.table(t);  // then scroll again — the tasks should be empty
-```
+Every number in this file is either a bundle size, a JS timing, or a scroll and a
+dialog open. No frame timeline of a *streaming* turn exists — per-token DOM
+insertion plus markdown re-parse — which is the one place a chat can stutter. It
+needs a funded provider key to record, not code: record one turn and report the
+longest task and the dropped-frame count before touching the render path.
 
 ---
 
@@ -125,6 +97,15 @@ cost a debugging round. Correctness beats a 0-byte cache hit on loopback.
 startup, answer `ETag` + `Cache-Control: no-cache` (revalidate, not `no-store`), so a
 reload of an unchanged binary is a `304` instead of ~220 KB. About ten lines in the
 asset route of `chat-server`.
+
+### Virtualising the transcript
+
+Measured, then declined: the first view of a 55-message thread pays **one 134 ms
+long task** (84 ms of blocking time) laying out the rows `content-visibility: auto`
+had been skipping, and never pays it again. A virtual list would add scroll
+restoration, anchoring and `find in page` regressions to buy back 84 ms of a
+once-per-thread cost. Revisit at hundreds of messages, or if that first-view task
+crosses 200 ms.
 
 ### `rollup-plugin-visualizer`
 
@@ -192,3 +173,13 @@ Backend: `cargo clippy --workspace --all-targets`, `cargo test --workspace`, the
 `index_repository(mode="fast")` **before** trusting a coverage signal — a new file
 reads `not_tracked` until it is indexed, which is the index being old, not the code
 being absent.
+
+Painting, in the served page's console with DevTools open:
+
+```js
+const t = [], po = new PerformanceObserver((l) => l.getEntries().forEach((e) => t.push(e.duration)));
+po.observe({ entryTypes: ["longtask"] });
+const sc = [...document.querySelectorAll("*")].find((e) => e.scrollHeight > e.clientHeight + 300 && !e.classList.contains("rail"));
+for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeight) * i) / 30; await new Promise(requestAnimationFrame); }
+console.table(t);  // the first scroll may show one task; later scrolls should be empty
+```
