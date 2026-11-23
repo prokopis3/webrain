@@ -96,7 +96,8 @@ sandboxed store (`WEBRAIN_CHAT_DB=output/chatcap/chat.db`):
 | `POST /mcp/remove` of an attached server | `{"removed":true,"reloaded":true,"attached":true}` — `attached` is true because the live session keeps it, which is what that field is for |
 | `POST /settings {"citations":true}` | `{"saved":true,"restart":true}` — creation-time, so the flag is honest about costing a rebuild; `/settings` and `settings.json` both then read `true` |
 | `POST /mcp/prompt {"server":"fixture","name":"greet","arguments":{"who":"Rust"}}` | `{"messages":1,"text":"Hello Rust from the fixture"}`, and the page's `use` put that in the composer |
-| `POST /mcp/resource {"server":"fixture","uri":"fixture://doc"}` | `{"parts":1,"text":"fixture document body"}`, likewise prepended in the composer |
+| `PATCH /sessions/<live id> {"title":"budget review"}` | `{"renamed":true,"runtime":{"saved":true,"name":"budget review"}}`, and the runtime's own list then read `"name": "budget review"` — before this it still said `webrain-<id>` |
+| `PATCH /sessions/<stored, not live>` | `{"renamed":true,"runtime":null}` — renaming an old row must not rename the one live session |
 
 `/agents/select` reported `selected: true` for a **deselect** on its first live
 run: the reply echoed the request's name instead of reading back what the session

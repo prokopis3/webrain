@@ -3338,7 +3338,25 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .unwrap_or_default()
                 .to_string();
             let renamed = state.store.as_ref().is_some_and(|s| s.rename(id, &title));
-            let out = json!({ "renamed": renamed }).to_string();
+            // The rail reads the store; the runtime keeps its own session name. A
+            // rename used to move only the first, so `session.list()` and a resume
+            // by name still carried the old one. Only the live conversation has a
+            // session to rename — every other row is just stored text.
+            let mut runtime = Value::Null;
+            if renamed && state.convo().await == id {
+                let live = state.live.read().await.clone();
+                runtime = match live
+                    .session
+                    .rpc()
+                    .name()
+                    .set(NameSetRequest { name: title.clone() })
+                    .await
+                {
+                    Ok(()) => json!({ "saved": true, "name": title }),
+                    Err(e) => json!({ "saved": false, "error": e.to_string() }),
+                };
+            }
+            let out = json!({ "renamed": renamed, "runtime": runtime }).to_string();
             let code = if renamed { 200 } else { 400 };
             respond(&mut stream, code, "application/json", &out).await
         }

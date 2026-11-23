@@ -354,6 +354,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"stopped":true,"id":1,…}`.
 
 ### Fixed
+- `chat`: **renaming a conversation moved only one of its two names.** The rail
+  saves a title in the store (`PATCH /sessions/:id`) while the runtime keeps its
+  own session name, so after a rename `session.list()` and any resume-by-name
+  still carried `webrain-<id>` — two views of one fact, disagreeing. The store
+  route now also calls `session.name().set`, but **only for the live
+  conversation**: an older row is stored text with no session to rename, and
+  renaming it must not rename the session that is running.
+  Found by diffing the server's route literals against the page's `fetch`
+  literals: `/name` was the one route the page never called, which is what made
+  the drift visible. Verified both branches: `PATCH` of the live id answered
+  `{"renamed":true,"runtime":{"saved":true,"name":"budget review"}}` and the
+  runtime's own list then read `"name": "budget review"`; `PATCH` of a stored
+  row answered `{"renamed":true,"runtime":null}`.
 - `chat`: **`/agents/select` reported `selected: true` for a deselect.** The reply
   echoed the request's name, so `{"name":"default"}` — which *clears* the
   selection — answered the opposite of what had happened. It reads `current` back
