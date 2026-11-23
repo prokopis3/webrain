@@ -372,6 +372,40 @@ binary is a `304` instead of 220 KB. About ten lines in the asset route of
 - **Divide the page before dividing the box** — the transcript's own rows are the
   next slice, and they are the coupled ones (one `{#each}` with a dozen locals).
 
+## Measured, and retired: the composer's per-keystroke "hot path"
+
+An earlier pass named `markInput` + `{@html}` as the next code change on the
+grounds that it re-escapes the whole draft and re-parses its HTML on every
+keystroke. That was structural inference, not a measurement. Measured on the
+served build (`evaluate` loop, 25 dispatches of a real `input` event):
+
+| draft | ms per keystroke (escape + 2 regex + `{@html}` + Svelte flush) |
+|---|---|
+| 7 chars | 0.01 ms |
+| **9,285 chars** | **0.03 ms** |
+
+30 µs is ~0.2% of a 16 ms frame, at a draft length no one types. The optimisation
+was written down, measured, and **not built** — an rAF-batched memo here would be
+code to improve a number nobody can feel. Re-measure before believing any future
+claim that the composer is slow; the cost of a keystroke in a 9 KB draft is the
+cheapest thing on the page.
+
+## Appendix: coverage of the two files this touched
+
+`check_index_coverage` before and after a `index_repository(mode="fast")` pass:
+
+| file | before | after |
+|---|---|---|
+| `webrain-cli/ui/src/App.svelte` | `unusable`, ranges 1–7197 | **`partial`**, one bad range (4469) |
+| `webrain-cli/ui/src/Palette.svelte` | `not_tracked` (older than the file) | **`no_recorded_issue`** |
+
+The graph can answer for the Svelte file now — `search_graph("markInput")` returns
+`App.svelte 20-28` — where before the reindex every query about it had to fall back
+to reading source. Index size went 2,566 nodes / 6,182 edges (2026-10-23) to
+**5,281 / 17,633**. Reindex before trusting a "not found" on a file added or moved
+since the last pass.
+
+
 ## Reproducing
 
 ```powershell

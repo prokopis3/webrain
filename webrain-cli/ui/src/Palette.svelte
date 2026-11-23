@@ -9,7 +9,11 @@
   let {
     palette = null,
     selected = 0,
-    options = [],
+    // The count, not the array: the header needs "27 · 14 shown", and handing
+    // over the full list only so it can be measured would tie this component to
+    // a shape it never reads — the day the menu pages, `rows` stops being a
+    // prefix of `options` and only this number has to keep meaning something.
+    total = 0,
     rows = [],
     sigil = {},
     onpick = () => {},
@@ -25,12 +29,12 @@
   });
 </script>
 
-{#if palette && options.length}
+{#if palette && total}
   <div class="palette" role="listbox" bind:this={el}>
     <div class="head">
       {palette.trigger === "/" ? "everything" : palette.trigger === "@" ? "skills" : "tools"}
       <span class="count"
-        >{options.length}{rows.length < options.length ? " · " + rows.length + " shown" : ""}</span
+        >{total}{rows.length < total ? " · " + rows.length + " shown" : ""}</span
       >
     </div>
     {#each rows as o, i (o.kind + o.name)}

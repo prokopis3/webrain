@@ -5088,7 +5088,7 @@
   <Palette
     {palette}
     selected={palette?.index ?? 0}
-    {options}
+    total={options.length}
     rows={menuRows}
     sigil={SIGIL}
     onpick={pick}
