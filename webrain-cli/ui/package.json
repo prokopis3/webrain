@@ -5,7 +5,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "check": "node check-step-titles.mjs && node check-stream-split.mjs && node check-next-steps.mjs && node check-duration.mjs && node check-turn-use.mjs && node check-subagent-events.mjs && node check-keys.mjs && node check-mentions.mjs && node check-html-vocab.mjs && node check-budget.mjs",
+    "check": "node check-step-titles.mjs && node check-stream-split.mjs && node check-next-steps.mjs && node check-duration.mjs && node check-turn-use.mjs && node check-subagent-events.mjs && node check-keys.mjs && node check-merge-rows.mjs && node check-mentions.mjs && node check-html-vocab.mjs && node check-budget.mjs",
     "budget": "node check-budget.mjs"
   },
   "devDependencies": {

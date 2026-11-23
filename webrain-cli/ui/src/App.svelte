@@ -1247,7 +1247,17 @@
         // A queued prompt starts the moment this turn ends, so the rail is stale
         // in the one frame it matters.
         loadQueue();
-        return loadSessions();
+        loadSessions();
+        // A tab that joined this turn mid-flight holds only its tail, and the
+        // copy it cached at boot predates this turn's answer. Now that the turn
+        // is over, read once more and put the rows it never saw in front of the
+        // ones it has; `seedLive` only claims the conversation once the pane is
+        // whole.
+        if (rowsFor !== current) {
+          cache.delete(current);
+          seedLive();
+        }
+        return;
       }
       // The runtime renamed the conversation itself, so the rail's row — built
       // from our own store — would keep the old title until the next reload.
@@ -1772,14 +1782,54 @@
     }
   }
 
-  // This tab is the live conversation, so show what it already said. A fresh tab
-  // used to open on an empty pane over a conversation that had a transcript —
-  // and, worse, could then be painted by a turn still running in it.
+  // The rows to put in front of the pane so it shows the whole thread. The count
+  // comes from the server's message log — appended once per message and never
+  // replaced — so it cannot drift: a tab that joined a turn mid-flight holds only
+  // the messages that landed after it attached, and `total - held` is the front
+  // it never saw.
+  function missingHead(disk, items, total) {
+    const msg = (r) => r.kind === "user" || r.kind === "assistant";
+    let want = total - items.filter(msg).length;
+    const out = [];
+    if (want <= 0) return out;
+    for (const r of disk) {
+      out.push(r);
+      if (msg(r) && --want === 0) break;
+    }
+    return out;
+  }
+
+  // This tab is the live conversation, so show what is already on disk. A fresh
+  // tab used to open on an empty pane over a conversation that had a transcript
+  // — and, worse, could then be painted by a turn still running in it.
+  //
+  // `busy` still holds it back, but the idle handler calls it again, and the
+  // merge is what makes that safe: a tab that reloaded mid-turn holds only the
+  // turn's tail, so the rows it never saw go in *front* of the ones it has
+  // instead of replacing them. `rowsFor` is only set once the pane is whole —
+  // the transcript save is a whole-array replace, so a partial pane that claimed
+  // this conversation would overwrite a complete transcript with its tail.
   async function seedLive() {
-    if (!current || items.length || busy) return;
+    if (!current || busy || viewing) return;
     const j = await loadConvo(current);
-    if (!j || items.length) return;
-    items = rowsOf(j);
+    if (!j || busy || viewing) return;
+    const disk = rowsOf(j);
+    if (!disk.length) return;
+    // First sight of this conversation: the stored copy is the whole thread.
+    if (!items.length) {
+      items = disk;
+    } else if (rowsFor === current) {
+      return; // this tab drew it; a pane cannot fall behind its own save
+    } else {
+      const head = missingHead(disk, items, (j.messages || []).length);
+      if (!head.length) return;
+      // Re-keyed above the live ids: the stored rows were written by another
+      // tab and count from 1 as well, so keeping them would hand the keyed list
+      // two rows with one key.
+      const base = seq;
+      items = [...head.map((r, i) => ({ ...r, id: base + i + 1 })), ...items];
+      seq = base + head.length;
+    }
     rowsFor = current;
     // The saved rows keep the ids they were written with while `push` counts
     // from zero, so without this the next row re-used id 1 and the keyed list

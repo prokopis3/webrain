@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `chat`: **a refresh or a second tab during a turn no longer loses the history.**
+  `seedLive` used to bail on `busy` and nothing retried it, so a tab opened (or
+  Ctrl+R'd) while a turn was running opened on the hero, or — once the turn ended
+  — on the answer alone, with no question above it, until you clicked another
+  thread and back. Measured on a 40-message thread: 33 rows before the reload,
+  **2 after**, which is the reported symptom. The fix is a merge, not a re-seed:
+  when the turn ends the tab reads the conversation once more and puts the rows it
+  never saw *in front* of the ones it streamed. How much is missing comes from the
+  server's message log — appended once per message and never replaced — so the
+  count cannot drift with a stored transcript that is itself a turn behind. The
+  prepended rows are re-keyed above the live ids (`each_key_duplicate`), and
+  `rowsFor` is only claimed once the pane is whole, because the transcript save is
+  a whole-array replace: a partial pane that claimed the conversation would have
+  overwritten a complete transcript with its tail. Verified end to end against a
+  local slow model: 2 rows mid-turn, 38 after idle, zero duplicate rows, and a
+  plain reload still seeds without duplicating.
+
 ### Added
 - `chat`: **five capabilities the page could describe but not use, closed against
   `copilot-sdk` 2.0.1** — the open rows in `docs/CHAT_CAPABILITIES.md`:
