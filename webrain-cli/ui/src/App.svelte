@@ -116,6 +116,11 @@
   // rows. Frames carry their conversation; this is what they say when they do
   // not belong here.
   let runningIn = $state("");
+  // The conversation this tab's own turn was started in. `current` moves the
+  // moment you open another thread, so deriving the owner from it painted the
+  // Stop button — and the rail's dot — onto whichever conversation you looked
+  // at: every chat read as running while one of them was.
+  let busyConvo = $state("");
   // Every MCP server the runtime reports on, by name. A server that dies is the
   // reason a turn suddenly has no tools, and until now that arrived as one line
   // inside the collapsed `runtime` row — the page looked like a model that had
@@ -649,7 +654,7 @@
   // The conversation the running turn belongs to: the one a foreign frame named,
   // or this one when the turn is ours. `busy` alone is a fact about the server,
   // not about where the work is.
-  const runningConvo = $derived(runningIn || (busy ? current : ""));
+  const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));
   const shown = $derived(list.length > tail ? list.slice(-tail) : list);
   // Which ledger the panel is reading: a saved conversation shows its own, so
   // the numbers stop changing to the live one's the moment you open history.
@@ -1649,6 +1654,7 @@
       // just started cannot be cancelled by a list refresh that raced it.
       if (j.busy) {
         busy = true;
+        busyConvo = current;
         state = "running";
       }
       // The live ledger survives a reload the same way the transcript does;
@@ -2282,6 +2288,7 @@
       past = null; // a new turn belongs to the live conversation
       viewing = "";
       busy = true;
+      busyConvo = current;
       state = "running";
       // A new turn starts with no spend, and with a fresh reasoning block, open
       // again: last turn's collapse does not carry over to a turn not yet seen.
@@ -2352,9 +2359,12 @@
   }
 
   // Stop is the runtime's abort; the page clears `busy` when the turn's own
-  // wait returns, so a slow abort cannot leave the button dead.
+  // wait returns, so a slow abort cannot leave the button dead. The owner check
+  // is the same one the composer draws its button with: `/stop` aborts whatever
+  // the one live session is running, which is not this conversation's turn when
+  // you are reading another thread.
   async function stopTurn() {
-    if (!busy) return;
+    if (!busy || runningConvo !== current) return;
     try {
       await fetch("/stop", { method: "POST" });
     } catch (e) {
@@ -2367,7 +2377,7 @@
   // stayed in the field. `/stop` clears the busy flag now that the abort returns,
   // which is what makes this one action instead of two.
   async function stopAndSend() {
-    if (!busy) return;
+    if (!busy || runningConvo !== current) return;
     await stopTurn();
     busy = false;
     state = "ready";
@@ -5300,12 +5310,14 @@
       {/each}
     </div>
   {/if}
-  {#if busy && runningIn && runningIn !== current}
+  {#if busy && runningConvo && runningConvo !== current}
     <!-- There is one live session, and it is busy in another conversation. Saying
          which one is the difference between "this page is stuck" and "it is
-         waiting for another chat to finish". -->
+         waiting for another chat to finish". The owner is `runningConvo`, not
+         `runningIn`: a turn this tab started belongs to a conversation too, and
+         opening a second thread used to hand it this one's stop button. -->
     <p class="runhint">
-      a turn is running in <b>{convos.find((c) => c.id === runningIn)?.title || runningIn}</b> — this
+      a turn is running in <b>{convos.find((c) => c.id === runningConvo)?.title || runningConvo}</b> — this
       conversation waits for it
     </p>
   {/if}
@@ -5363,11 +5375,14 @@
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           // While a turn runs, Enter steers it and the queue key sends behind it —
-          // the two choices the runtime has that a plain send does not.
-          if (keyName(e) === keys.queue) return send("queue");
+          // the two choices the runtime has that a plain send does not. Only for
+          // the conversation the turn belongs to: a turn running elsewhere gets
+          // neither, because both would be delivered to that one.
+          const mine = busy && runningConvo === current;
+          if ((!busy || mine) && keyName(e) === keys.queue) return send("queue");
           // Stop, then send, in one keystroke.
-          if (busy && keyName(e) === keys.stopSend) return stopAndSend();
-          if (busy) return send("steer");
+          if (mine && keyName(e) === keys.stopSend) return stopAndSend();
+          if (mine) return send("steer");
           send();
         }
       }}
@@ -5410,7 +5425,7 @@
         </svg>
       {/if}
     </button>
-    {#if busy}
+    {#if busy && runningConvo === current}
       <!-- One small icon each, and they are the runtime's own two ways to
            deliver a message mid-turn: queue behind it, or make it yield. -->
       <button
@@ -5469,7 +5484,15 @@
         
       </button>
     {:else}
-      <button aria-label="stop" title="send this prompt" class="send" onclick={() => send()} disabled={!draft.trim()}>
+      <button
+        aria-label="send"
+        title={busy
+          ? "a turn is running in another conversation — this one waits for it"
+          : "send this prompt"}
+        class="send"
+        onclick={() => send()}
+        disabled={!draft.trim() || busy}
+      >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 24 24"

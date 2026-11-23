@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `chat`: **the running state now belongs to the conversation that owns the turn.**
+  `runningConvo` was derived from `current`, which moves the moment you open another
+  thread — so with a turn running in one chat, every chat you opened showed the Stop
+  button, the queue/steer buttons and the rail's running dot, as if the turn were
+  theirs. The page now records `busyConvo` where it sets `busy`, and the composer
+  draws its running controls only for `runningConvo === current`; everywhere else it
+  draws a disabled Send whose title says a turn is running in another conversation,
+  above the existing hint naming that conversation. The keystroke path and
+  `stopTurn`/`stopAndSend` take the same owner check, so Ctrl+Enter can no longer
+  abort a turn from a thread that does not own it. `check-keys.mjs` pins the four
+  call sites. Measured in the page with a running turn: away from the owner the
+  button reads `send` (disabled), the hint names the owner, there are no mini
+  buttons and the dot stays on the owning row; back on the owner it reads `stop`
+  again.
 - `chat`: **a refresh or a second tab during a turn no longer loses the history.**
   `seedLive` used to bail on `busy` and nothing retried it, so a tab opened (or
   Ctrl+R'd) while a turn was running opened on the hero, or — once the turn ended

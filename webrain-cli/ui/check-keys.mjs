@@ -53,4 +53,23 @@ assert.ok(tabGuard > enterGuard, "the completion key is not checked after Enter"
 assert.ok(fillCall > tabGuard, "Tab does not fill the name");
 assert.ok(src.includes('localStorage.setItem("webrain-chat-keys"'), "the keys are not persisted");
 
-console.log("keys: 12 assertions passed");
+// The running controls belong to the conversation that owns the turn. `current`
+// moves the moment another thread is opened, so deriving the owner from it drew
+// the Stop button — and the rail's dot — onto whichever chat you looked at, and
+// every chat read as running while one of them was.
+assert.ok(
+  src.includes('const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));'),
+  "runningConvo is derived from `current`, which moves when you open a thread",
+);
+const busySets = (src.match(/busy = true;/g) || []).length;
+const owners = (src.match(/busyConvo = current;/g) || []).length;
+assert.ok(busySets > 0, "no `busy = true` found");
+assert.equal(owners, busySets, "a `busy = true` that does not record which conversation it belongs to");
+assert.ok(src.includes("{#if busy && runningConvo === current}"), "the stop controls are not scoped to the owner");
+assert.ok(src.includes("const mine = busy && runningConvo === current;"), "the keystroke path is not scoped to the owner");
+assert.ok(
+  src.includes("if (!busy || runningConvo !== current) return;"),
+  "stopTurn would abort another conversation's turn",
+);
+
+console.log("keys: 17 assertions passed");
