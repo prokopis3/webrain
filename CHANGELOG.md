@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `webrain-mcp`: **`call_tool` is a dispatcher again.** Its 61 tool arms moved
+  verbatim into nine family functions — `call_page`, `call_session`, `call_crawl`,
+  `call_extract`, `call_interact`, `call_read`, `call_batch`, `call_media`,
+  `call_toolbox` — so the dispatcher is **74 lines of routing** (was 1,837) and a
+  tool family can be read, and reached, without the other 55 tools in the way.
+  The move was range-exact and machine-verified before committing: all nine blocks
+  are byte-identical to the arms they replace, all 61 names dispatch exactly once
+  (none added, none lost), `nav_opts` moved to module scope, each family keeps its
+  own `err` closure, and the 176-test workspace suite passes unchanged.
+  `cargo fmt` and `cargo build` are clean.
 - `chat`: **the shared atoms are one stylesheet again** (`ui/src/app.css`).
   `.tcheck`/`.box`, `.linky`, `.dim`, `.none`, `.gi` and `.ico` lived inside
   `App.svelte`'s scoped `<style>`, so the tools dialog could only *copy* them

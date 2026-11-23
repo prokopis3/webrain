@@ -1836,6 +1836,39 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
 /// Dispatch one tool call. The span carries the FOLDED tool name, so a
 /// `webrain_observe{what:screenshot}` shows up as `webrain_screenshot` in
 /// `RUST_LOG=debug` — the name that actually did the work.
+// Parse Scrapling-style request-quality params from tool args (shared by
+// navigate + batch). All optional; defaults keep legacy behavior.
+fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
+    use webrain_core::backends::cdp::NavOpts;
+    NavOpts {
+        disable_resources: args
+            .get("disable_resources")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        block_trackers: args
+            .get("block_trackers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        network_idle: args
+            .get("network_idle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        wait_selector: args
+            .get("wait_selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wait_selector_state: args
+            .get("wait_selector_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("visible")
+            .to_string(),
+        css_selector: args
+            .get("css_selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
+    }
+}
 #[tracing::instrument(skip_all, fields(tool = %name))]
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
@@ -1845,40 +1878,6 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     let mapped = map_surface(name, args);
     let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);
     let args: &Value = mapped.as_ref().map(|(_, a)| a).unwrap_or(args);
-
-    // Parse Scrapling-style request-quality params from tool args (shared by
-    // navigate + batch). All optional; defaults keep legacy behavior.
-    fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
-        use webrain_core::backends::cdp::NavOpts;
-        NavOpts {
-            disable_resources: args
-                .get("disable_resources")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            block_trackers: args
-                .get("block_trackers")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            network_idle: args
-                .get("network_idle")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            wait_selector: args
-                .get("wait_selector")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            wait_selector_state: args
-                .get("wait_selector_state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("visible")
-                .to_string(),
-            css_selector: args
-                .get("css_selector")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
-        }
-    }
 
     match name {
         "webrain_guide" => guide_from_args(args),
@@ -1892,6 +1891,63 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        "webrain_navigate"
+        | "webrain_eval"
+        | "webrain_screenshot"
+        | "webrain_click"
+        | "webrain_type"
+        | "webrain_click_coords"
+        | "webrain_hold"
+        | "webrain_drag"
+        | "webrain_eval_in_frame"
+        | "webrain_scroll"
+        | "webrain_get_html" => call_page(backend, name, args).await,
+        "webrain_cookies" | "webrain_setcookies" => call_session(backend, name, args).await,
+        "webrain_spider" | "webrain_sitemap" | "webrain_snapshot" => {
+            call_crawl(backend, name, args).await
+        }
+        "webrain_pixel"
+        | "webrain_extract_json"
+        | "webrain_extract_regex"
+        | "webrain_get_jsonld"
+        | "webrain_table"
+        | "webrain_scan"
+        | "webrain_autoschema"
+        | "webrain_fetch_http"
+        | "webrain_bm25"
+        | "webrain_fit"
+        | "webrain_flatten"
+        | "webrain_annotate" => call_extract(backend, name, args).await,
+        "webrain_select" | "webrain_hover" | "webrain_check" | "webrain_dialog"
+        | "webrain_wait" | "webrain_upload" => call_interact(backend, name, args).await,
+        "webrain_validate_urls"
+        | "webrain_pdf"
+        | "webrain_tab"
+        | "webrain_page_info"
+        | "webrain_a11y"
+        | "webrain_semantic_tree" => call_read(backend, name, args).await,
+        "webrain_batch" => call_batch(backend, name, args).await,
+        "webrain_download" | "webrain_watch" | "webrain_search" | "webrain_serp"
+        | "webrain_nav" | "webrain_press" | "webrain_get_images" | "webrain_assets" => {
+            call_media(backend, name, args).await
+        }
+        "webrain_media"
+        | "webrain_console"
+        | "webrain_dismiss_overlays"
+        | "webrain_vision_index"
+        | "webrain_vision_retrieve"
+        | "webrain_vision_ask"
+        | "webrain_clean"
+        | "webrain_profiles"
+        | "webrain_captcha"
+        | "webrain_login" => call_toolbox(backend, name, args).await,
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_page(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_navigate" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if url.is_empty() {
@@ -2104,6 +2160,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             Ok(html) => json!({"status": "ok", "html": html}),
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_session(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         // Cross-browser session migration: read/write cookies ON THE SESSION
         // BACKEND. Set + batch on the same connection so per-connection
         // isolated browsers (obscura stealth) share the imported session.
@@ -2172,6 +2235,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 },
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_spider" => {
             let seed = args.get("seed_url").and_then(|v| v.as_str()).unwrap_or("");
             if seed.is_empty() {
@@ -2345,6 +2415,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_extract(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_pixel" => {
             let tw = args
                 .get("tile_width")
@@ -2531,6 +2608,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_interact(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_select" => {
             // agent-browser select_option borrow: value|text match, change event,
             // error lists available options on no-match.
@@ -2630,6 +2714,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_read(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_validate_urls" => {
             // browsemind seed(from_links, validate=True): which URLs are alive vs dead.
             let urls: Vec<String> = args
@@ -2737,6 +2828,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    match name {
         "webrain_batch" => {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("fetch");
             let urls: Vec<String> = args
@@ -3212,6 +3309,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             payload
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_media(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_download" => {
             // Combined download: single or batch. engine 'ytdlp' routes to the
             // installed yt-dlp binary (video/audio/HLS/playlists/features);
@@ -3396,6 +3500,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_media" => {
             let wait_ms = args.get("wait_ms").and_then(|v| v.as_i64()).unwrap_or(0);
             let url = args.get("url").and_then(|v| v.as_str()).map(String::from);

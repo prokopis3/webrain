@@ -13,18 +13,21 @@ measure in the running page before calling anything a performance problem.
 
 ## Open
 
-### 1. Three functions do the work of twenty (backend)
+### 1. Two RPC loops still do the work of twenty (backend)
 
-`webrain-mcp/src/tools.rs:926-2322` (`call_tool`, ~1400 lines),
-`webrain-mcp/src/lib.rs:154-985` (`handle_rpc`, 831), `:1255-1525`
-(`handle_http_conn`, 270).
+~~`webrain-mcp/src/tools.rs:926-2322` (`call_tool`, ~1400 lines)~~ — **done**: 61
+tool arms moved into nine family functions (`call_page`, `call_session`,
+`call_crawl`, `call_extract`, `call_interact`, `call_read`, `call_batch`,
+`call_media`, `call_toolbox`); the dispatcher is 74 lines of routing. Verified by
+diffing the moved blocks against the originals (byte-identical), by asserting all
+61 names dispatch once, and by the workspace test suite.
 
-`call_tool` is one `match` covering every tool family: no arm can be tested without
-the whole dispatcher, and any edit risks an unrelated arm. The serp and vision paths
-are well tested only because they were extracted into `serp.rs` / `vision.rs`.
+Still open: `webrain-mcp/src/lib.rs` — `handle_rpc` (831 lines) and
+`handle_http_conn` (270). `handle_rpc` is one `match` over every JSON-RPC method
+with the connection's state in scope, so the same treatment applies: cut contiguous
+method arms into `rpc_*` functions, keep the loop.
 
-**Fix:** split by tool family into small functions returning `Value` — mechanical, no
-behaviour change. **Why it is still open:** ~1400 moved lines across the two most
+**Why the rest is not done yet:** ~1100 moved lines across the two most
 load-bearing files, zero functional gain, and a review surface that would hide the
 real diffs if it landed beside a fix. It is a readability project with its own
 change window.
