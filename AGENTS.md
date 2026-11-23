@@ -25,8 +25,10 @@ using the `mcp_webrain-*` tools.
    `Object.keys(el).filter(k => k.startsWith('__react')).length` on a real control
    before calling a page frozen — and if a hand-opened tab of the same URL works,
    the difference is our injected stealth shim, not the site. Escape hatch:
-   `WEBRAIN_STEALTH_NOISE=0` (set at attach time; needs a fresh tab). Detail:
-   `docs/AGENT_DECISION_GUIDE.md` §2b.
+   `WEBRAIN_STEALTH_NOISE=0` (set at attach time; needs a fresh tab). `webrain chat
+   --serve` now defaults it to `0` for itself and the child `webrain mcp`, and says
+   so in the page banner and on stderr — `WEBRAIN_STEALTH_NOISE=1` restores the shim
+   there. Detail: `docs/AGENT_DECISION_GUIDE.md` §2b.
 
 8. **Know which engine answered, and bridge cookies in-session.** Probe identity
    before diagnosing: `webgl:false` + UA Chrome/143 = obscura, `webgl:true` +

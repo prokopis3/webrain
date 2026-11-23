@@ -3387,11 +3387,17 @@
 
   // Read once on load; a failure leaves the defaults above, which are what the
   // server uses when it cannot read the file.
+  // `chat --serve` defaults the fingerprint-noise shim off — it is what stops an
+  // SPA mounting — and the server reports the effective switch, so the page can
+  // say so instead of letting a site's odd behaviour look like ours.
+  let stealthOff = $state(false);
+
   async function loadSettings() {
     try {
       const r = await fetch("/settings");
       if (!r.ok) return;
       const j = await r.json();
+      stealthOff = j.stealth?.noise === false;
       // The page appended the standing hints to what is stored; the field shows
       // the operator's own words only, so they come back out here.
       if (j.settings) rt = { ...rt, ...j.settings, instructions: stripHints(j.settings.instructions) };
@@ -4274,6 +4280,20 @@
           </span>
           <button onclick={() => reconnectMcp(s.name)}>reconnect</button>
         {/each}
+      </div>
+    {/if}
+
+    {#if stealthOff}
+      <!-- The other banner that has to be visible before the first turn: the
+           browser presents its own fingerprint, so a site that blocks here but
+           works in a hand-opened tab is this switch, not a webrain bug. The way
+           back is one variable and a restart, so it is said in the same line. -->
+      <div class="banner">
+        <span>
+          stealth fingerprint noise <b>off</b> — pages mount reliably here, but a site
+          that fingerprints the browser sees its real values. Set
+          <code>WEBRAIN_STEALTH_NOISE=1</code> and restart this server to restore the shim.
+        </span>
       </div>
     {/if}
 

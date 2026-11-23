@@ -57,6 +57,24 @@ fn wait_state_js(sel: &str) -> String {
 ///
 /// CORE is always on (webdriver→false, real plugins, window.chrome, Function.toString
 /// spoof — the bits Cloudflare/Google don't punish). NOISE is ON by default:
+/// Whether the fingerprint-noise shim is injected.
+///
+/// Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
+/// measures hardwareConcurrency + WebGL vendor, and real values leave it stuck on
+/// "Just a moment…". The noise evasions are applied always, and a site that
+/// distrusts the spoofed profile can opt out with `WEBRAIN_STEALTH_NOISE=0`.
+///
+/// One definition, because the CLI now reports this switch to the user and a
+/// report that disagrees with what was injected is worse than no report.
+pub fn stealth_noise_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("WEBRAIN_STEALTH_NOISE")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
+}
+
 /// ponytail: canvas/audio/WebGL spoofs + hardwareConcurrency/deviceMemory/connection
 /// lies — the managed Cloudflare challenge (scrapingcourse cf-antibot) measures
 /// exactly these, and real values leave it stuck on "Just a moment…" (verified:
@@ -213,17 +231,7 @@ fn stealth_js() -> String {
       return _cpt.call(this, arg);
     };
   } catch (e) {}"#;
-    static NOISE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *NOISE_ON.get_or_init(|| {
-        // Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
-        // checks hardwareConcurrency + WebGL vendor — real values get it stuck on
-        // "Just a moment…". The noise evasions are applied always. Opt out with
-        // WEBRAIN_STEALTH_NOISE=0 for the rare site that distrusts the spoofed profile.
-        std::env::var("WEBRAIN_STEALTH_NOISE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    });
-    if on {
+    if stealth_noise_on() {
         CORE.replace("/*STEALTH_NOISE*/", NOISE)
     } else {
         CORE.replace("/*STEALTH_NOISE*/", "")

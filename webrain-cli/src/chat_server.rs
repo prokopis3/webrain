@@ -164,6 +164,16 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         }
     })?;
     eprintln!("webrain chat · serving on http://{addr}/ · Ctrl-C to stop");
+    // Said here as well as in the page: the terminal is where this was started,
+    // and "why is this site different here" is answered before opening a tab.
+    if !webrain_core::backends::cdp::stealth_noise_on() {
+        eprintln!(
+            "· stealth fingerprint noise OFF (default for --serve) — pages mount where the\n  \
+             noise shim stops them hydrating; a fingerprinting site sees real values.\n  \
+             WEBRAIN_STEALTH_NOISE=1 restores the shim (Cloudflare managed challenges\n  \
+             then pass, but some SPAs stop mounting)."
+        );
+    }
     let state = Arc::new(State {
         bus,
         permission,
@@ -1634,7 +1644,12 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // chat database so they outlive the process.
         ("GET", "/settings") => {
             let s = state.settings.lock().await.clone().to_json();
-            let body = json!({ "settings": s }).to_string();
+            // The page says out loud which fingerprint the browser will present:
+            // `chat --serve` defaults the noise shim off, and a user who wonders
+            // why a site behaves differently here than in their own tab needs to
+            // read the switch, not guess it.
+            let noise = webrain_core::backends::cdp::stealth_noise_on();
+            let body = json!({ "settings": s, "stealth": { "noise": noise } }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
         ("POST", "/settings") => {

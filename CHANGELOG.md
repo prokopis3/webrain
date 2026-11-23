@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `chat`: **`--serve` drops the fingerprint-noise shim by default, and says so.**
+  The noise block is what gets a managed Cloudflare challenge through, and also
+  the one thing measured to make a page render without ever hydrating (Next.js
+  aborts inside `getInitialProps`; with it off, the same browser mounts). So
+  `webrain chat --serve` now sets `WEBRAIN_STEALTH_NOISE=0` for itself — inherited
+  by the child `webrain mcp` — but only when nobody set it, and only for that
+  command: `webrain serp`, every CLI verb and every MCP session launched another
+  way keep the shim. The page shows a banner (`stealth fingerprint noise off —
+  pages mount reliably here, but a site that fingerprints the browser sees its
+  real values. Set WEBRAIN_STEALTH_NOISE=1 and restart to restore`), the terminal
+  gets the same paragraph at boot, and `GET /settings` now reports
+  `stealth: {noise}` so the page states the switch it is actually running with.
+  The switch has one definition (`webrain_core::backends::cdp::stealth_noise_on`)
+  instead of the CLI guessing at it. Verified both ways: unset → `noise:false`,
+  the stderr paragraph, the banner; `WEBRAIN_STEALTH_NOISE=1` → `noise:true`, no
+  paragraph, no banner. Budget 78.2 KB gzipped (+0.2).
 - `webrain-mcp`: **`handle_rpc` is protocol again.** Its `tools/call` arm was
   1,078 lines — the whole browser-connection, surface-folding, no-state guard and
   token-cost path inside a `match` — and it is now `handle_tools_call`, with

@@ -646,6 +646,17 @@ fn main() -> anyhow::Result<()> {
     if is_serp && no_stealth_engine {
         unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
     }
+    // `chat --serve` drives pages through a child `webrain mcp` (env inherited,
+    // see chat_session.rs), and the fingerprint-noise shim is the one thing
+    // measured to make a page render without ever mounting. Default it OFF for
+    // the served UI, and only for it: an explicit value always wins, and every
+    // other command keeps the shim. Set before the runtime spawns threads, for
+    // the reason above.
+    let chat_serve = args.get(1).map(|s| s.as_str()) == Some("chat")
+        && args.iter().skip(2).any(|a| a == "--serve");
+    if chat_serve && std::env::var_os("WEBRAIN_STEALTH_NOISE").is_none() {
+        unsafe { std::env::set_var("WEBRAIN_STEALTH_NOISE", "0") };
+    }
     let rt = tokio::runtime::Runtime::new()?;
 
     // `webrain doctor` / `--doctor`: diagnose install — MCP, CDP ports, engines,
