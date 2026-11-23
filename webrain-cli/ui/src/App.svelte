@@ -3600,13 +3600,19 @@
           note: typeof x === "string" ? "" : x.status,
         })),
         // A server's own prompts and resources, which only ever reached the model.
+        // The server and the uri travel with the row: without them the list could
+        // name a prompt and nothing could ask for it.
         prompts: (items.prompts || []).map((p) => ({
           name: p.name,
           note: p.description || "",
+          server: p.server || "",
+          args: (p.arguments || []).map((a) => a.name).filter(Boolean).join(", "),
         })),
         resources: (items.resources || []).map((r) => ({
           name: r.name || r.uri,
           note: r.uri || "",
+          server: r.server || "",
+          uri: r.uri || "",
         })),
         // Agent definitions, which `read_agent`/`list_agents` give the model and
         // nothing gave a person — `/env` only ever said "no custom agents loaded".
@@ -3618,6 +3624,28 @@
       if (ag.current && ag.current.error) toast(`agents: ${ag.current.error}`, "err");
     } catch {
       /* a panel with no rows beats one that lies about what is installed */
+    }
+  }
+
+  // A prompt is text and a resource is a document, so both land where a person
+  // can act on them — the composer. One handler, because the two differ only in
+  // which route answers; an error (a prompt that needs arguments names them) is
+  // shown rather than swallowed.
+  async function useMcpItem(route, row) {
+    const body = route === "/mcp/prompt" ? { server: row.server, name: row.name } : { server: row.server, uri: row.uri };
+    try {
+      const r = await fetch(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`${route}: ${j.error}`, "err");
+      if (!j.text) return toast(`${route}: nothing to insert`, "err");
+      draft = draft.trim() ? `${j.text}\n\n${draft}` : j.text;
+      toast(`${row.name} → composer`);
+    } catch {
+      toast(`${route}: the server is not reachable`, "err");
     }
   }
 
@@ -5931,24 +5959,30 @@
                 <textarea rows="5" bind:value={mcpNew.config} spellcheck="false"></textarea>
                 <button onclick={createMcp} disabled={!mcpNew.name.trim() || !mcpNew.config.trim()}>add server</button>
                 <small>
-                  Written to the runtime's user MCP configuration with <code>mcp.config.add</code>.
-                  A tool only reaches this session if the reload after it connects — the list
-                  above is re-read either way, so the note under it says which happened.
+                  Written to the runtime's user MCP configuration with <code>mcp.config.add</code>,
+                  then started in <em>this</em> session with <code>session.mcp.startServer</code> —
+                  so its tools are usually available at once. The note under it says which of the
+                  two happened.
                 </small>
               </label>
             {/if}
             {#if !isSkills}
-              <!-- What else a server ships. Read-only here because a prompt is
-                   invoked by the model, not by a switch: the list is the answer
-                   to "does this server have anything beyond tools". -->
-              {#each [["prompts", "prompts"], ["resources", "resources"]] as [key, label] (key)}
+              <!-- What else a server ships. Prompts and resources are invoked by
+                   whoever asks, not only by the model, so each row can put its
+                   text in the composer instead of being an inventory line. -->
+              {#each [["prompts", "prompts", "/mcp/prompt"], ["resources", "resources", "/mcp/resource"]] as [key, label, route] (key)}
                 {#if manage[key].length}
                   <div class="sfld">
                     <span>{label}</span>
                     <ul class="mng">
                       {#each manage[key] as row (row.name)}
                         <li>
-                          <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
+                          <span class="mngname">
+                            <b>{row.name}</b>
+                            {#if row.note}<small>{row.note}</small>{/if}
+                            {#if row.args}<small>args: {row.args}</small>{/if}
+                          </span>
+                          <button class="mact" onclick={() => useMcpItem(route, row)}>use</button>
                         </li>
                       {/each}
                     </ul>

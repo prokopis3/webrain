@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `chat`: **four capabilities the page could describe but not use, closed against
+- `chat`: **five capabilities the page could describe but not use, closed against
   `copilot-sdk` 2.0.1** — the open rows in `docs/CHAT_CAPABILITIES.md`:
   - **An agent picker that switches a live session.** `session.agent.select` moves
     the selection without a rebuild, so `GET /agents` now carries `current`,
@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bogus command.
   - `POST /permission` now takes `always` so the page can send the standing grant
     to the side that knows whether it could be written.
+  - **A prompt or a resource you can actually use.** `/mcp/items` listed both and
+    stopped there — the tab's own comment admitted they "only ever reached the
+    model". A prompt is text, so `POST /mcp/prompt` renders its messages and
+    `POST /mcp/resource` returns a resource's text; each row's `use` puts the
+    result in the composer. Verified against a stdio fixture that ships one of
+    each (nothing else here exposes a prompt): `Hello Rust from the fixture` with
+    an argument, and `fixture document body`. The MCP tab's "add one" copy now
+    says the server is started in this session, instead of "only if the reload
+    connects".
 - `cli`: **`webrain read <url>` — a page as markdown, over HTTP, with no browser
   and no model.** The last capability the agent-browser comparison called a gap:
   `webrain_scrape` returned raw HTML, so a docs page cost markup tokens and a

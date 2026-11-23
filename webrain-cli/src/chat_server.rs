@@ -57,7 +57,8 @@ use copilot_sdk::rpc::{
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpConfigAddRequest,
     McpConfigRemoveRequest,
     McpDisableRequest,
-    McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
+    McpEnableRequest, McpListToolsRequest, McpPromptsGetRequest, McpPromptsListRequest,
+    McpResourcesReadRequest, McpResourcesListRequest,
     McpStartServerRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
     NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
@@ -2004,6 +2005,100 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 "errors": errors,
             });
             respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // A prompt a server ships is text, so a person can use it too: render it
+        // and hand it back for the composer. Without this the list above was the
+        // only thing a `/mcp/items` prompt did — it "only ever reached the model".
+        ("POST", "/mcp/prompt") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let server = v["server"].as_str().unwrap_or_default().to_string();
+            let name = v["name"].as_str().unwrap_or_default().to_string();
+            if server.is_empty() || name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"server and name"}"#).await;
+            }
+            // Arguments are whatever the caller typed; a prompt that needs one and
+            // got none answers with the server's own complaint, which names it.
+            let args = v["arguments"].as_object().map(|o| {
+                o.iter()
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            });
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .mcp()
+                .prompts()
+                .get(McpPromptsGetRequest {
+                    arguments: args,
+                    prompt_name: name.clone(),
+                    server_name: server.clone(),
+                })
+                .await
+            {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(r) => {
+                    // `content` is the raw MCP content block, so text is taken
+                    // where it is text and printed as JSON otherwise — a block the
+                    // page cannot render is still worth showing verbatim.
+                    let mut parts: Vec<String> = Vec::new();
+                    for m in &r.messages {
+                        let text = match m.content.get("text").and_then(Value::as_str) {
+                            Some(t) => t.to_string(),
+                            None => m.content.to_string(),
+                        };
+                        parts.push(text);
+                    }
+                    json!({
+                        "server": server,
+                        "prompt": name,
+                        "messages": r.messages.len(),
+                        "text": parts.join("\n\n"),
+                    })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // Same shape, for a document a server publishes. A blob is base64 and is
+        // reported as such rather than decoded into the composer.
+        ("POST", "/mcp/resource") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let server = v["server"].as_str().unwrap_or_default().to_string();
+            let uri = v["uri"].as_str().unwrap_or_default().to_string();
+            if server.is_empty() || uri.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"server and uri"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .mcp()
+                .resources()
+                .read(McpResourcesReadRequest {
+                    server_name: server.clone(),
+                    uri: uri.clone(),
+                })
+                .await
+            {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(r) => {
+                    let text: Vec<String> = r
+                        .contents
+                        .iter()
+                        .filter_map(|c| {
+                            c.text.clone().or_else(|| {
+                                c.blob
+                                    .as_ref()
+                                    .map(|b| format!("[{} bytes of base64 — {}]", b.len(), c.mime_type.clone().unwrap_or_default()))
+                            })
+                        })
+                        .collect();
+                    json!({ "server": server, "uri": uri, "parts": text.len(), "text": text.join("\n\n") })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // Write a skill into the directory the `@` menu already reads. Measured
         // against the runtime: the skill's own tools arrive when the runtime next

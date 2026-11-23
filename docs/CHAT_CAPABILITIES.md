@@ -5,7 +5,7 @@ Measured against `copilot-sdk` 2.0.1 on `feat/copilot-sdk-v2`, last pass
 file holds only what is still missing, and it is short because most of it turned
 out to be blocked upstream rather than unbuilt.
 
-**Four of the six rows below closed, and two closed differently than they were
+**Five of the seven rows below closed, and three closed differently than they were
 written.** `citations` (#5) was listed as impossible on a premise that is false for
 2.0.1 — the typed payload is there, so the switch, the transport and the sources
 strip now exist. `agent picker` (#2) needed no restart path at all: the SDK's
@@ -14,7 +14,8 @@ not use the SDK's rule vocabulary, which still has no documented `kind`; it stor
 the two fields a card actually carries. `attaching an MCP server` (#3) was written
 off as blocked on a doc comment about an *internal* config shape — the session-scoped
 `startServer` call does the job the internal one was being read for, and it is
-measured working.
+measured working. `prompts and resources` (#7) were listed and never usable: a
+prompt is text, so a person can invoke one too.
 
 ## Open
 
@@ -33,6 +34,25 @@ measured working.
 | 5 | citations | The premise was **wrong for 2.0.1**: `AssistantMessageData.citations` is a typed payload (`Citations { sources[], spans[] }`, `CitationSource { id, provider, title?, url?, path? }`), not just the `String` on the memory-store request. `SessionInferenceOptions::with_enable_citations(true)` turns it on, the server already forwards `event.data` untouched, and the page draws a `sources` strip under a cited answer. Off by default: the SDK marks it experimental and asking for markers spends output tokens. Creation-time only (the live `options.update` shape has no such field), so flipping it reports `restart: true` |
 | 6 | approvals that survive the turn | `permissions.get_capabilities()` still has no rule vocabulary and `modify_rules`'s `kind` is still documented only by example — so this does **not** use it. A "always allow" answer is stored as `server:tool` (the two fields the card carries, never the runtime's `kind`, which calls nearly everything `tool`) in `approvals.json` beside the settings, and `WebPermission` answers a matching prompt before raising a card. A *managed* approval is never answered from the store: the runtime is saying a policy requires a human. The Approvals tab lists and revokes; the auto-answer posts a `webrain.note` so a standing grant stays visible |
 | 3 | removing an MCP server | `GET /mcp/items` listed servers and nothing could forget one, so a server added by mistake stayed in every new session. `POST /mcp/remove {"name"}` calls `mcp.config.remove` + `reload` and reports `{removed, reloaded, attached}`, where `attached` is the honest answer to "is it gone from *this* session" |
+| 7 | a prompt or a resource you can **use** | `GET /mcp/items` listed both and stopped there — the code comment said as much ("only ever reached the model"). A prompt is text, so `POST /mcp/prompt {server, name, arguments}` renders its messages and `POST /mcp/resource {server, uri}` returns its text, and each row's `use` puts the result in the composer. Verified against a stdio fixture that ships one of each (nothing else here exposes a prompt): `{"text":"Hello Rust from the fixture"}` with an argument, and `{"text":"fixture document body"}` |
+
+## What the SDK actually offered
+
+Every claim in this file was checked against the crate source, not its prose. Where
+the truth lives matters, because it is not where the names suggest: in
+`copilot-sdk-2.0.1`, `src/<name>.rs` are **7-line `include!` shims** and the real
+definitions are in `src/generated/`. Grepping the shim reports line numbers that do
+not exist in the file it printed.
+
+| Symbol | What it settled |
+|---|---|
+| `McpStartServerRequest { config: Option<Value>, expected_installation_id, server_name }` + `session.mcp.start_server` | `config: None` starts a server **with the already-registered configuration**, in the live session. This is what closed #3 — `mcp.config.reload` only re-reads the file, and the "marked internal" note that row was blocked on belongs to a different call |
+| `McpServerStatus` (`connected` / `failed` / `needs-auth` / `pending` / `disabled` / `stopped` / `not_configured`) | Why `attached` must compare `status == "connected"`: a spawn failure still appears in `list()`, so a presence check reports success |
+| `session.agent.select` / `deselect` / `agent.get_current` | Selection moves on a **live** session, so #2 needed no restart path — and `get_current` is what the reply must read back, not the request's name |
+| `SessionInferenceOptions::with_enable_citations` + `AssistantMessageData.citations: Option<Citations>` | The typed payload exists (`Citations { sources[], spans[] }`), which is what made #5 possible instead of "markers nothing can parse" |
+| `McpExecuteSamplingRequest {}` (empty) + `McpExecuteSamplingResult = HashMap<String, Value>` | Why #4 is still open: the *result* is free-form but the *request* is empty, so the MCP `createMessage` messages have nowhere to go. The runtime's own conversion needs params the typed struct cannot carry |
+| `AssistantMessageDeltaData { delta_content, message_id }`, `AssistantTurnEndData.parent_task_tool_call_id` | The exact join behind #1's deferral: `delta.messageId` → `assistant.message.turnId` → `turn_end.parentTaskToolCallId` |
+| `permissions.get_capabilities()`, `modify_rules { kind, argument }` | No rule vocabulary, and `kind` is documented only by example — which is why #6 stores what the card carries instead |
 
 ## Not rows, deliberately
 
@@ -75,6 +95,8 @@ sandboxed store (`WEBRAIN_CHAT_DB=output/chatcap/chat.db`):
 | `POST /mcp/new` with a command that cannot spawn | `{"added":"broken-test","reloaded":true,"attached":false,"status":"failed","attach_error":"… program not found"}` — the first version of this reply said `attached: true` because it checked presence in the list rather than the status, which is the failure-that-reads-as-success shape; `attached` now means connected |
 | `POST /mcp/remove` of an attached server | `{"removed":true,"reloaded":true,"attached":true}` — `attached` is true because the live session keeps it, which is what that field is for |
 | `POST /settings {"citations":true}` | `{"saved":true,"restart":true}` — creation-time, so the flag is honest about costing a rebuild; `/settings` and `settings.json` both then read `true` |
+| `POST /mcp/prompt {"server":"fixture","name":"greet","arguments":{"who":"Rust"}}` | `{"messages":1,"text":"Hello Rust from the fixture"}`, and the page's `use` put that in the composer |
+| `POST /mcp/resource {"server":"fixture","uri":"fixture://doc"}` | `{"parts":1,"text":"fixture document body"}`, likewise prepended in the composer |
 
 `/agents/select` reported `selected: true` for a **deselect** on its first live
 run: the reply echoed the request's name instead of reading back what the session
