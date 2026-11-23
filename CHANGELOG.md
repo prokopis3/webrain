@@ -337,6 +337,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sdk` in the runtime's own session list (`client_name`).
 
 ### Changed
+- `chat`: **session info moved to the dock and speaks percentages.** It lived in
+  the instruments rail, which is `display: none` below 1100px — on a tablet or a
+  phone the context ring did not exist at all. It now sits in the composer's
+  control row at the right corner beside the model button (it carries the `auto`
+  margin; without a ring the model keeps it), and the panel opens upward as the
+  mode menu does and **closes on any click outside it**, like the model dialog —
+  verified: a click inside the panel leaves it open, a click on the transcript
+  closes it. The rows are grouped and quoted the way the Copilot chat's own
+  session-info panel reads — `Reserved for response` as a count (it overlaps the
+  allowance rather than occupying it), then **System** (System Instructions,
+  Tool Definitions) and **User Context** (Messages) as percentages of the prompt
+  allowance, with a share under 0.1% printed as `<0.1%` instead of `0.0%`. Above
+  them, one bar splits the same allowance into segments so the reservation and the
+  occupied categories are visible on one line. Measured on a mock turn:
+  `4k / 128k tokens · 3%`, System Instructions `0.4%`, Tool Definitions `1.9%`,
+  Messages `<0.1%`, reserved `6k`, four bar segments. The header now reads the
+  same `session.usage_info` figure the ring does, so the button and the panel can
+  no longer disagree. The reservation is a **dashed** segment on the bar rather than a
+  solid block: it overlaps the allowance instead of occupying it, and a solid fill read
+  as tokens already spent.
+- `chat`: **the panel grew the third group the Copilot one has — Uncategorized → Other.**
+  It is the derived remainder: the runtime's `totalTokens` minus the categories it
+  names, shown only when that remainder is non-zero, so a session that attributes
+  everything gets no invented row. Verified by stubbing `/context` with a 5,000-token
+  total against 4,788 named: `Other 0.2%`. There is deliberately **no Tool Results
+  row** — this SDK reports user, assistant and tool messages as one `messages` figure,
+  and splitting it would be a guess.
+- `chat`: **the instruments rail has a door below 1100px, and the "latest" button no
+  longer paints over the dock's panels.** The rail was `display: none` under the
+  breakpoint, so on a tablet or phone the readouts simply did not exist; it is now a
+  right-hand drawer opened by a small topbar icon — the mirror of the sessions drawer,
+  stopping above the composer, closed by default. Measured at 1000px: off-screen at
+  x=1000, 728–1000 when opened, off again when closed. The composer sat at z-index 3
+  while the "latest" button is 10, so the context panel (a child of the composer)
+  painted *under* it; the composer is 12 now, above the button and below both drawers
+  (30) and the dialogs (40). Verified with `elementFromPoint` inside the overlap: the
+  point resolves to the panel.
 - `docs`: **the streaming baseline is now a real provider turn, not a mock.**
   `PERF_AUDIT.md` → *Re-measuring* records a measured `deepseek-flash` turn
   (1,201 output tokens, page footer `129.9 tok/s · 9.3s`): a `MutationObserver`

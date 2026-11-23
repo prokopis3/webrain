@@ -212,6 +212,10 @@
     const wide = window.matchMedia("(min-width: 861px)");
     wide.addEventListener("change", (e) => (panelOpen = e.matches));
   }
+  // The instruments rail is part of the layout above 1100px and a right-hand
+  // drawer below it — this is that drawer's door, and its state. Closed by
+  // default: a drawer nobody asked for covers the transcript it is about.
+  let instOpen = $state(false);
   // How wide the two rails are, in px, dragged by the handles between them. The
   // grid, the composer's own offset and the handles all read these two vars, so
   // there is one number per side rather than three that can disagree.
@@ -426,17 +430,63 @@
     }
   }
 
-  const ctxCats = $derived.by(() => {
-    const c = ctxInfo?.attribution?.contextAttribution?.categories;
+  // The runtime's buckets, grouped the way the Copilot chat's session-info panel
+  // groups them: System (instructions + tool definitions), User Context
+  // (messages), and the output reservation apart from both. Percentages are of
+  // the prompt allowance, which is the number the runtime actually compacts
+  // against. `free` is left out — the ring is the rest of it.
+  const ctxGroups = $derived.by(() => {
+    const a = ctxInfo?.attribution?.contextAttribution;
+    const c = a?.categories;
     if (!c) return [];
+    const lim = a.limit || ctxInfo.promptTokenLimit || 0;
+    const row = (label, n) => {
+      const p = lim ? (n / lim) * 100 : 0;
+      // A share under a tenth of a percent is not zero, and "0.0%" reads as zero.
+      return { label, n, pct: p, show: lim ? (n > 0 && p < 0.1 ? "<0.1%" : `${p.toFixed(1)}%`) : toks(n) };
+    };
+    const system = [
+      row("System Instructions", (c.systemPrompt || 0) + (c.customInstructions || 0)),
+      row("Tool Definitions", (c.systemTools || 0) + (c.mcpTools || 0)),
+    ].filter((r) => r.n > 0);
+    const user = [row("Messages", c.messages || 0)].filter((r) => r.n > 0);
+    // Everything the runtime counted into the prompt that its own categories do
+    // not name. Derived, never guessed: the remainder, shown only when there is
+    // one. (There is no Tool Results row: this SDK reports user, assistant and
+    // tool messages as one `messages` figure, so a split would be invented.)
+    const known = (c.systemPrompt || 0) + (c.customInstructions || 0) + (c.systemTools || 0) +
+      (c.mcpTools || 0) + (c.messages || 0);
+    const other = Math.max(0, (ctxInfo.totalTokens || 0) - known);
+    const misc = [row("Other", other)].filter((r) => r.n > 0);
     return [
-      ["system prompt", c.systemPrompt || 0],
-      ["instructions", c.customInstructions || 0],
-      ["tool definitions", (c.systemTools || 0) + (c.mcpTools || 0)],
-      ["messages", c.messages || 0],
-      ["reserved for reply", c.buffer || 0],
-      ["free", c.freeSpace || 0],
-    ].filter(([, n]) => n > 0);
+      { head: "System", tone: "sys", rows: system },
+      { head: "User Context", tone: "usr", rows: user },
+      { head: "Uncategorized", tone: "oth", rows: misc },
+    ].filter((g) => g.rows.length);
+  });
+  // A reservation is not a share: the buffer overlaps the prompt allowance, so it
+  // is printed as tokens rather than a percentage that would not add up. It gets
+  // its own segment on the bar, which is the one place the overlap is visible.
+  const ctxReserved = $derived(
+    ctxInfo?.attribution?.contextAttribution?.categories?.buffer || 0,
+  );
+  const ctxReservedPct = $derived.by(() => {
+    const lim = ctxInfo?.attribution?.contextAttribution?.limit || ctxInfo?.promptTokenLimit || 0;
+    return lim ? (ctxReserved / lim) * 100 : 0;
+  });
+
+  // A panel that only closes from its own button is a panel you hunt for. Any
+  // click outside puts it away, the rule the model dialog already follows; the
+  // button sits inside `.ctxwrap`, so the click that opens it is not the click
+  // that closes it.
+  $effect(() => {
+    if (!ctxOpen) return;
+    const away = (e) => {
+      const wrap = document.querySelector(".ctxwrap");
+      if (wrap && e.target instanceof Node && !wrap.contains(e.target)) ctxOpen = false;
+    };
+    addEventListener("click", away);
+    return () => removeEventListener("click", away);
   });
 
   // Compaction rewrites the conversation it runs on, so it asks first and stays
@@ -4470,6 +4520,17 @@
   <span class="wordmark">webrain<i>chat</i></span>
   <span class="state {state}" role="status">{state === "running" ? "running" : state}</span>
   <span class="grow"></span>
+  <!-- Below 1100px the instruments rail is gone from the layout; this is its
+       door there, and hidden above the breakpoint where the rail is the door. -->
+  <button
+    class="icon instbtn"
+    onclick={() => (instOpen = !instOpen)}
+    aria-expanded={instOpen}
+    aria-label="toggle session instruments"
+    title="session instruments"
+  >
+    <span class="gi" aria-hidden="true">{@html ICON.pulse}</span>
+  </button>
   {#if measured}
     <span class="meter-inline" title="tokens in / out">
       <b>{stats.tok}</b><u>tok</u>
@@ -4566,7 +4627,7 @@
   {/if}
 </header>
 
-<div class="deck" class:open={panelOpen}>
+<div class="deck" class:open={panelOpen} class:instopen={instOpen}>
   <!-- `click` is delegated from a document listener (see the effect): the
        markdown renderer's code-copy buttons are real buttons. -->
   <main
@@ -5269,63 +5330,6 @@
       <p class="none">nothing measured yet — the numbers land with the first answer</p>
     {/if}
 
-    <!-- Context budget, straight from `session.usage_info`: the one number that
-         says whether this conversation is about to be compacted. The ring is the
-         button; the breakdown behind it is the runtime's own accounting, because
-         a category this page invented would be a lie. -->
-    {#if ctx?.limit}
-      <div class="side-h">context</div>
-      <button
-        class="ctxb"
-        onclick={openCtx}
-        aria-expanded={ctxOpen}
-        title="session info — where the context window goes"
-      >
-        <svg class="ring" viewBox="0 0 36 36" aria-hidden="true">
-          <circle cx="18" cy="18" r="15.5" pathLength="100" />
-          <circle cx="18" cy="18" r="15.5" pathLength="100" style="stroke-dasharray: {ctxPct} 100" />
-        </svg>
-        <span class="ctxb-n">
-          <b>{ctxPct.toFixed(0)}%</b>
-          <small>{toks(ctx.used)} / {toks(ctx.limit)}</small>
-        </span>
-      </button>
-      {#if ctxOpen}
-        <div class="ctxpop">
-          {#if !ctxInfo}
-            <p class="none">reading the runtime's accounting…</p>
-          {:else if ctxInfo.error}
-            <p class="none">{ctxInfo.error}</p>
-          {:else}
-            <dl class="readout">
-              {#each ctxCats as [label, n] (label)}
-                <dt>{label}</dt><dd>{n}</dd>
-              {/each}
-            </dl>
-            {#if ctxInfo.promptTokenLimit}
-              <p class="ctx-n">
-                {toks(ctxInfo.totalTokens)} of {toks(ctxInfo.promptTokenLimit)} tokens
-              </p>
-            {/if}
-          {/if}
-          <button class="ctxcompact" onclick={compactNow} disabled={ctxBusy || busy}>
-            {ctxBusy ? "compacting…" : "compact history"}
-          </button>
-        </div>
-      {/if}
-      <!-- The model's advertised window and the budget the runtime actually sends
-           are two different numbers: the runtime compacts at its own, and a 1M
-           model behind a 128k session budget will never see 1M here. Say both. -->
-      {#if ctxOf && ctxOf !== ctx.limit}
-        <p
-          class="ctx-n dim"
-          title="This session's budget is the runtime's, not the model's advertised window — it compacts at the smaller number."
-        >
-          {ctxText(ctxOf)} model · {ctxText(ctx.limit)} session
-        </p>
-      {/if}
-    {/if}
-
     <!-- The conversation, not the turn. The list below is per turn; this is the
          question a session actually asks once it is three hours old. -->
     {#if totals.turns}
@@ -5740,6 +5744,81 @@
         <span class="gi" aria-hidden="true">{@html ICON.pencil}</span>
         edit
       </button>
+    {/if}
+    <!-- Session info, in the dock rather than the instruments rail: the rail is
+         gone below 1100px, and the context budget is the one number that has to
+         stay reachable on a phone. The ring is the button; the breakdown behind
+         it is the runtime's own accounting, because a category this page invented
+         would be a lie. -->
+    {#if ctx?.limit}
+      <div class="ctxwrap">
+        <button
+          class="ghost ctxb"
+          onclick={openCtx}
+          aria-expanded={ctxOpen}
+          aria-label="session info, {ctxPct.toFixed(0)}% of the context window used"
+          title="{toks(ctx.used)} of {toks(ctx.limit)} tokens — where the context window goes"
+        >
+          <svg class="ring" viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="15.5" pathLength="100" />
+            <circle cx="18" cy="18" r="15.5" pathLength="100" style="stroke-dasharray: {ctxPct} 100" />
+          </svg>
+          {ctxPct.toFixed(0)}%
+        </button>
+        {#if ctxOpen}
+          <div class="ctxpop">
+            {#if !ctxInfo}
+              <p class="none">reading the runtime's accounting…</p>
+            {:else if ctxInfo.error}
+              <p class="none">{ctxInfo.error}</p>
+            {:else}
+              <p class="ctxpop-h">
+                <b>{toks(ctx.used)} / {toks(ctx.limit)} tokens</b>
+                <span>{ctxPct.toFixed(0)}%</span>
+              </p>
+              <!-- One line, the window split the way the rows below read: each
+                   segment is a share of the allowance, and the darker one on the
+                   end is the output reservation — the only place the overlap
+                   between "reserved" and "used" can be seen at once. -->
+              <div class="ctxbar" aria-hidden="true">
+                {#each ctxGroups as g (g.head)}
+                  {#each g.rows as r (r.label)}
+                    <i class={g.tone} style="width: {r.pct}%" title="{r.label} {r.show}"></i>
+                  {/each}
+                {/each}
+                {#if ctxReserved}
+                  <i class="res" style="width: {ctxReservedPct}%" title="reserved for response {toks(ctxReserved)}"></i>
+                {/if}
+              </div>
+              {#if ctxReserved}
+                <p class="ctx-row"><span>Reserved for response</span><b>{toks(ctxReserved)}</b></p>
+              {/if}
+              {#each ctxGroups as g (g.head)}
+                <p class="ctx-h">{g.head}</p>
+                {#each g.rows as r (r.label)}
+                  <p class="ctx-row" title="{r.n} tokens">
+                    <span>{r.label}</span><b>{r.show}</b>
+                  </p>
+                {/each}
+              {/each}
+            {/if}
+            <!-- The model's advertised window and the budget the runtime actually
+                 sends are two numbers: it compacts at its own, and a 1M model
+                 behind a 128k session budget will never see 1M here. -->
+            {#if ctxOf && ctxOf !== ctx.limit}
+              <p
+                class="ctx-n dim"
+                title="This session's budget is the runtime's, not the model's advertised window — it compacts at the smaller number."
+              >
+                {ctxText(ctxOf)} model · {ctxText(ctx.limit)} session
+              </p>
+            {/if}
+            <button class="ctxcompact" onclick={compactNow} disabled={ctxBusy || busy}>
+              {ctxBusy ? "compacting…" : "compact history"}
+            </button>
+          </div>
+        {/if}
+      </div>
     {/if}
     <button
       class="modelbtn"
@@ -6797,6 +6876,7 @@
   .loadearlier:hover { color: var(--on-surface); }
 
   /* A readout, not a card: label left, value right, tabular numerals. */
+  .instbtn { display: none; }
   .readout { display: grid; grid-template-columns: auto 1fr; gap: 3px var(--s2); margin: 0; }
   .readout :global(dt) { color: var(--faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.12em; }
   .readout :global(dd) { margin: 0; text-align: right; font-variant-numeric: tabular-nums;
@@ -7453,8 +7533,10 @@
      spans the page, but its content belongs to the transcript column — when the
      rail opens the field has to shrink with the transcript, not stay full width
      and slide out of alignment. */
+  /* 12, not 3: the dock's panels (context, mode) open upward over the transcript,
+     and the "latest" button is 10 — inside a 3 the popover painted under it. */
   #composer { position: absolute; left: var(--rail-w, 16rem); right: var(--inst-w, 15rem);
-    bottom: 0; z-index: 3; background: var(--surface-container-low);
+    bottom: 0; z-index: 12; background: var(--surface-container-low);
     border-top: 1px solid var(--outline-variant); }
   /* The field belongs to the column between the rails, so it follows the same two
      numbers the grid does — no padding hack, and nothing to drift. */
@@ -7642,20 +7724,47 @@
   .askcard .args :global(dd) { font-family: var(--mono); }
   .askcard .row { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
 
-  /* Session info: a ring that opens. The bar it replaces said one number; the
-     panel behind the ring says which category is eating the window. */
-  .ctxb { display: flex; align-items: center; gap: var(--s2); width: 100%;
-    padding: 0; background: none; border: 0; color: inherit; font: inherit;
-    text-align: left; cursor: pointer; }
-  .ring { width: 2.4rem; height: 2.4rem; flex: 0 0 auto; transform: rotate(-90deg); }
-  .ring circle { fill: none; stroke-width: 3.4; stroke: var(--surface-container-highest); }
+  /* Session info: a ring that opens. It sits in the dock (the rail that used to
+     hold it is hidden below 1100px), and the panel opens upward from it, the way
+     the mode menu does. It carries the `auto` margin when it is present, so the
+     ring and the model share the right corner; without a ring the model keeps it. */
+  .ctxwrap { position: relative; margin-left: auto; }
+  .dock:has(.ctxwrap) .modelbtn { margin-left: 0; }
+  .ctxb { gap: var(--s1); font-variant-numeric: tabular-nums; }
+  .ring { width: 1.35rem; height: 1.35rem; flex: 0 0 auto; transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 4; stroke: var(--surface-container-highest); }
   .ring circle + circle { stroke: var(--primary); stroke-linecap: round;
     transition: stroke-dasharray var(--motion-medium) var(--ease); }
-  .ctxb-n { display: grid; gap: 1px; min-width: 0; }
-  .ctxb-n b { font-size: 13px; font-variant-numeric: tabular-nums; }
-  .ctxb-n small { color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; }
-  .ctxpop { margin-top: var(--s2); padding: var(--s2); border-radius: var(--shape-sm);
-    background: var(--surface-container-high); }
+  .ctxpop { position: absolute; bottom: calc(100% + var(--s2)); right: 0; z-index: 25;
+    width: min(19rem, 88vw); padding: var(--s2) var(--s3); border-radius: var(--shape-md);
+    background: var(--surface-container-high); border: 1px solid var(--outline-variant);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.45); animation: rise var(--motion-short) var(--ease); }
+  /* Header says the window, rows say the share of it — the same reading as the
+     Copilot chat's session-info panel, in the type this page already uses. */
+  .ctxpop-h { display: flex; align-items: baseline; justify-content: space-between;
+    gap: var(--s2); margin: 0 0 var(--s2); font-size: 11.5px;
+    font-variant-numeric: tabular-nums; }
+  .ctxpop-h b { font-weight: 500; }
+  .ctxpop-h span { color: var(--primary); }
+  .ctx-h { margin: var(--s2) 0 var(--s1); color: var(--faint); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.14em; }
+  /* The bar is the groups at a glance: system, the user's own words, then the
+     output reservation. A share too small to see still gets 2px, because a
+     segment that vanishes reads as zero. */
+  .ctxbar { display: flex; gap: 1px; height: 4px; margin: 0 0 var(--s1);
+    border-radius: var(--shape-full); overflow: hidden; background: var(--surface-container-highest); }
+  .ctxbar i { display: block; min-width: 2px; }
+  .ctxbar i.sys { background: var(--primary); }
+  .ctxbar i.usr { background: var(--tertiary); }
+  .ctxbar i.oth { background: var(--secondary-container); }
+  /* Dashed, not filled: the reservation is not a share of the prompt it sits
+     against — it is a band that overlaps it, and a solid block would read as
+     tokens already spent. */
+  .ctxbar i.res { background: repeating-linear-gradient(90deg,
+    var(--outline) 0 2px, transparent 2px 5px); }
+  .ctx-row { display: flex; justify-content: space-between; gap: var(--s2); margin: 0;
+    font-size: 11px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
+  .ctx-row b { color: var(--on-surface); font-weight: 500; }
   .ctxcompact { width: 100%; margin-top: var(--s2); padding: var(--s1) var(--s2);
     border-radius: var(--shape-full); background: var(--surface-container-highest);
     color: var(--on-surface); font-family: var(--mono); font-size: 10.5px; }
@@ -7922,7 +8031,15 @@
   @media (max-width: 1100px) {
     .deck.open { grid-template-columns: var(--rail-w, 16rem) minmax(0, 1fr); }
     .deck:not(.open) { grid-template-columns: minmax(0, 1fr); }
-    .inst { display: none; }
+    /* One door per rail: the sessions rail slides in from the left, the
+       instruments from the right. Both stop above the composer, and both are
+       30 — above the composer's popovers, below the dialogs. */
+    .instbtn { display: grid; }
+    .inst { display: flex; flex-direction: column; position: fixed; top: 44px; right: 0;
+      bottom: var(--composer-h, 8rem); z-index: 30; width: min(84vw, 17rem);
+      border-left: 1px solid var(--outline-variant);
+      transform: translateX(100%); transition: transform var(--motion-short) var(--ease); }
+    .deck.instopen .inst { transform: none; box-shadow: 0 0 60px #000c; }
     .grip.r { display: none; }
   }
 
