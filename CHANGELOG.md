@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `docs`: **the streaming baseline is now a real provider turn, not a mock.**
+  `PERF_AUDIT.md` → *Re-measuring* records a measured `deepseek-flash` turn
+  (1,201 output tokens, page footer `129.9 tok/s · 9.3s`): a `MutationObserver`
+  on the transcript saw **62 DOM updates for a 1,410-char reply — median 23 chars
+  per update, p90 39, median gap 17 ms — with zero long tasks.** Reasoning tokens
+  land before any answer text (first content update ~8.2 s in), then the answer
+  streams in ~1.1 s, so per-frame render cost is bounded by chunk size, not token
+  count. The 420-token synthetic stream stays as the harsher offline baseline.
+  Two measurement traps are documented because they produced wrong numbers first:
+  in-page `setTimeout` is throttled in a tab without OS focus (a 12.1 s turn
+  measured as 93 s, rAF frozen 91 s, the whole reply coalesced into one
+  1,427-char update), and the first turn navigates, destroying the evaluate
+  context.
 - `chat`: **`--serve` drops the fingerprint-noise shim by default, and says so.**
   The noise block is what gets a managed Cloudflare challenge through, and also
   the one thing measured to make a page render without ever hydrating (Next.js

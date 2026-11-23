@@ -176,17 +176,36 @@ for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeig
 console.table(t);  // the first scroll may show one task; later scrolls should be empty
 ```
 
-Streaming, which is the path a chat can actually stutter on. Measured 2026-11-23:
-**420 tokens 18 ms apart (≈55 tok/s, faster than any provider streams) through the
-page's own `render()` from `chunk-markdown.js`, inserted into a real transcript row
-— 430 frames over 8,131 ms, P50 16.7 ms, P95 33.4 ms, max 33.6 ms, no frame over
-34 ms, zero long tasks, TBT 0.** The 33.4 ms P95 is the harness: the loop yields
-18 ms between paints, so every few frames get two intervals. Per-token markdown
-re-parse of a 2.3 KB reply does not block the main thread.
+Streaming, which is the path a chat can actually stutter on.
 
-A turn served by a real provider was not recordable — OpenRouter had 57 tokens of
-credit left and this server floors `max_tokens` at 64, so every attempt answered
-402 (which the page rendered as a streamed error, also with zero long tasks).
+**Real provider turn, measured 2026-11-23** (`webrain chat --serve`, provider
+`deepseek` / `deepseek-flash`, 1,201 output tokens, the page's own footer:
+`129.9 tok/s · 9.3s`). A `MutationObserver` on the transcript recorded **62 DOM
+updates for a 1,410-char reply — median 23 chars per update, p90 39, biggest 113
+(the "webrain copy" label), median gap 17 ms — and zero long tasks.** Reasoning
+tokens arrive before any answer text: the first content update lands ~8.2 s in,
+the answer then streams in ~1.1 s. Rendering cost is therefore bounded by chunk
+size (≤ ~40 chars), not by token count, and stays far below one frame.
+
+**Synthetic stress baseline, same day:** 420 tokens 18 ms apart (≈55 tok/s)
+through the page's own `render()` from `chunk-markdown.js`, inserted into a real
+transcript row — 430 frames over 8,131 ms, P50 16.7 ms, P95 33.4 ms, max 33.6 ms,
+no frame over 34 ms, zero long tasks, TBT 0. The 33.4 ms P95 is the harness: the
+loop yields 18 ms between paints, so every few frames get two intervals. This is
+the harsher profile (finer chunks than any provider sends) and still passes.
+
+Two traps when reproducing, both of which produced wrong numbers first:
+
+- **In-page `setTimeout` is throttled when the window lacks OS focus.** A
+  `hasFocus: false` tab stretched a 12.1 s turn into 93 s of wall clock, froze
+  `requestAnimationFrame` for 91 s and coalesced the whole reply into one
+  1,427-char update — which reads exactly like "the provider sends one giant
+  chunk". Poll from outside the page (`page.evaluate` in a loop) and record with a
+  `MutationObserver`, which fires on the DOM change itself. Check
+  `document.hasFocus()` before trusting any in-page timing loop.
+- **The first turn navigates** (to the conversation URL), destroying the evaluate
+  context. Establish the thread with a throwaway turn, or re-arm on each poll.
+
 `output/mock-stream.mjs` serves the same OpenAI-shaped SSE chunks locally when the
-full transport path needs recording; point a provider row at
-`http://127.0.0.1:8811/v1` for the duration of the measurement and delete it after.
+full transport path needs recording without spending provider credit; point a
+provider row at `http://127.0.0.1:8811/v1` for the duration and delete it after.
