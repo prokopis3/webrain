@@ -242,20 +242,6 @@
   .card { margin: auto; background: var(--surface-container-high); border-radius: var(--shape-lg);
     padding: var(--s4) var(--s5, 20px); max-width: 44rem; width: 100%;
     box-shadow: 0 12px 32px #000b; animation: pop var(--motion-medium) var(--ease); }
-  .ico { flex: 0 0 auto; width: 2.2rem; min-height: 2.2rem; padding: 0; display: grid;
-    place-items: center; background: var(--surface-container); color: var(--on-surface-variant);
-    border: 0; border-radius: var(--shape-full); font: inherit; font-size: 15px; line-height: 1;
-    cursor: pointer; transition: background var(--motion-short) var(--ease),
-      color var(--motion-short) var(--ease); }
-  .ico:hover { background: var(--surface-container-high); color: var(--primary); }
-  .gi { display: inline-grid; place-items: center; flex: 0 0 auto; line-height: 0; }
-  .gi :global(svg) { width: 15px; height: 15px; display: block; }
-  .linky { background: none; border: 0; color: var(--faint); font: inherit; font-size: 10px;
-    letter-spacing: 0.08em; padding: 0 var(--s1); border-radius: var(--shape-xs); cursor: pointer;
-    min-height: 0; text-transform: uppercase; }
-  .linky:hover { color: var(--primary); background: var(--state-hover); }
-  .dim { color: var(--faint); }
-  .none { color: var(--faint); margin: 0 0 var(--s2); }
   button { position: relative; overflow: hidden; }
 
   .card.tools { width: min(38rem, 92vw); display: grid; gap: 0; padding: 0; }
@@ -293,10 +279,6 @@
   .tcaret { color: var(--primary); width: 1rem; display: grid; place-items: center; flex: 0 0 auto; }
   .tchecks { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
     gap: var(--s1) var(--s2); padding: 0 0 var(--s2) calc(1rem + var(--s2)); }
-  .tcheck { position: relative; display: flex; align-items: center; gap: var(--s2);
-    font-family: var(--mono); font-size: 11px; color: var(--on-surface-variant); cursor: pointer;
-    min-height: 2rem; animation: rise 160ms var(--ease); }
-  .tcheck:hover { color: var(--on-surface); }
   .tcell { display: flex; align-items: center; gap: var(--s1); min-width: 0; }
   .tcell .tcheck { flex: 1; min-width: 0; }
   .tallow { flex: none; border: 0; background: none; cursor: pointer; padding: 0 var(--s1);
@@ -304,24 +286,6 @@
     color: var(--faint); border-radius: var(--shape-xs); }
   .tallow:hover { color: var(--on-surface); background: var(--state-hover); }
   .tallow.on { color: var(--primary); }
-  /* The real input stays in the tab order and the a11y tree; the box beside it is
-     the picture. A drawn box beats `appearance: none` on the input itself because
-     the tick can then animate on its own curve. */
-  .tcheck input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0;
-    pointer-events: none; }
-  .tcheck .box { flex: 0 0 auto; width: 1.05rem; height: 1.05rem; border-radius: 6px;
-    border: 1.5px solid var(--outline); background: var(--surface-container);
-    display: grid; place-items: center;
-    transition: background 170ms var(--ease), border-color 170ms var(--ease),
-      box-shadow 200ms var(--ease); }
-  .tcheck .box::after { content: ""; width: 0.52rem; height: 0.28rem; margin-top: -2px;
-    border-left: 2px solid var(--on-primary); border-bottom: 2px solid var(--on-primary);
-    transform: rotate(-45deg) scale(0.3); opacity: 0;
-    transition: transform 180ms var(--ease), opacity 140ms var(--ease); }
-  .tcheck:hover .box { border-color: var(--primary); }
-  .tcheck input:checked + .box { background: var(--primary); border-color: var(--primary); }
-  .tcheck input:checked + .box::after { transform: rotate(-45deg) scale(1); opacity: 1; }
-  .tcheck input:focus-visible + .box { box-shadow: 0 0 0 3px var(--primary-container); }
   .tfoot { display: grid; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3);
     border-top: 1px solid var(--outline-variant); }
   .tfoot .note { margin: 0; }
@@ -341,9 +305,6 @@
   .tcount { margin-right: auto; font-family: var(--mono); font-size: 11px;
     font-variant-numeric: tabular-nums; }
   .tcaret :global(svg) { width: 12px; height: 12px; }
-  /* Local copy: the checkbox tick's entrance belongs to the component that owns
-     the checkbox. */
-  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
   @keyframes fade { from { opacity: 0; } }
   @keyframes pop { from { opacity: 0; transform: scale(0.985); } }
   /* The phone rules that used to live in the app's sheet — a scoped selector

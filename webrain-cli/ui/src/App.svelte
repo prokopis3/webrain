@@ -6323,7 +6323,6 @@
   .side-h { color: var(--faint); font-family: var(--mono); font-size: 9px; font-weight: 600;
     letter-spacing: 0.18em; text-transform: uppercase; margin: var(--s4) 0 var(--s2); }
   .side-h:first-child { margin-top: 0; }
-  .none { color: var(--faint); margin: 0 0 var(--s2); }
 
   /* Compose sits above the thread list, where a mail client puts it. */
   .newchat { display: flex; align-items: center; justify-content: center; gap: var(--s2);
@@ -6417,9 +6416,6 @@
     font-family: var(--mono); font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.2em; margin-bottom: var(--s2); }
   .msg.assistant .who { color: var(--primary); }
-  .linky { background: none; border: 0; color: var(--faint); font: inherit; font-size: 10px;
-    letter-spacing: 0.08em; padding: 0 var(--s1); border-radius: var(--shape-xs); cursor: pointer;
-    min-height: 0; text-transform: uppercase; }
   .linky:hover { color: var(--primary); background: var(--state-hover); }
   .copy { float: right; background: none; border: 0; color: var(--faint); border-radius: var(--shape-full);
     padding: 0 var(--s2); font: inherit; font-size: 10px; text-transform: uppercase;
@@ -6589,11 +6585,6 @@
   .dock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
     padding: var(--s2) clamp(1rem, 4vw, 3rem) var(--s3); }
   .dock .modelbtn { margin-left: auto; }
-  .ico { flex: 0 0 auto; width: 2.2rem; min-height: 2.2rem; padding: 0; display: grid; place-items: center;
-    background: var(--surface-container); color: var(--on-surface-variant); border: 0;
-    border-radius: var(--shape-full); font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
-    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
-  .ico:hover { background: var(--surface-container-high); color: var(--primary); }
   .ico.rec { color: var(--error); }
   .ico.rec.live { width: auto; gap: var(--s1); padding: 0 var(--s2) 0 var(--s3);
     background: var(--error-container); color: var(--error); display: flex; }
@@ -6677,16 +6668,10 @@
   .modelbtn:hover { background: var(--surface-container-high); color: var(--primary); }
   .modelbtn .gi { margin-left: var(--s1); }
 
-  /* Every control icon is an inline SVG in a `.gi` box, never a font character:
-     glyph coverage differs per OS and some of them simply do not exist. */
-  .gi { display: inline-grid; place-items: center; flex: 0 0 auto; line-height: 0; }
-  .gi :global(svg) { width: 15px; height: 15px; display: block; }
-  .mini .gi :global(svg), .clearq .gi :global(svg), .jump .gi :global(svg) {
-    width: 12px; height: 12px; }
-
-  /* The tools chooser's stylesheet moved with it to ToolsDialog.svelte: scoped
-     CSS cannot reach a child's DOM, so leaving it here would have styled
-     nothing. */
+  /* Icons, checkboxes, `.dim`, `.none` and `.linky` are in src/app.css: a
+     component's <style> is scoped to that component, so a second consumer could
+     only copy them — which is how the settings checkboxes lost their box when
+     the tools dialog moved out. */
 
   .chips { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); }
   .chip { background: var(--surface-container-high); color: var(--on-surface-variant);
@@ -6880,7 +6865,6 @@
     letter-spacing: 0.18em; color: var(--faint); }
   .next .chip { color: var(--on-surface); }
 
-  .dim { color: var(--faint); }
   /* A failure's reason is one line here and in full on hover: an MCP error is a
      paragraph, and a paragraph inside a summary row turns one step into four. */
   .bad { color: var(--error); font-size: 11px; min-width: 0; max-width: 26rem;
@@ -7504,7 +7488,6 @@
   .md :global(h1) { font-size: 1.24em; }
   .md :global(code) { font-size: 0.92em; padding: 1px 6px; }
 
-  .ico { width: 2.5rem; min-height: 2.5rem; font-size: 17px; }
   .seg { padding: 3px; }
   .seg button { min-height: 2.1rem; font-size: 13px; padding: 0 var(--s4); }
   .ghost, .modelbtn { min-height: 2.5rem; font-size: 13px; }

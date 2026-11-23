@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `chat`: **the shared atoms are one stylesheet again** (`ui/src/app.css`).
+  `.tcheck`/`.box`, `.linky`, `.dim`, `.none`, `.gi` and `.ico` lived inside
+  `App.svelte`'s scoped `<style>`, so the tools dialog could only *copy* them
+  (~28 lines) and any further dialog would copy them again. They are now global,
+  imported once by `index.html`, and both copies are deleted: `chat.css`
+  89.0 → 87.5 kB (13.86 → 13.78 gzipped) with no visual change. This is the
+  prerequisite the settings split needed — a tab component now costs no form CSS.
+  One deliberate change: the dialog's search button follows the scale pass
+  (2.2 → 2.5 rem) instead of being a second, smaller icon size.
 - `chat`: **the tools chooser is its own component.** `ToolsDialog.svelte` now
   owns the checklist's markup, styles, search field, folds and the unsaved draft,
   so `App.svelte` keeps only the open flag and the two persisted sets it reports
@@ -38,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing else noticed when it grew.
 
 ### Fixed
+- `chat`: **the settings checkboxes have their box back.** Moving the tools
+  chooser out of `App.svelte` took the `.tcheck`/`.box` rules with it, and the
+  five settings checkboxes (Runtime tab) kept rendering as bare native inputs —
+  nothing warned, because Svelte only reports *unused* selectors, never a
+  selector that another part of the same file still needed. Verified live:
+  `.box` is 16.8 px with a 6 px radius, the input is hidden but still in the tab
+  order, and the tick paints `--primary`.
 - `chat`: **a bad port in a URL no longer kills the server.** `ureq::get()` panics
   inside its URL parser on `https://host:abc/`, so one link preview — or a provider
   `base_url` with a typo — took the whole `chat --serve` process down with

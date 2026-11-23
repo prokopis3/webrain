@@ -60,6 +60,12 @@ component, each with a handful of props, measured after each.
 The transcript rows stay last: one `{#each}` with a dozen locals, and the
 measurement below shows they are already cheap to scroll.
 
+**Prerequisite, now shipped:** the atoms those tabs draw (checkbox, `.linky`,
+`.dim`, `.none`, icon, round button) are in `ui/src/app.css` instead of a
+component's scoped `<style>`, so a tab component costs its markup and no form CSS.
+The relocation also fixed a regression it exposed — the settings checkboxes had
+lost their drawn box when the tools dialog moved out.
+
 ### 3. Painting is now measured, and the transcript is not the problem
 
 Measured 2026-11-23 on a 55-message thread (`c1794890501696`: 33 `.msg`, 82
