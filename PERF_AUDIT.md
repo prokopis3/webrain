@@ -307,3 +307,75 @@ Three things the roadmap can stop guessing:
 
 Reproduce both tables before and after any phase 2 change.
 
+
+---
+
+# Addendum — the SvelteKit performance guide, against this app
+
+**Date:** 2026-11-23
+**Source:** <https://svelte.dev/docs/kit/performance> (fetched, not recalled)
+**Method:** the guide's own checklist walked against the real tree. Coverage first,
+per this file's usual method — `check_index_coverage` on
+`webrain-cli/ui/src/App.svelte` reports **`parse_unusable`, ranges 1–7197**, so the
+graph cannot answer for the component and every claim below is read from source.
+
+**The premise that decides most of it:** this page is **not SvelteKit**. There is
+no router, no `+page.svelte`, no `load` function, no adapter, no `handle` hook, no
+prerender step. It is a plain Svelte 5 + Vite bundle (`webrain-cli/ui`) whose output
+(`chat.js`, `chat.css`, `chunk-markdown.js`) is `include_str!`-embedded in the Rust
+binary and served by `chat --serve`. Six of the guide's ten "out of the box"
+bullets describe machinery we do not run, so their absence is not a gap.
+
+## Item by item
+
+| Guide item | Here | Evidence |
+|---|---|---|
+| Code-splitting | **Partial, by Vite** — 3 files: app, CSS, markdown chunk | `vite build` output; the chunk is loaded by `import("./markdown.js")` |
+| Asset preloading (`modulepreload`) | **N/A** — one JS + one CSS, both in the served HTML | `index.html` is a single inline module that mounts `App` |
+| File hashing / cache forever | **Deliberately not done** (see below) | assets served `Cache-Control: no-store`, `chat_server.rs` |
+| Request coalescing | **N/A** — no `load` layer | — |
+| Parallel loading | **Already true** | mount fires `/settings`, `/permission-rules`, `/pending`, `/sessions`, `/catalog`, `/providers` concurrently; only `loadSessions().then(seed)` is sequenced, and that is a real dependency |
+| Data inlining (replay `fetch`) | **N/A** — no SSR | — |
+| Conservative invalidation | **N/A** — the page holds one live SSE stream (`/events`) and re-reads a route only when a frame says so | |
+| Prerendering | **N/A** — one route, and it is the app | |
+| Link preloading | **N/A** — no client-side navigation | |
+| Svelte version latest | **Met** | `svelte: ^5` in `webrain-cli/ui/package.json` |
+| Images / video | **N/A** — the page ships no images or video; attachments are rendered from the server on demand | `kindOf()` in `App.svelte` |
+| Fonts: preload, subset | **N/A, and the waterfall it warns about cannot happen** — zero webfonts | `@font-face` / `fonts.googleapis` / `.woff` = **0 hits**; `--mono` and `--display` are system stacks |
+| External scripts | **None** | `index.html` has one inline module and no third-party tag |
+| `rollup-plugin-visualizer` | **Not added** — a dependency for a report | `check-budget.mjs` already fails the build when an asset crosses its gzip ceiling, which is the part that keeps it true |
+| Selective loading | **Already done** where it matters | two static imports (`svelte`, `./Palette.svelte`), the 84 KB `marked`+`DOMPurify` pair deferred and warmed on idle |
+| Instrumenting (`Server-Timing`, OpenTelemetry) | **Not done** | a local single-process server; the browser's own Network panel answers the same question |
+
+## The one contested item: file hashing and long-lived caching
+
+The guide's "hash the filename, cache forever" assumes a static host that can emit
+new names per deploy. Here the assets live **inside the binary** and are served
+`no-store`, because a rebuilt binary must never hand a browser the previous UI —
+that exact failure has already cost one debugging round (screenshots showing a UI
+that no longer existed). Correctness beats a 0-byte cache hit on localhost.
+
+The honest upgrade, if this is ever served over a tunnel or on a shared host:
+compute one hash of the embedded bytes at startup, answer `ETag` +
+`Cache-Control: no-cache` (revalidate, not `no-store`), so a reload of an unchanged
+binary is a `304` instead of 220 KB. About ten lines in the asset route of
+`chat_server.rs`; not worth it while every client is on loopback.
+
+## What the guide's spirit does ask for, and where it stands
+
+- **A budget instead of a feeling** — done: `check-budget.mjs` fails `bun run check`
+  past 80 / 15 / 29 KB gzip (measured 75.0 / 13.1 / 27.3).
+- **Do not lay out what nobody sees** — done: `content-visibility: auto` on the
+  card-like transcript rows.
+- **Small reactive scopes** — started: the composer's palette is its own component;
+  ~7.6k lines remain in `App.svelte`.
+- **Divide the page before dividing the box** — the transcript's own rows are the
+  next slice, and they are the coupled ones (one `{#each}` with a dozen locals).
+
+## Reproducing
+
+```powershell
+cd webrain-cli/ui
+bun run build            # sizes printed per asset
+bun run check            # ends with the gzip budget
+```
