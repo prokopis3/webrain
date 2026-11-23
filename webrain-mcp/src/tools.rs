@@ -429,7 +429,7 @@ ENVIRONMENT — read at PROCESS START, a tool call cannot change them
 /// Is this line a guide section header?
 ///
 /// Headers are the unindented lines that OPEN with an all-caps word ("RULES",
-/// "EXTRACTION MATRIX", "17 TOOLS — …", "FROM-SCRATCH DISCOVERY (…)"); body lines
+/// "EXTRACTION MATRIX", "19 TOOLS — …", "FROM-SCRATCH DISCOVERY (…)"); body lines
 /// are indented or start with a bullet, so the shape is enough and the const needs
 /// no markers. Testing the whole line would miss the three headers that carry a
 /// lowercase tail after their title.

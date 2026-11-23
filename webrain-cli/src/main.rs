@@ -254,6 +254,10 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
                 "WEBRAIN_DOWNLOAD_MAX_BYTES",
                 "per-file cap for `webrain_download` http (512 MiB)",
             ),
+            (
+                "WEBRAIN_RESPONSE_BUDGET",
+                "row-text bytes a batch reply may carry before later rows truncate (8 MiB)",
+            ),
         ],
     ),
     (
@@ -369,11 +373,28 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
         &[("RUST_LOG", "log verbosity (webrain=info,tungstenite=warn)")],
     ),
     (
+        "Captcha",
+        &[
+            (
+                "CAPSOLVER_API_KEY",
+                "paid reCAPTCHA-v2 solver (preferred: cheaper + faster per solve)",
+            ),
+            (
+                "WEBRAIN_2CAPTCHA_KEY / TWOCAPTCHA_API_KEY",
+                "the older reCAPTCHA solver — used only when CapSolver is unset; 2CAPTCHA_API_KEY is NOT read",
+            ),
+        ],
+    ),
+    (
         "Chat runtime",
         &[
             (
                 "WEBRAIN_CHAT_DEBUG",
                 "mirror every raw session event to stderr (the provider's own error)",
+            ),
+            (
+                "WEBRAIN_CHAT_UI",
+                "a directory holding the four `chat --serve` files, digest-checked against the build",
             ),
             (
                 "WEBRAIN_CHAT_HOME",
@@ -2596,7 +2617,7 @@ mod asset_tests {
 /// "expected value at line 1 column 1".
 #[cfg(test)]
 mod tool_argv_tests {
-    use super::{parse_tool_argv, strip_inline_images};
+    use super::{parse_tool_argv, strip_inline_images, ENV};
     use serde_json::json;
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -2652,5 +2673,38 @@ mod tool_argv_tests {
             .contains("3 bytes"));
         assert_eq!(reply["nested"][1]["keep"], 1);
         assert_eq!(reply["bytes"], 12);
+    }
+
+    /// `webrain help env` is the offline copy of `docs/reference/environment.mdx`,
+    /// and the table's own comment says the two lists must stay equal. They had
+    /// drifted by seven names (four advertised nowhere, three documented but
+    /// undiscoverable from a terminal), so this fails instead of drifting again.
+    ///
+    /// A name may legitimately appear in two groups — `OPENAI_API_KEY` is a vision
+    /// hop and a chat row, with a different hint in each — so repeats are allowed
+    /// here; only coverage is enforced.
+    #[test]
+    fn every_env_var_the_terminal_advertises_is_documented() {
+        const DOC: &str = include_str!("../../docs/reference/environment.mdx");
+        let mut missing = Vec::new();
+        for (_, vars) in ENV {
+            for (names, _) in *vars {
+                for raw in names.split('/') {
+                    // "WEBRAIN_HTTP_CACHE=0" and the abbreviated "_MODEL" in a
+                    // combined row are not names of their own.
+                    let name = raw.trim().split('=').next().unwrap_or("").trim();
+                    if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if !DOC.contains(name) {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "help env and docs/reference/environment.mdx disagree: {missing:?}"
+        );
     }
 }

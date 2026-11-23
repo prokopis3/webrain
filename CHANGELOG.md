@@ -38,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead" sentence. Its opening claim that "every engine and tool has a CLI twin"
   was false for 12 of the 19 tools and is now true via `tool`.
 
-### Added
 - `mcp`: **`webrain_network` — the page's own HTTP traffic, with bodies.** The
   commonest way to scrape a JavaScript app is to stop reading the DOM and read the
   XHR that holds the JSON; the server subscribed to no network events at all, so an
@@ -61,6 +60,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found for resource with given identifier") — a cache flag I added for that theory
   was **removed** once a cache-proof URL showed the flag was not the cause.
   Tool count 18 → 19 across the guide, README, reference page and docs.
+
+- `chat`: **add an MCP server from the page** — the MCP tab could list and switch
+  servers and had no way to add one. `POST /mcp/new` writes it with
+  `mcp.config.add` (the public user-config RPC, not the internal
+  `reloadWithConfig` shape), follows with `mcp.config.reload`, and the tab re-reads
+  the list and says which of the two happened. Proven end to end: the entry landed
+  in `mcp-config.json` in the runtime home, the next start listed it as
+  `source: user, status: connected`, and a bad name or non-JSON config is a 400.
+- `chat`: **elicitation** — a structured question from the agent or an MCP server is
+  now answered instead of dropped. The JSON schema's fields are asked one at a time
+  on the existing `ask_user` card (`enum` → buttons, `boolean` → yes/no,
+  `integer`/`number` → parsed, `string` → freeform) and coerced to the declared
+  type before `ui.handlePendingElicitation` accepts them. A field a card cannot
+  draw — an object, an array — declines the whole request rather than submitting
+  a value the server never asked for.
+- `chat`: **MCP sampling is no longer a hang** — `sampling.requested` is resolved
+  with the protocol's reject and a note naming the server that asked. Answering it
+  is impossible on this SDK: `UIHandlePendingSamplingResponse` and
+  `McpExecuteSamplingRequest` are both empty structs, so neither a completion we
+  ran nor the raw MCP messages can cross the typed boundary.
+- `chat`: **the runtime's own slash commands** — the composer's `/` menu was ours
+  alone, so `/compact`, `/model`, `/usage` and 26 others existed and were never
+  offered. `GET /catalog` now appends `session.commands.list` after our own
+  entries (deduped by name), and picking one posts to the new `POST /command`,
+  which invokes it and renders the answer: output text, a prompt placed in the
+  composer, or a note that the command wants a surface the page does not have.
+  `commands.execute` is not used — it refused all 29 with `No client found for
+  command`, being the path for a host that registered handlers.
+- `chat`: **agent-definition tools** — `read_agent`, `write_agent` and
+  `list_agents` were in the hide list but never in the allowlist, so they were
+  excluded whether delegation was on or off: `task` could spawn a worker and the
+  model could not see what it may spawn from. They are served with the switch.
+- `chat`: **all six `subagent.*` events** — `selected` becomes a note naming the
+  definition and its tool count, `configured` writes the child's model and turn
+  shape onto the running-agents row, `deselected` is recognised as empty by
+  contract. `check-subagent-events.mjs` keeps the arms equal to the wire ids.
+- `chat`: **resume** — `POST /resume` continues the current conversation on the
+  runtime's own session (`sessions.list` → `resume_session`) instead of replaying
+  the transcript onto a blank one, so the model gets its context back: plan file,
+  rewind points, tool history. The page's transcript is unchanged.
+- `chat`: **plan-mode and auto-mode handlers** — the agent can ask to leave plan
+  mode (the card's buttons are the plan's own actions) and to retry a rate-limited
+  turn on the auto model. Both reuse the `ask_user` card; without them the SDK
+  sends `requestExitPlanMode: false` / `requestAutoModeSwitch: false` and the
+  capability is silently absent.
+- `chat`: **nine events the page was dropping** — reused approvals, mid-session
+  tool/skill/MCP changes, spend checkpoints, runtime messages, a failed
+  compaction, and a tool waiting for user input.
+- `chat`: **`parallel_tools` switch** — one turn may ask for several tool calls
+  at once (`inference.allow_multiple_tool_calls`, on by default in the Runtime
+  tab). Creation-time in the SDK, so flipping it reports `restart: true`.
+- `chat`: **model allowlist** — the Runtime tab's "models the runtime may use"
+  (`policy.allowed_models`). Empty means unrestricted; naming models turns a typo
+  into a refusal when the session is built instead of a provider error mid-turn.
+- `chat`: sessions now identify themselves as `webrain` instead of the generic
+  `sdk` in the runtime's own session list (`client_name`).
 
 ### Changed
 - `docs`: **the streaming baseline is now a real provider turn, not a mock.**
@@ -148,80 +203,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   13.0 / 27.3 KB, 114.5 KB total). The page is one 7.9k-line component and
   nothing else noticed when it grew.
 
-### Fixed
-- `chat`: **the settings checkboxes have their box back.** Moving the tools
-  chooser out of `App.svelte` took the `.tcheck`/`.box` rules with it, and the
-  five settings checkboxes (Runtime tab) kept rendering as bare native inputs —
-  nothing warned, because Svelte only reports *unused* selectors, never a
-  selector that another part of the same file still needed. Verified live:
-  `.box` is 16.8 px with a 6 px radius, the input is hidden but still in the tab
-  order, and the tick paints `--primary`.
-- `chat`: **a bad port in a URL no longer kills the server.** `ureq::get()` panics
-  inside its URL parser on `https://host:abc/`, so one link preview — or a provider
-  `base_url` with a typo — took the whole `chat --serve` process down with
-  `parsed url: InvalidPort`. Both call sites (`/preview`, the model-list probe) now
-  pass through a scheme + host + port guard first and answer with an error instead.
-  Verified live: three malformed ports answer `{"error":"not an http(s) url"}` and
-  the process stays up.
-
-### Added
-- `chat`: **add an MCP server from the page** — the MCP tab could list and switch
-  servers and had no way to add one. `POST /mcp/new` writes it with
-  `mcp.config.add` (the public user-config RPC, not the internal
-  `reloadWithConfig` shape), follows with `mcp.config.reload`, and the tab re-reads
-  the list and says which of the two happened. Proven end to end: the entry landed
-  in `mcp-config.json` in the runtime home, the next start listed it as
-  `source: user, status: connected`, and a bad name or non-JSON config is a 400.
-- `chat`: **elicitation** — a structured question from the agent or an MCP server is
-  now answered instead of dropped. The JSON schema's fields are asked one at a time
-  on the existing `ask_user` card (`enum` → buttons, `boolean` → yes/no,
-  `integer`/`number` → parsed, `string` → freeform) and coerced to the declared
-  type before `ui.handlePendingElicitation` accepts them. A field a card cannot
-  draw — an object, an array — declines the whole request rather than submitting
-  a value the server never asked for.
-- `chat`: **MCP sampling is no longer a hang** — `sampling.requested` is resolved
-  with the protocol's reject and a note naming the server that asked. Answering it
-  is impossible on this SDK: `UIHandlePendingSamplingResponse` and
-  `McpExecuteSamplingRequest` are both empty structs, so neither a completion we
-  ran nor the raw MCP messages can cross the typed boundary.
-- `chat`: **the runtime's own slash commands** — the composer's `/` menu was ours
-  alone, so `/compact`, `/model`, `/usage` and 26 others existed and were never
-  offered. `GET /catalog` now appends `session.commands.list` after our own
-  entries (deduped by name), and picking one posts to the new `POST /command`,
-  which invokes it and renders the answer: output text, a prompt placed in the
-  composer, or a note that the command wants a surface the page does not have.
-  `commands.execute` is not used — it refused all 29 with `No client found for
-  command`, being the path for a host that registered handlers.
-- `chat`: **agent-definition tools** — `read_agent`, `write_agent` and
-  `list_agents` were in the hide list but never in the allowlist, so they were
-  excluded whether delegation was on or off: `task` could spawn a worker and the
-  model could not see what it may spawn from. They are served with the switch.
-- `chat`: **all six `subagent.*` events** — `selected` becomes a note naming the
-  definition and its tool count, `configured` writes the child's model and turn
-  shape onto the running-agents row, `deselected` is recognised as empty by
-  contract. `check-subagent-events.mjs` keeps the arms equal to the wire ids.
-- `chat`: **resume** — `POST /resume` continues the current conversation on the
-  runtime's own session (`sessions.list` → `resume_session`) instead of replaying
-  the transcript onto a blank one, so the model gets its context back: plan file,
-  rewind points, tool history. The page's transcript is unchanged.
-- `chat`: **plan-mode and auto-mode handlers** — the agent can ask to leave plan
-  mode (the card's buttons are the plan's own actions) and to retry a rate-limited
-  turn on the auto model. Both reuse the `ask_user` card; without them the SDK
-  sends `requestExitPlanMode: false` / `requestAutoModeSwitch: false` and the
-  capability is silently absent.
-- `chat`: **nine events the page was dropping** — reused approvals, mid-session
-  tool/skill/MCP changes, spend checkpoints, runtime messages, a failed
-  compaction, and a tool waiting for user input.
-- `chat`: **`parallel_tools` switch** — one turn may ask for several tool calls
-  at once (`inference.allow_multiple_tool_calls`, on by default in the Runtime
-  tab). Creation-time in the SDK, so flipping it reports `restart: true`.
-- `chat`: **model allowlist** — the Runtime tab's "models the runtime may use"
-  (`policy.allowed_models`). Empty means unrestricted; naming models turns a typo
-  into a refusal when the session is built instead of a provider error mid-turn.
-- `chat`: sessions now identify themselves as `webrain` instead of the generic
-  `sdk` in the runtime's own session list (`client_name`).
-
-### Changed
 - `chat`: migrated to **`copilot-sdk` 2.0.1** (the successor to the now-deprecated
   `github-copilot-sdk`). `connect()` builds the grouped `CreateSessionOptions`
   instead of the flat 99-field `SessionConfig`, and `ClientOptions` is constructed
@@ -284,6 +265,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"stopped":true,"id":1,…}`.
 
 ### Fixed
+- `chat`: **the settings checkboxes have their box back.** Moving the tools
+  chooser out of `App.svelte` took the `.tcheck`/`.box` rules with it, and the
+  five settings checkboxes (Runtime tab) kept rendering as bare native inputs —
+  nothing warned, because Svelte only reports *unused* selectors, never a
+  selector that another part of the same file still needed. Verified live:
+  `.box` is 16.8 px with a 6 px radius, the input is hidden but still in the tab
+  order, and the tick paints `--primary`.
+- `chat`: **a bad port in a URL no longer kills the server.** `ureq::get()` panics
+  inside its URL parser on `https://host:abc/`, so one link preview — or a provider
+  `base_url` with a typo — took the whole `chat --serve` process down with
+  `parsed url: InvalidPort`. Both call sites (`/preview`, the model-list probe) now
+  pass through a scheme + host + port guard first and answer with an error instead.
+  Verified live: three malformed ports answer `{"error":"not an http(s) url"}` and
+  the process stays up.
+
 
 - **mcp**: `webrain_session(op=open|close|list)` over **stdio** answered
   `Unknown tool: webrain_open_session`, so a stdio client could not point its
@@ -295,6 +291,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `close` drops it and `list` names it. Also: a payload shaped
   `{"error": "…"}` was reported `isError: false`, because only
   `{"status":"error"}` was inspected.
+- **cli**: `webrain help env` and `docs/reference/environment.mdx` had drifted
+  apart by seven names, and the table's own comment says they are one list.
+  Advertised now (were documented but undiscoverable from a terminal):
+  `CAPSOLVER_API_KEY` and `WEBRAIN_2CAPTCHA_KEY` / `TWOCAPTCHA_API_KEY` in a new
+  **Captcha** group, `WEBRAIN_CHAT_UI`, `WEBRAIN_RESPONSE_BUDGET`. Documented now
+  (were advertised but on no page): `WEBRAIN_ASR_BIN` / `WEBRAIN_ASR_MODEL`, the
+  chat-dictation pair. `every_env_var_the_terminal_advertises_is_documented`
+  reads the page with `include_str!` and fails on the next gap — a name may still
+  appear in two groups on purpose (`OPENAI_API_KEY` is a vision hop *and* a chat
+  row, with a different hint in each), so that test enforces coverage, not
+  uniqueness.
+- **docs**: the tool count said 17 or 18 in five live places while
+  `list_tools()` serves 19 — both landing hero SVGs (`18 tools loaded`),
+  `VEOPROMPT.md` (`17`), `docs/ARCHITECTURE.md` (`tools.rs # 18 tools`), and
+  `is_guide_header`'s doc comment quoting `"17 TOOLS — …"`. The ADR-0003 sentence
+  no longer carries a number at all ("fewer tools than the surface advertises"),
+  since a count in a decision record only drifts again. Two mentions are left on
+  purpose: the 0.19.0 changelog entry states what was true at that release, and
+  `ISSUES_OCR.md` quotes a bug report from before `webrain_eval_in_frame` was
+  wired into `list_tools()`.
+- **docs**: `CHANGELOG.md` had duplicate `###` headings in four releases —
+  `[Unreleased]` with three `### Added`, two `### Changed` and two `### Fixed`,
+  plus one repeat each in 0.13.0, 0.9.0 and 0.6.0. Each release now has one
+  heading per type in Keep a Changelog order, with the entries regrouped under it.
+  The rewrite was machine-checked: 780 bullets before and after, 772 em dashes
+  before and after, zero duplicate headings, no BOM added.
 
 ## [0.19.0] - 2026-11-21
 
@@ -2366,67 +2388,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.0] - 2026-11-02
 
-### Security
-
-- **deps**: `zip` 7.2.0 → **9.2.2**, closing five advisories against the engine
-  archive extractor in `install.rs` (Chrome for Testing, whisper, llama-server):
-  critical GHSA-m665-v7pm-7grj (parser differential / security-control bypass),
-  high GHSA-hjqx-j4rw-g7xv (**arbitrary file write outside the extraction
-  directory**), high GHSA-q7v9-x93c-xqv3 (unbounded symlink target), high
-  GHSA-9hj8-73fh-9963 (legacy Shrink/Reduce/Implode decoder DoS) and medium
-  GHSA-8hxf-qr8p-62x4 (AES-entry HMAC bypass). Only `by_index` / `name()` /
-  `is_dir()` / `unix_mode()` are used; `name()` now returns a `Result`, so the
-  zip-slip guard takes `?`. The guard itself — absolute paths, `..`, drive
-  prefixes — is unchanged and stays the last line of defence.
-- **deps**: `rustls` 0.23.43 → 0.23.46 (reached through `tokio-tungstenite`'s
-  `rustls-tls-webpki-roots`), closing GHSA-2mjx-qc3c-rqvc (TLS 1.3 handshake
-  messages incorrectly accepted), GHSA-h2v8-394m-p7vv (brotli certificate
-  decompression allocation), GHSA-c8m5-c952-6cm4 (session `Debug` formatting
-  exposes the TLS master secret) and GHSA-w44r-93j7-qv28 (an unauthenticated
-  `ServerHello` poisons the per-connection).
-
-### Changed
-
-- **build**: workspace `rust-version` 1.85 → **1.88**, forced by the fix above —
-  every `zip` release that closes the critical advisory declares 1.88. The
-  `clippy::collapsible_if` sites stay nested and are allowed once per crate
-  root: collapsing 65 of them into let-chains is a mechanical cleanup, not part
-  of a security fix. README badge, CONTRIBUTING and `docs/contributing.mdx`
-  follow.
-- **deps**: `tokio-tungstenite` 0.24 → **0.30** (the CDP WebSocket transport),
-  `scraper` 0.24 → **0.27**, `pdf-inspector` 1.14.1 → **1.25.2**, `ureq` 3.3.0 →
-  **3.4.2**, `aes-gcm` 0.11.0 → **0.11.1**. One line of code changed:
-  `tungstenite` ≥ 0.26 stores text frames as `Utf8Bytes`, so
-  `Message::Text(text)` became `Message::Text(text.into())`. The 114 workspace
-  lib tests are unchanged.
-- **ci**: `Swatinem/rust-cache` 2.9.3, `softprops/action-gh-release` 3.0.3 and
-  Docker's `build-push-action` 7.4.0 / `login-action` 4.7.0 /
-  `setup-buildx-action` 4.4.1 — the five outstanding Dependabot PRs, applied on
-  top of the release-workflow rewrite so they would not have to rebase over it.
-- **docs**: `ARCHITECTURE.md` was a scaffold from August kept as "superseded
-  history", so the file GitHub shows first described 11 MCP tools, two *planned*
-  backends, a `webrain-python` crate, and `session.rs` / `stealth.rs` modules that
-  do not exist — and claimed the tool "bypasses Cloudflare and bot detection",
-  which `AGENTS.md` forbids documenting. Replaced with the map: three crates and
-  what each owns, the real `webrain-core/src` file table, the tool groups with
-  `map_surface` in between, the per-call flow, engine selection and the skills
-  layout — delegating rationale to `docs/ARCHITECTURE.md`.
-- **skills**: `.github/skills/` carried copies of four product skills, so a rename
-  had to be made twice. One copy had already drifted: `credentials` still named
-  `webrain_profiles` and `webrain_login`, folded into `webrain_session` releases
-  ago, which sends an agent to tools that do not exist. Removed the four copies and
-  documented the split in `.github/skills/README.md`: `skills/webrain/**` is the
-  only place a product skill is edited, because it is what `include_str!` compiles
-  and `webrain install skills` ships; `.github/skills/` is for skills that serve
-  this repository.
-
-- **docs**: `AGENTS.md` and `ARCHITECTURE.md` named `map_surface` routing targets as
-  if they were MCP tools — `webrain_a11y`, `webrain_spider`, `webrain_extract_json`,
-  `webrain_autoschema`, `webrain_cookies`, `webrain_setcookies`. None of them is in
-  `list_tools()`, so an agent following the file asks for a tool that does not exist.
-  Both now name the real entry points and selectors (`observe(what=a11y)`,
-  `crawl(mode=spider)`, `extract(mode=json|autoschema)`, `session(op=cookies|setcookies)`).
-
 ### Added
 
 - **dist**: a release binary per platform **and architecture**, and installers that
@@ -2472,6 +2433,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stated fallback. `webrain install skills` still reports zero unknown `webrain_*`
   names, and now there is a documented path for both tools.
 
+### Changed
+
+- **build**: workspace `rust-version` 1.85 → **1.88**, forced by the fix above —
+  every `zip` release that closes the critical advisory declares 1.88. The
+  `clippy::collapsible_if` sites stay nested and are allowed once per crate
+  root: collapsing 65 of them into let-chains is a mechanical cleanup, not part
+  of a security fix. README badge, CONTRIBUTING and `docs/contributing.mdx`
+  follow.
+- **deps**: `tokio-tungstenite` 0.24 → **0.30** (the CDP WebSocket transport),
+  `scraper` 0.24 → **0.27**, `pdf-inspector` 1.14.1 → **1.25.2**, `ureq` 3.3.0 →
+  **3.4.2**, `aes-gcm` 0.11.0 → **0.11.1**. One line of code changed:
+  `tungstenite` ≥ 0.26 stores text frames as `Utf8Bytes`, so
+  `Message::Text(text)` became `Message::Text(text.into())`. The 114 workspace
+  lib tests are unchanged.
+- **ci**: `Swatinem/rust-cache` 2.9.3, `softprops/action-gh-release` 3.0.3 and
+  Docker's `build-push-action` 7.4.0 / `login-action` 4.7.0 /
+  `setup-buildx-action` 4.4.1 — the five outstanding Dependabot PRs, applied on
+  top of the release-workflow rewrite so they would not have to rebase over it.
+- **docs**: `ARCHITECTURE.md` was a scaffold from August kept as "superseded
+  history", so the file GitHub shows first described 11 MCP tools, two *planned*
+  backends, a `webrain-python` crate, and `session.rs` / `stealth.rs` modules that
+  do not exist — and claimed the tool "bypasses Cloudflare and bot detection",
+  which `AGENTS.md` forbids documenting. Replaced with the map: three crates and
+  what each owns, the real `webrain-core/src` file table, the tool groups with
+  `map_surface` in between, the per-call flow, engine selection and the skills
+  layout — delegating rationale to `docs/ARCHITECTURE.md`.
+- **skills**: `.github/skills/` carried copies of four product skills, so a rename
+  had to be made twice. One copy had already drifted: `credentials` still named
+  `webrain_profiles` and `webrain_login`, folded into `webrain_session` releases
+  ago, which sends an agent to tools that do not exist. Removed the four copies and
+  documented the split in `.github/skills/README.md`: `skills/webrain/**` is the
+  only place a product skill is edited, because it is what `include_str!` compiles
+  and `webrain install skills` ships; `.github/skills/` is for skills that serve
+  this repository.
+
+- **docs**: `AGENTS.md` and `ARCHITECTURE.md` named `map_surface` routing targets as
+  if they were MCP tools — `webrain_a11y`, `webrain_spider`, `webrain_extract_json`,
+  `webrain_autoschema`, `webrain_cookies`, `webrain_setcookies`. None of them is in
+  `list_tools()`, so an agent following the file asks for a tool that does not exist.
+  Both now name the real entry points and selectors (`observe(what=a11y)`,
+  `crawl(mode=spider)`, `extract(mode=json|autoschema)`, `session(op=cookies|setcookies)`).
+
 ### Fixed
 - **skills**: `WEBRAIN_SKILLS_DIR` was printed by `webrain install skills` as "pin the
   dir" and listed in `--help`, but `skills::dir()` never read it — only
@@ -2481,6 +2484,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a unit test.
 - **dist**: `install.sh` sent Windows users to a `scoop bucket add` command that
   needs a manual step; it now points at `install.ps1`.
+
+### Security
+
+- **deps**: `zip` 7.2.0 → **9.2.2**, closing five advisories against the engine
+  archive extractor in `install.rs` (Chrome for Testing, whisper, llama-server):
+  critical GHSA-m665-v7pm-7grj (parser differential / security-control bypass),
+  high GHSA-hjqx-j4rw-g7xv (**arbitrary file write outside the extraction
+  directory**), high GHSA-q7v9-x93c-xqv3 (unbounded symlink target), high
+  GHSA-9hj8-73fh-9963 (legacy Shrink/Reduce/Implode decoder DoS) and medium
+  GHSA-8hxf-qr8p-62x4 (AES-entry HMAC bypass). Only `by_index` / `name()` /
+  `is_dir()` / `unix_mode()` are used; `name()` now returns a `Result`, so the
+  zip-slip guard takes `?`. The guard itself — absolute paths, `..`, drive
+  prefixes — is unchanged and stays the last line of defence.
+- **deps**: `rustls` 0.23.43 → 0.23.46 (reached through `tokio-tungstenite`'s
+  `rustls-tls-webpki-roots`), closing GHSA-2mjx-qc3c-rqvc (TLS 1.3 handshake
+  messages incorrectly accepted), GHSA-h2v8-394m-p7vv (brotli certificate
+  decompression allocation), GHSA-c8m5-c952-6cm4 (session `Debug` formatting
+  exposes the TLS master secret) and GHSA-w44r-93j7-qv28 (an unauthenticated
+  `ServerHello` poisons the per-connection).
 
 ## [0.13.0] - 2026-11-02
 
@@ -2561,6 +2583,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<engine cache>/skills` rather than "feature off", which serves nothing until
   something is installed.
 
+
+- **mcp**: the embedded `AGENT_GUIDE` (served by `webrain_guide`) and
+  `skills/webrain` now document the two facts an operator previously had to read
+  the Rust source to learn: (1) cookie transfer moves **login state, not bot
+  clearance** — `cf_clearance`/DataDome/`_abck` are TLS-fingerprint-bound, so
+  lightpanda and obscura stay on the challenge page even with a byte-identical UA
+  and the full jar (verified on skroutz.gr: 46 s wait, 12/12 pages only in the
+  Chrome that minted the cookie); (2) **engine identity** — obscura
+  `--storage-dir` is a real profile (persists cookies across restarts, lifts
+  per-connection jar isolation), obscura `--user-agent`, lightpanda
+  `--cookie`/`--cookie-jar`, and that `webrain obscura` passes only `--stealth`,
+  so the binary must be launched directly for those flags.
+
 ### Fixed
 - **mcp**: `filter_extension` on `webrain_download` was **ignored on the MCP path**.
   The `handle_rpc` no-browser short-circuit returns before the dispatcher, and only
@@ -2596,20 +2631,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as "no transcript". It now prefers `small.en` when present and otherwise uses
   whichever `ggml-*.bin` is on disk, multilingual before English-only (`.en`
   models cannot transcribe non-English audio at all).
-
-### Changed
-
-- **mcp**: the embedded `AGENT_GUIDE` (served by `webrain_guide`) and
-  `skills/webrain` now document the two facts an operator previously had to read
-  the Rust source to learn: (1) cookie transfer moves **login state, not bot
-  clearance** — `cf_clearance`/DataDome/`_abck` are TLS-fingerprint-bound, so
-  lightpanda and obscura stay on the challenge page even with a byte-identical UA
-  and the full jar (verified on skroutz.gr: 46 s wait, 12/12 pages only in the
-  Chrome that minted the cookie); (2) **engine identity** — obscura
-  `--storage-dir` is a real profile (persists cookies across restarts, lifts
-  per-connection jar isolation), obscura `--user-agent`, lightpanda
-  `--cookie`/`--cookie-jar`, and that `webrain obscura` passes only `--stealth`,
-  so the binary must be launched directly for those flags.
 
 ## [0.12.1] - 2026-10-29
 
@@ -3242,46 +3263,24 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   on real Chrome/obscura, matching `webrain_crawl` (1 / single-target lightpanda
   = sequential, unchanged default).
 
-### Performance
+### Changed
 
-- **core**: the CDP connection is no longer a per-browser bottleneck.
-  `send_cmd_with` held the shared-connection lock for the entire reply wait
-  (30 s, 120 s for screenshot/PDF), so `webrain_batch(concurrency: 8)` issued its
-  eight tabs' commands strictly one at a time and a single slow
-  `Page.captureScreenshot` stalled every other tab. Replies are now routed by one
-  reader task through `HashMap<u64, oneshot::Sender<Value>>`; the lock is held
-  only long enough to allocate an id and write. No API change — `CdpBackend`
-  still clones.
-- **core**: `capture_media` no longer fakes traffic with a 200 ms `eval_js("1")`
-  pump. The shared reader drains events whether or not a command is in flight, so
-  the dwell is a plain sleep, and capture is armed per page session
-  (`net_capture` is now `Option<String>`, not `bool`) so browser-level events can
-  no longer land in a page's buffer.
-- **core**: the network-capture buffer is capped at 2048 URLs and consumed with
-  `std::mem::take`. A video page emits thousands of segment requests; the old
-  uncapped push plus a full clone doubled peak memory for a list that is trimmed
-  to 100 entries when reported.
-- **core**: `VectorStore` normalizes on `add`/`load` instead of on every
-  candidate of every `search` — one `sqrt` per query instead of one per indexed
-  tile. `load` also normalizes, so indexes written before this change stay
-  correct.
-- **core**: `vision index_current_page` copies each tile's base64 PNG once per
-  call instead of once for the embedder and again for
-  `describe_tiles`/`caption_tiles` — the largest transient allocation in the
-  vision path.
-- **mcp**: `tokens.est_tokens` reports the `chars/4` estimate above a 32 KiB
-  reply instead of running exact BPE over it. Screenshot, vision and PDF replies
-  carry megabytes of base64, and cl100k emits roughly one `u32` per four
-  characters — about 1M tokens, hundreds of ms of CPU and a multi-megabyte
-  transient, for a cosmetic number.
-- **mcp**: session eviction at the 64-session cap is now **LRU**
-  (`SessionMeta.used` + `min_by_key`) instead of `map.keys().next()`. HashMap
-  order is hash order, so the old code could drop the caller's own live session
-  while idle ones survived.
-- **core**: one `serp::renumber` helper replaces five hand-written position
-  loops, and the `auto` merge no longer re-runs `filter_relevant` on results every
-  provider had already relevance-filtered (each URL was parsed twice for an
-  identical list).
+- **core**: `auto` no longer renders google/brave unconditionally — the browser
+  tier is skipped once the merge already reached `limit`. The join ran
+  regardless, so a default `limit=10` search that duckduckgo had already filled
+  still paid up to `SERP_BROWSER_CAP` × 2 (~40 s) rendering google and brave for
+  results it was about to discard. Browser engines are also skipped when the
+  Brave API already supplied `brave` for the same reply.
+- **docs**: MCP surface count corrected 16 → **17** across landing, README,
+  tools reference, decision guide, and the embedded `AGENT_GUIDE` —
+  `webrain_eval_in_frame` is a separately-registered tool in `list_tools()`
+  (was mislabeled "hidden executor — not in tools/list").
+- **deps**: bump `base64` 0.22 → 0.23 (workspace dependency).
+- **deps**: bump `lopdf` 0.41.0 → 0.42.0 — unifies with `pdf-inspector`'s
+  transitive lopdf (drops the duplicate 0.41/0.42 PDF stack).
+- **deps**: bump `zip` 2.4.2 → 7.2.0 (engine archive extraction only).
+- **deps**: bump `futures-util` 0.3.33 → 0.3.34.
+- **deps**: bump `async-trait` 0.1.91 → 0.1.92.
 
 ### Fixed
 - **core**: SERP pagination advanced by a **guessed** page size, so deep requests
@@ -3342,28 +3341,49 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   It now documents webrain, including the codebase-memory-mcp 0.11.x path-guard
   workaround this repo requires to be indexed at all.
 
-### Changed
-
-- **core**: `auto` no longer renders google/brave unconditionally — the browser
-  tier is skipped once the merge already reached `limit`. The join ran
-  regardless, so a default `limit=10` search that duckduckgo had already filled
-  still paid up to `SERP_BROWSER_CAP` × 2 (~40 s) rendering google and brave for
-  results it was about to discard. Browser engines are also skipped when the
-  Brave API already supplied `brave` for the same reply.
-- **docs**: MCP surface count corrected 16 → **17** across landing, README,
-  tools reference, decision guide, and the embedded `AGENT_GUIDE` —
-  `webrain_eval_in_frame` is a separately-registered tool in `list_tools()`
-  (was mislabeled "hidden executor — not in tools/list").
-- **deps**: bump `base64` 0.22 → 0.23 (workspace dependency).
-- **deps**: bump `lopdf` 0.41.0 → 0.42.0 — unifies with `pdf-inspector`'s
-  transitive lopdf (drops the duplicate 0.41/0.42 PDF stack).
-- **deps**: bump `zip` 2.4.2 → 7.2.0 (engine archive extraction only).
-- **deps**: bump `futures-util` 0.3.33 → 0.3.34.
-- **deps**: bump `async-trait` 0.1.91 → 0.1.92.
-
-### Fixed
 - **cli**: `webrain vault user` no longer echoes the username back to the
   terminal (CodeQL cleartext-log — a username is half a credential).
+
+### Performance
+
+- **core**: the CDP connection is no longer a per-browser bottleneck.
+  `send_cmd_with` held the shared-connection lock for the entire reply wait
+  (30 s, 120 s for screenshot/PDF), so `webrain_batch(concurrency: 8)` issued its
+  eight tabs' commands strictly one at a time and a single slow
+  `Page.captureScreenshot` stalled every other tab. Replies are now routed by one
+  reader task through `HashMap<u64, oneshot::Sender<Value>>`; the lock is held
+  only long enough to allocate an id and write. No API change — `CdpBackend`
+  still clones.
+- **core**: `capture_media` no longer fakes traffic with a 200 ms `eval_js("1")`
+  pump. The shared reader drains events whether or not a command is in flight, so
+  the dwell is a plain sleep, and capture is armed per page session
+  (`net_capture` is now `Option<String>`, not `bool`) so browser-level events can
+  no longer land in a page's buffer.
+- **core**: the network-capture buffer is capped at 2048 URLs and consumed with
+  `std::mem::take`. A video page emits thousands of segment requests; the old
+  uncapped push plus a full clone doubled peak memory for a list that is trimmed
+  to 100 entries when reported.
+- **core**: `VectorStore` normalizes on `add`/`load` instead of on every
+  candidate of every `search` — one `sqrt` per query instead of one per indexed
+  tile. `load` also normalizes, so indexes written before this change stay
+  correct.
+- **core**: `vision index_current_page` copies each tile's base64 PNG once per
+  call instead of once for the embedder and again for
+  `describe_tiles`/`caption_tiles` — the largest transient allocation in the
+  vision path.
+- **mcp**: `tokens.est_tokens` reports the `chars/4` estimate above a 32 KiB
+  reply instead of running exact BPE over it. Screenshot, vision and PDF replies
+  carry megabytes of base64, and cl100k emits roughly one `u32` per four
+  characters — about 1M tokens, hundreds of ms of CPU and a multi-megabyte
+  transient, for a cosmetic number.
+- **mcp**: session eviction at the 64-session cap is now **LRU**
+  (`SessionMeta.used` + `min_by_key`) instead of `map.keys().next()`. HashMap
+  order is hash order, so the old code could drop the caller's own live session
+  while idle ones survived.
+- **core**: one `serp::renumber` helper replaces five hand-written position
+  loops, and the `auto` merge no longer re-runs `filter_relevant` on results every
+  provider had already relevance-filtered (each URL was parsed twice for an
+  identical list).
 
 ## [0.8.0] - 2026-08-27
 
@@ -3379,75 +3399,37 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   showing which engines contributed results and which were skipped (CLI prints
   `engines: duckduckgo=ok(5), bing=empty(0), ...`).
 
-### Security
+### Changed
 
-- **core**: engine archives are extracted with a zip-slip guard — absolute
-  paths and `..` traversal entries are rejected, and Unix exec bits from the
-  archive are preserved (`chrome`/`whisper-cli` stay executable on Linux).
-- **core**: `lightpanda`/`obscura` CDP servers now bind to `127.0.0.1`
-  (previously `0.0.0.0` exposed unauthenticated browser control on the LAN);
-  Chrome already bound loopback.
-- **core**: the 2captcha submit is now a form POST — the API key and proxy
-  credentials no longer travel in the URL query string (access-log exposure).
-- **core**: vault hardening — `vault.key` is created exclusively with `0600`
-  (no world-readable window, no concurrent-run clobber), unreadable keys/index
-  errors are propagated instead of treated as "empty" (no silent data loss),
-  and `vault.json` writes are atomic (temp + rename).
-- **cli**: `webrain upgrade`/`self-update` now verify the downloaded binary's
-  SHA-256 against the release's `checksums.txt` and fail closed on mismatch.
-- **mcp**: HTTP transport caps the request body (16 MiB) — a huge client
-  `Content-Length` can no longer exhaust memory — and `port` args are validated
-  with `u16::try_from` instead of silently truncating.
-- **installers**: `install.sh`/`install.ps1` download to a temp file, reject
-  empty downloads, and atomically move into place (an interrupted download
-  can no longer destroy a working install).
-- **mcp**: search queries are percent-encoded (space→`+` let `&`/`#`/`%`
-  inject parameters or truncate the query), and the `webrain_download`
-  `isError` flag reflects the result instead of being hardcoded `false`.
-- **cli**: `webrain serp` errors go to stderr with a non-zero exit (scripts
-  can detect failures; `--json` stdout stays pure JSON), launch diagnostics
-  are suppressed under `--json`, the screenshot filename gets sub-second
-  precision, and the PowerShell stop-command escapes `'` in the exe path.
-- **installer/port script**: `port_blocklist.ps1` validates hostnames per RFC
-  1123, guards against clobbering the blocklist on a truncated response
-  (<1000 domains → abort), writes BOM-less UTF-8 (PowerShell 5.1's BOM broke
-  `include_str!` exact matches), and retries with TLS 1.2.
-- **core**: the TOTP base32 decoder rejects seeds with non-zero trailing bits
-  (a malformed key is an error instead of a silently wrong code), and the
-  template filler uses two-phase sentinel replacement so a literal `SEL`/`VAL`
-  in real values can't corrupt the fill.
-- **ci**: third-party GitHub Actions are pinned to full commit SHAs (the
-  mutable `stable`/`v2`/`v3`/`v6` refs could be force-moved); Dependabot keeps
-  the SHAs updated. `dependabot.yml` no longer references the nonexistent
-  `dependencies` label (Dependabot won't create it — the PRs were silently
-  skipped or unlabeled).
-- **installers**: `install.sh`/`install.ps1` verify the downloaded binary
-  against the release's published `checksums.txt` before installing — a
-  tampered release/mirror/MITM fails the check instead of silently installing
-  arbitrary code (release.yml already publishes the checksums).
-
-### Docs
-
-- **docs/landing**: coverflow cards render in the correct order (`--card`
-  indices were inverted), hovering the coverflow pauses the transcript groups
-  too (not just the cards), the no-JS fallback shows the benchmark comparison
-  via a `--fill` custom property, and `bar-fill` reads `var(--fill, 0)`.
-- **docs/landing**: `runPlayground`'s async continuations are generation-
-  guarded (a stale run can no longer reveal a card after reset), the
-  IntersectionObserver callback is idempotent (no double-reveal flash), the
-  no-IO fallback no longer flashes content hidden→shown, and the install-tab
-  demo stops auto-cycling once the user clicks.
-- **docs/landing**: `h1 .w` `will-change` is scoped to `prefers-reduced-
-  motion: no-preference`, and `.try-input` gets a `:focus-visible` ring.
-- **docs/logo-nav**: the injected script appends to `document.head` (with a
-  `documentElement` fallback), the nav bindings react to keyboard (`Tab`
-  counts as a user click so the poll doesn't steal focus), and the loader
-  bails out early once the block is settled.
-- **docs/config**: commitlint's type/scope overlap is documented as deliberate
-  (the `.md`-scope templates and the `docs` type intentionally overlap) so a
-  future reader doesn't "fix" it (#7).
-- **docs/script**: `port_blocklist.ps1` documents its alphabetical crop to the
-  3500-slot blocklist cap (#27).
+- **core/mcp/cli**: clippy `--workspace --all-targets` is clean (zero warnings)
+  — doc-comment list/continuation fixes, `sort_by_key` for engine discovery,
+  explicit `.truncate(false)` on the pre-allocated `.part`, `VectorStore::is_empty`,
+  `#[allow(clippy::too_many_arguments)]` on the two 8-arg public APIs, and the
+  `surface_tests` module moved to the end of `tools.rs` (items-after-test-module).
+- **docker**: base images pinned to concrete minors (`rust:1.85-alpine`,
+  `alpine:3.21`), the build copies only the workspace manifests + crate
+  sources instead of the whole repo, and BuildKit cache mounts reuse the
+  cargo registry + target dirs across builds. (Running as non-root is
+  deferred — Alpine Chromium needs `--no-sandbox`, which `launch.rs` doesn't
+  pass yet.)
+- **cargo**: workspace tokio narrowed from `features = ["full"]` to the
+  feature set the crates actually use (rt, net, time, io-util, sync, macros,
+  process, signal, fs), and the direct `lopdf` pinned `0.44` → `0.41` to match
+  `pdf-inspector`'s transitive version — one PDF stack instead of two (the
+  extraction code already targeted 0.41's API).
+- **ci**: PR-lint runs on `pull_request_target` (fork PRs get a read-only
+  `GITHUB_TOKEN` under `pull_request`, so the commit-status + sticky-comment
+  steps failed with 403 — safe here, no PR head code is executed); the release
+  workflow gains a concurrency group + job timeouts; `ci.yml` gains a docs
+  orphan check (`.github/scripts/check_docs_orphans.py`) that enforces the
+  `.mintignore` promise — every `docs/` `.md`/`.mdx` must be in `docs.json`
+  navigation or listed in `.mintignore`.
+- **cli**: `webrain upgrade` is one careful cross-platform flow — Homebrew /
+  Scoop delegate to the package manager detached (this process exits so it
+  never holds the binary); raw installs self-update in place. Running
+  instances handled per-OS: Windows stops only same-exe siblings (never an
+  unrelated `webrain*` process or a second install), Unix swaps atomically
+  and warns that a still-running server keeps the old version until restart.
 
 ### Fixed
 - **core**: `bm25_filter` document-frequency now counts distinct documents per
@@ -3675,37 +3657,75 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   executor (`spawn_blocking`) — a large page no longer stalls other MCP
   requests on the tokio worker (#99).
 
-### Changed
+### Security
 
-- **core/mcp/cli**: clippy `--workspace --all-targets` is clean (zero warnings)
-  — doc-comment list/continuation fixes, `sort_by_key` for engine discovery,
-  explicit `.truncate(false)` on the pre-allocated `.part`, `VectorStore::is_empty`,
-  `#[allow(clippy::too_many_arguments)]` on the two 8-arg public APIs, and the
-  `surface_tests` module moved to the end of `tools.rs` (items-after-test-module).
-- **docker**: base images pinned to concrete minors (`rust:1.85-alpine`,
-  `alpine:3.21`), the build copies only the workspace manifests + crate
-  sources instead of the whole repo, and BuildKit cache mounts reuse the
-  cargo registry + target dirs across builds. (Running as non-root is
-  deferred — Alpine Chromium needs `--no-sandbox`, which `launch.rs` doesn't
-  pass yet.)
-- **cargo**: workspace tokio narrowed from `features = ["full"]` to the
-  feature set the crates actually use (rt, net, time, io-util, sync, macros,
-  process, signal, fs), and the direct `lopdf` pinned `0.44` → `0.41` to match
-  `pdf-inspector`'s transitive version — one PDF stack instead of two (the
-  extraction code already targeted 0.41's API).
-- **ci**: PR-lint runs on `pull_request_target` (fork PRs get a read-only
-  `GITHUB_TOKEN` under `pull_request`, so the commit-status + sticky-comment
-  steps failed with 403 — safe here, no PR head code is executed); the release
-  workflow gains a concurrency group + job timeouts; `ci.yml` gains a docs
-  orphan check (`.github/scripts/check_docs_orphans.py`) that enforces the
-  `.mintignore` promise — every `docs/` `.md`/`.mdx` must be in `docs.json`
-  navigation or listed in `.mintignore`.
-- **cli**: `webrain upgrade` is one careful cross-platform flow — Homebrew /
-  Scoop delegate to the package manager detached (this process exits so it
-  never holds the binary); raw installs self-update in place. Running
-  instances handled per-OS: Windows stops only same-exe siblings (never an
-  unrelated `webrain*` process or a second install), Unix swaps atomically
-  and warns that a still-running server keeps the old version until restart.
+- **core**: engine archives are extracted with a zip-slip guard — absolute
+  paths and `..` traversal entries are rejected, and Unix exec bits from the
+  archive are preserved (`chrome`/`whisper-cli` stay executable on Linux).
+- **core**: `lightpanda`/`obscura` CDP servers now bind to `127.0.0.1`
+  (previously `0.0.0.0` exposed unauthenticated browser control on the LAN);
+  Chrome already bound loopback.
+- **core**: the 2captcha submit is now a form POST — the API key and proxy
+  credentials no longer travel in the URL query string (access-log exposure).
+- **core**: vault hardening — `vault.key` is created exclusively with `0600`
+  (no world-readable window, no concurrent-run clobber), unreadable keys/index
+  errors are propagated instead of treated as "empty" (no silent data loss),
+  and `vault.json` writes are atomic (temp + rename).
+- **cli**: `webrain upgrade`/`self-update` now verify the downloaded binary's
+  SHA-256 against the release's `checksums.txt` and fail closed on mismatch.
+- **mcp**: HTTP transport caps the request body (16 MiB) — a huge client
+  `Content-Length` can no longer exhaust memory — and `port` args are validated
+  with `u16::try_from` instead of silently truncating.
+- **installers**: `install.sh`/`install.ps1` download to a temp file, reject
+  empty downloads, and atomically move into place (an interrupted download
+  can no longer destroy a working install).
+- **mcp**: search queries are percent-encoded (space→`+` let `&`/`#`/`%`
+  inject parameters or truncate the query), and the `webrain_download`
+  `isError` flag reflects the result instead of being hardcoded `false`.
+- **cli**: `webrain serp` errors go to stderr with a non-zero exit (scripts
+  can detect failures; `--json` stdout stays pure JSON), launch diagnostics
+  are suppressed under `--json`, the screenshot filename gets sub-second
+  precision, and the PowerShell stop-command escapes `'` in the exe path.
+- **installer/port script**: `port_blocklist.ps1` validates hostnames per RFC
+  1123, guards against clobbering the blocklist on a truncated response
+  (<1000 domains → abort), writes BOM-less UTF-8 (PowerShell 5.1's BOM broke
+  `include_str!` exact matches), and retries with TLS 1.2.
+- **core**: the TOTP base32 decoder rejects seeds with non-zero trailing bits
+  (a malformed key is an error instead of a silently wrong code), and the
+  template filler uses two-phase sentinel replacement so a literal `SEL`/`VAL`
+  in real values can't corrupt the fill.
+- **ci**: third-party GitHub Actions are pinned to full commit SHAs (the
+  mutable `stable`/`v2`/`v3`/`v6` refs could be force-moved); Dependabot keeps
+  the SHAs updated. `dependabot.yml` no longer references the nonexistent
+  `dependencies` label (Dependabot won't create it — the PRs were silently
+  skipped or unlabeled).
+- **installers**: `install.sh`/`install.ps1` verify the downloaded binary
+  against the release's published `checksums.txt` before installing — a
+  tampered release/mirror/MITM fails the check instead of silently installing
+  arbitrary code (release.yml already publishes the checksums).
+
+### Docs
+
+- **docs/landing**: coverflow cards render in the correct order (`--card`
+  indices were inverted), hovering the coverflow pauses the transcript groups
+  too (not just the cards), the no-JS fallback shows the benchmark comparison
+  via a `--fill` custom property, and `bar-fill` reads `var(--fill, 0)`.
+- **docs/landing**: `runPlayground`'s async continuations are generation-
+  guarded (a stale run can no longer reveal a card after reset), the
+  IntersectionObserver callback is idempotent (no double-reveal flash), the
+  no-IO fallback no longer flashes content hidden→shown, and the install-tab
+  demo stops auto-cycling once the user clicks.
+- **docs/landing**: `h1 .w` `will-change` is scoped to `prefers-reduced-
+  motion: no-preference`, and `.try-input` gets a `:focus-visible` ring.
+- **docs/logo-nav**: the injected script appends to `document.head` (with a
+  `documentElement` fallback), the nav bindings react to keyboard (`Tab`
+  counts as a user click so the poll doesn't steal focus), and the loader
+  bails out early once the block is settled.
+- **docs/config**: commitlint's type/scope overlap is documented as deliberate
+  (the `.md`-scope templates and the `docs` type intentionally overlap) so a
+  future reader doesn't "fix" it (#7).
+- **docs/script**: `port_blocklist.ps1` documents its alphabetical crop to the
+  3500-slot blocklist cap (#27).
 
 ### Docs (landing + README + guides)
 
@@ -3784,41 +3804,6 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   completed with `IMPROVE_PLAN.md` + `SERP_CLAIMS_REVIEW.md`.
 
 ## [0.7.3] - 2026-08-15
-
-### Fixed
-- **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
-  `String::from_utf8_lossy` instead of ureq's charset-header-driven
-  `read_to_string`, which mis-decoded (latin-1) every non-ASCII char into
-  mojibake (`–` → `ΓÇô`). All engines serve UTF-8, so the lossy decode is
-  always correct; API/JSON consumers now get clean text (a legacy console/pipe
-  may still render UTF-8 as glyph soup — use `chcp 65001` or a UTF-8 terminal).
-- **core**: no more transient Chrome on HTTP serp runs — removed the
-  `chrome --version` UA probe (`chrome_ua_version` + `parse_chrome_ver`) that
-  spawned a visible Chrome window (with crashpad children) on every
-  duckduckgo/bing/auto invocation. UA/sec-ch-ua now use a static, internally
-  consistent `CHROME_UA_VER` constant: the probe's "real" version never matched
-  webrain's engine (Chrome for Testing, not system Chrome), and the HTTP path's
-  rustls TLS is identifiable regardless of UA. Also speeds up every no-browser
-  SERP call (no spawn + 5s watchdog).
-- **core**: serp **brave pagination fixed** — Brave's `offset` is page-indexed
-  (0, 1, 2, ...), not result-indexed: its own Next link is `offset=1` from
-  `offset=0`. The old `offset=page*10` (e.g. `offset=10` for page 1) landed on a
-  nonexistent page that Brave answers with a "no results" page, so `fresh==0`
-  stopped the loop at one page (21 results). Now `offset=page`; verified:
-  `--engine brave --limit 50` returns 50 results across 3 pages (fresh 21+20+15).
-- **core**: serp debug logs name the real engine and brave skips the consent
-  poll — the shared google/brave `browser_search` path hardcoded "google" in
-  the `consent dismiss` / `serp page` trace labels (misleading under
-  `--engine brave`), and it ran `dismiss_google_consent` (≤1.2s poll) on a
-  path that never shows a consent modal. Logs now emit `engine=brave` /
-  `engine=google`, and consent dismissal runs for google only.
-- **mcp**: removed dead `legacy_tool_schemas()` — ~748 lines of
-  `#[allow(dead_code)]` JSON schema data superseded by the consolidated
-  16-tool surface (`tools/list` already returns `list_tools()`; legacy names
-  still dispatch via `map_surface()` → executor arms, which are untouched).
-  Tool surface and dispatch are byte-identical.
-- **core**: serp/engines comments trimmed to `ponytail:`-style one-liners
-  (CHROME_UA_VER, brave offset, consent gate, brave-offset test).
 
 ### Added
 
@@ -4033,6 +4018,41 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
     dead-end guard bound the failure path (51s → ~20s).
   - In-parse href dedupe (nested `div[data-hveid]` previously collapsed the
     result set down to 1); 4× retry absorbs Google's intermittent IP CAPTCHA.
+
+### Fixed
+- **core**: SERP results decode as UTF-8 — `serp_http_get` now reads raw bytes +
+  `String::from_utf8_lossy` instead of ureq's charset-header-driven
+  `read_to_string`, which mis-decoded (latin-1) every non-ASCII char into
+  mojibake (`–` → `ΓÇô`). All engines serve UTF-8, so the lossy decode is
+  always correct; API/JSON consumers now get clean text (a legacy console/pipe
+  may still render UTF-8 as glyph soup — use `chcp 65001` or a UTF-8 terminal).
+- **core**: no more transient Chrome on HTTP serp runs — removed the
+  `chrome --version` UA probe (`chrome_ua_version` + `parse_chrome_ver`) that
+  spawned a visible Chrome window (with crashpad children) on every
+  duckduckgo/bing/auto invocation. UA/sec-ch-ua now use a static, internally
+  consistent `CHROME_UA_VER` constant: the probe's "real" version never matched
+  webrain's engine (Chrome for Testing, not system Chrome), and the HTTP path's
+  rustls TLS is identifiable regardless of UA. Also speeds up every no-browser
+  SERP call (no spawn + 5s watchdog).
+- **core**: serp **brave pagination fixed** — Brave's `offset` is page-indexed
+  (0, 1, 2, ...), not result-indexed: its own Next link is `offset=1` from
+  `offset=0`. The old `offset=page*10` (e.g. `offset=10` for page 1) landed on a
+  nonexistent page that Brave answers with a "no results" page, so `fresh==0`
+  stopped the loop at one page (21 results). Now `offset=page`; verified:
+  `--engine brave --limit 50` returns 50 results across 3 pages (fresh 21+20+15).
+- **core**: serp debug logs name the real engine and brave skips the consent
+  poll — the shared google/brave `browser_search` path hardcoded "google" in
+  the `consent dismiss` / `serp page` trace labels (misleading under
+  `--engine brave`), and it ran `dismiss_google_consent` (≤1.2s poll) on a
+  path that never shows a consent modal. Logs now emit `engine=brave` /
+  `engine=google`, and consent dismissal runs for google only.
+- **mcp**: removed dead `legacy_tool_schemas()` — ~748 lines of
+  `#[allow(dead_code)]` JSON schema data superseded by the consolidated
+  16-tool surface (`tools/list` already returns `list_tools()`; legacy names
+  still dispatch via `map_surface()` → executor arms, which are untouched).
+  Tool surface and dispatch are byte-identical.
+- **core**: serp/engines comments trimmed to `ponytail:`-style one-liners
+  (CHROME_UA_VER, brave offset, consent gate, brave-offset test).
 
 ## [0.6.2] - 2026-08-12
 
@@ -4330,6 +4350,25 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   driver (falls back to playwright + undetected_playwright), real-Chrome-first
   binary detection, and interactive **Turnstile** checkbox click + token wait.
 
+
+- **spider** (`webrain_core::engines::SpiderEngine`): added
+  `with_nav_opts`/`nav_opts` — every page fetch now goes through
+  `navigate_opts` so `NavOpts` (blocked resources, wait, timeout) apply to the
+  crawl path too, matching the single-tool navigate path (the `NavOpts`
+  `wait_timeout_secs` now also caps the Queen-Reader wait loops in `cdp.rs`,
+  with `Debug` derived for the struct).
+- **obscura** (`webrain_core::launch`): `launch_obscura` now passes
+  `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
+  server is the anti-bot posture, not the vanilla build.
+- **obscura install** (`webrain install --engine obscura`): explicit v0.2.0
+  package selection — `--stealth` and `--no-render` map to the exact asset
+  suffix (`-stealth` / `-no-render` / `-no-render-stealth` / plain render)
+  instead of a length-sort heuristic, so the install pulls the build you ask
+  for (e.g. `render+stealth` = screenshots + anti-bot, verified live).
+- **docs**: obscura v0.2.0 renderer notes (README + `AGENT_DECISION_GUIDE`)
+  — v0.1.11 vs v0.2.0 split in the anti-bot/screenshot table, auto asset
+  selection called out.
+
 ### Fixed
 - **tools** (`webrain_download` http + ytdlp engines): the http
   engine derived the output filename from the URL *including its query string*,
@@ -4371,26 +4410,6 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   installs as `yt-dlp_linux` / `yt-dlp_macos` / `yt-dlp_linux_aarch64` (not
   the bare name) — fixes `watch`/`download engine:ytdlp` on Linux/macOS with
   `No such file or directory (os error 2)`.
-
-### Changed
-
-- **spider** (`webrain_core::engines::SpiderEngine`): added
-  `with_nav_opts`/`nav_opts` — every page fetch now goes through
-  `navigate_opts` so `NavOpts` (blocked resources, wait, timeout) apply to the
-  crawl path too, matching the single-tool navigate path (the `NavOpts`
-  `wait_timeout_secs` now also caps the Queen-Reader wait loops in `cdp.rs`,
-  with `Debug` derived for the struct).
-- **obscura** (`webrain_core::launch`): `launch_obscura` now passes
-  `--stealth` by default (BoringSSL stealth build) so the spawned obscura CDP
-  server is the anti-bot posture, not the vanilla build.
-- **obscura install** (`webrain install --engine obscura`): explicit v0.2.0
-  package selection — `--stealth` and `--no-render` map to the exact asset
-  suffix (`-stealth` / `-no-render` / `-no-render-stealth` / plain render)
-  instead of a length-sort heuristic, so the install pulls the build you ask
-  for (e.g. `render+stealth` = screenshots + anti-bot, verified live).
-- **docs**: obscura v0.2.0 renderer notes (README + `AGENT_DECISION_GUIDE`)
-  — v0.1.11 vs v0.2.0 split in the anti-bot/screenshot table, auto asset
-  selection called out.
 
 ## [0.5.0] - 2026-08-06
 
@@ -4615,6 +4634,13 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   attributes (use addEventListener). Lightpanda lacks `Input.*` entirely
   (JS fallback).
 
+### Fixed
+- **cli**: `webrain upgrade` on Windows/Scoop now closes other running webrain
+  instances before `scoop update` — the MCP server kept the exe locked, so
+  Scoop refused to replace the binary and the upgrade never landed. It now
+  stops the siblings (self exits right after spawning scoop) and the update
+  completes.
+
 ### Docs
 
 - **multi-agent delegation doctrine** (enriched from browsemind
@@ -4635,13 +4661,6 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   validate→batch, B Next-only → click loop, C Load More, D infinite scroll, E
   /page/N → construct+batch, F unknown → spider), and an **SPA hydration wait**
   tip (poll DOM growth with webrain_wait before extracting a JS shell).
-
-### Fixed
-- **cli**: `webrain upgrade` on Windows/Scoop now closes other running webrain
-  instances before `scoop update` — the MCP server kept the exe locked, so
-  Scoop refused to replace the binary and the upgrade never landed. It now
-  stops the siblings (self exits right after spawning scoop) and the update
-  completes.
 
 ## [0.3.3] - 2026-08-05
 
@@ -4733,12 +4752,6 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   across machines.
 - **cli**: `webrain -v` / `--version` / `version` prints the version.
 
-### Fixed
-- **core**: `webrain install` failed with "the response body is larger than
-  request limit" — ureq's `read_to_vec()` caps bodies at 10 MB, too small for
-  the Chrome/Obscura engine zips. Now reads via the unlimited
-  `into_with_config()` reader.
-
 ### Changed
 
 - **docs**: rewrote README — removed the table of contents and made it
@@ -4749,6 +4762,12 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   vault/profile/cache volumes).
 - **tools**: deduped the repeated JS→JSON parse chain in `tools.rs` into
   `parse_json_str` / `arr_len` helpers — no behavior change.
+
+### Fixed
+- **core**: `webrain install` failed with "the response body is larger than
+  request limit" — ureq's `read_to_vec()` caps bodies at 10 MB, too small for
+  the Chrome/Obscura engine zips. Now reads via the unlimited
+  `into_with_config()` reader.
 
 ## [0.2.0] - 2026-08-05
 
@@ -5149,6 +5168,17 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   elements and visible text at ~3 KB (`PAGE_TEXT_CAP`), cutting
   `webrain_navigate` responses from ~40 KB to ~9 KB.
 
+### Removed
+- **core**: dead SHA-256 crawl disk cache (`cache_read`/`cache_write`) — zero
+  callers (ponytail-audit).
+- **core**: unused `PageResult.screenshot_b64` field and dead `lib.rs` re-exports
+  (`EmbedInput`, `VectorStore`).
+- **core**: unused in-process `obscura` git dependency + `obscura` feature —
+  replaced by the `webrain install --engine obscura` binary path.
+- **tools**: standalone `webrain_ytdlp` tool — folded into `webrain_download`
+  (`engine=ytdlp`).
+- **scripts**: one-off `scripts/merge_task2.ps1` data migration.
+
 ### Fixed
   `0` when the arg was absent → `Some(0)` → deadline = now → every spider crawl
   stopped before the first page (returned 0 pages). One guard in the shared
@@ -5192,14 +5222,3 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   `.header()` for ureq 3 (unblocked the workspace build).
 - **core**: regex `url` pattern unterminated-char-literal build error.
 - **core**: open-tab double-load (tab opened blank, then navigated once).
-
-### Removed
-- **core**: dead SHA-256 crawl disk cache (`cache_read`/`cache_write`) — zero
-  callers (ponytail-audit).
-- **core**: unused `PageResult.screenshot_b64` field and dead `lib.rs` re-exports
-  (`EmbedInput`, `VectorStore`).
-- **core**: unused in-process `obscura` git dependency + `obscura` feature —
-  replaced by the `webrain install --engine obscura` binary path.
-- **tools**: standalone `webrain_ytdlp` tool — folded into `webrain_download`
-  (`engine=ytdlp`).
-- **scripts**: one-off `scripts/merge_task2.ps1` data migration.
