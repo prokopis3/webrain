@@ -1891,6 +1891,28 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        other => match family_of(other) {
+            Some("page") => call_page(backend, name, args).await,
+            Some("session") => call_session(backend, name, args).await,
+            Some("crawl") => call_crawl(backend, name, args).await,
+            Some("extract") => call_extract(backend, name, args).await,
+            Some("interact") => call_interact(backend, name, args).await,
+            Some("read") => call_read(backend, name, args).await,
+            Some("batch") => call_batch(backend, name, args).await,
+            Some("media") => call_media(backend, name, args).await,
+            Some("toolbox") => call_toolbox(backend, name, args).await,
+            _ => json!({"error": format!("Unknown tool: {name}")}),
+        },
+    }
+}
+
+/// Which family function owns a tool name.
+///
+/// Kept as data rather than as literal patterns inside `call_tool`, because a
+/// 61-arm dispatcher has one silent failure mode: a tool that is advertised
+/// and dispatched nowhere. `every_advertised_tool_has_a_family` holds that.
+fn family_of(name: &str) -> Option<&'static str> {
+    Some(match name {
         "webrain_navigate"
         | "webrain_eval"
         | "webrain_screenshot"
@@ -1901,11 +1923,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         | "webrain_drag"
         | "webrain_eval_in_frame"
         | "webrain_scroll"
-        | "webrain_get_html" => call_page(backend, name, args).await,
-        "webrain_cookies" | "webrain_setcookies" => call_session(backend, name, args).await,
-        "webrain_spider" | "webrain_sitemap" | "webrain_snapshot" => {
-            call_crawl(backend, name, args).await
-        }
+        | "webrain_get_html" => "page",
+        "webrain_cookies" | "webrain_setcookies" => "session",
+        "webrain_spider" | "webrain_sitemap" | "webrain_snapshot" => "crawl",
         "webrain_pixel"
         | "webrain_extract_json"
         | "webrain_extract_regex"
@@ -1917,20 +1937,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         | "webrain_bm25"
         | "webrain_fit"
         | "webrain_flatten"
-        | "webrain_annotate" => call_extract(backend, name, args).await,
+        | "webrain_annotate" => "extract",
         "webrain_select" | "webrain_hover" | "webrain_check" | "webrain_dialog"
-        | "webrain_wait" | "webrain_upload" => call_interact(backend, name, args).await,
+        | "webrain_wait" | "webrain_upload" => "interact",
         "webrain_validate_urls"
         | "webrain_pdf"
         | "webrain_tab"
         | "webrain_page_info"
         | "webrain_a11y"
-        | "webrain_semantic_tree" => call_read(backend, name, args).await,
-        "webrain_batch" => call_batch(backend, name, args).await,
+        | "webrain_semantic_tree" => "read",
+        "webrain_batch" => "batch",
         "webrain_download" | "webrain_watch" | "webrain_search" | "webrain_serp"
-        | "webrain_nav" | "webrain_press" | "webrain_get_images" | "webrain_assets" => {
-            call_media(backend, name, args).await
-        }
+        | "webrain_nav" | "webrain_press" | "webrain_get_images" | "webrain_assets" => "media",
         "webrain_media"
         | "webrain_console"
         | "webrain_dismiss_overlays"
@@ -1940,9 +1958,9 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         | "webrain_clean"
         | "webrain_profiles"
         | "webrain_captcha"
-        | "webrain_login" => call_toolbox(backend, name, args).await,
-        _ => json!({"error": format!("Unknown tool: {name}")}),
-    }
+        | "webrain_login" => "toolbox",
+        _ => return None,
+    })
 }
 
 async fn call_page(backend: &CdpBackend, name: &str, args: &Value) -> Value {
@@ -4288,5 +4306,58 @@ mod surface_tests {
         assert!(map_surface("webrain_navigate", &json!({})).is_none());
         assert!(map_surface("webrain_guide", &json!({})).is_none());
         assert!(map_surface("webrain_observe", &json!({})).is_none()); // missing selector
+    }
+
+    /// Every tool the server advertises either reaches a family or is answered
+    /// earlier by `lib.rs`. The one failure a dispatcher this wide can hide is a
+    /// name that is listed, documented and dead — `family_of` is the table that
+    /// says which family owns what, so drift shows up here and nowhere else.
+    #[test]
+    fn every_advertised_tool_is_dispatched_somewhere() {
+        // Answered before `call_tool` is reached: the session and pdf ops that
+        // `lib.rs` intercepts on their folded names, the two arms still in
+        // `call_tool` itself, and the intent umbrellas, which need a selector to
+        // fold and are refused by `map_surface` when called bare.
+        const HANDLED_EARLIER: &[&str] = &[
+            "webrain_guide",
+            "webrain_add_init_script",
+            "webrain_stats",
+            "webrain_observe",
+            "webrain_interact",
+            "webrain_extract",
+            "webrain_crawl",
+            "webrain_pdf",
+            "webrain_session",
+            "webrain_vision",
+            "webrain_scrape",
+            "webrain_open_session",
+            "webrain_close_session",
+            "webrain_list_sessions",
+            "webrain_pdf_extract",
+            "webrain_pdf_render",
+            "webrain_pdf_images",
+            "webrain_save_state",
+            "webrain_restore_state",
+            "webrain_close_launch",
+        ];
+        let mut orphans = Vec::new();
+        for t in list_tools() {
+            let Some(advertised) = t["name"].as_str() else {
+                continue;
+            };
+            let folded = map_surface(advertised, &json!({}))
+                .map(|(n, _)| n)
+                .unwrap_or(advertised);
+            if HANDLED_EARLIER.contains(&folded) {
+                continue;
+            }
+            if family_of(folded).is_none() {
+                orphans.push(advertised.to_string());
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "advertised but dispatched nowhere: {orphans:?}"
+        );
     }
 }
