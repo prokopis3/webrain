@@ -3676,9 +3676,10 @@
   async function createSkill() {
     await createIn("/skills/new", skillNew, (t) => (skillNew = t));
   }
-  // Different promise from the other two: the config is persisted by the runtime,
-  // and whether this session sees the tools depends on its reload, so the note
-  // reports what came back instead of assuming.
+  // Different promise from the other two: saving the config and having the tools
+  // in *this* session are two things, so the note repeats whichever came back.
+  // The server starts it in the live session (`startServer`), which is why the
+  // first sentence is usually true — and it is still read from `attached`.
   async function createMcp() {
     try {
       const r = await fetch("/mcp/new", {
@@ -3690,11 +3691,14 @@
       if (j.error) return toast(`/mcp/new: ${j.error}`, "err");
       mcpNew = { ...mcpNew, name: "" };
       await loadManage();
-      // Measured: `mcp.config.reload` answers ok and the running session still
-      // does not attach the server, so the note never promises this session.
-      toast(
-        `${j.added} saved to the user config — a running session keeps what it attached, so it arrives on the next start`,
-      );
+      if (j.attached) {
+        toast(`${j.added} saved and running — its tools are available now`);
+      } else {
+        toast(
+          `${j.added} saved${j.attach_error ? `, but it did not start: ${j.attach_error}` : ""} — it arrives on the next start`,
+          "err",
+        );
+      }
     } catch {
       toast("/mcp/new: the server is not reachable", "err");
     }

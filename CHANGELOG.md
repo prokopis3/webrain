@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `chat`: **three capabilities the page could describe but not use, closed against
+- `chat`: **four capabilities the page could describe but not use, closed against
   `copilot-sdk` 2.0.1** — the open rows in `docs/CHAT_CAPABILITIES.md`:
   - **An agent picker that switches a live session.** `session.agent.select` moves
     the selection without a rebuild, so `GET /agents` now carries `current`,
@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reports `{removed, reloaded, attached}` — `attached` being the honest answer
     to "is it gone from *this* session", since a running session keeps what it
     attached.
+  - **Attaching a new MCP server to the session that is already running.**
+    `mcp.config.reload` re-reads the config file and attaches nothing, which is
+    why the page used to promise the server "on the next start". The call that
+    does the job is `session.mcp.startServer` **with no config**: it starts the
+    already-registered server in this session. `/mcp/new` now makes both calls and
+    reports `{added, reloaded, attached, status}`, with `attached` read from the
+    session's own list. Measured on a session that had never seen the server:
+    `GET /mcp` went from two servers to three, `webrain-self status=connected`, no
+    restart.
+    `attached` counts only a **connected** server: its first version checked
+    presence in the list, so a command that could not spawn came back
+    `attached: true` beside `attach_error` — a failure that reads as success.
+    Measured both ways: `status=connected` for a real server, and
+    `attached:false, status:"failed", attach_error:"… program not found"` for a
+    bogus command.
   - `POST /permission` now takes `always` so the page can send the standing grant
     to the side that knows whether it could be written.
 - `cli`: **`webrain read <url>` — a page as markdown, over HTTP, with no browser

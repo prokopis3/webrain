@@ -58,6 +58,7 @@ use copilot_sdk::rpc::{
     McpConfigRemoveRequest,
     McpDisableRequest,
     McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
+    McpStartServerRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
     NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
     QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
@@ -2041,10 +2042,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // Persist an MCP server into the runtime's **own** user configuration —
-        // `mcp.config.add`, not the internal `reloadWithConfig` shape. A running
-        // session keeps what it attached, so the reply says whether the reload
-        // it asks for afterwards actually took; the page reloads its list either
-        // way instead of claiming a tool that is not there yet.
+        // `mcp.config.add`, not the internal `reloadWithConfig` shape — and then
+        // start it in the session that is running right now.
+        //
+        // Two calls because they do two jobs: `reload` re-reads the config file,
+        // while `startServer` with **no config** starts an already-registered
+        // server *in this session*. The reply reports both, and `attached` comes
+        // from the session's own `list()` — the config write and the reload are
+        // not evidence that a turn can use it.
         ("POST", "/mcp/new") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let name = v["name"].as_str().unwrap_or_default().trim().to_string();
@@ -2067,7 +2072,40 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 Err(e) => json!({ "error": e.to_string() }),
                 Ok(()) => {
                     let reloaded = mcp.reload().await.is_ok();
-                    json!({ "added": name, "reloaded": reloaded })
+                    // No config: start what was just registered. A failure here is
+                    // reported and not folded into `attached`, because "saved but
+                    // could not start" is a different thing to fix than "not saved".
+                    let started = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .start_server(McpStartServerRequest {
+                            config: None,
+                            expected_installation_id: None,
+                            server_name: name.clone(),
+                        })
+                        .await;
+                    // Both facts from the same list: presence says the session
+                    // knows it, `status` says it can be used. Reporting only the
+                    // first made a server that failed to spawn come back
+                    // `attached: true` next to `attach_error` — the shape of a
+                    // failure that reads as success.
+                    let mut attached = false;
+                    let mut status = String::from("not_configured");
+                    if let Ok(l) = live.session.rpc().mcp().list().await
+                        && let Some(s) = l.servers.iter().find(|s| s.name == name)
+                    {
+                        status = serde_json::to_value(&s.status)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or(status);
+                        attached = status == "connected";
+                    }
+                    let mut out = json!({ "added": name, "reloaded": reloaded, "attached": attached, "status": status });
+                    if let Err(e) = started {
+                        out["attach_error"] = json!(e.to_string());
+                    }
+                    out
                 }
             };
             let code = if out.get("error").is_some() { 500 } else { 200 };
