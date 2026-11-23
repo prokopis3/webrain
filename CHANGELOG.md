@@ -80,6 +80,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not a broken renderer.
 
 ### Added
+- `chat`: **the composer's menus are the session's, not a hard-coded sample.** `GET
+  /catalog` asks the runtime for its own built-in descriptors
+  (`session.tools.getBuiltinDescriptors`) instead of assuming four names, so `#` lists
+  what this session can actually call — `web_fetch`, `grep`, `glob`, `view`,
+  `apply_patch`, `update_todo`, `tool_search_tool`, the agent tools, the PowerShell
+  pair. Measured on two live sessions: **32 and 33 built-ins** alongside 42 commands,
+  43 tools and 8 skills, with **0 duplicate names**, because every row now enters
+  through one `seen` set — a name reachable two ways is offered once, whatever its
+  sigil. Other configured MCP servers' tools are enumerated too (only this binary's
+  own server was ever listed), and an agent tool stays hidden while delegation is off
+  because `tool_filter` withholds it.
+- `chat`: **session info, behind the context ring.** The right rail's context bar is
+  now a button: a 0–100 ring with `used / limit`, opening the runtime's own six
+  buckets — `system prompt`, `instructions`, `tool definitions`, `messages`, `reserved
+  for reply`, `free` — straight from `metadata.getContextAttribution`, so a category
+  the page invented cannot appear. Measured on a mock turn: 483 + 2,426 + 31 + 6,400 +
+  118,660 against a 128k limit, ring at 3.18/100. A **compact history** button runs the
+  runtime's own `/compact` through `POST /command`, asks first, and is disabled while a
+  turn is live — compaction rewrites the history that turn is reading. Verified:
+  `compacting history (manual)…` → `history compacted — 1,386 tokens, 3 messages
+  removed`.
 - `chat`: **a picture in an answer is a picture, not a link.** Two sentences a model
   actually writes now render — a link whose target is an image (`[…/x.jpg](https://…
   /x.jpg)`), and inline code naming a file this machine already has

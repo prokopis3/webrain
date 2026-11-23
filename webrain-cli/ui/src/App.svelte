@@ -403,6 +403,64 @@
         : "",
   );
   let ctx = $state(null); // {used, limit} from session.usage_info
+  // Session info: the same accounting the runtime's own `/context` prints, asked
+  // for when the panel opens rather than per frame. The six categories are the
+  // runtime's normalisation — `free` and the reserved buffer describe window
+  // capacity, not occupancy, so they never add up to the total on their own.
+  let ctxInfo = $state(null);
+  let ctxOpen = $state(false);
+  let ctxBusy = $state(false);
+  const ctxPct = $derived(ctx?.limit ? Math.min(100, (ctx.used / ctx.limit) * 100) : 0);
+  // 230.5K / 1M, the way a window is spoken about.
+  const toks = (n) =>
+    n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+
+  async function openCtx() {
+    ctxOpen = !ctxOpen;
+    if (!ctxOpen) return;
+    ctxInfo = null;
+    try {
+      ctxInfo = await (await fetch("/context")).json();
+    } catch {
+      ctxInfo = { error: "the server is not reachable" };
+    }
+  }
+
+  const ctxCats = $derived.by(() => {
+    const c = ctxInfo?.attribution?.contextAttribution?.categories;
+    if (!c) return [];
+    return [
+      ["system prompt", c.systemPrompt || 0],
+      ["instructions", c.customInstructions || 0],
+      ["tool definitions", (c.systemTools || 0) + (c.mcpTools || 0)],
+      ["messages", c.messages || 0],
+      ["reserved for reply", c.buffer || 0],
+      ["free", c.freeSpace || 0],
+    ].filter(([, n]) => n > 0);
+  });
+
+  // Compaction rewrites the conversation it runs on, so it asks first and stays
+  // off while a turn is live: the runtime is reading the history it would rewrite.
+  async function compactNow() {
+    if (ctxBusy || busy) return;
+    if (!confirm("compact this history now? the transcript becomes a summary.")) return;
+    ctxBusy = true;
+    try {
+      const j = await (
+        await fetch("/command", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "compact" }),
+        })
+      ).json();
+      push({ kind: j.error ? "err" : "note", text: `compact: ${j.text || j.error || "done"}` });
+      ctxInfo = await (await fetch("/context")).json();
+    } catch {
+      push({ kind: "err", text: "compact: the server is not reachable" });
+    } finally {
+      ctxBusy = false;
+    }
+  }
   let adding = $state(false);
   let fresh = $state({ id: "", base_url: "", model: "", key_env: "WEBRAIN_CHAT_API_KEY" });
   // A key typed into the model dialog. It goes to the vault, never to a store.
@@ -5212,23 +5270,49 @@
     {/if}
 
     <!-- Context budget, straight from `session.usage_info`: the one number that
-         says whether this conversation is about to be compacted. -->
+         says whether this conversation is about to be compacted. The ring is the
+         button; the breakdown behind it is the runtime's own accounting, because
+         a category this page invented would be a lie. -->
     {#if ctx?.limit}
       <div class="side-h">context</div>
-      <div
-        class="ctx"
-        role="meter"
-        aria-valuenow={ctx.used}
-        aria-valuemin="0"
-        aria-valuemax={ctx.limit}
-        aria-label="context used"
+      <button
+        class="ctxb"
+        onclick={openCtx}
+        aria-expanded={ctxOpen}
+        title="session info — where the context window goes"
       >
-        <i style="width: {Math.min(100, (ctx.used / ctx.limit) * 100).toFixed(1)}%"></i>
-      </div>
-      <p class="ctx-n">
-        {((ctx.used / ctx.limit) * 100).toFixed(0)}% · {(ctx.used / 1000).toFixed(1)}k of
-        {(ctx.limit / 1000).toFixed(0)}k
-      </p>
+        <svg class="ring" viewBox="0 0 36 36" aria-hidden="true">
+          <circle cx="18" cy="18" r="15.5" pathLength="100" />
+          <circle cx="18" cy="18" r="15.5" pathLength="100" style="stroke-dasharray: {ctxPct} 100" />
+        </svg>
+        <span class="ctxb-n">
+          <b>{ctxPct.toFixed(0)}%</b>
+          <small>{toks(ctx.used)} / {toks(ctx.limit)}</small>
+        </span>
+      </button>
+      {#if ctxOpen}
+        <div class="ctxpop">
+          {#if !ctxInfo}
+            <p class="none">reading the runtime's accounting…</p>
+          {:else if ctxInfo.error}
+            <p class="none">{ctxInfo.error}</p>
+          {:else}
+            <dl class="readout">
+              {#each ctxCats as [label, n] (label)}
+                <dt>{label}</dt><dd>{n}</dd>
+              {/each}
+            </dl>
+            {#if ctxInfo.promptTokenLimit}
+              <p class="ctx-n">
+                {toks(ctxInfo.totalTokens)} of {toks(ctxInfo.promptTokenLimit)} tokens
+              </p>
+            {/if}
+          {/if}
+          <button class="ctxcompact" onclick={compactNow} disabled={ctxBusy || busy}>
+            {ctxBusy ? "compacting…" : "compact history"}
+          </button>
+        </div>
+      {/if}
       <!-- The model's advertised window and the budget the runtime actually sends
            are two different numbers: the runtime compacts at its own, and a 1M
            model behind a 128k session budget will never see 1M here. Say both. -->
@@ -7558,12 +7642,24 @@
   .askcard .args :global(dd) { font-family: var(--mono); }
   .askcard .row { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
 
-  /* Context meter — the only gauge in the rail, and the only number that says a
-     conversation is about to be compacted. */
-  .ctx { height: 3px; border-radius: var(--shape-full); overflow: hidden;
-    background: var(--surface-container-highest); }
-  .ctx i { display: block; height: 100%; border-radius: inherit; background: var(--primary);
-    transition: width var(--motion-medium) var(--ease); }
+  /* Session info: a ring that opens. The bar it replaces said one number; the
+     panel behind the ring says which category is eating the window. */
+  .ctxb { display: flex; align-items: center; gap: var(--s2); width: 100%;
+    padding: 0; background: none; border: 0; color: inherit; font: inherit;
+    text-align: left; cursor: pointer; }
+  .ring { width: 2.4rem; height: 2.4rem; flex: 0 0 auto; transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 3.4; stroke: var(--surface-container-highest); }
+  .ring circle + circle { stroke: var(--primary); stroke-linecap: round;
+    transition: stroke-dasharray var(--motion-medium) var(--ease); }
+  .ctxb-n { display: grid; gap: 1px; min-width: 0; }
+  .ctxb-n b { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ctxb-n small { color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .ctxpop { margin-top: var(--s2); padding: var(--s2); border-radius: var(--shape-sm);
+    background: var(--surface-container-high); }
+  .ctxcompact { width: 100%; margin-top: var(--s2); padding: var(--s1) var(--s2);
+    border-radius: var(--shape-full); background: var(--surface-container-highest);
+    color: var(--on-surface); font-family: var(--mono); font-size: 10.5px; }
+  .ctxcompact:disabled { opacity: 0.5; }
   .ctx-n { margin: var(--s1) 0 0; color: var(--faint); font-size: 10px;
     font-variant-numeric: tabular-nums; }
 

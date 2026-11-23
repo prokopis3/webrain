@@ -64,6 +64,7 @@ use copilot_sdk::rpc::{
     NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
     QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
     SlashCommandInvocationResult, TasksSendMessageRequest, ToolsExecuteRequest,
+    ToolsGetBuiltinDescriptorsRequest,
     UIEphemeralQueryRequest, UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
 };
 use copilot_sdk::session_events::{
@@ -3796,33 +3797,86 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     "hint": "installed by this binary, path-fenced",
                 }));
             }
-            // The four the session actually allows. `task` and `task_complete`
-            // were missing here, so delegation had no checkbox at all and the
-            // only place to switch it was the Runtime tab.
-            let mut builtins = vec!["ask_user", "skill", "task", "task_complete"];
-            // `tool_filter` serves these with delegation on, so the checklist
-            // has to agree or the dialog shows a group it cannot tick.
-            let agents_on = state.settings.lock().await.allow_agents;
-            if agents_on {
-                builtins.extend(["read_agent", "write_agent", "list_agents"]);
+            // Every name already on the list. The menu is one flat list and a
+            // name typed into the draft means the same thing whatever its sigil,
+            // so a row is offered once — first kind to claim the name wins.
+            let mut seen: std::collections::HashSet<String> = items
+                .iter()
+                .filter_map(|i| i["name"].as_str().map(str::to_owned))
+                .collect();
+            // Every other configured MCP server. Only this binary's own server
+            // was ever listed, so a second one's tools existed for the model and
+            // in no menu at all.
+            if let Ok(list) = live.session.rpc().mcp().list().await {
+                for s in list.servers {
+                    if s.name == "webrain" {
+                        continue;
+                    }
+                    let Ok(t) = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .list_tools(McpListToolsRequest {
+                            server_name: s.name.clone(),
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    for tool in t.tools {
+                        let v = serde_json::to_value(&tool).unwrap_or(Value::Null);
+                        let name = v["name"].as_str().unwrap_or_default().to_string();
+                        if name.is_empty() || !seen.insert(name.clone()) {
+                            continue;
+                        }
+                        let hint = v["description"]
+                            .as_str()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| format!("{} · {d}", s.name))
+                            .unwrap_or_else(|| s.name.clone());
+                        items.push(json!({"name": name, "kind": "tool", "hint": hint}));
+                    }
+                }
             }
-            for name in builtins {
-                items.push(
-                    json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}),
-                );
+            // The runtime's built-ins, asked for rather than assumed. The four
+            // names this used to hard-code were only a sample: everything else
+            // (`runSubagent`, the todo list, the file tools) was given to the
+            // model and offered in no menu. The descriptors are the set this
+            // session is actually handed.
+            let agents_on = state.settings.lock().await.allow_agents;
+            let descriptors = live
+                .session
+                .rpc()
+                .tools()
+                .get_builtin_descriptors(ToolsGetBuiltinDescriptorsRequest::default())
+                .await;
+            let mut builtins: Vec<(String, String)> = match descriptors {
+                Ok(r) => r.tools.into_iter().map(|t| (t.name, t.description)).collect(),
+                // A failed call must not empty the group: no rows in `#` reads as
+                // "this build has no built-ins", which is not what happened.
+                Err(_) => ["ask_user", "skill", "task", "task_complete"]
+                    .iter()
+                    .map(|n| ((*n).to_string(), "installed by the runtime".to_string()))
+                    .collect(),
+            };
+            // `tool_filter` withholds these when delegation is off, so offering
+            // them would be offering a call the session refuses.
+            if !agents_on {
+                builtins.retain(|(n, _)| !n.contains("agent"));
+            }
+            for (name, hint) in builtins {
+                if seen.insert(name.clone()) {
+                    items.push(json!({"name": name, "kind": "builtin", "hint": hint}));
+                }
             }
             // The runtime's own slash commands. `session.commands.list` is the
             // namespace that lists them — the page's menu was ours alone, so
             // `/compact` and friends existed and were never offered. Marked
             // `runtime` so `pick` can tell one from a command this page handles
             // itself without keeping a second copy of the names.
-            let ours: std::collections::HashSet<String> = items
-                .iter()
-                .filter_map(|i| i["name"].as_str().map(str::to_owned))
-                .collect();
             if let Ok(list) = live.session.rpc().commands().list().await {
                 for c in list.commands {
-                    if ours.contains(&c.name) {
+                    if !seen.insert(c.name.clone()) {
                         continue;
                     }
                     let exp = if c.experimental.unwrap_or(false) {
