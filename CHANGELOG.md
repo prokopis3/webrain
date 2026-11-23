@@ -22,6 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   button reads `send` (disabled), the hint names the owner, there are no mini
   buttons and the dot stays on the owning row; back on the owner it reads `stop`
   again.
+- `chat`: **the composer's state belongs to the thread too.** Four more places treated
+  page state as if it were the conversation's, found by auditing for the same shape:
+  - **The draft.** Text typed in one chat followed you into another's send box, one
+    Enter from being posted to the wrong thread. `swapDraft` keeps a map of
+    conversation → text and swaps it on all three thread changes (`openConvo`,
+    `backToLive`, `newChat`). Measured: "alpha" typed in one thread, a second thread
+    opens empty, "beta" typed there, back to the first reads "alpha" again.
+  - **The queue of prompts behind a running turn.** Drawn above the composer while
+    reading history, where its "send now"/"drop" act on a turn that thread does not
+    own. Now only in the live pane.
+  - **The cost panel.** `stats` preferred `turnUse` unconditionally, so opening an old
+    thread showed the last live turn's tokens and cost instead of that thread's own
+    ledger row.
+  - **Attachments.** An upload's URL was built from `current` at *send* time, but the
+    server stores a file under the conversation that was live when it arrived — a
+    switch between upload and send pointed at a directory the file was never in. The
+    upload now records its own conversation and the URL is built from that.
 - `chat`: **a refresh or a second tab during a turn no longer loses the history.**
   `seedLive` used to bail on `busy` and nothing retried it, so a tab opened (or
   Ctrl+R'd) while a turn was running opened on the hero, or — once the turn ended

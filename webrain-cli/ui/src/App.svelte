@@ -141,6 +141,14 @@
   let turnUse = $state(null);
   // Restored, because an accidental reload mid-prompt should not cost the prompt.
   let draft = $state(recall("draft", ""));
+  // What was typed where. The draft is part of the conversation it was written
+  // in: carrying it across a thread switch put one chat's text in another's send
+  // box — one Enter away from being posted to the wrong thread.
+  const drafts = new Map();
+  function swapDraft(next) {
+    drafts.set(current, draft);
+    draft = drafts.get(next) ?? "";
+  }
   let copiedId = $state(-1);
   let marksEl = $state(null); // the tint layer behind the composer
   let pinned = $state(true);
@@ -666,7 +674,9 @@
     // cost and the counts appeared to jump backwards as the turn progressed.
     // Cost is computed from the provider's published per-token price when there
     // is one; the SDK's own `nano_aiu` is 0 on BYOK turns, where the key pays.
-    if (turnUse) {
+    // `!past` because a turn is not the property of a thread you are only
+    // reading: the panel shows that conversation's own ledger row instead.
+    if (turnUse && !past) {
       const speed =
         turnUse.duration > 0 ? (turnUse.outputTokens / (turnUse.duration / 1000)).toFixed(1) : "—";
       return {
@@ -1682,6 +1692,7 @@
   function backToLive() {
     past = null;
     viewing = "";
+    swapDraft(current);
     restoreSetup(current);
     route(current);
   }
@@ -1706,6 +1717,7 @@
     } catch {
       return push({ kind: "note", text: "new chat: the server is not reachable" });
     }
+    swapDraft(j.current || "");
     current = j.current || "";
     seededFor = current;
     rowsFor = current;
@@ -1878,6 +1890,7 @@
     // with it. Left behind, `current` names the thread you were in before, and
     // every frame the turn streams is dropped as "another conversation's" while
     // the transcript save lands on the wrong id.
+    swapDraft(id);
     current = id;
     seededFor = id;
     turns = pastTurns;
@@ -2279,7 +2292,9 @@
     const files = attached.map((a) => ({
       name: a.name,
       bytes: a.bytes,
-      src: `/attach/${encodeURIComponent(current)}/${encodeURIComponent(baseOf(a.path))}`,
+      // The conversation the upload belongs to, not the one on screen now: the
+      // server stores a file under the convo that was live when it arrived.
+      src: `/attach/${encodeURIComponent(a.convo || current)}/${encodeURIComponent(baseOf(a.path))}`,
     }));
     for (const a of attached) if (a.url) URL.revokeObjectURL(a.url);
     attached = [];
@@ -2877,7 +2892,11 @@
         // message is sent it points at the server's own copy instead, so nothing
         // has to stay alive in this tab for the picture to survive a reload.
         const url = kindOf(j.name) === "k-img" ? URL.createObjectURL(f) : "";
-        attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url }];
+        // The convo it was uploaded under, not whichever thread is on screen when
+        // it is finally sent: `/attach/<convo>/<name>` is the server's own path,
+        // so building it from `current` at send time pointed at a directory the
+        // file was never in — a broken image and a wrong-conversation prompt.
+        attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url, convo: current }];
       } catch (e) {
         push({ kind: "err", text: `${f.name}: ${e.message}` });
       }
@@ -2901,7 +2920,7 @@
     const n = ++attachSeq;
     try {
       const j = await upload(new Blob([text], { type: "text/markdown" }), `pasted-${n}.md`);
-      attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url: "" }];
+      attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url: "", convo: current }];
     } catch (err) {
       push({ kind: "err", text: `paste: ${err.message}` });
     }
@@ -5295,7 +5314,7 @@
   <!-- What is waiting behind the turn in flight. The composer can enqueue
        (Alt+Enter), so a queued prompt that is invisible is indistinguishable
        from a message that was dropped. -->
-  {#if queued.length}
+  {#if queued.length && !past}
     <div class="qrail">
       <span class="eyebrow">queued · {queued.length}</span>
       {#each queued as q (q.id)}

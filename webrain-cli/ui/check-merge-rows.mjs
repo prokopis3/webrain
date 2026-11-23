@@ -65,4 +65,18 @@ const claim = src.indexOf("    rowsFor = current;", src.indexOf("async function 
 const merge = src.indexOf("missingHead(disk, items", src.indexOf("async function seedLive("));
 assert.ok(claim > merge, "seedLive claims the conversation before the pane is whole");
 
-console.log("merge-rows: 10 assertions passed");
+// A conversation is a session, so the state that belongs to one must not follow
+// you into another: the draft you were typing, the runtime's queue of prompts
+// behind the running turn, the cost panel's "this turn", and the directory an
+// attachment was uploaded under. Each of these was on the page, not the thread.
+assert.ok(src.includes("function swapDraft(next) {"), "no per-conversation draft");
+const swaps = (src.match(/swapDraft\(/g) || []).length;
+assert.equal(swaps, 4, "swapDraft must be defined once and called from all three thread changes");
+assert.ok(src.includes("{#if queued.length && !past}"), "the queue is shown while reading another thread");
+assert.ok(src.includes("if (turnUse && !past) {"), "the cost panel shows the live turn while reading another");
+assert.ok(
+  src.includes("encodeURIComponent(a.convo || current)"),
+  "an attachment is addressed by the thread on screen, not the one it was uploaded under",
+);
+
+console.log("merge-rows: 16 assertions passed");
