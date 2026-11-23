@@ -29,7 +29,8 @@ not exist in the file it printed.
 | `McpServerStatus` (`connected` / `failed` / `needs-auth` / `pending` / `disabled` / `stopped` / `not_configured`) | Why `attached` must compare `status == "connected"`: a spawn failure still appears in `list()`, so a presence check reports success |
 | `session.agent.select` / `deselect` / `agent.get_current` | Selection moves on a **live** session, so switching agents needs no restart path — and `get_current` is what the reply must read back, not the request's name |
 | `SessionInferenceOptions::with_enable_citations` + `AssistantMessageData.citations: Option<Citations>` | The typed payload exists (`Citations { sources[], spans[] }`), which is what makes the toggle possible instead of "markers nothing can parse" |
-| `session.history.compact` / `compact_with_params` / `truncate` / `list_rewind_points` (`HistoryCompactResult { tokens_removed, messages_removed, summary_content, context_window, success }`) | The `history()` namespace is both the rewind surface the page uses and the compaction surface it never touches. Compaction already reaches us two ways — the `compact_at` session threshold and the runtime's own commands served into the composer's `/` menu (`commands.list`) — so a third, route-shaped trigger was declined: the typed result would only restate what the `session.compaction_*` events already say |
+| `session.history.compact` / `compact_with_params` / `truncate` / `list_rewind_points` (`HistoryCompactResult { tokens_removed, messages_removed, summary_content, context_window, success }`) | The `history()` namespace is both the rewind surface the page uses and the compaction surface it never touches. Compaction reaches us two ways — the `compact_at` session threshold and the runtime's own `compact` command (next row) — so a third, route-shaped trigger was declined: the typed result would only restate what the `session.compaction_*` events already say. Its `custom_instructions` field is the same thing the runtime's command offers as "focus instructions", so the typed path adds nothing the command cannot already say |
+| `session.commands.list` → `{ name, description, kind, experimental }` | The composer's `/` menu was this page's own list until this was read, so the runtime's commands had no entry at all. Measured on the live session: **`GET /catalog` answers 83 items, 42 of them `cmd`** — 13 written by this page and **29 the runtime's own**, the same 29 `execute` refuses — and `compact` is one of the 29 — *"Summarize conversation history to reduce context window usage. Optionally provide focus instructions."* That sentence is what turns the manual-compaction row below from a guess into a measurement |
 | `McpExecuteSamplingRequest {}` (empty) + `McpExecuteSamplingResult = HashMap<String, Value>` | Why sampling *answered* is still open: the *result* is free-form but the *request* is empty, so the MCP `createMessage` messages have nowhere to go. The runtime's own conversion needs params the typed struct cannot carry |
 | `AssistantMessageDeltaData { delta_content, message_id }`, `AssistantTurnEndData.parent_task_tool_call_id` | The exact join behind the worker-transcript deferral: `delta.messageId` → `assistant.message.turnId` → `turn_end.parentTaskToolCallId` |
 | `permissions.get_capabilities()`, `modify_rules { kind, argument }` | No rule vocabulary, and `kind` is documented only by example — which is why the approval store keeps what the card carries instead |
@@ -37,7 +38,7 @@ not exist in the file it printed.
 ## What the graph answered
 
 `check_index_coverage` reports `no_recorded_issue` for the four chat sources and
-**`parse_unusable`, ranges 1–7764** for `webrain-cli/ui/src/App.svelte`, so every page
+**`parse_unusable`, ranges 1–7814** for `webrain-cli/ui/src/App.svelte`, so every page
 claim here is read from source; the graph cannot answer for the component. What it can
 answer, it answers flatly, and it settles what the next phase is *not*:
 
@@ -97,6 +98,8 @@ Not verified, in order of how much it matters:
 6. **The turn totals.** `webrain.usage` now sends the difference from the snapshot
    taken at the previous turn's end, and the panel sums per-call usage; both are
    one turn's worth, but neither has been compared against a funded turn's bill.
-7. **Manual compaction.** No route calls `session.history.compact`; a manual
-   compaction can only arrive through the runtime's own command list (`/command` →
-   `session.commands.invoke`), and nobody has invoked one here.
+7. **Manual compaction is offered, and has never run.** Measured, not inferred: `compact`
+   is in the runtime's own command list, so `POST /command {"name":"compact"}` is a
+   real path and `session.history.compact` a second one — neither has been exercised
+   here. Deliberately not exercised for a test either: a compaction **rewrites the
+   thread it runs on**, and every thread on this machine is a real one.
