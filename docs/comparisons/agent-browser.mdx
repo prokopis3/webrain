@@ -24,7 +24,7 @@ from `webrain-core/src/backends/cdp.rs` — not from memory.
 | Capability | agent-browser | webrain | Verdict |
 |---|---|---|---|
 | Fetch a URL as markdown, no browser | `read` — `Accept: text/markdown`, `.md` retry, walks to the nearest `llms.txt`, `--outline`, `--filter` | `webrain_scrape` / `fetch_http`: plain HTTP, text capped at 3000 chars | **gap** — ours never negotiates markdown or reads `llms.txt` |
-| See the requests a page made | `network requests`, `network request <id>`, `network har start/stop` | only `Network.enable` for cookie + blocking plumbing; `Network.responseReceived` only inside `capture_media` | **gap** — no request log, no response bodies, no HAR |
+| See the requests a page made | `network requests`, `network request <id>`, `network har start/stop` | `webrain_network`: `op=log` buffers `requestWillBeSent` / `responseReceived` / `loadingFinished` (id, method, type, status, mime, bytes, ms, failed), `op=request` returns the body — base64-decoded, JSON re-parsed. No HAR export | **equivalent for reading traffic**, HAR is the one gap |
 | Block resource types | `network route --abort --resource-type script` | `Network.setBlockedURLs` via `disable_resources` / `block_trackers` on navigate and batch | equivalent |
 | Save a page as PDF | `pdf <path>` (CLI) | `webrain_pdf{op:page}` (MCP only) | **gap** — no CLI verb |
 | Download a file | `download <sel> <path>` (click triggers it) + `wait --download` | `webrain_download` takes a URL; no click→download, no `Page.setDownloadBehavior` | **gap** |
@@ -42,21 +42,16 @@ from `webrain-core/src/backends/cdp.rs` — not from memory.
 
 ## The gaps worth closing, in order
 
-1. **A request log and HAR export** (`webrain_network`). The most common way to
-   scrape a JavaScript app is to stop scraping the DOM and read the XHR that holds
-   the JSON. We subscribe to no network events today, so an agent has to reach for
-   `eval` + `performance.getEntries()` and gets no bodies. Medium effort: buffer
-   `Network.responseReceived`, expose `requests` / `request <id>` / `har`.
-2. **A `read` verb: markdown negotiation + `llms.txt`.** Cheap — all HTTP, no
+1. **A `read` verb: markdown negotiation + `llms.txt`.** Cheap — all HTTP, no
    browser — and squarely in scope: `Accept: text/markdown`, retry with `.md`,
    walk ancestors for the nearest `llms.txt`, `--outline` a heading list,
    `--filter` a section. Docs sites increasingly serve this directly, and a
    markdown body is a fraction of the tokens of extracted text.
-3. **Click-triggered download.** `Page.setDownloadBehavior` + a wait for the file,
+2. **Click-triggered download.** `Page.setDownloadBehavior` + a wait for the file,
    so "click the CSV button, give me the file" works. Ours only fetches a URL.
-4. **Viewport / device / geo emulation.** Three CDP calls next to the timezone and
+3. **Viewport / device / geo emulation.** Three CDP calls next to the timezone and
    locale we already set. It is how you get a mobile layout, or localised results.
-5. **Frame-scoped snapshot and extraction.** `eval_in_frame` proves frame
+4. **Frame-scoped snapshot and extraction.** `eval_in_frame` proves frame
    addressing works; `observe` and `extract` should accept the same selector.
 6. **`--if-changed` screenshots.** Hash the bytes, return `unchanged`, so a
    repeated capture does not spend image tokens.

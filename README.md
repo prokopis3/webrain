@@ -27,7 +27,7 @@ Web automation shouldn't mean wiring up a driver, a browser download, and your o
 |---|---|---|
 | **Setup** | one binary + `webrain install` | runtime + driver + browser download + your own wrappers |
 | **Browsers** | Chrome + lightpanda + obscura through one CDP backend | one engine, usually Chromium |
-| **LLM-ready** | MCP server, 18 tools, built-in decision guide | you hand-roll tool functions |
+| **LLM-ready** | MCP server, 19 tools, built-in decision guide | you hand-roll tool functions |
 | **Anti-bot** | challenge detection + persistent profile + native login | manual |
 | **Extraction** | autoschema → JSON / regex / table / spider / batch | you write selectors |
 | **Runs on** | any OS, any LLM client, or plain CLI | tied to your stack |
@@ -295,12 +295,13 @@ engines otherwise) and the closing cost line: [chat guide](docs/guides/chat.mdx)
 
 ## MCP Tools
 
-The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 18 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
+The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `action` / `op` / `mode` selector, so the LLM picks a boundary, not a primitive. Every capability is preserved as a selector value, and all 19 tools are discovered dynamically (`webrain_guide` lists them for the LLM):
 
 | Tool | What it does |
 |---|---|
 | `webrain_navigate` | Go to a URL — page state + `challenge` / `crippled` detection. The entry point. |
 | `webrain_observe` | Read the current page: `what` = state · a11y · semantic · html · images · console · flatten (Shadow DOM) · fit · clean · screenshot · pixel · page_info · annotate · media |
+| `webrain_network` | The page's own HTTP traffic: `op` = log (every request: method/type/status/mime/bytes/ms) · request (`id` → that response body, JSON parsed) · requests · clear |
 | `webrain_interact` | Drive the page: `action` = click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script |
 | `webrain_extract` | Structured data: `mode` = schema (CSS) · regex · jsonld · table · autoschema · bm25 |
 | `webrain_scrape` | No-browser HTTP fetch of one URL (static only, no render) |
@@ -404,7 +405,7 @@ The complete list, with defaults and the allow/deny rules, is in
 
 ## Marketplace / IDE Plugins
 
-Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 18 tools appear.
+Webrain is an **MCP server**, so it plugs into any MCP-capable IDE. There is no separate extension to publish — you register the server, and the 19 tools appear.
 
 Both transports work in every client: **stdio** (`webrain mcp`) or **HTTP**
 (`webrain mcp --http 9223`, endpoint `http://127.0.0.1:9223/mcp`).

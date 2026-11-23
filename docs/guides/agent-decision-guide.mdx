@@ -10,12 +10,13 @@ given a task, which tool (and which `what` / `action` / `mode` / `op`
 selector) should your agent call? The same rules are served to the LLM at
 runtime by `webrain_guide`.
 
-## The 18 tools at a glance
+## The 19 tools at a glance
 
 | Need | Tool | Selector |
 |---|---|---|
 | Move to a URL, read page state + challenge | `webrain_navigate` | — |
 | Read the page (a11y, semantic tree, HTML, images, screenshot, pixel) | `webrain_observe` | `what=…` |
+| Read the page's own XHR/fetch traffic, and the body of one response | `webrain_network` | `op=…` |
 | Click, type, press, scroll, select, hover, upload, dialogs | `webrain_interact` | `action=…` |
 | Extract structured data (autoschema, schema, regex, table, JSON-LD, BM25) | `webrain_extract` | `mode=…` |
 | Fast no-browser HTTP fetch of static pages | `webrain_scrape` | — |

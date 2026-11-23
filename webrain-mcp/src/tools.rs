@@ -62,13 +62,17 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-18 TOOLS — match the request to a boundary:
+19 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
                      annotate|media) — assets = every link internal+external+
                      non-http scheme, images incl. CSS background-image, video
                      sources+embeds, in one pass
+  webrain_network    the page's OWN HTTP traffic (op: log|requests|request|clear) —
+                     log captures every request the app makes; request <id> returns
+                     that response body, which is how a JS app with no visible data
+                     gets scraped
   webrain_interact   drive the page (action: click|click_coords|type|press|scroll|
                      nav|tab|select|hover|check|dialog|wait|upload|dismiss_overlays|
                      add_init_script)
@@ -537,7 +541,7 @@ pub fn guide_from_args(args: &Value) -> Value {
         );
         for (title, body) in &sections {
             // The tool list is used on nearly every call, so it stays inline.
-            if title.starts_with("18 TOOLS") {
+            if title.starts_with("19 TOOLS") {
                 text.push_str(&format!("\n{title}\n{body}"));
                 continue;
             }
@@ -816,9 +820,10 @@ mod stats_tests {
 /// them: the router has always accepted it, but an UNDECLARED parameter is one
 /// no client will ever send, which made `webrain_session{op:open, cdp_url}`
 /// write-only for everything except batch and session itself.
-const SESSION_ROUTED_TOOLS: [&str; 11] = [
+const SESSION_ROUTED_TOOLS: [&str; 12] = [
     "webrain_navigate",
     "webrain_observe",
+    "webrain_network",
     "webrain_interact",
     "webrain_eval",
     "webrain_eval_in_frame",
@@ -898,6 +903,20 @@ pub fn list_tools() -> Vec<Value> {
                 "url": {"type": "string", "description": "media: URL to load and capture network requests"},
                 "wait_ms": {"type": "integer", "default": 0, "description": "media: keep capturing after load"}
             }, "required": ["what"]}
+        }),
+        json!({
+            "name": "webrain_network",
+            "description": "The page's OWN HTTP traffic — every request the app makes, not just what it paints. op=log arms CDP Network capture (optionally navigating first with url, then capturing for wait_ms) and returns entries: id, url, method, type, status, mime, bytes, at (epoch ms), ms, failed. The arm stays on afterwards, so log → interact (a click) → requests reads one buffer. op=request returns ONE response body by that id — this is how a JS app with no visible data gets scraped; ask while the renderer still holds it, and note an entry with bytes:0 has no body to give. op=requests re-reads the buffer; op=clear empties it. Narrow with filter (URL substring), type, status, limit.",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["log","requests","request","clear"]},
+                "url": {"type": "string", "description": "log: navigate first and capture the whole load"},
+                "wait_ms": {"type": "integer", "default": 0, "description": "log: keep capturing this long after load, for late XHR"},
+                "id": {"type": "string", "description": "request: the id from op=log"},
+                "filter": {"type": "string", "description": "only entries whose URL contains this"},
+                "type": {"type": "string", "description": "only this resource type: XHR, Fetch, Document, Script, Image…"},
+                "status": {"type": "integer", "description": "only this status code"},
+                "limit": {"type": "integer", "default": 200, "description": "max entries returned"}
+            }, "required": ["op"]}
         }),
         json!({
             "name": "webrain_interact",
@@ -1950,6 +1969,7 @@ fn family_of(name: &str) -> Option<&'static str> {
         "webrain_download" | "webrain_watch" | "webrain_search" | "webrain_serp"
         | "webrain_nav" | "webrain_press" | "webrain_get_images" | "webrain_assets" => "media",
         "webrain_media"
+        | "webrain_network"
         | "webrain_console"
         | "webrain_dismiss_overlays"
         | "webrain_vision_index"
@@ -3558,6 +3578,91 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 }
             }
         }
+        "webrain_network" => {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("log");
+            let filt = args.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            let want_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let want_status = args.get("status").and_then(|v| v.as_i64());
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(200)
+                .clamp(1, 2048) as usize;
+            // One filter for both read ops, so `log` and `requests` answer the
+            // same question the same way.
+            let keep = |e: &Value| {
+                if !filt.is_empty()
+                    && !e
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .contains(filt)
+                {
+                    return false;
+                }
+                if !want_type.is_empty()
+                    && !e
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case(want_type)
+                {
+                    return false;
+                }
+                if let Some(s) = want_status {
+                    if e.get("status").and_then(|x| x.as_i64()) != Some(s) {
+                        return false;
+                    }
+                }
+                true
+            };
+            let pack = |op: &str, all: Vec<Value>| {
+                let total = all.len();
+                let rows: Vec<Value> = all.into_iter().filter(|e| keep(e)).take(limit).collect();
+                json!({"status": "ok", "op": op, "total": total, "count": rows.len(), "requests": rows})
+            };
+            match op {
+                "request" => {
+                    let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        return json!({"status": "error", "message": "id required (from op=log)"});
+                    }
+                    match backend.network_body(id).await {
+                        Ok(mut v) => {
+                            // An API-driven page answers in JSON; hand it back
+                            // typed instead of making the agent parse the string.
+                            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                                    v["json"] = parsed;
+                                }
+                            }
+                            v
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                "clear" => {
+                    backend.network_clear().await;
+                    json!({"status": "ok", "op": "clear", "cleared": true})
+                }
+                "requests" => pack("requests", backend.network_entries().await),
+                _ => {
+                    let wait_ms = args
+                        .get("wait_ms")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let url = args
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .filter(|u| !u.is_empty());
+                    match backend.network_log(url, wait_ms).await {
+                        Ok(all) => pack("log", all),
+                        Err(e) => err(e),
+                    }
+                }
+            }
+        }
         "webrain_console" => {
             // The captor is normally already installed at document start (see
             // CONSOLE_CAPTOR_JS); re-sending it covers a tab attached after load
@@ -4051,7 +4156,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("18 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("19 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 

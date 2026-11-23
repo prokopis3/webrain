@@ -5,7 +5,7 @@ description: The 18-tool consolidated MCP surface (63 legacy capabilities folded
 
 # Tools Reference
 
-All 18 tools are discovered dynamically — `webrain_guide` lists them for the
+All 19 tools are discovered dynamically — `webrain_guide` lists them for the
 LLM. The surface is **intent-based** (firecrawl-style): each tool has a `what`
 / `action` / `op` / `mode` selector that routes to the legacy capability via
 `map_surface()`. This page is the authoritative reference; descriptions match
@@ -33,6 +33,7 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 |---|---|---|
 | `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
 | `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · assets (every link internal+external+non-http, images incl. CSS `background-image`, video sources+embeds in one pass; `only`+`max`) · console · flatten · fit · clean · screenshot (`format`+`quality`) · pixel (`tiles_dir`) · page_info · annotate · media | ✅ CDP |
+| `webrain_network` (`op=…`) | log (arm capture, optional `url`+`wait_ms` → every request with id/method/type/status/mime/bytes/ms) · request (`id` → that response body) · requests (last log) · clear | ✅ CDP |
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
@@ -141,6 +142,31 @@ Semantic-tree text snapshot of the current page: `role "name"` lines for the LLM
 
 <Accordion title="webrain_console">
 Return captured page errors/warnings (uncaught errors + unhandled rejections) since the last call. Injects a listener on first call.
+</Accordion>
+
+<Accordion title="webrain_network">
+The page's **own HTTP traffic** — every request the app makes, including the XHR/fetch
+that carries the data a rendered page may never show. This is the path for a JS app
+whose content arrives after mount: log the requests, then read the one that has it.
+
+- `op=log` arms CDP Network capture, optionally navigates (`url`) and keeps capturing
+  for `wait_ms`, then returns one row per request: `id`, `url`, `method`, `type`
+  (`XHR`, `Fetch`, `Document`, `Script`, …), `status`, `mime`, `bytes`, `at` (epoch ms),
+  `ms`, `failed`.
+- `op=request` + `id` returns that response body — base64-decoded, capped at 200 KB
+  (`truncated` says so), and a JSON body also comes back parsed as `json`. Chrome only
+  keeps a body while the renderer holds it: measured, an entry with `bytes: 0` (served
+  from cache, or already released) answers *"No data found for resource with given
+  identifier"*, while every request that transferred data inside the capture window
+  reads back fine.
+- `op=requests` re-reads the buffer; `op=clear` empties it. **The arm stays on after
+  `log`**, so the sequence that matters for a search UI — `log`, then a click through
+  `webrain_interact`, then `op=requests` — reads one continuous buffer.
+- Narrow with `filter` (URL substring), `type`, `status`, `limit` (default 200).
+
+A redirect chain is one row, not one per hop, and the buffer caps at 2,048 entries so a
+chatty page cannot grow it without bound. Bodies are never buffered — they are fetched on
+request — which is why the log stays small enough to return whole.
 </Accordion>
 
 <Accordion title="webrain_screenshot">

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mcp`: **`webrain_network` — the page's own HTTP traffic, with bodies.** The
+  commonest way to scrape a JavaScript app is to stop reading the DOM and read the
+  XHR that holds the JSON; the server subscribed to no network events at all, so an
+  agent had to reach for `eval` + `performance.getEntries()` and never got a body.
+  `op=log` arms CDP capture (optionally navigating, then dwelling `wait_ms`) and
+  returns one row per request — `id, url, method, type, status, mime, bytes, at,
+  ms, failed`; `op=request` returns that response body (base64-decoded, 200 KB cap,
+  a JSON body also parsed as `json`); `op=requests` re-reads the buffer; `op=clear`
+  empties it; `filter`/`type`/`status`/`limit` narrow it. The reader now folds three
+  events (`requestWillBeSent`, `responseReceived`, `loadingFinished`,
+  `loadingFailed`) through one pure `absorb()`, and the URL list `capture_media`
+  used became rows in the same buffer — one source of truth, both consumers.
+  Measured on real Chrome: 97 requests on github.com across six resource types, a
+  220-word JSON body read back from `api.github.com` (`stargazers_count` parsed),
+  and a load-time `fetch` captured then read (511 bytes → 577-char body).
+  Four things measurement changed while building it: the arm **stays on** after
+  `log` so `log → interact → requests` shares one buffer; the buffer is cloned, not
+  taken, because `op=requests` reads it twice; a redirect chain is one row, not one
+  per hop; and an entry with `bytes: 0` has no body to give (Chrome answers "No data
+  found for resource with given identifier") — a cache flag I added for that theory
+  was **removed** once a cache-proof URL showed the flag was not the cause.
+  Tool count 18 → 19 across the guide, README, reference page and docs.
+
 ### Changed
 - `docs`: **the streaming baseline is now a real provider turn, not a mock.**
   `PERF_AUDIT.md` → *Re-measuring* records a measured `deepseek-flash` turn

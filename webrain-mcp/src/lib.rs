@@ -1,6 +1,6 @@
 // webrain-mcp: Model Context Protocol server for AI model browser automation.
 //
-// 18 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
+// 19 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
 // is `tools::AGENT_GUIDE`. This header used to enumerate every tool and drifted two
 // rewrites behind both — one line pointing at the source of truth instead.
 //
@@ -1455,6 +1455,7 @@ fn retry_after_dead_socket(tool: &str) -> bool {
             | "webrain_extract_regex"
             | "webrain_table"
             | "webrain_observe"
+            | "webrain_network"
             | "webrain_snapshot"
             | "webrain_markdown"
             | "webrain_clean"
