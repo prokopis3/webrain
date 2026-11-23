@@ -4,9 +4,10 @@
 are removed from this file and live in git history; what remains is what is still
 open or deliberately declined. Re-measure before trusting any number here.
 
-**Method:** `check_index_coverage` first (the graph is best-effort: `App.svelte` is
-`partial`, one unusable range at 4469 — read that region directly), then
-`search_graph` / `query_graph` / `search_code`, then the cited lines re-read.
+**Method:** `check_index_coverage` first (the graph is best-effort: `App.svelte`
+currently reports `parse_unusable` for the whole file, so read it directly), then
+`search_graph` / `query_graph` / `search_code`, then the cited lines re-read, then
+measure in the running page before calling anything a performance problem.
 
 ---
 
@@ -28,7 +29,7 @@ load-bearing files, zero functional gain, and a review surface that would hide t
 real diffs if it landed beside a fix. It is a readability project with its own
 change window.
 
-### 2. The chat page is still one 7.5k-line component (frontend)
+### 2. The chat page is still one 7.5k-line component (frontend, readability)
 
 `webrain-cli/ui/src/App.svelte`, 7,540 lines. The palette, the snackbar and the
 tools chooser are out (see `CHANGELOG.md`); each took its markup, styles and
@@ -36,25 +37,68 @@ keyframes with it, because Svelte scopes all three to the defining component, an
 the chooser also had to redeclare the dialog shell (`#modal` backdrop, `.card`,
 primary button) because `App`'s rules never reach a child's DOM.
 
-**Fix:** the remaining presentational blocks, in this order — the settings panel,
-the model dialog, then the transcript rows. The rows are last and hardest: one
-`{#each}` with a dozen locals (`previews`, `editArgs`, `toggles`, `item`), so they
-need a real prop contract rather than a move.
+**This is not a performance item, and the measurement says so** (see item 3):
+opening the settings panel and stepping through all nine tabs produces **zero**
+long tasks. The reason to split is that 7,540 lines is hard to review.
 
-**Blocking decision, before the next slice:** `chat.js` is 77.96 KB gzipped against
-the 80 KB ceiling, and the settings panel is another shell-copying dialog. Either
-the shared dialog shell becomes one component both dialogs import, or the ceiling
-moves with a written reason. Do not extract a third dialog into the ceiling and
-discover it at the budget check.
+**A boundary is not free — measured, not assumed:** palette `+0.8 KB` gzipped,
+snackbar `+0.2`, tools chooser `+2.8` (it copied the dialog shell), and a
+`Dialog.svelte` shared shell written to remove that duplication cost **`+0.73`
+with only one consumer** — it was reverted rather than shipped. Call it ~0.7 KB
+per component boundary, so a full split of the remaining 7,540 lines lands
+somewhere near `+7 KB`.
 
-### 3. Nothing yet measures *painting*
+**Decision (recorded, so it stops being re-discovered):** the 80 KB ceiling is a
+*bug detector*, not a decomposition budget. If the page is split further, the
+ceiling moves to 88 KB in the same commit that crosses 80, with this paragraph as
+the reason — and the split goes **per tab**, not per panel: the settings card is
+nine tabs in one 355-line block over ~40 shared values (`manage`, `toggles`,
+`skillNew`, `mcpNew`, `providers`, …), so a whole-panel move would need a
+40-prop component, which is worse code than what it replaces. One tab per
+component, each with a handful of props, measured after each.
 
-Every frontend number so far is either a bundle size or a JS timing measured in the
-page (a 9 KB draft costs 0.03 ms per keystroke, so the composer is not a hot path).
-No frame timeline of a streaming turn exists, which is the one place a chat can stutter
-— per-token DOM insertion plus markdown re-parse. **Next measurement, not next code:**
-record one turn in the Performance panel and report the longest task and the
-dropped-frame count before touching the render path.
+The transcript rows stay last: one `{#each}` with a dozen locals, and the
+measurement below shows they are already cheap to scroll.
+
+### 3. Painting is now measured, and the transcript is not the problem
+
+Measured 2026-11-23 on a 55-message thread (`c1794890501696`: 33 `.msg`, 82
+`content-visibility` rows, 9,972 px of transcript in a 603 px viewport), debug
+build, headless Chrome, via `PerformanceObserver` on `longtask` plus a
+`requestAnimationFrame` delta loop while scrolling 30 steps top→bottom:
+
+| Interaction | Long tasks | Longest | TBT | Frames | P50 / P95 | Slow (>34 ms) |
+|---|---:|---:|---:|---:|---|---:|
+| First scroll after opening the thread | 1 | **134 ms** | 84 ms | 67 | 16.7 / 16.8 ms | 1 |
+| Second scroll | 0 | — | 0 | 30 | 16.7 ms | 0 |
+| Third scroll | 0 | — | 0 | 30 | 16.7 ms | 0 |
+| Settings open + all 9 tabs | 0 | — | 0 | — | — | — |
+
+**Reading:** the 134 ms task is the first layout of the rows that
+`content-visibility: auto` had been skipping — it happens once per thread, and
+never again on the same thread. Steady-state scrolling is a locked 60 fps, and
+the settings panel does not block the main thread at all, which is the evidence
+that item 2 is readability work rather than a performance fix.
+
+**Declined on the record: virtualising the transcript.** One 134 ms task on the
+first view of a 55-message thread, paid once, is under the ~200 ms a deliberate
+navigation can absorb, and a virtual list would add scroll restoration, anchoring
+and `find in page` regressions to buy back 84 ms of blocking time. Revisit if a
+thread reaches the hundreds of messages, or if the first-view task crosses 200 ms.
+
+**Still unmeasured:** a *streaming* turn (per-token DOM insertion plus markdown
+re-parse) — the provider was out of credits, so no live turn could be recorded.
+That is the one place a chat can stutter, and it needs a funded key, not code.
+
+**Reproducing** (paste in the served page's console, DevTools open):
+
+```js
+const t = [], po = new PerformanceObserver((l) => l.getEntries().forEach((e) => t.push(e.duration)));
+po.observe({ entryTypes: ["longtask"] });
+const sc = [...document.querySelectorAll("*")].find((e) => e.scrollHeight > e.clientHeight + 300 && !e.classList.contains("rail"));
+for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeight) * i) / 30; await new Promise(requestAnimationFrame); }
+console.table(t);  // then scroll again — the tasks should be empty
+```
 
 ---
 
