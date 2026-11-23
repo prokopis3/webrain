@@ -265,15 +265,24 @@ line and the three follow-up chips the model wrote.*
 - **The right rail totals the conversation**: turns, tokens in/out, steps, sources and
   cost summed from the per-turn ledger — `6 turns · 540052 in / 29798 out · 17 steps ·
   $0.031` — with durations that scale (`240ms → 7.1s → 3m 00s → 2d 3h → 1y 1mo`)
-  instead of always seconds.
+  instead of always seconds. The dock's context ring sits beside the model button and
+  opens the runtime's own accounting — tool definitions, instructions, messages, what is
+  reserved for the reply, and anything it did not attribute — with a one-click
+  **compact history**.
+- **A picture in an answer is a picture.** A reply that links an image, or names a
+  screenshot a tool just wrote (`output/shots/shot_….jpg`), gets a captioned frame
+  instead of a URL: capped at 22 rem, lazy while the thread is reopened, and a path that
+  does not exist falls back to the text it was written as.
 - **A tool call is a card you can re-run.** Arguments and result are shown verbatim,
   the row reads as a sentence (`Searched the web for "…"`, `Read el.aegeanair.com`),
   and **edit & re-run** sends the corrected arguments through the session's own
   invocation pipeline — no model turn, no tokens, and the original call stays visible.
 - **The turn is steerable**: queue a prompt behind the running one or steer it, stop
-  it, rewind the conversation (and the files it changed) to any earlier turn, fork a
+  it, **edit the last message** (rewind + prefill, the way ChatGPT and the VS Code chat
+  do it), rewind the conversation (and the files it changed) to any earlier turn, fork a
   thread at a message, and switch permission mode (ask / assisted / allow-all) or MCP
-  servers and skills from the page.
+  servers and skills from the page. Settings → Skills also lists the skills the
+  `npx`-style installers put in `~/.agents/skills`, marked as not loaded here.
 - **Evidence is kept**: every URL a tool returned becomes a source chip, every failure
   says why in one line, a dead tool server raises a banner with a reconnect button, and
   a reload redraws open approvals instead of stranding the turn.

@@ -351,6 +351,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sdk` in the runtime's own session list (`client_name`).
 
 ### Changed
+- `docs`: **the chat guide and the README now say what the page actually does.** Synced
+  from the entries above: the picture frames and `GET /local`, `POST /command` and the
+  session-info panel it drives (grouped percentages, the reservation as a count, compact
+  history), the `/catalog` answer that includes the runtime's built-in descriptors and
+  other MCP servers' tools, the cross-tool skill tree in Settings → Skills, edit-last-turn,
+  both drawers (1100 px for instruments, 860 px for sessions), and the two rules the
+  defects taught — a running turn belongs to its own conversation, and a reload merges
+  rows instead of replacing them. The route table gained `/favicon.png` and `/local`.
 - `chat`: **session info moved to the dock and speaks percentages.** It lived in
   the instruments rail, which is `display: none` below 1100px — on a tablet or a
   phone the context ring did not exist at all. It now sits in the composer's

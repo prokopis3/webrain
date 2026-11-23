@@ -308,6 +308,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /` | the page |
 | `GET /chat.js`, `GET /chat.css` | the page's bundle, read from the verified directory |
 | `GET /chunk-markdown.js` | the lazy half of the bundle (`marked` + DOMPurify) |
+| `GET /favicon.png`, `GET /favicon.ico` | the tab icon: the docs site's own logo, downscaled to 64×64 and embedded in the binary |
 | `GET /events` | SSE, one `data: {"type":…,"data":{…}}` frame per runtime event |
 | `POST /preview` | `{"url":"…"}` → that page's `og:` title, description, image and site, fetched server-side (a browser cannot read another origin's HTML) |
 
@@ -327,6 +328,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `POST /undo` | put back the last file the agent changed |
 | `GET /rewind`, `POST /rewind` | the turns the session can go back to, then a preview of the files a rewind would restore (`{"event","preview":true}`) and the rewind itself (`{"event","files":true\|false}`) |
 | `POST /ephemeral` | `{"question":"…"}` → a one-shot answer against the conversation with no tools and no history |
+| `POST /command` | `{"name":"compact","input":"…"}` → runs one of the **runtime's own** slash commands (`session.commands.invoke`). The answer is text, a message, or a prompt the page puts in the field rather than one it starts for you |
 | `GET /context` | the runtime's token breakdown and per-message attribution |
 | `GET /todos` | the agent's todo rows |
 | `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
@@ -363,13 +365,14 @@ everything else is the runtime's own event, forwarded unchanged.
 
 | Route | What it does |
 |---|---|
-| `GET /catalog` | the commands, the shipped skills and the MCP tools this build exposes |
+| `GET /catalog` | every row a menu can offer: this page's commands, the **runtime's own** slash commands, the shipped skills, this build's MCP tools, other configured MCP servers' tools and the runtime's built-in descriptors — one row per name, whatever its sigil, so nothing is offered twice |
 | `GET /mcp`, `POST /mcp` | the MCP servers this session attached to, and `{"server":"…","enabled":bool}` to turn one off or back on |
-| `GET /skills`, `POST /skills` | the skills on offer, and the same toggle |
+| `GET /skills`, `POST /skills` | the skills this session loaded — then the cross-tool tree at `~/.agents/skills`, listed with the reason it cannot be switched on here — and the toggle, which only applies to the first group |
 | `POST /tool` | `{"name":"…","args":{…}}` → run one tool through the session's own invocation pipeline, with no model turn |
 | `GET /instructions` | the instruction files the model was given, in merge order |
 | `POST /attach` | raw bytes + `x-name` → a file under the temp upload dir |
 | `GET /attach/<convo>/<file>` | that file back out; `?dl=1` downloads instead of inlining |
+| `GET /local?p=<relative path>` | a file this machine already has, by the path an answer named it by. Served only when the path is relative, still resolves inside the directory the chat was started in **after** `canonicalize`, and the file is an image by `mime_of` — an absolute path, a `..` that leaves the tree, a directory or any non-image is `404` |
 | `POST /transcribe` | raw audio + `x-name` / `x-lang` → `{"text":…}`, transcribed locally |
 
 One dock sits under the field, and it is ordered the way a turn is built:
@@ -409,13 +412,30 @@ on, and the runtime answers with `session.skills_loaded`.
 Each turn shows its own evidence: a tool card carries the arguments **and the
 result the tool actually returned**, with every `http(s)` url in that result
 lifted into a source strip — the page never invents a citation, so an empty strip
-means the tool returned no links. A reasoning/thinking stream is **filed with the
+means the tool returned no links.
+
+A picture is evidence too. A reply that writes `![alt](https://…)`, a **link whose
+destination is an image** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`,
+`.bmp` — `svg` is excluded, because the frame's own link opens the file as a
+document), or inline code naming a file on this machine
+(`output/shots/shot_….jpg`) renders as a captioned frame rather than a link. The
+frame is capped at 22 rem so one screenshot cannot own the column, and every image
+is `loading="lazy"`, so reopening a thread fetches nothing from a third party until
+you scroll to it. The local case is served by `GET /local`; when the file is not
+there the page puts the `<code>` the reply wrote back in the frame's place, so a
+miss costs the picture and nothing else.
+
+A reasoning/thinking stream is **filed with the
 step it produced**: a folded row directly above the tool call or the answer it
 explains, which is the order it happened in and survives into a saved
 conversation, instead of one block pooled at the end of the turn. The record
 control beside Send dictates: it records through `MediaRecorder`, sends the take
 to `POST /transcribe`, and puts the **text** in the field — see
-[Dictation](#dictation). `↻ retry` re-sends the last prompt.
+[Dictation](#dictation). `↻ retry` re-sends the last prompt unchanged, and `✎ edit`
+goes back to it instead: it reads the runtime's newest rewound point, asks before
+dropping the answer after it, and prefills the field with what you wrote — the same
+move ChatGPT and the VS Code chat make, and the only way to correct a question
+without re-typing it.
 
 ### Send, stop, queue, steer
 
@@ -440,6 +460,17 @@ rail above the field, and a queued prompt can be run now, edited, or dropped
 (`session.queue.sendNow` / `updateText` / `removeAt`): a prompt you can send but
 not correct is one you retype in the composer, which starts a second turn instead
 of fixing the first.
+
+A running turn belongs to **one conversation, not to the window**. Stop, the queue
+and the composer's steer controls are drawn in the thread that owns the turn and
+nowhere else; opening another thread in the same tab shows that thread's own state,
+which is usually idle. The draft and the attachment path follow the same rule, so
+switching conversations is a switch, not a carry-over.
+
+Reloading mid-answer, or opening the same thread in a second tab, **merges** instead
+of replacing: the rows this tab never saw are put in front of the ones it streamed,
+counted from the server's append-only message list. Nothing the pane already holds
+is thrown away, which is what makes a refresh safe in the middle of a long turn.
 
 Provider rows are names, never secrets. A key can arrive two ways: an exported
 variable, or a key pasted into the model dialog, which goes to the **encrypted
@@ -475,13 +506,29 @@ The rail prints both numbers when they disagree (`1.0M tokens model · 128k toke
 session`) rather than quietly showing the smaller one, and `--max-prompt-tokens`
 still overrides the lookup for a model nobody publishes a window for.
 
-In the composer, `/` lists the commands the page itself runs — `/clear`, `/tools`,
-`/undo`, `/rewind`, `/instructions`, `/quota`, `/todos`, `/jobs`, `/agents`,
-`/fleet`, `/context`, `/mcp`, `/skills` — `@` lists the shipped skills and `#` lists the MCP
-tools. Both menus read from `GET /catalog`, so neither can offer something this
-build does not have. `+` attaches a file, and ↑/↓ walk the menu with the selected
-row scrolled into view. A pick inserts `@name` / `#name` into the prompt; nothing
-is sent for you.
+The dock carries the same number as a gauge: a ring with `used / limit` and a
+percentage, which is also the button for the runtime's own accounting. Open it and
+the panel reads the way the Copilot chat's session-info does:
+`Reserved for response` as a count (it overlaps the allowance rather than occupying
+it), then **System** (System Instructions, Tool Definitions) and **User Context**
+(Messages) as percentages of the prompt allowance, and an `Uncategorized → Other`
+row only when the runtime counted tokens its own categories do not name. Every
+figure is `metadata.getContextAttribution`; the page invents no category, and there
+is no *Tool Results* row because this runtime reports user, assistant and tool
+messages as one `messages` figure. A **compact history** button runs the runtime's
+`/compact` through `POST /command` — it asks first, and it is disabled while a turn
+is running, because compaction rewrites the history that turn is reading.
+
+In the composer, `/` lists every command the session can run — the ones this page
+handles itself (`/clear`, `/tools`, `/undo`, `/rewind`, `/instructions`, `/quota`,
+`/todos`, `/jobs`, `/agents`, `/fleet`, `/context`, `/mcp`, `/skills`) and the
+runtime's own (`/compact` among them), `@` lists the skills, and `#` lists the tools:
+this build's MCP tools, any other configured MCP server's, and the runtime's
+built-in descriptors — so `#` offers what the session can actually call rather than
+a list this page typed out. All of it comes from `GET /catalog`, one row per name,
+so a menu can neither offer something this build does not have nor offer it twice.
+`+` attaches a file, and ↑/↓ walk the menu with the selected row scrolled into
+view. A pick inserts `@name` / `#name` into the prompt; nothing is sent for you.
 
 ### The deck: rail, transcript, instruments
 
@@ -493,6 +540,12 @@ hangs off a single hairline — the **spine**. Every row puts a tick on it: a
 message tick is the role's colour, a tool tick is its state (amber running,
 mint complete, red failed), and reasoning is grey. The spine is the one element
 that survives removing the wordmark, which is the point of having it.
+
+Neither rail is a column on a small screen, because a column there is the
+transcript's width: below 1100 px the instruments rail becomes a drawer from the
+right, opened by a button in the topbar, and below 860 px the sessions rail does
+the same from the left. Both stop above the composer — a drawer that covers the
+field you are about to type into has to be closed twice.
 
 Type is three roles and no webfonts, because the page still makes zero network
 requests: a serif for the wordmark and the empty state, the OS UI face for
