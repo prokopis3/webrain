@@ -416,6 +416,9 @@
     session_store: false,
     allow_agents: true,
     parallel_tools: true,
+    // Off by default and server-side like the rest: the payload is marked
+    // experimental upstream, and asking for it spends output tokens.
+    citations: false,
     allowed_models: '',
     max_output_tokens: 4096,
     timeout_secs: 300,
@@ -1031,10 +1034,19 @@
         // field on the row, removed from the text — the transcript stores what a
         // reader would copy, and the chips come back on reload.
         const said = parseSuggest(d.content || d.message || d.text || streamText);
+        // Sources the provider attributed the answer to, when `citations` is on
+        // in settings. The runtime sends `{sources, spans}`; only `sources` is
+        // drawn — a span list would need offsets re-mapped onto the rendered
+        // markdown, and a source list a reader can open is the useful half.
+        // Turn-scoped by the protocol's own wording, so it is not persisted.
+        const cites = Array.isArray(d.citations?.sources) && d.citations.sources.length
+          ? d.citations.sources
+          : undefined;
         push({
           kind: "assistant",
           text: said.clean,
           suggest: said.list.length ? said.list : undefined,
+          cites,
         });
         return clearStream();
       }
@@ -2314,11 +2326,13 @@
 
   /// Answer a pending permission request by id, whether or not its card is the
   /// one on screen — the auto-allow path answers requests that never showed one.
-  async function answerPermission(id, allow) {
+  /// `always` sends the standing grant to the server, which is the side that
+  /// knows whether it could be written.
+  async function answerPermission(id, allow, always = false) {
     await fetch("/permission", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, allow }),
+      body: JSON.stringify({ id, allow, always }),
     });
   }
 
@@ -2329,7 +2343,7 @@
     items = items.map((it) =>
       it.id === item.id ? { ...it, ans: allow ? (always ? "always" : "once") : "deny" } : it,
     );
-    await answerPermission(item.pid, allow);
+    await answerPermission(item.pid, allow, always);
   }
 
   // What an `html` reply may build with, and the shape it should reach for
@@ -3563,7 +3577,7 @@
   // Settings > Skills / MCP read the same two routes the `/skills` and `/mcp`
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
-  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [] });
+  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [], agentCurrent: null });
   async function loadManage() {
     try {
       const [s, m, items, ag] = await Promise.all([
@@ -3597,9 +3611,53 @@
         // Agent definitions, which `read_agent`/`list_agents` give the model and
         // nothing gave a person — `/env` only ever said "no custom agents loaded".
         agents: ag.agents || [],
+        // Which one the session runs now. `session.agent.select` moves this on a
+        // live session, so the list is a picker and not just an inventory.
+        agentCurrent: ag.current && ag.current.id ? ag.current : null,
       };
+      if (ag.current && ag.current.error) toast(`agents: ${ag.current.error}`, "err");
     } catch {
       /* a panel with no rows beats one that lies about what is installed */
+    }
+  }
+
+  // Choose the agent the next turns run as, or go back to the built-in one.
+  async function useAgent(name) {
+    try {
+      const r = await fetch("/agents/select", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/agents/select: ${j.error}`, "err");
+      await loadManage();
+      toast(name ? `agent: ${name}` : "agent: default");
+    } catch {
+      toast("/agents/select: the server is not reachable", "err");
+    }
+  }
+
+  // Removing a server from the runtime's user config. `attached` says whether the
+  // live session still holds it, which is the difference between "gone" and
+  // "gone at the next start" — and the note never claims the stronger one.
+  async function removeMcp(name) {
+    try {
+      const r = await fetch("/mcp/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/mcp/remove: ${j.error}`, "err");
+      await loadManage();
+      toast(
+        j.attached
+          ? `${name} removed from the user config — this session still has it until it restarts`
+          : `${name} removed`,
+      );
+    } catch {
+      toast("/mcp/remove: the server is not reachable", "err");
     }
   }
 
@@ -3734,6 +3792,9 @@
     });
     loadCatalog();
     loadProviders();
+    // Saved approvals are the server's, so they are read on boot: a grant made in
+    // another tab (or a previous run) must silence the prompt here too.
+    loadApprovals();
     const es = new EventSource("/events");
     es.onmessage = (e) => {
       try {
@@ -4104,19 +4165,53 @@
   // arriving again is allowed without asking. It is keyed on the server and the
   // TOOL, not on the `kind` the runtime names — a kind like `tool` would grant
   // every tool there is, which is not what the button said.
+  //
+  // The list lives on the SERVER (`/approvals`), not in this browser: the grant
+  // is about this session's tools, so a second tab must not be asked again and a
+  // reload must not forget. This copy is only what the panel draws.
   let autoTools = $state(readJson("allow", []));
 
-  function allowTool(key) {
-    if (key && !autoTools.includes(key)) autoTools = [...autoTools, key];
+  async function loadApprovals() {
+    try {
+      const j = await (await fetch("/approvals")).json();
+      if (Array.isArray(j.approved)) {
+        autoTools = j.approved;
+      }
+    } catch {
+      /* the panel keeps the last list it had rather than emptying itself */
+    }
   }
 
-  // The same list, as a policy the reader can see and undo. Kept in this browser
-  // rather than on the server: it answers "may this page approve without
-  // asking", which is a fact about the person at this screen, not the session.
+  function allowTool(key) {
+    if (key && !autoTools.includes(key)) {
+      autoTools = [...autoTools, key];
+      void saveApproval(key, true);
+    }
+  }
+
+  // The same list, as a policy the reader can see and undo.
   function toggleAllow(key) {
-    autoTools = autoTools.includes(key)
-      ? autoTools.filter((k) => k !== key)
-      : [...autoTools, key];
+    const on = !autoTools.includes(key);
+    autoTools = on ? [...autoTools, key] : autoTools.filter((k) => k !== key);
+    void saveApproval(key, on);
+  }
+
+  async function saveApproval(key, on) {
+    try {
+      const r = await fetch("/approvals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key, on }),
+      });
+      const j = await r.json();
+      if (j.error || j.saved === false) {
+        toast(`/approvals: ${j.error || "could not save the approval"}`, "err");
+      } else if (Array.isArray(j.approved)) {
+        autoTools = j.approved;
+      }
+    } catch {
+      toast("/approvals: the server is not reachable", "err");
+    }
   }
 
   const toolKey = (a) => `${a.server || "mcp"}:${a.tool || a.kind || "tool"}`;
@@ -4650,6 +4745,24 @@
               {copiedId === item.id ? "copied" : "copy"}
             </button>
             <div class="body md" class:html5={rawHtml}>{@html md(item.text)}</div>
+            {#if item.cites?.length}
+              <!-- Only when the provider attributed the answer: `citations` is
+                   opt-in in settings, so a page that always showed this strip
+                   would promise sources a turn does not have. A file source has
+                   no url, and it prints its path — a link that goes nowhere is
+                   worse than a name. -->
+              <div class="cites">
+                <span class="eyebrow">sources</span>
+                {#each item.cites as s (s.id)}
+                  {#if s.url}
+                    <a class="cite" href={s.url} target="_blank" rel="noreferrer noopener"
+                       title={s.provider}>{s.title || s.url}</a>
+                  {:else}
+                    <span class="cite" title={s.provider}>{s.title || s.path || s.id}</span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           {:else}
             <div class="body">
               <!-- What you sent stays sent: the image is the server's copy, so it
@@ -5716,7 +5829,7 @@
   >
     <div class="card settings">
       <div class="stabs">
-        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["agents", "Agents"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
+        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["agents", "Agents"], ["approvals", "Approvals"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
           <button
             class="tab"
             class:on={setTab === k}
@@ -5725,6 +5838,7 @@
               // The live lists are read when shown, not when the panel opens: a
               // server that died since then must not still look up.
               if (k === "skills" || k === "mcp" || k === "agents") loadManage();
+              if (k === "approvals") loadApprovals();
             }}>{label}</button>
         {/each}
       </div>
@@ -5774,6 +5888,13 @@
                   {@const on = toggles[`${item.route}:${row.name}`] ?? row.on}
                   <li>
                     <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
+                    {#if !isSkills}
+                      <button
+                        class="mact"
+                        onclick={() => removeMcp(row.name)}
+                        title="forget this server from the runtime's user config"
+                      >remove</button>
+                    {/if}
                     <button
                       class="mswitch"
                       class:on
@@ -5837,9 +5958,9 @@
             <div class="sfld">
               <span>agent definitions</span>
               <small>
-                What the runtime can delegate to. Choosing one is a session option
-                (<code>agents.selected</code>), so a picker would mean a restart —
-                this list is what tells you whether there is anything to pick.
+                What the runtime can run as or delegate to. The picked one becomes
+                this session's agent immediately — <code>session.agent.select</code>
+                moves it live, so nothing restarts.
               </small>
             </div>
             {#if !manage.agents.length}
@@ -5849,14 +5970,31 @@
                 <code>write_agent</code>
               </p>
             {:else}
+              {#if manage.agentCurrent}
+                <ul class="mng">
+                  <li>
+                    <span class="mngname">
+                      <b>{manage.agentCurrent.title || manage.agentCurrent.name}</b>
+                      <small>running now</small>
+                    </span>
+                    <button class="mact" onclick={() => useAgent("")}>use default</button>
+                  </li>
+                </ul>
+              {/if}
               <ul class="mng">
                 {#each manage.agents as row (row.id)}
+                  {@const cur = manage.agentCurrent && manage.agentCurrent.id === row.id}
                   <li>
                     <span class="mngname">
                       <b>{row.title || row.name}</b>
                       {#if row.description}<small>{row.description}</small>{/if}
                     </span>
                     {#if row.manual_only}<small class="dim">manual only</small>{/if}
+                    {#if cur}
+                      <small class="dim">in use</small>
+                    {:else}
+                      <button class="mact" onclick={() => useAgent(row.name)}>use</button>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -5872,6 +6010,30 @@
                 the runtime's own read, so a definition it refuses shows up as nothing.
               </small>
             </label>
+          </div>
+        {:else if setTab === "approvals"}
+          <div class="form">
+            <div class="sfld">
+              <span>approved without asking</span>
+              <small>
+                Tools you answered “always allow” for, keyed
+                <code>server:tool</code>. Kept on the server, so a second tab — and
+                a turn the model runs on its own — is approved without a card.
+                Revoking one means the next call asks again.
+              </small>
+            </div>
+            {#if !autoTools.length}
+              <p class="mngempty">none — “always allow” on an approval card adds one</p>
+            {:else}
+              <ul class="mng">
+                {#each autoTools as key (key)}
+                  <li>
+                    <span class="mngname"><b>{key}</b></span>
+                    <button class="mact" onclick={() => toggleAllow(key)}>revoke</button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           </div>
         {:else if setTab === "chat"}
           <div class="form">
@@ -5982,6 +6144,11 @@
               <input type="checkbox" bind:checked={rt.parallel_tools} />
               <span class="box" aria-hidden="true"></span>
               <span>let one turn ask for several tools at once</span>
+            </label>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rt.citations} />
+              <span class="box" aria-hidden="true"></span>
+              <span>ask for citations — an answer lists the sources it used</span>
             </label>
             <label class="sfld">
               <span>models the runtime may use</span>
@@ -6901,6 +7068,15 @@
   .steps { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
     margin: var(--s2) 0; font-family: var(--mono); font-size: 10.5px; }
   .steps .route { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+  /* Where an answer's claims came from. Sits under the body like `.steps` sits
+     above it: same eyebrow, same chips, so a cited answer reads as one row with
+     two facts attached rather than four new styles. */
+  .cites { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+    margin: var(--s2) 0 0; font-family: var(--mono); font-size: 10.5px; }
+  .cites .cite { max-width: 22rem; padding: 2px 8px; border-radius: var(--shape-full);
+    background: var(--surface-container-low); color: var(--on-surface-variant);
+    text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cites a.cite:hover { color: var(--on-surface); text-decoration: underline; }
   .steps .arrow { color: var(--faint); }
   .steps .stp { display: inline-flex; align-items: center; gap: 5px; max-width: 16rem;
     padding: 2px 8px; border-radius: var(--shape-full); background: var(--surface-container-low);
@@ -7336,6 +7512,13 @@
       background var(--motion-short) var(--ease); }
   .mswitch.on i { background: var(--secondary-container); border-color: var(--secondary-container); }
   .mswitch.on i::after { transform: translateX(14px); background: var(--on-secondary-container); }
+  /* The row's one text action (use / remove / revoke). Quiet until hovered: the
+     switch is the primary control on these rows, and a second loud button on
+     every line would read as two equal decisions. */
+  .mact { flex: none; border: 0; background: none; cursor: pointer; padding: 8px 10px;
+    border-radius: var(--shape-full); color: var(--dim); font: inherit; font-size: 12.5px;
+    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
+  .mact:hover { background: var(--state-hover); color: var(--on-surface, inherit); }
 
   /* The snackbar lives in Toasts.svelte: one more presentational scope out of
      this file, and its styles with it. */

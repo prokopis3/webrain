@@ -56,6 +56,11 @@ pub struct Args {
     /// `--serve`: let one turn ask for several tool calls at once instead of
     /// serially. `None` means on — it only ever shortens a turn.
     pub parallel_tools: Option<bool>,
+    /// `--serve`: ask the provider for citations on each answer, so the page can
+    /// show which sources support a span of text. `None`/`false` is off: the SDK
+    /// marks the payload experimental, and a model that emits markers for them
+    /// spends output tokens that a chat answer does not need.
+    pub citations: Option<bool>,
     /// Comma-separated models the runtime may use. Empty means "whatever the
     /// provider serves", which is the default; naming models turns a typo into
     /// a refusal at creation instead of a provider error mid-turn.

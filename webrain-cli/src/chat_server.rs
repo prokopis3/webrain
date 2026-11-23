@@ -53,8 +53,9 @@ use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use copilot_sdk::rpc::{
-    AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    AgentSelectRequest, AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpConfigAddRequest,
+    McpConfigRemoveRequest,
     McpDisableRequest,
     McpEnableRequest, McpListToolsRequest, McpPromptsListRequest, McpResourcesListRequest,
     MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
@@ -111,6 +112,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     let permission = Arc::new(WebPermission {
         bus: bus.clone(),
         pending: Mutex::new(HashMap::new()),
+        approved: Mutex::new(load_approvals()),
         seq: AtomicU64::new(1),
     });
     let input = Arc::new(WebInput {
@@ -836,6 +838,10 @@ struct RuntimeSettings {
     /// One turn may ask for several tool calls at once. Creation-time only, so
     /// flipping it costs a restart — the trade nobody minds for a faster turn.
     parallel_tools: bool,
+    /// Ask the provider to mark which sources support each span of the answer.
+    /// Off by default: the SDK calls the payload experimental, and asking costs
+    /// output tokens. Creation-time only, like `parallel_tools`.
+    citations: bool,
     /// Comma-separated models the runtime may use; empty means unrestricted.
     allowed_models: String,
 }
@@ -852,6 +858,7 @@ impl Default for RuntimeSettings {
             effort: String::new(),
             instructions: String::new(),
             parallel_tools: true,
+            citations: false,
             allowed_models: String::new(),
         }
     }
@@ -887,6 +894,7 @@ impl RuntimeSettings {
             effort: v["effort"].as_str().unwrap_or_default().to_string(),
             instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
             parallel_tools: v["parallel_tools"].as_bool().unwrap_or(d.parallel_tools),
+            citations: v["citations"].as_bool().unwrap_or(d.citations),
             allowed_models: v["allowed_models"].as_str().unwrap_or_default().to_string(),
         }
     }
@@ -902,6 +910,7 @@ impl RuntimeSettings {
             "effort": self.effort,
             "instructions": self.instructions,
             "parallel_tools": self.parallel_tools,
+            "citations": self.citations,
             "allowed_models": self.allowed_models,
         })
     }
@@ -920,6 +929,7 @@ impl RuntimeSettings {
                 s.max_output_tokens,
                 s.compact_at,
                 s.parallel_tools,
+                s.citations,
                 s.allowed_models.clone(),
             )
         };
@@ -955,6 +965,9 @@ impl RuntimeSettings {
         if let Some(b) = v["parallel_tools"].as_bool() {
             self.parallel_tools = b;
         }
+        if let Some(b) = v["citations"].as_bool() {
+            self.citations = b;
+        }
         if let Some(m) = v["allowed_models"].as_str() {
             self.allowed_models = m.to_string();
         }
@@ -982,6 +995,7 @@ impl RuntimeSettings {
         args.effort = Some(self.effort.clone());
         args.instructions = Some(self.instructions.clone());
         args.parallel_tools = Some(self.parallel_tools);
+        args.citations = Some(self.citations);
         args.allowed_models = Some(self.allowed_models.clone());
     }
 }
@@ -1037,7 +1051,72 @@ struct WebPermission {
     // runtime waited for an answer the page could no longer give, and nothing
     // was on screen to answer.
     pending: Mutex<HashMap<String, (oneshot::Sender<bool>, Value)>>,
+    // `server:tool` keys the reader approved with "always allow", loaded once and
+    // written back on every change. On the server rather than in the page's
+    // localStorage: the approval is a statement about this session's tools, so a
+    // second tab — or a reload — must not be asked again, and the CLI's own turn
+    // must not be able to slip past a grant the page already gave.
+    approved: Mutex<Vec<String>>,
     seq: AtomicU64,
+}
+
+/// The key an approval is remembered under, and the same key the page uses:
+/// the server and the TOOL, never the runtime's `kind` — a kind like `tool`
+/// would stand for every tool there is. An unnamed server reads as `mcp`, which
+/// is what the page's `a.server || "mcp"` produces for the empty string a card
+/// carries when the runtime names none.
+fn approval_key(card: &Value) -> String {
+    let server = card["server"].as_str().unwrap_or("");
+    let server = if server.is_empty() { "mcp" } else { server };
+    let tool = card["tool"].as_str().unwrap_or("");
+    let tool = if tool.is_empty() { "tool" } else { tool };
+    format!("{server}:{tool}")
+}
+
+fn load_approvals() -> Vec<String> {
+    load_approvals_from(&chat_store::approvals_path())
+}
+
+fn load_approvals_from(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    v["approved"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_approvals(keys: &[String]) -> bool {
+    save_approvals_to(&chat_store::approvals_path(), keys)
+}
+
+fn save_approvals_to(path: &std::path::Path, keys: &[String]) -> bool {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, json!({ "approved": keys }).to_string()).is_ok()
+}
+
+impl WebPermission {
+    /// Add or drop one key and persist. A store that cannot be written is
+    /// reported rather than swallowed: the answer still applies to this prompt,
+    /// but the promise "you will not be asked again" would be a lie.
+    async fn set_approved(&self, key: &str, on: bool) -> bool {
+        let mut keys = self.approved.lock().await;
+        keys.retain(|k| k != key);
+        if on {
+            keys.push(key.to_string());
+        }
+        save_approvals(&keys)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1049,12 +1128,26 @@ impl PermissionHandler for WebPermission {
         data: PermissionRequestData,
     ) -> PermissionResult {
         let id = format!("p{}", self.seq.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
+        let managed = data.managed_approval_required.unwrap_or(false);
         // The runtime packs a structured request inside `extra` — server, tool,
         // arguments, whether it only reads. `format!("{data:?}")` was what turned
         // the dialog into a wall of text; these are the fields a person decides on.
         let req = &data.extra["permissionRequest"];
-        let card = permission_card(&id, req, data.managed_approval_required.unwrap_or(false));
+        let card = permission_card(&id, req, managed);
+        // A saved approval answers a tool prompt without a card — but never a
+        // managed one, where the runtime is saying a policy requires a human. The
+        // note keeps the grant visible: silence would hide a standing permission.
+        let key = approval_key(&card);
+        if !managed && self.approved.lock().await.iter().any(|k| *k == key) {
+            let _ = self.bus.send(
+                json!({ "type": "webrain.note", "data": { "text": format!(
+                    "{key} approved without asking — you saved this approval; remove it in settings to be asked again"
+                ) } })
+                .to_string(),
+            );
+            return PermissionResult::approve_once();
+        }
+        let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .await
@@ -1069,6 +1162,20 @@ impl PermissionHandler for WebPermission {
             Ok(Ok(false)) => PermissionResult::reject(Some("denied in the web UI".into())),
             _ => PermissionResult::reject(Some("no answer from the web UI".into())),
         }
+    }
+}
+
+/// The agent definition the session is running right now, in the shape the page
+/// lists definitions in. `null` is the built-in agent (nothing selected); an
+/// object with `error` is a call that failed — the two are different facts and
+/// the page must not read a failure as "nothing selected".
+async fn current_agent(live: &Live) -> Value {
+    match live.session.rpc().agent().get_current().await {
+        Ok(r) => match r.agent {
+            Some(a) => json!({ "id": a.id, "name": a.name, "title": a.display_name }),
+            None => Value::Null,
+        },
+        Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
@@ -2037,6 +2144,44 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
         }
+        // Forget a server from the runtime's user configuration. Adding one had a
+        // route and removing one had none, so a server added by mistake stayed in
+        // every new session. The reload after it is best-effort for the same
+        // reason the add reports it: a running session keeps what it attached.
+        ("POST", "/mcp/remove") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() || name.len() > 64 {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let mcp = live.client.rpc().mcp().config();
+            let out = match mcp
+                .remove(McpConfigRemoveRequest {
+                    name: name.clone(),
+                    auth_client_id_metadata_url: None,
+                })
+                .await
+            {
+                Err(e) => json!({ "removed": false, "error": e.to_string() }),
+                Ok(()) => {
+                    let reloaded = mcp.reload().await.is_ok();
+                    // A server still attached to this live session shows up here,
+                    // which is the honest answer to "is it gone".
+                    let still = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .list()
+                        .await
+                        .map(|l| l.servers.iter().any(|s| s.name == name))
+                        .unwrap_or(false);
+                    json!({ "removed": true, "name": name, "reloaded": reloaded, "attached": still })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
         // Run one tool directly, with arguments the page can edit. This is the
         // difference between "the model called the wrong selector" and "let me fix
         // the selector": no model turn, no tokens, the same invocation pipeline.
@@ -2149,7 +2294,40 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             let mut body = body;
             body["paths"] = paths;
+            // Which definition the session is running. `agents.selected` is a
+            // creation option, but `session.agent.select` moves it on a live
+            // session — so a picker needs no restart, only a list that says what
+            // is chosen now.
+            body["current"] = current_agent(&live).await;
             respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Choose the agent the next turns run as. `name` empty (or "default")
+        // deselects, which is the only way back to the built-in agent.
+        ("POST", "/agents/select") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let live = state.live.read().await.clone();
+            let agents = live.session.rpc().agent();
+            let r = if name.is_empty() || name == "default" {
+                agents.deselect().await.map(|_| ())
+            } else {
+                agents
+                    .select(AgentSelectRequest { name: name.clone() })
+                    .await
+                    .map(|_| ())
+            };
+            let reply = match r {
+                // `selected` is read back from the session, not from the request:
+                // asking for `default` is a request to have NOTHING selected, and
+                // echoing the name back reported the opposite of what happened.
+                Ok(()) => {
+                    let current = current_agent(&live).await;
+                    let selected = !current.is_null() && current.get("error").is_none();
+                    json!({ "selected": selected, "current": current })
+                }
+                Err(e) => json!({ "selected": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
         }
         // Create an agent definition. The runtime ships `write_agent` for the
         // model and nothing for a person, which is why this tab could only ever
@@ -2363,12 +2541,49 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let id = v["id"].as_str().unwrap_or_default().to_string();
             let allow = v["allow"].as_bool().unwrap_or(false);
-            let sent = match state.permission.pending.lock().await.remove(&id) {
+            // "Always allow" is a standing grant, so it is recorded here rather
+            // than only remembered by the tab that clicked it.
+            let always = v["always"].as_bool().unwrap_or(false) && allow;
+            let entry = state.permission.pending.lock().await.remove(&id);
+            let mut saved = None;
+            if always && let Some((_, card)) = &entry {
+                if card["managed"].as_bool().unwrap_or(false) {
+                    saved = Some(json!({ "saved": false, "why": "a managed policy requires this approval every time" }));
+                } else {
+                    let key = approval_key(card);
+                    let ok = state.permission.set_approved(&key, true).await;
+                    saved = Some(json!({ "key": key, "saved": ok }));
+                }
+            }
+            let sent = match entry {
                 Some((tx, _)) => tx.send(allow).is_ok(),
                 None => false,
             };
-            let body = json!({ "answered": sent }).to_string();
+            let mut out = json!({ "answered": sent });
+            if let Some(s) = saved {
+                out["approval"] = s;
+            }
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // The approvals that outlive a card: listed so a reader can undo one, and
+        // written only by an explicit "always allow".
+        ("GET", "/approvals") => {
+            let keys = state.permission.approved.lock().await.clone();
+            let body = json!({ "approved": keys }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
+        }
+        ("POST", "/approvals") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let key = v["key"].as_str().unwrap_or_default().trim().to_string();
+            if key.is_empty() || key.len() > 200 {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"key"}"#).await;
+            }
+            let on = v["on"].as_bool().unwrap_or(false);
+            let ok = state.permission.set_approved(&key, on).await;
+            let keys = state.permission.approved.lock().await.clone();
+            let out = json!({ "key": key, "on": on, "saved": ok, "approved": keys });
+            let code = if ok { 200 } else { 500 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // The approvals still waiting for an answer. A reload used to lose them:
         // the runtime kept waiting, the page had no card, and the turn sat there
@@ -4600,6 +4815,53 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_is_remembered_under_server_and_tool() {
+        // The same key the page computes, so a grant saved here silences the card
+        // the page would have drawn. `kind` is deliberately NOT part of it: the
+        // runtime calls almost everything "tool", and keying on that would stand
+        // for every tool there is.
+        let tool = json!({
+            "kind": "tool",
+            "serverName": "webrain",
+            "toolName": "webrain-webrain_navigate",
+        });
+        assert_eq!(approval_key(&permission_card("p1", &tool, false)), "webrain:navigate");
+
+        // A memory card is its own key, so approving one never approves writes.
+        let mem = json!({ "kind": "memory", "action": "store", "fact": "f", "subject": "s" });
+        assert_eq!(approval_key(&permission_card("p2", &mem, false)), "memory:remember");
+
+        // Nothing to name is not a wildcard: it is a key nothing else matches.
+        assert_eq!(approval_key(&permission_card("p3", &json!({}), false)), "mcp:tool");
+        assert_eq!(
+            approval_key(&json!({ "kind": "tool", "serverName": "", "toolName": "" })),
+            "mcp:tool"
+        );
+    }
+
+    #[test]
+    fn an_approval_survives_a_round_trip_through_its_file() {
+        let dir = std::env::temp_dir().join(format!("webrain-approvals-{}", std::process::id()));
+        let path = dir.join("nested/approvals.json");
+        // A missing file is "nothing approved", not an error — the first run has
+        // no file and must not ask for permission to have no preferences.
+        assert_eq!(load_approvals_from(&path), Vec::<String>::new());
+
+        let keys = vec!["webrain:navigate".to_string(), "memory:remember".to_string()];
+        assert!(save_approvals_to(&path, &keys), "the nested dir should be created");
+        assert_eq!(load_approvals_from(&path), keys);
+
+        // Revoking is a save of the shorter list, and it must stay short.
+        assert!(save_approvals_to(&path, &keys[..1]));
+        assert_eq!(load_approvals_from(&path), vec!["webrain:navigate".to_string()]);
+
+        // A truncated or hand-edited file reads as empty rather than panicking.
+        std::fs::write(&path, "{oops").unwrap();
+        assert_eq!(load_approvals_from(&path), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_page_summary_is_read_from_either_attribute_order() {
         let page = concat!(
             r#"<html><head><title>Tom &amp; Jerry</title>"#,
@@ -4719,11 +4981,22 @@ mod tests {
         assert!(s.parallel_tools);
         assert!(s.merge(&json!({"parallel_tools": false})));
         assert!(!s.merge(&json!({"parallel_tools": false})));
+        // Citations are the same shape: the live `options.update` inference
+        // options have no `enableCitations`, so the only honest answer to a flip
+        // is "this rebuilds the session". Off unless asked — it costs tokens.
+        assert!(!s.citations);
+        assert!(
+            s.merge(&json!({"citations": true})),
+            "enabling citations must be reported as a session change"
+        );
+        assert!(s.citations);
+        assert!(!s.merge(&json!({"citations": true})));
         // And the stamp is what `connect` actually reads.
         let mut args = Args::default();
         s.stamp(&mut args);
         assert_eq!(args.memory, Some(true));
         assert_eq!(args.compact_at, Some(COMPACT_PCT.0));
+        assert_eq!(args.citations, Some(true), "the flip must reach the session");
     }
 
     #[test]

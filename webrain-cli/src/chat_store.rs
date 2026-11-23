@@ -27,6 +27,13 @@ pub fn settings_path() -> PathBuf {
     db_path().with_file_name("settings.json")
 }
 
+/// Saved `server:tool` approvals, same directory for the same reason. Beside the
+/// settings rather than in them: this list is a standing permission, and a
+/// settings file a user edits by hand is the wrong place to keep one.
+pub fn approvals_path() -> PathBuf {
+    db_path().with_file_name("approvals.json")
+}
+
 impl Store {
     /// `None` when the file cannot be opened — the caller treats that as "no
     /// history menu" rather than an error.

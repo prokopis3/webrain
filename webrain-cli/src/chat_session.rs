@@ -530,6 +530,14 @@ pub(crate) async fn connect(
         // default: it only ever shortens the turn, and 2.0.1 is where the
         // option exists at all.
         .with_allow_multiple_tool_calls(args.parallel_tools.unwrap_or(true));
+    // Citations are opt-in and creation-time only — the live `options.update`
+    // shape has no such field — so flipping the switch rebuilds the session, the
+    // way `parallel_tools` does. The payload rides on `assistant.message` as a
+    // typed `citations` object (`CitationSpan { startIndex, endIndex,
+    // references[] }`), which the server already forwards untouched.
+    if args.citations.unwrap_or(false) {
+        inference = inference.with_enable_citations(true);
+    }
     // A one-shot command must not leave session state behind, but `--serve` is
     // the opposite: a long conversation, where hitting the context limit
     // mid-answer is the failure this switch exists to prevent. Compaction is

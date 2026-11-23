@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **three capabilities the page could describe but not use, closed against
+  `copilot-sdk` 2.0.1** — the open rows in `docs/CHAT_CAPABILITIES.md`:
+  - **An agent picker that switches a live session.** `session.agent.select` moves
+    the selection without a rebuild, so `GET /agents` now carries `current`,
+    `POST /agents/select {"name"}` switches it (or deselects to the built-in
+    agent), and the Agents tab draws "in use" instead of a "use" button on the
+    running one. The same reply reports what the session *now* runs rather than
+    echoing the request.
+  - **Approvals that outlive the card.** An "always allow" answer is stored as
+    `server:tool` in `approvals.json` beside the settings, and `WebPermission`
+    answers a matching prompt before raising a card — so a second tab, a reload,
+    or a turn the model runs on its own is not asked again. Managed approvals are
+    never auto-answered (the runtime is saying a policy wants a human), the
+    auto-answer posts a `webrain.note` so a standing grant stays visible, and the
+    new Approvals tab lists and revokes them. Deliberately not the SDK's
+    `modify_rules`: its `kind` is still documented only by example, and a rule
+    keyed on a kind that calls everything `tool` would stand for every tool.
+  - **Citations, on a premise that was wrong.** The payload is typed after all
+    (`Citations { sources[], spans[] }`), so a setting turns on
+    `with_enable_citations(true)` and a cited answer lists its sources; off by
+    default, because it is experimental and markers cost output tokens.
+  - **Removing an MCP server**, which had a route for adding and none for
+    forgetting: `POST /mcp/remove` removes it from the runtime's user config and
+    reports `{removed, reloaded, attached}` — `attached` being the honest answer
+    to "is it gone from *this* session", since a running session keeps what it
+    attached.
+  - `POST /permission` now takes `always` so the page can send the standing grant
+    to the side that knows whether it could be written.
 - `cli`: **`webrain read <url>` — a page as markdown, over HTTP, with no browser
   and no model.** The last capability the agent-browser comparison called a gap:
   `webrain_scrape` returned raw HTML, so a docs page cost markup tokens and a
@@ -302,6 +330,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"stopped":true,"id":1,…}`.
 
 ### Fixed
+- `chat`: **`/agents/select` reported `selected: true` for a deselect.** The reply
+  echoed the request's name, so `{"name":"default"}` — which *clears* the
+  selection — answered the opposite of what had happened. It reads `current` back
+  from the session now; found by running the route, not by the type check.
 - `mcp`: **table headers no longer carry `&nbsp;` into the JSON keys.**
   `webrain_extract mode=table` used `th.textContent.trim()`, and `trim()` only
   strips the *ends*, so a header padded with `&nbsp;` for layout became the key
