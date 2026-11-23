@@ -6,6 +6,7 @@
   // The composer's menu lives in Palette.svelte, which owns the scroll-into-view
   // for the selected row — that was the only reason `tick` was imported here.
   import Palette from "./Palette.svelte";
+  import Toasts from "./Toasts.svelte";
   // webrain chat · Svelte 5 runes.
   // Wire contract: GET /events (SSE), POST /turn, POST /permission,
   // GET /sessions (+ /sessions/<id>). Unknown runtime events are shown, never
@@ -5901,21 +5902,7 @@
   </div>
 {/if}
 
-{#if toasts.length}
-  <!-- A snackbar, not a modal: it reports what another thread did and never asks
-       for an answer. Above the composer so it cannot cover the field. -->
-  <div class="toasts" role="status" aria-live="polite">
-    {#each toasts as t (t.id)}
-      <div class="toast" class:bad={t.kind === "err"}>
-        <span>{t.text}</span>
-        <button
-          class="linky"
-          onclick={() => (toasts = toasts.filter((x) => x.id !== t.id))}
-          aria-label="dismiss">×</button>
-      </div>
-    {/each}
-  </div>
-{/if}
+<Toasts {toasts} ondismiss={(id) => (toasts = toasts.filter((x) => x.id !== id))} />
 
 {#if settingsOpen}
   <div
@@ -7639,18 +7626,8 @@
   .mswitch.on i { background: var(--secondary-container); border-color: var(--secondary-container); }
   .mswitch.on i::after { transform: translateX(14px); background: var(--on-secondary-container); }
 
-  /* Snackbar: a line from another thread. Bottom-left, above the composer, so it
-     never covers the field it is reporting about. */
-  .toasts { position: fixed; left: var(--s4); bottom: 7.5rem; z-index: 70;
-    display: flex; flex-direction: column; gap: var(--s2);
-    max-width: min(26rem, calc(100vw - 2 * var(--s4))); }
-  .toast { display: flex; align-items: center; gap: var(--s3);
-    padding: var(--s2) var(--s2) var(--s2) var(--s4);
-    border-radius: var(--shape-md); font-size: 13px;
-    background: var(--surface-container-highest); color: var(--on-surface);
-    box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); }
-  .toast.bad { background: var(--error-container); color: var(--on-error-container); }
-  .toast span { flex: 1; }
+  /* The snackbar lives in Toasts.svelte: one more presentational scope out of
+     this file, and its styles with it. */
 
   /* Provider tab body: the live catalogue, filterable, one row per model. It is
      the provider's own list — not a copy of the default model in the config. */
