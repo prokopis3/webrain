@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `chat`: **the transcript skips what is off screen.** Tool cards, runtime rows,
+  notes and step strips now carry `content-visibility: auto` with
+  `contain-intrinsic-size: auto 3rem`, so a 120-row thread lays out only the rows
+  in view. Messages are excluded on purpose — their height is what a reader
+  scrolls by. Verified in a 40-message thread (88 such rows): `cv: auto`,
+  pinned-to-bottom still reports 0 and the jump button still appears away from it.
+- `chat`: **a bundle size budget.** `bun run check` now ends with
+  `check-budget.mjs`, which fails the chain when a gzipped asset crosses its
+  ceiling (chat.js 80 KB, chat.css 15 KB, markdown chunk 29 KB; measured 74.2 /
+  13.0 / 27.3 KB, 114.5 KB total). The page is one 7.9k-line component and
+  nothing else noticed when it grew.
+
 ### Fixed
 - `chat`: **a bad port in a URL no longer kills the server.** `ureq::get()` panics
   inside its URL parser on `https://host:abc/`, so one link preview — or a provider

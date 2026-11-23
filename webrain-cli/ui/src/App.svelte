@@ -6635,6 +6635,14 @@
      only thing that changes colour. Nothing floats and nothing is boxed: on a
      page that streams, a card per message is a wall of boxes. */
   .msg, .tool, .act, .think, .usage, .note, .steps, .evidence, .next { position: relative; }
+  /* The transcript keeps up to 120 rows of tool cards, and off-screen ones still
+     cost layout. `content-visibility: auto` skips everything outside the
+     viewport; `contain-intrinsic-size: auto 3rem` seeds the placeholder with a
+     collapsed-card height and then remembers the real one, so the scroll height
+     the pinned-to-bottom logic reads does not jump. Messages are left out: their
+     height is what a reader scrolls by, and a guess there is felt. */
+  .tool, .act, .think, .usage, .note, .steps { content-visibility: auto;
+    contain-intrinsic-size: auto 3rem; }
   .msg { border-top: 1px solid var(--rule); padding: var(--s4) 0; margin: 0;
     white-space: pre-wrap; word-break: break-word; animation: rise var(--motion-short) var(--ease); }
   .msg::after { content: ""; position: absolute; left: -1.32rem; top: calc(var(--s4) + 3px);
