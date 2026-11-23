@@ -2271,9 +2271,35 @@
   const lastUser = $derived([...shown].reverse().find((i) => i.kind === "user")?.text || "");
 
   function retry() {
-    if (!lastUser || busy) return;
+    if (!lastUser || busy || past) return;
     draft = lastUser;
     send();
+  }
+
+  // Editing the last turn is a rewind plus a prefilled field. The runtime keeps
+  // one rewind point per user turn, so going back to the newest one drops exactly
+  // that turn, and its own text is what comes back to the composer. ChatGPT (and
+  // the VS Code chat) do the same thing; appending the correction instead would
+  // leave two versions of a question the model can only see one of.
+  async function editLast() {
+    if (busy || past) return;
+    let j;
+    try {
+      j = await (await fetch("/rewind")).json();
+    } catch {
+      return push({ kind: "note", text: "edit: the server is not reachable" });
+    }
+    if (j.error) return push({ kind: "note", text: `edit: ${j.error}` });
+    if (j.unavailable) return push({ kind: "note", text: `edit: ${j.unavailable}` });
+    const p = (j.points || []).at(-1);
+    const was = p?.text || lastUser;
+    if (!was) return push({ kind: "note", text: "edit: no turn recorded yet" });
+    // Dropping a turn and its answer is not undoable, so it is asked first.
+    if (!confirm(`Go back to your last message and drop the answer after it?\n\n${was.slice(0, 200)}`))
+      return;
+    await doRewind(p.event, was, false);
+    draft = was;
+    document.querySelector("textarea")?.focus();
   }
 
   // `delivery` is the runtime's own three-way choice, which is why the page
@@ -5600,10 +5626,18 @@
       <span class="gi" aria-hidden="true">{@html ICON.tools}</span>
       {toolsSel.length ? `tools ${toolsSel.length}` : "tools"}
     </button>
-    {#if lastUser && !busy}
+    {#if lastUser && !busy && !past}
       <button class="ghost" onclick={retry} title="send the last prompt again">
         <span class="gi" aria-hidden="true">{@html ICON.refresh}</span>
         retry
+      </button>
+      <button
+        class="ghost"
+        onclick={editLast}
+        title="go back to your last message, drop the answer after it, and rewrite it"
+      >
+        <span class="gi" aria-hidden="true">{@html ICON.pencil}</span>
+        edit
       </button>
     {/if}
     <button

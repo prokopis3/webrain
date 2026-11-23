@@ -78,5 +78,13 @@ assert.ok(
   src.includes("encodeURIComponent(a.convo || current)"),
   "an attachment is addressed by the thread on screen, not the one it was uploaded under",
 );
+// Retry and edit both act on the *live* turn, so neither may be offered while an
+// old thread is on screen — `lastUser` follows the pane, and sending it would
+// post one conversation's question into another.
+assert.ok(src.includes("{#if lastUser && !busy && !past}"), "retry/edit are offered while reading history");
+assert.ok(
+  src.includes("if (!lastUser || busy || past) return;"),
+  "retry sends a history thread's question to the live conversation",
+);
 
-console.log("merge-rows: 16 assertions passed");
+console.log("merge-rows: 19 assertions passed");

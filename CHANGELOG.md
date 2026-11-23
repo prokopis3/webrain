@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not a broken renderer.
 
 ### Added
+- `chat`: **the last turn can be edited, the way ChatGPT and the VS Code chat do it.**
+  `retry` existed (send the same prompt again) but there was no way to change the
+  wording. An `edit` button beside it reads the runtime's newest **rewind point**,
+  asks before dropping anything, rewinds the conversation to that turn, and puts the
+  old text back in the field for rewriting — the runtime keeps one rewind point per
+  user turn, so the newest one *is* the last message. Both buttons are now hidden
+  while an old thread is on screen: `lastUser` follows the pane, and sending it would
+  post one conversation's question into another. Measured: one turn recorded, `edit`
+  clicked, confirm accepted → the pane went to 0 rows, the field held the original
+  text, and the note read `rewound · 26 events dropped`.
 - `chat`: **five capabilities the page could describe but not use, closed against
   `copilot-sdk` 2.0.1** — the open rows in `docs/CHAT_CAPABILITIES.md`:
   - **An agent picker that switches a live session.** `session.agent.select` moves

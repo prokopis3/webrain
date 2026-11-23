@@ -79,13 +79,13 @@ which is the part that matters when deciding whether to trust this page:
 
 Not verified, in order of how much it matters:
 
-1. **The permission path.** Every turn so far has died at the provider (the key is
-   out of credits) before a tool call, so no approval card has been raised on
-   2.0.1. Until a funded key raises one, treat `permissions.on_request` as
-   compiled-but-unproven — it is the failure that looks like success. This is also
-   why the standing-approval store is proven by unit tests (key shape, file round
-   trip, managed-never-auto-answered) and by its routes, but not yet by a card
-   that was actually skipped.
+1. **The permission path, answered.** Cards *are* drawn on 2.0.1 — seen 2026-11-23
+   on a `deepseek-flash` turn that called `list_dir` and `search_files`: two cards
+   with Deny / Approve once / Always allow, which is `permissions.on_request` and the
+   `WebPermission` card both working. What has never happened is an **answer**: that
+   turn was stopped, so no tool ran on an approval, and the standing-approval store is
+   still proven only by unit tests (key shape, file round trip,
+   managed-never-auto-answered) and by its routes, not by a card that was skipped.
 2. **Citations on a real turn.** The switch, the restart report, the persisted
    value and the page's strip are in place; no funded turn has run with it on, so
    `Citations` has not been seen populated by a provider. The BYOK providers here
