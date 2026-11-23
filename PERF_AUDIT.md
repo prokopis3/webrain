@@ -74,14 +74,6 @@ those tabs draw are in `ui/src/app.css`, so a tab costs its markup and no form C
 The transcript rows stay last: one `{#each}` with a dozen locals, and the
 measurement shows they are already cheap to scroll.
 
-### 4. A streaming turn is still unmeasured (frontend)
-
-Every number in this file is either a bundle size, a JS timing, or a scroll and a
-dialog open. No frame timeline of a *streaming* turn exists — per-token DOM
-insertion plus markdown re-parse — which is the one place a chat can stutter. It
-needs a funded provider key to record, not code: record one turn and report the
-longest task and the dropped-frame count before touching the render path.
-
 ---
 
 ## Declined on purpose
@@ -183,3 +175,18 @@ const sc = [...document.querySelectorAll("*")].find((e) => e.scrollHeight > e.cl
 for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeight) * i) / 30; await new Promise(requestAnimationFrame); }
 console.table(t);  // the first scroll may show one task; later scrolls should be empty
 ```
+
+Streaming, which is the path a chat can actually stutter on. Measured 2026-11-23:
+**420 tokens 18 ms apart (≈55 tok/s, faster than any provider streams) through the
+page's own `render()` from `chunk-markdown.js`, inserted into a real transcript row
+— 430 frames over 8,131 ms, P50 16.7 ms, P95 33.4 ms, max 33.6 ms, no frame over
+34 ms, zero long tasks, TBT 0.** The 33.4 ms P95 is the harness: the loop yields
+18 ms between paints, so every few frames get two intervals. Per-token markdown
+re-parse of a 2.3 KB reply does not block the main thread.
+
+A turn served by a real provider was not recordable — OpenRouter had 57 tokens of
+credit left and this server floors `max_tokens` at 64, so every attempt answered
+402 (which the page rendered as a streamed error, also with zero long tasks).
+`output/mock-stream.mjs` serves the same OpenAI-shaped SSE chunks locally when the
+full transport path needs recording; point a provider row at
+`http://127.0.0.1:8811/v1` for the duration of the measurement and delete it after.
