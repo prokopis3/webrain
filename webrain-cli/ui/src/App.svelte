@@ -2527,7 +2527,9 @@
     fetch("/mode", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: mode === "plan" ? "plan" : "interactive" }),
+      // The conversation whose session takes the mode. Each one runs its own, so a
+      // switch made here must not land on whichever thread was opened last.
+      body: JSON.stringify({ mode: mode === "plan" ? "plan" : "interactive", convo: current }),
     }).catch(() => {});
     const r = await fetch("/turn", {
       method: "POST",

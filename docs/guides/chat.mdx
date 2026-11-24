@@ -321,7 +321,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /pending` | the approvals still waiting for an answer, so a reloaded page can redraw the cards |
 | `POST /permission` | `{"id":"…","allow":true}` — answers a pending approval |
 | `POST /answer` | `{"id":"…","answer":"…","freeform":true}` — answers `ask_user` |
-| `GET /mode`, `POST /mode` | the runtime's session mode (`interactive` / `plan` / `autopilot`) — a switch, not a prompt prefix |
+| `GET /mode`, `POST /mode` | the runtime's session mode (`interactive` / `plan` / `autopilot`) **of the conversation named in `convo`** — a switch, not a prompt prefix. A conversation with no session yet answers `session: false` and is left alone; its first turn carries the mode |
 | `GET /queue`, `POST /queue` | what waits behind the running turn: `POST` with `{"id"}` runs one now, `{"id","text"}` edits it, `{"id","remove":true}` drops it |
 | `GET /permission-mode`, `POST /permission-mode` | the runtime's own permission policy (`manual` / `assisted` / `allow-all`) |
 | `GET /plan`, `POST /plan` | the plan the agent keeps on file |

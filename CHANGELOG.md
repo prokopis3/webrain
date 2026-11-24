@@ -41,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared is what belongs to the process: the bus, the card id counter, and the standing
   `server:tool` approvals — a grant is about the tool, not the thread
   (`two_conversations_do_not_share_a_cap_or_a_card`).
+- `chat`: **`/mode` switches the conversation it is told about, and no session through a
+  fallback.** It was the last route that read the page's current conversation, so a mode
+  change from a background tab landed on whichever thread had been opened last. `POST /mode`
+  takes a `convo` and the page sends it; a conversation with no session yet answers
+  `session: false` and is left alone, because its first turn already carries the mode and
+  applying it to another chat's session is the cross-chat bug this closed. Every route that
+  CHANGES a session now resolves it with `Shared::find`, not the read-only `chat` fallback.
 
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids

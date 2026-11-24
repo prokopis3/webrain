@@ -1096,15 +1096,22 @@ impl Shared {
         self.current.lock().await.clone()
     }
 
+    /// The chat for a conversation, or `None` when it has no session yet. The
+    /// difference matters to every route that CHANGES a session: applying a switch
+    /// to a fallback chat is how one conversation used to configure another.
+    async fn find(&self, convo: &str) -> Option<Arc<State>> {
+        self.chats.lock().await.get(convo).cloned()
+    }
+
     /// The chat a read-only route answers from. A conversation that has never
     /// been turned has no session of its own, so these routes fall back to the
     /// one `run` booted with — which is what they answered from when there was
     /// only one.
     async fn chat(&self, convo: &str) -> Arc<State> {
-        if let Some(s) = self.chats.lock().await.get(convo) {
-            return s.clone();
+        match self.find(convo).await {
+            Some(s) => s,
+            None => self.primary.get().cloned().expect("run sets primary"),
         }
-        self.primary.get().cloned().expect("run sets primary")
     }
 
     async fn busy_of(&self, convo: &str) -> bool {
@@ -3421,9 +3428,16 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         // the agent actually reads, and `set` reports when honouring it needs a
         // model switch or a compaction.
         ("GET", "/mode") => {
-            let live = state.live.read().await.clone();
+            // The conversation whose session this is. A chat that has never been
+            // turned has no mode to report — `interactive` is the default the
+            // runtime would apply, not a claim about a session that exists.
+            let Some(chat) = shared.find(&convo).await else {
+                let body = json!({ "mode": "interactive", "session": false }).to_string();
+                return respond(&mut stream, 200, "application/json", &body).await;
+            };
+            let live = chat.live.read().await.clone();
             let body = match live.session.rpc().mode().get().await {
-                Ok(m) => json!({ "mode": mode_word(&m) }),
+                Ok(m) => json!({ "mode": mode_word(&m), "session": true }),
                 Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
@@ -3431,14 +3445,29 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         ("POST", "/mode") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let want = v["mode"].as_str().unwrap_or("interactive");
+            // The turn names its conversation, so this does too — and a chat with
+            // no session yet is left alone rather than switched through a fallback:
+            // its first turn carries the mode, and setting it on another
+            // conversation's session is exactly the cross-chat bug this closed.
+            let convo = match v["convo"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) => c.to_string(),
+                None => convo.clone(),
+            };
+            let Some(chat) = shared.find(&convo).await else {
+                let body = json!({ "mode": want, "applied": false, "session": false }).to_string();
+                return respond(&mut stream, 200, "application/json", &body).await;
+            };
             // A crate-private field, so `Default` then assign.
             let mut req = ModeSetRequest::default();
             req.mode = session_mode_of(want);
-            let live = state.live.read().await.clone();
+            let live = chat.live.read().await.clone();
             let reply = match live.session.rpc().mode().set(req).await {
-                Ok(r) => {
-                    json!({ "mode": want, "message": r.message, "deferred": r.defer_implementation })
-                }
+                Ok(r) => json!({
+                    "mode": want,
+                    "applied": true,
+                    "message": r.message,
+                    "deferred": r.defer_implementation,
+                }),
                 Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
