@@ -15,6 +15,7 @@
     off = [], // builtins switched off (persisted)
     allow = [], // "server:tool" keys approved without asking (persisted)
     sel = [], // the tools already preferred
+    dead = new Set(), // builtins the runtime withheld from this session
     runtimeOff = "", // the runtime's own sentence about what it disabled
     icons = {},
     onclose = () => {},
@@ -66,7 +67,10 @@
     return builtin.filter((n) => !q || n.toLowerCase().includes(q));
   });
   const draftCount = $derived(draft.length);
-  const builtinOnCount = $derived(builtin.filter(builtinOn).length);
+  // Only what this session can actually call: a withheld builtin is listed (so
+  // its absence is explained) but is not a switch and is not counted.
+  const live = $derived(builtin.filter((n) => !dead.has(n)));
+  const builtinOnCount = $derived(live.filter(builtinOn).length);
 
   const toggleDraft = (full) =>
     (draft = draft.includes(full) ? draft.filter((t) => t !== full) : [...draft, full]);
@@ -75,7 +79,7 @@
   const allBuiltin = (on) =>
     onoff(on
       ? off.filter((n) => !builtinShown.includes(n))
-      : [...new Set([...off, ...builtinShown])]);
+      : [...new Set([...off, ...builtinShown.filter((n) => !dead.has(n))])]);
   const allOf = (server, on) => {
     const names = groups.find((g) => g.server === server)?.tools.map((t) => t.full) || [];
     draft = on ? [...new Set([...draft, ...names])] : draft.filter((t) => !names.includes(t));
@@ -125,7 +129,8 @@
       </div>
       <div class="tlist">
         {#if builtinShown.length}
-          {@const onCount = builtinShown.filter(builtinOn).length}
+          {@const onCount = builtinShown.filter((n) => !dead.has(n) && builtinOn(n)).length}
+          {@const liveShown = builtinShown.filter((n) => !dead.has(n)).length}
           {@const folded = closed.includes("builtin")}
           <div class="tgroup">
             <div class="trow">
@@ -137,7 +142,10 @@
               >
                 <span class="tcaret" aria-hidden="true">{@html folded ? icons.right : icons.down}</span>
                 builtin
-                <span class="dim">{onCount} of {builtinShown.length} on</span>
+                <span class="dim">{onCount} of {liveShown} on</span>
+                {#if liveShown < builtinShown.length}
+                  <span class="dim">{builtinShown.length - liveShown} withheld</span>
+                {/if}
               </button>
               <button class="linky" onclick={() => allBuiltin(true)}>all</button>
               <button class="linky" onclick={() => allBuiltin(false)}>none</button>
@@ -145,11 +153,20 @@
             {#if !folded}
               <div class="tchecks">
                 {#each builtinShown as name (name)}
+                  {@const served = !dead.has(name)}
                   <label
                     class="tcheck"
-                    title="a tool this build installs itself — unticking only tells the agent to prefer others"
+                    class:dead={!served}
+                    title={served
+                      ? "a tool this build installs itself — unticking only tells the agent to prefer others"
+                      : "the runtime disabled this one for this session — no switch here can turn it on"}
                   >
-                    <input type="checkbox" checked={builtinOn(name)} onchange={() => toggleBuiltin(name)} />
+                    <input
+                      type="checkbox"
+                      checked={served && builtinOn(name)}
+                      disabled={!served}
+                      onchange={() => toggleBuiltin(name)}
+                    />
                     <span class="box" aria-hidden="true"></span>
                     <span>{name}</span>
                   </label>
@@ -221,7 +238,7 @@
         {/if}
         <div class="row">
           <span class="dim tcount"
-            >{draftCount + builtinOnCount} of {tools.length + builtin.length} preferred</span
+            >{draftCount + builtinOnCount} of {tools.length + live.length} preferred</span
           >
           <button class="deny" onclick={onclose}>Close</button>
           <button onclick={() => onsave(draft)}>Save · {draftCount}</button>
@@ -286,6 +303,14 @@
     color: var(--faint); border-radius: var(--shape-xs); }
   .tallow:hover { color: var(--on-surface); background: var(--state-hover); }
   .tallow.on { color: var(--primary); }
+  .tcheck input { flex: 0 0 auto; }
+  /* A built-in name can be longer than a 11rem cell; without a shrinkable,
+     ellipsed name the text ran over the next column's checkbox. */
+  .tcheck { min-width: 0; }
+  .tcheck > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .tcheck.dead { opacity: 0.5; }
+  .tcheck.dead input { cursor: not-allowed; }
   .tfoot { display: grid; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3);
     border-top: 1px solid var(--outline-variant); }
   .tfoot .note { margin: 0; }

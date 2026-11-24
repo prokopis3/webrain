@@ -406,7 +406,7 @@ fn mode_label(mode: SearchMode) -> &'static str {
 /// (`task`) and could not look at what it spawned: `list_agents` was excluded
 /// whether the switch was on or off. `validate_name` only checks the shape of a
 /// name, so a runtime that lacks one ignores it rather than failing the session.
-fn tool_filter(allow_agents: bool) -> Vec<String> {
+pub(crate) fn tool_filter(allow_agents: bool) -> Vec<String> {
     let mut allowed = webrain_mcp::tool_names()
         .iter()
         .fold(ToolSet::new(), |set, n| {

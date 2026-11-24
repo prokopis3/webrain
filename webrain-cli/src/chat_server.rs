@@ -4446,9 +4446,22 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             if !agents_on {
                 builtins.retain(|(n, _)| !n.contains("agent"));
             }
+            // Which of these this session is actually handed. `get_builtin_descriptors`
+            // is the REGISTRY — 33 names — and the allowlist the session was created
+            // with serves a handful of them. Drawing the rest as live switches is
+            // what made ticking `powershell` change nothing while the model kept
+            // answering "no such tool exists in this session".
+            let served = chat_session::tool_filter(agents_on);
             for (name, hint) in builtins {
                 if seen.insert(name.clone()) {
-                    items.push(json!({"name": name, "kind": "builtin", "hint": hint}));
+                    // `with_search(defer_threshold: 1)` is what hands the model the
+                    // schema loader, so it is served without appearing in the
+                    // allowlist — the one name the filter cannot say yes to.
+                    let live = name == "tool_search_tool"
+                        || served.iter().any(|f| f == &format!("builtin:{name}"));
+                    items.push(json!({
+                        "name": name, "kind": "builtin", "hint": hint, "live": live
+                    }));
                 }
             }
             // The runtime's own slash commands. `session.commands.list` is the

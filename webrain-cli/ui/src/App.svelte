@@ -221,8 +221,11 @@
         ? catalog.items
         : catalog.items.filter((r) => r.kind === want || (want === "tool" && r.kind === "builtin"));
     // A builtin the Runtime tab switched off is not offered in `#`: that menu is
-    // what the model can reach this session, not a catalogue of what exists.
-    const usable = rows.filter((r) => !(r.kind === "builtin" && builtinOff.includes(r.name)));
+    // what the model can reach this session, not a catalogue of what exists —
+    // and one the runtime withheld is not reachable at all.
+    const usable = rows.filter(
+      (r) => !withheld.has(r.name) && !(r.kind === "builtin" && builtinOff.includes(r.name)),
+    );
     // What the draft already names is not offered again — a pick always writes
     // `@name `, so the trailing space is the boundary that keeps `@web` from
     // hiding `@webrain`. The menu answers "what can I still add".
@@ -841,6 +844,14 @@
   // from its `configuration` event. Shown in the tools checklist because a list
   // of what the model *has* cannot explain a tool that never appears.
   let runtimeOff = $state("");
+  // Built-ins this session cannot call, from the catalogue's own flag. The list
+  // is the runtime's *registry* (33 names); the allowlist the session was built
+  // with serves a handful, and a checkbox for the rest was a switch wired to
+  // nothing — ticking `powershell` changed nothing and the model kept answering
+  // `no such tool exists in this session`.
+  const withheld = $derived(
+    new Set(catalog.items.filter((r) => r.kind === "builtin" && r.live === false).map((r) => r.name)),
+  );
   const builtinOn = (name) => !builtinOff.includes(name);
   function toggleBuiltin(name) {
     builtinOff = builtinOn(name)
@@ -6212,6 +6223,7 @@
   off={builtinOff}
   allow={autoTools}
   sel={toolsSel}
+  dead={withheld}
   {runtimeOff}
   icons={ICON}
   onclose={() => (toolsOpen = false)}

@@ -134,6 +134,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
+- `chat`: **the tools checklist no longer offers switches for built-ins the session cannot call.** The
+  list was the runtime's *registry* — 33 built-ins, drawn as 33 live checkboxes, "33 of 33 on" —
+  while the allowlist the session was created with serves eight of them (`task`, `task_complete`,
+  `ask_user`, `skill`, the three agent tools and `tool_search_tool`). Ticking `powershell` changed
+  nothing, and the model answered, correctly, that no such tool exists in that session. `GET
+  /catalog` now marks each built-in `live` from `tool_filter`, which is the same list
+  `chat_session::connect` sends: the served rows keep their checkbox, the rest are dimmed,
+  disabled ones with the reason in the tooltip and a `24 withheld` count on the group — and `#`
+  no longer offers them as completions either. Measured on a live session: `builtins=32 live=8
+  withheld=24`.
+- `chat`: **a long built-in name stays in its own column.** `fetch_copilot_cli_documentation` ran
+  over the next cell's checkbox, because a flex item without `min-width: 0` cannot shrink; the
+  name now ellipsizes inside the 11rem cell.
 - `chat`: **the Session Info panel reads one basis, and opens before the first turn.** Two
   numbers disagreed inside one panel: the header printed `used / promptTokenLimit` (12% of a
   128k session budget) while the rows below took their percentages from the attribution's
