@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **a mention stays marked once it is sent, and `@name` reads both skill roots.**
+  The Settings → Skills panel lists two trees — the bundle and `~/.agents/skills`, where the
+  `npx`-style installers write — but `expand_mentions` asked `webrain_mcp::skill_text`, which
+  reads only the first. A skill the panel listed therefore reached the model as bare prose
+  (`@2d-games`) and came back as *"there is no such tool in this runtime"*. `mention_skill`
+  now falls back to `agents_skill(name, agents_dir())`, and the panel's own label says
+  `attached when you name it with @` instead of `not loaded by this session`. In the
+  transcript, a sent message is painted by the same `markInput` that tints the draft, so
+  `@skill` / `#tool` / `/command` keep their sigil colour in your own message —
+  `check-mentions.mjs` holds both halves (17 assertions, was 12).
 - `chat`: **every conversation runs on its own runtime session, so two chats can work
   at the same time.** `State` was one session for the whole server — one `live`, one
   `busy`, one `convo` — so a second conversation's turn answered `409 busy`, and opening

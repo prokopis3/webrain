@@ -2533,8 +2533,9 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             // The runtime knows only its own directory. The cross-tool tree the
             // `npx`-style installers write (`~/.agents/skills`) is a second root,
             // so a skill installed for every other agent on this machine is listed
-            // rather than invisible — off, and marked not-live, because a tool this
-            // session did not load cannot be switched on from the page.
+            // rather than invisible. The runtime has not loaded it, but `@name` in
+            // a prompt attaches its text to that turn — which is the lever the page
+            // has for a skill this session did not register.
             let mut skills: Vec<Value> = match &list {
                 Ok(l) => l
                     .skills
@@ -2554,7 +2555,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                             "name": name,
                             "enabled": false,
                             "live": false,
-                            "source": "~/.agents/skills · not loaded by this session",
+                            "source": "~/.agents/skills · attached when you name it with @",
                         }));
                     }
                 }
@@ -5213,6 +5214,27 @@ fn skill_hint(name: &str) -> Option<String> {
     )
 }
 
+/// The text of one skill a mention named: the webrain tree first (bundled or
+/// installed), then the cross-tool `~/.agents/skills` tree that Settings → Skills
+/// already lists. Both roots are on that list, so a name it shows has to resolve
+/// here — a panel that advertises a skill the mention path cannot read is the bug
+/// this closes, and it is why `@2d-games` used to reach the model as prose.
+fn mention_skill(name: &str) -> Option<String> {
+    if let Some(body) = webrain_mcp::skill_text(name) {
+        return Some(body);
+    }
+    agents_skill(name, webrain_core::skills::agents_dir()?)
+}
+
+/// One skill out of the cross-tool tree, by the same name the panel shows. Split
+/// from `mention_skill` so the lookup is testable without a home directory.
+fn agents_skill(name: &str, dir: std::path::PathBuf) -> Option<String> {
+    let (_, path) = webrain_core::skills::list(&dir)
+        .into_iter()
+        .find(|(n, _)| n == name.trim())?;
+    std::fs::read_to_string(path).ok()
+}
+
 /// `@name` in a prompt is a mention, not prose. When `name` is an installed
 /// skill, that skill's text rides along with the turn.
 ///
@@ -5223,7 +5245,7 @@ fn skill_hint(name: &str) -> Option<String> {
 fn expand_mentions(prompt: &str) -> String {
     let named: Vec<(&str, String)> = mentions(prompt)
         .into_iter()
-        .filter_map(|n| webrain_mcp::skill_text(n).map(|body| (n, body)))
+        .filter_map(|n| mention_skill(n).map(|body| (n, body)))
         .collect();
     attach_skills(prompt, named)
 }
@@ -5702,6 +5724,28 @@ mod tests {
     fn a_named_skill_rides_along_with_the_prompt() {
         let out = attach_skills("explain @a", vec![("a", "  body a  ".to_string())]);
         assert_eq!(out, "explain @a\n\n<skill name=\"a\">\nbody a\n</skill>");
+    }
+
+    /// Settings → Skills lists two roots. A name on that list has to resolve when
+    /// it is typed as `@name`, or the panel promises a skill the mention path
+    /// cannot read — which is how `@2d-games` reached the model as bare prose and
+    /// came back as "there is no such tool".
+    #[test]
+    fn a_mention_reads_the_cross_tool_skill_tree() {
+        let dir = std::env::temp_dir().join(format!("webrain-agents-{}", std::process::id()));
+        let nested = dir.join("2d-games");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), "---\nname: 2d-games\n---\nbody\n").unwrap();
+        assert_eq!(
+            agents_skill("2d-games", dir.clone()).as_deref(),
+            Some("---\nname: 2d-games\n---\nbody\n"),
+            "a skill the panel lists must be readable by a mention"
+        );
+        // A name nobody installed stays unresolved, so the prompt is unchanged.
+        assert_eq!(agents_skill("nope", dir.clone()), None);
+        // Trailing punctuation is not part of a name (the `@name,` case).
+        assert!(agents_skill(" 2d-games ", dir.clone()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

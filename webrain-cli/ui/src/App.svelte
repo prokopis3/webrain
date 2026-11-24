@@ -5238,7 +5238,14 @@
                   {/each}
                 </div>
               {/if}
-              {item.files?.length ? withoutLines(item.text) : item.text}
+              {#if item.files?.length}
+                {withoutLines(item.text)}
+              {:else}
+                <!-- A mention reads as a thing you picked, not as words: the same
+                     `markInput` that tints the draft paints the sent message, so a
+                     thread shows at a glance what was handed to the turn. -->
+                {@html markInput(item.text)}
+              {/if}
             </div>
           {/if}
         </div>
@@ -7894,6 +7901,17 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-skill) 40%, transparent); }
   /* The wipe: the pill grows up from the baseline. Only the paint moves. */
   @keyframes tintin { from { background-size: 100% 0; } to { background-size: 100% 62%; } }
+  /* The same three tints in a sent message. The composer's layer paints
+     transparent glyphs behind a textarea, so the tokens it marks are re-painted
+     here as real text — one rule per sigil over the same `--m-*` tokens, so a
+     `/`, `#` or `@` is the same colour wherever it is drawn. */
+  .msg.user .body :global(mark) { color: inherit; background-color: transparent;
+    border-radius: 0.34em; padding: 0 0.16em;
+    background-image: linear-gradient(var(--tint), var(--tint));
+    background-repeat: no-repeat; background-position: 0 94%; background-size: 100% 62%; }
+  .msg.user .body :global(mark.mc) { --tint: color-mix(in srgb, var(--m-cmd) 22%, transparent); }
+  .msg.user .body :global(mark.mt) { --tint: color-mix(in srgb, var(--m-tool) 22%, transparent); }
+  .msg.user .body :global(mark.ms) { --tint: color-mix(in srgb, var(--m-skill) 24%, transparent); }
   textarea:focus { outline: none; }
   textarea::placeholder { color: var(--faint); }
   .send { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--s1);
