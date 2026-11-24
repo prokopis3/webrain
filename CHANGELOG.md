@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **the agent's todo list above the composer folds and opens, the shape the Copilot
+  chat list has.** It was one strip showing four rows and a `+N`; a run with eight steps hid
+  half of them behind a number. It is a `<details>` now — folded to the single line that says
+  `todo · 3/8` and the step in progress, opened to the whole list with finished rows struck
+  through and the list scrolling past nine rems. It opens by itself while a turn runs and
+  closes when the turn ends, and `<details>` carries the keyboard and the open/closed state
+  rather than a signal this page has to keep.
+- `chat`: **the context panel says where the tool output went.** The panel had a bold total
+  but no title, and no line for tool results — the SDK's six categories roll user, assistant
+  *and* tool messages into one `messages` figure. They do not have to be guessed at: the
+  runtime's `contextAttribution.entries` is a flat list whose `kind` is `tool`, `system`,
+  `skill`, `mcpServer`, `toolDefinition`…, each with its own `tokens`. The panel is headed
+  **Session Info** and shows `Tool Results` with its token count and share, taken from those
+  entries and subtracted from `messages`, so the two rows still add up to the runtime's own
+  number instead of counting the same tokens twice.
 - `chat`: **a connected MCP server is now a server whose tools a model can call.** The
   allowlist `tool_filter` names was built from `webrain`'s own tools plus four runtime
   builtins, so a server the page had attached (`POST /mcp/new`) and `/mcp` listed as

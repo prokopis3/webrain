@@ -504,7 +504,20 @@
       row("System Instructions", (c.systemPrompt || 0) + (c.customInstructions || 0)),
       row("Tool Definitions", (c.systemTools || 0) + (c.mcpTools || 0)),
     ].filter((r) => r.n > 0);
-    const user = [row("Messages", c.messages || 0)].filter((r) => r.n > 0);
+    // Tool results are their own line, out of the runtime's per-source `entries`:
+    // `kind: "tool"` is the tokens one tool's output left in the window, and the
+    // categories roll it into `messages` ("user/assistant/tool message tokens").
+    // Subtracting keeps the two rows adding up to the runtime's own figure instead
+    // of showing the same tokens twice — VS Code does the same, reporting what the
+    // entries do not cover as Messages.
+    const listed = ctxInfo?.attribution?.contextAttribution?.entries;
+    const toolResults = Array.isArray(listed)
+      ? listed.filter((e) => e.kind === "tool").reduce((n, e) => n + (e.tokens || 0), 0)
+      : 0;
+    const user = [
+      row("Messages", Math.max(0, (c.messages || 0) - toolResults)),
+      row("Tool Results", toolResults),
+    ].filter((r) => r.n > 0);
     // Everything the runtime counted into the prompt that its own categories do
     // not name. Derived, never guessed: the remainder, shown only when there is
     // one. (There is no Tool Results row: this SDK reports user, assistant and
@@ -629,6 +642,14 @@
       : /(progress|doing|active|start)/i.test(s || "")
         ? "▸ "
         : "· ";
+  const todoDone = (t) => /^(done|complet|finish|✓|✔)/i.test(t?.status || "");
+  // The one row the collapsed summary names: the step in progress, else the next
+  // still open. That is the line VS Code's list keeps visible while folded.
+  const activeTodo = $derived(
+    todos.find((t) => /(progress|doing|active|start)/i.test(t.status || "")) ??
+      todos.find((t) => !todoDone(t)) ??
+      null,
+  );
   // The prompts this page drew a bubble for, so the runtime's echo of the same
   // message does not draw a second one. Not rendered, so not reactive.
   let echoed = [];
@@ -5636,17 +5657,29 @@
   />
   <!-- The agent's todo rows, above the field and above the attachments: during a
        long run this is what says what it is doing, and a row three screens up in
-       the transcript has already scrolled past. -->
+       the transcript has already scrolled past. Folded it is one line — the step
+       in progress — and opened it is the whole list, the shape the Copilot chat
+       list uses. -->
   {#if todos.length}
-    <div class="qrail todorail">
-      <span class="eyebrow">todo · {todosDone}/{todos.length}</span>
-      {#each todos.slice(0, 4) as t, i (t.id ?? i)}
-        <span class="qchip" title={t.description || t.status || "?"}>
-          <span class="qtext">{todoMark(t.status)}{t.title || t.id}</span>
-        </span>
-      {/each}
-      {#if todos.length > 4}<span class="eyebrow">+{todos.length - 4}</span>{/if}
-    </div>
+    <details class="qrail todorail" open={busy}>
+      <summary>
+        <span class="eyebrow">todo · {todosDone}/{todos.length}</span>
+        {#if activeTodo}
+          <span class="qtext" title={activeTodo.description || activeTodo.status || ""}>
+            {todoMark(activeTodo.status)}{activeTodo.title || activeTodo.id}
+          </span>
+        {/if}
+      </summary>
+      <ol class="todolist">
+        {#each todos as t, i (t.id ?? i)}
+          <li class:done={todoDone(t)}>
+            <span class="qtext" title={t.description || t.status || "?"}>
+              {todoMark(t.status)}{t.title || t.id}
+            </span>
+          </li>
+        {/each}
+      </ol>
+    </details>
   {/if}
   <!-- Attachments are files on disk the agent was told about; the chips are the
        receipt, and the prompt lines are what actually reaches the model. An image
@@ -5998,6 +6031,7 @@
         </button>
         {#if ctxOpen}
           <div class="ctxpop">
+            <h3 class="ctx-title">Session Info</h3>
             {#if !ctxInfo}
               <p class="none">reading the runtime's accounting…</p>
             {:else if ctxInfo.error}
@@ -7884,8 +7918,21 @@
     transition: opacity var(--motion-short) var(--ease); }
   .shot:hover button, .shot button:focus-visible { opacity: 1; }
   /* The todo rail: same chips as the queue, one line, above the attachments. */
-  .todorail { border-style: solid; }
-  .todorail .qchip { border-left: 3px solid var(--tertiary); }
+  .todorail { border-style: solid; display: block; }
+  /* One line folded, the list opened — the shape the Copilot chat todo list
+     uses. `<details>` carries the open/closed state and the keyboard for free. */
+  .todorail > summary { display: flex; align-items: center; gap: var(--s2);
+    cursor: pointer; list-style: none; }
+  .todorail > summary::-webkit-details-marker { display: none; }
+  .todorail > summary::after { content: "▾"; margin-left: auto; color: var(--faint);
+    font-size: 9px; transition: transform var(--motion-short) var(--ease); }
+  .todorail[open] > summary::after { transform: rotate(180deg); }
+  .todorail .qtext { border-left: 3px solid var(--tertiary); padding-left: var(--s2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30rem; }
+  .todolist { list-style: none; margin: var(--s2) 0 0; padding: 0 0 0 var(--s2);
+    display: grid; gap: 2px; max-height: 9rem; overflow-y: auto; }
+  .todolist li { font-size: 12px; color: var(--on-surface-variant); }
+  .todolist li.done { color: var(--faint); text-decoration: line-through; }
   /* The preview you see before sending. It is a blob URL — no round trip, and it
      dies with the list. */
   .attached .thumb { width: 1.5rem; height: 1.5rem; object-fit: cover; border-radius: 3px;
@@ -8077,6 +8124,9 @@
     box-shadow: 0 12px 32px rgb(0 0 0 / 0.45); animation: rise var(--motion-short) var(--ease); }
   /* Header says the window, rows say the share of it — the same reading as the
      Copilot chat's session-info panel, in the type this page already uses. */
+  .ctx-title { margin: 0 0 var(--s2); font-family: var(--mono); font-size: 10px;
+    font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--on-surface); }
   .ctxpop-h { display: flex; align-items: baseline; justify-content: space-between;
     gap: var(--s2); margin: 0 0 var(--s2); font-size: 11.5px;
     font-variant-numeric: tabular-nums; }
