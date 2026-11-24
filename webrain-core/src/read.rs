@@ -202,77 +202,53 @@ fn is_json(ct: &str) -> bool {
     ct.contains("json")
 }
 
-/// Read one URL as markdown. Returns
-/// `{url, fetched_url, status, content_type, source, bytes, chars, text, …}`
-/// where `source` names how the body arrived — `markdown`, `text`, `html`,
-/// `json` — because that is the number that explains the token count: a page
-/// that negotiated markdown was never converted, and one that did not says so.
-pub fn read_url(raw: &str, opts: &ReadOpts) -> anyhow::Result<Value> {
-    let url = normalize(raw)?;
-    let proxy = opts.proxy.as_deref();
-    let mut tried: Vec<Value> = Vec::new();
-    let mut got: Option<(String, u16, String, String, &'static str)> = None;
+/// Everything one URL gave us, before the tail decides what the caller sees.
+struct Fetched {
+    url: String,
+    fetched_url: String,
+    status: u16,
+    content_type: String,
+    body: String,
+    source: &'static str,
+}
 
-    for cand in std::iter::once(url.clone()).chain(markdown_candidates(&url)) {
-        let md_candidate = cand != url;
-        match crate::engines::http_get_accept(&cand, Some(ACCEPT), proxy) {
-            Ok((status, ct, body)) if (200..300).contains(&status) && !body.trim().is_empty() => {
-                let source = if is_markdown(&ct) {
-                    "markdown"
-                } else if is_plain(&ct) {
-                    "text"
-                } else if is_json(&ct) {
-                    "json"
-                } else if is_html(&ct) {
-                    if md_candidate {
-                        // An HTML body from a `.md` URL is a soft 404 page.
-                        tried.push(json!({
-                            "url": cand, "status": status, "skipped": "html from a .md route"
-                        }));
-                        continue;
-                    }
-                    "html"
-                } else {
-                    "text"
-                };
-                got = Some((cand, status, ct, body, source));
-                break;
-            }
-            Ok((status, ct, _)) => {
-                tried.push(json!({"url": cand, "status": status, "content_type": ct}));
-            }
-            Err(e) => tried.push(json!({"url": cand, "error": e.to_string()})),
-        }
-    }
-
-    let Some((fetched_url, status, content_type, body, source)) = got else {
-        anyhow::bail!(
-            "nothing readable at {url} - tried {} form(s): {}",
-            tried.len(),
-            serde_json::to_string(&tried).unwrap_or_default()
-        );
-    };
-
-    let bytes = body.chars().count();
-    let full = if source == "html" {
-        html_to_markdown(&body)
+/// The tail both transports share: convert to Markdown, then outline / filter / cap.
+/// `source == "browser"` converts too — the browser hands over HTML, and rendering
+/// only changed which client asked for it, not what the body is.
+fn finish(
+    f: Fetched,
+    opts: &ReadOpts,
+    proxy: Option<&str>,
+    tried: Vec<Value>,
+) -> anyhow::Result<Value> {
+    let bytes = f.body.chars().count();
+    // Before the body moves into the converter: the title is a document fact, and on
+    // a page the host refuses to markdown-negotiate it is the only cheap identity.
+    let title = if f.source == "html" || f.source == "browser" {
+        crate::engines::title_of(&f.body)
     } else {
-        body
+        String::new()
+    };
+    let full = if f.source == "html" || f.source == "browser" {
+        html_to_markdown(&f.body)
+    } else {
+        f.body
     };
 
     let mut out = json!({
-        "url": url,
-        "fetched_url": fetched_url,
-        "status": status,
-        "content_type": content_type,
-        "source": source,
+        "url": f.url.clone(),
+        "title": title,
+        "fetched_url": f.fetched_url,
+        "status": f.status,
+        "content_type": f.content_type,
+        "source": f.source,
         "bytes": bytes,
         "chars": full.chars().count(),
         "truncated": false,
     });
     // The nearest llms.txt is a map, not content: report where it is and how big
     // it is (reading it is another `read`, since it is plain text).
-    if let Some((u, c)) = nearest_llms(&url, proxy) {
+    if let Some((u, c)) = nearest_llms(&f.url, proxy) {
         out["llms_txt"] = json!({"url": u, "chars": c});
     }
     if !tried.is_empty() {
@@ -322,6 +298,104 @@ pub fn read_url(raw: &str, opts: &ReadOpts) -> anyhow::Result<Value> {
         selected
     });
     Ok(out)
+}
+
+/// One URL's already-rendered HTML, through the same tail as `read_url`: the
+/// `--browser` transport for hosts that refuse a plain HTTP client (a shop host,
+/// a challenge, anything that only answers a real browser). The caller navigates
+/// and hands over the document; this stays sync and browser-free.
+pub fn read_url_browser(
+    raw: &str,
+    html: &str,
+    final_url: &str,
+    opts: &ReadOpts,
+) -> anyhow::Result<Value> {
+    let url = normalize(raw)?;
+    finish(
+        Fetched {
+            url,
+            fetched_url: final_url.to_string(),
+            status: 200,
+            content_type: "text/html; rendered".to_string(),
+            body: html.to_string(),
+            source: "browser",
+        },
+        opts,
+        None,
+        Vec::new(),
+    )
+}
+
+/// Read one URL as markdown. Returns
+/// `{url, fetched_url, status, content_type, source, bytes, chars, text, …}`
+/// where `source` names how the body arrived — `markdown`, `text`, `html`,
+/// `json` — because that is the number that explains the token count: a page
+/// that negotiated markdown was never converted, and one that did not says so.
+pub fn read_url(raw: &str, opts: &ReadOpts) -> anyhow::Result<Value> {
+    let url = normalize(raw)?;
+    let proxy = opts.proxy.as_deref();
+    let mut tried: Vec<Value> = Vec::new();
+    let mut got: Option<Fetched> = None;
+
+    for cand in std::iter::once(url.clone()).chain(markdown_candidates(&url)) {
+        let md_candidate = cand != url;
+        match crate::engines::http_get_accept(&cand, Some(ACCEPT), proxy) {
+            Ok((status, ct, body)) if (200..300).contains(&status) && !body.trim().is_empty() => {
+                let source = if is_markdown(&ct) {
+                    "markdown"
+                } else if is_plain(&ct) {
+                    "text"
+                } else if is_json(&ct) {
+                    "json"
+                } else if is_html(&ct) {
+                    if md_candidate {
+                        // An HTML body from a `.md` URL is a soft 404 page.
+                        tried.push(json!({
+                            "url": cand, "status": status, "skipped": "html from a .md route"
+                        }));
+                        continue;
+                    }
+                    "html"
+                } else {
+                    "text"
+                };
+                got = Some(Fetched {
+                    url: url.clone(),
+                    fetched_url: cand,
+                    status,
+                    content_type: ct,
+                    body,
+                    source,
+                });
+                break;
+            }
+            Ok((status, ct, _)) => {
+                tried.push(json!({"url": cand, "status": status, "content_type": ct}));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // 401/403 is the site refusing THIS client, not a missing markdown
+                // route — `.md` and `/index.md` would only collect the same block.
+                // shortcut: ureq reports 4xx as the plain string "http status: NNN",
+                // so this matches text; upgrade to a typed status if http_get_accept
+                // ever stops erroring on 4xx.
+                let blocked = msg.contains("http status: 401") || msg.contains("http status: 403");
+                tried.push(json!({"url": cand, "error": msg}));
+                if blocked {
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(f) = got else {
+        anyhow::bail!(
+            "nothing readable at {url} - tried {} form(s): {}",
+            tried.len(),
+            serde_json::to_string(&tried).unwrap_or_default()
+        );
+    };
+    finish(f, opts, proxy, tried)
 }
 
 /// The nearest non-empty `llms.txt` above the page, as `(url, chars)`.

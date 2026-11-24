@@ -175,9 +175,9 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "read",
-        "webrain read <url> [--outline] [--filter TEXT] [--max N] [--json] [--proxy URL]",
-        "A page as markdown over plain HTTP — negotiated, `.md` retried, nearest llms.txt reported.",
-        "No browser and no model. The request asks for text/markdown first, so a docs site that\n  already publishes markdown sends it and nothing is converted; otherwise the page is asked\n  for as `.md` (and `<path>/index.md`), also HTTP only. When neither exists the HTML is\n  converted by the same converter `webrain_batch op=markdown` uses, and `source` in the\n  stderr line says which of the three happened. --outline prints the heading tree instead of\n  the body (20 lines instead of 40 000 chars) and --filter returns one section, stopping at\n  the next heading of the same or a higher level; a heading that does not exist lists the\n  page's own instead of answering an empty section. The nearest non-empty llms.txt above the\n  page is reported, and `webrain read <that url>` reads it — it is plain text. Relative links\n  stay as the page wrote them: resolve them against `fetched_url`.",
+        "webrain read <url> [--outline] [--filter TEXT] [--max N] [--json] [--proxy URL] [--browser]",
+        "A page as markdown — plain HTTP by default, or `--browser` when the host refuses an HTTP client.",
+        "No model. The request asks for text/markdown first, so a docs site that\n  already publishes markdown sends it and nothing is converted; otherwise the page is asked\n  for as `.md` (and `<path>/index.md`), also HTTP only. When neither exists the HTML is\n  converted by the same converter `webrain_batch op=markdown` uses, and `source` in the\n  stderr line says which of the three happened. **`--browser` renders the page in the\n  attached Chrome instead** (same tail, `source: browser`) — the answer for a host that\n  answers 403 to every plain HTTP client, which the error now names. --outline prints the\n  heading tree instead of the body (20 lines instead of 40 000 chars) and --filter returns\n  one section, stopping at the next heading of the same or a higher level; a heading that\n  does not exist lists the page's own instead of answering an empty section. The nearest\n  non-empty llms.txt above the page is reported, and `webrain read <that url>` reads it —\n  it is plain text. Relative links stay as the page wrote them: resolve them against\n  `fetched_url`.",
     ),
     (
         "pdf",
@@ -928,8 +928,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("read") => {
-            // Browserless and model-free, like `diff` and `pdf`: markdown
-            // negotiation, a `.md` retry, and the nearest llms.txt — all HTTP.
+            // Browserless by default, model-free always: markdown negotiation, a
+            // `.md` retry, and the nearest llms.txt — all HTTP. `--browser` swaps
+            // the transport for the attached Chrome and keeps the same tail.
             let target = args.get(2).cloned().unwrap_or_default();
             if target.is_empty() || target.starts_with("--") {
                 print!("{}", help_page("read"));
@@ -947,7 +948,33 @@ fn main() -> anyhow::Result<()> {
                 max_chars: flag("--max").and_then(|v| v.parse().ok()).unwrap_or(0),
                 proxy: flag("--proxy"),
             };
-            let v = webrain_core::read::read_url(&target, &opts)?;
+            let v = if args.contains(&"--browser".to_string()) {
+                // A host that refuses a plain HTTP client (a shop host, a challenge,
+                // anything that only answers a real browser) still answers Chrome:
+                // navigate, hand over the rendered document, run the SAME tail.
+                let backend = rt.block_on(CdpBackend::connect_default())?;
+                rt.block_on(backend.navigate(&target))?;
+                let html = rt.block_on(
+                    backend.evaluate("document.documentElement ? document.documentElement.outerHTML : ''"),
+                )?;
+                let href = rt.block_on(backend.evaluate("location.href"))?;
+                webrain_core::read::read_url_browser(
+                    &target,
+                    html.as_str().unwrap_or(""),
+                    href.as_str().unwrap_or(&target),
+                    &opts,
+                )?
+            } else {
+                match webrain_core::read::read_url(&target, &opts) {
+                    Ok(v) => v,
+                    // The one failure the caller can fix with a flag: a plain HTTP
+                    // client is refused, not the page missing.
+                    Err(e) if e.to_string().contains("http status: 40") => anyhow::bail!(
+                        "{e}\n  That host refuses a plain HTTP client - retry with --browser (needs Chrome on CDP_URL)."
+                    ),
+                    Err(e) => return Err(e),
+                }
+            };
             if args.contains(&"--json".to_string()) {
                 println!("{}", serde_json::to_string_pretty(&v)?);
                 return Ok(());
