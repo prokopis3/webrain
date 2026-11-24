@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "webrain browser tools",
+    "description": "Adds webrain's browser-automation and scraping tools to the agent as mcp__webrain__* tools, served by a local `webrain mcp` process. Start with webrain_guide, then drive real Chrome for interactive SPAs, signed-in pages, and CAPTCHA- or Cloudflare-gated pages; browser state, profiles, and screenshots stay on this machine. Requires the webrain binary on PATH (scoop, Homebrew, or a GitHub release) plus one `webrain install` for a browser engine; when either is missing, this MCP client row fails visibly in Plugins and no webrain tools appear. Turning the bundle off removes the tools, and the row's config accepts an already-open Chrome (CDP) or WEBRAIN_* variables.",
+    "detail": "docs/DETAIL.md"
+  }
+}

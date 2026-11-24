@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`dsh-webrain`: webrain as an installable DeepSeek Harness bundle.** `dsh` composes
+  MCP servers through Loader patches rather than a client-side JSON file, so webrain now
+  ships as a bundle under `integrations/dsh-webrain`: one `@deepseek-ai/dsh-mcp-client`
+  row over stdio (`webrain mcp`) that registers all 19 tools as `mcp__webrain__*`, with
+  display metadata, an icon, a detail document, and eight locales. It installs from npm
+  (`dsh plugin --profile <p> install dsh-webrain`), from a pinned commit
+  (`github:prokopis3/webrain#<sha>&path:integrations/dsh-webrain`), from a local
+  directory, or from **Plugins → Add plugin** in the Web UI; the row is configurable
+  (absolute `command` for GUI launches, `CDP_URL`, timeouts). New
+  `docs/mcp/deepseek-harness.mdx` owns the guide and the failure modes found while
+  dogfooding: a missing `pnpm` on the harness `PATH`, the profile-workspace
+  `ERR_PNPM_ADDING_TO_ROOT`, and the `serverName` collision with a hand-written webrain
+  MCP row. `scripts/check-bundle.mjs` validates the packaged bundle, and
+  `.github/workflows/publish-dsh-plugin.yml` publishes it at each release tag once an
+  `NPM_TOKEN` secret exists.
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
   the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs

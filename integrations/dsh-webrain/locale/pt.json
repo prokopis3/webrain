@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Ferramentas de navegador webrain",
+    "description": "Adiciona ao agente as ferramentas de automação de navegador e scraping do webrain como ferramentas mcp__webrain__*, servidas por um processo local `webrain mcp`. Comece por webrain_guide e depois conduza o Chrome real para SPAs interativas, páginas autenticadas e páginas protegidas por CAPTCHA ou Cloudflare; o estado do navegador, os perfis e as capturas ficam nesta máquina. Requer o binário webrain no PATH (scoop, Homebrew ou uma versão do GitHub) e uma execução de `webrain install` para o motor de navegador; quando qualquer um falta, esta linha de cliente MCP falha de forma visível em Plug-ins e nenhuma ferramenta webrain aparece. Desativar o pacote remove as ferramentas; a configuração da linha aceita um Chrome já aberto (CDP) ou variáveis WEBRAIN_*.",
+    "detail": "docs/DETAIL.md"
+  }
+}

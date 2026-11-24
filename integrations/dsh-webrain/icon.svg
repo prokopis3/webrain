@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <defs>
+    <linearGradient id="webrain-drop" x1="18" y1="22.5" x2="18" y2="35" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38a0ff"/>
+      <stop offset="1" stop-color="#0b63ce"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="24" height="15.5" rx="3.6" fill="none" stroke="#0b63ce" stroke-width="2.2"/>
+  <path d="M6 11.4h24" fill="none" stroke="#0b63ce" stroke-width="1.6"/>
+  <g fill="#0b63ce">
+    <circle cx="9.6" cy="8.7" r="0.9"/>
+    <circle cx="12.4" cy="8.7" r="0.9"/>
+    <circle cx="15.2" cy="8.7" r="0.9"/>
+  </g>
+  <path d="M18 22.2c2.7 3.6 4.4 5.9 4.4 8.2a4.4 4.4 0 0 1-8.8 0c0-2.3 1.7-4.6 4.4-8.2Z" fill="url(#webrain-drop)"/>
+</svg>
