@@ -582,8 +582,8 @@
     ].filter((r) => r.n > 0);
     // Everything the runtime counted into the prompt that its own categories do
     // not name. Derived, never guessed: the remainder, shown only when there is
-    // one. (There is no Tool Results row: this SDK reports user, assistant and
-    // tool messages as one `messages` figure, so a split would be invented.)
+    // one. Tool Results was taken out of `messages` above, so it is not counted
+    // a second time here.
     const known = (c.systemPrompt || 0) + (c.customInstructions || 0) + (c.systemTools || 0) +
       (c.mcpTools || 0) + (c.messages || 0);
     const other = Math.max(0, (ctxInfo.totalTokens || 0) - known);
