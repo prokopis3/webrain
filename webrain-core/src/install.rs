@@ -541,6 +541,19 @@ fn copilot_bin_name() -> &'static str {
     }
 }
 
+/// The runtime at THIS build's pin — the only one safe to spawn, because the
+/// SDK's JSON-RPC surface is version-coupled (see `COPILOT_VERSION` above).
+fn pinned_copilot() -> Option<PathBuf> {
+    find_named(&copilot_dir(), copilot_bin_name(), 4)
+}
+
+/// Is *any* Copilot runtime in the engine cache? `webrain upgrade` refreshes
+/// only what the user opted into: nobody who never ran `install copilot` wants
+/// a 166 MB archive fetched behind their back by a version bump.
+pub fn copilot_present() -> bool {
+    find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4).is_some()
+}
+
 /// A Copilot runtime `webrain chat` can start: `COPILOT_CLI_PATH` when it names
 /// a real file, otherwise what `webrain install copilot` put in the engine cache.
 pub fn find_copilot() -> Option<PathBuf> {
@@ -549,7 +562,11 @@ pub fn find_copilot() -> Option<PathBuf> {
     {
         return Some(p);
     }
-    find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4)
+    // The pin first. `find_named` prefers the newest version dir, so a runtime
+    // left by a NEWER webrain — a downgrade, or an upgrade whose `install` step
+    // has not run yet — would otherwise win the search and be spoken to by a
+    // build it was never compiled against.
+    pinned_copilot().or_else(|| find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4))
 }
 
 /// `webrain install copilot` — the runtime `webrain chat` drives.
@@ -560,7 +577,16 @@ pub fn find_copilot() -> Option<PathBuf> {
 /// the digest the SDK pins before it is ever spawned.
 pub fn install_copilot(force: bool) -> Result<PathBuf> {
     if !force {
-        if let Some(bin) = find_copilot() {
+        // Pin, not "any runtime": this is the check that used to make `--force`
+        // the step everyone missed after a Copilot bump. A `COPILOT_CLI_PATH`
+        // runtime is the user's own and is left alone.
+        if let Some(p) = std::env::var_os("COPILOT_CLI_PATH").map(PathBuf::from)
+            && p.is_file()
+        {
+            println!("copilot runtime already installed: {}", p.display());
+            return Ok(p);
+        }
+        if let Some(bin) = pinned_copilot() {
             println!("copilot runtime already installed: {}", bin.display());
             return Ok(bin);
         }
@@ -580,9 +606,31 @@ pub fn install_copilot(force: bool) -> Result<PathBuf> {
     extract_archive(&bytes, &dest, asset)?;
     let bin = find_named(&dest, copilot_bin_name(), 4)
         .with_context(|| format!("{} not found in {}", copilot_bin_name(), dest.display()))?;
+    prune_other_copilot();
     println!("copilot runtime ready: {}", bin.display());
     println!("  `webrain chat` finds it automatically (engine cache)");
     Ok(bin)
+}
+
+/// Drop runtime dirs from other pins once this build's is in place. Each is
+/// ~166 MB and `find_copilot` will never spawn one now that it looks at the pin
+/// first, so keeping them only makes an upgrade look like it doubled the cache.
+/// Best-effort: a runtime another process still has open stays until next time.
+fn prune_other_copilot() {
+    prune_copilot_except(&browsers_dir().join("copilot"), COPILOT_VERSION);
+}
+
+/// Every version dir under `root` except `keep`. Split from the caller so the
+/// delete — recursively, 166 MB at a time — can be checked without a download.
+fn prune_copilot_except(root: &Path, keep: &str) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in rd.flatten() {
+        if e.path().is_dir() && e.file_name().to_string_lossy() != keep {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1771,5 +1819,26 @@ mod tests {
         let found = super::find_named(&dir, "chrome.exe", 4);
         assert_eq!(found, Some(bin));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The prune is a recursive delete, so it gets a check: it must take the
+    // superseded runtime and leave the pinned one alone (an inverted predicate
+    // here would delete the runtime it just verified).
+    #[test]
+    fn prune_keeps_only_the_pinned_runtime() {
+        let root = std::env::temp_dir().join(format!("webrain-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for v in ["1.0.114", "1.0.120"] {
+            let d = root.join(v);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("copilot.exe"), b"").unwrap();
+        }
+        super::prune_copilot_except(&root, "1.0.114");
+        assert!(
+            root.join("1.0.114/copilot.exe").is_file(),
+            "the pin survives"
+        );
+        assert!(!root.join("1.0.120").exists(), "the superseded pin is gone");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
