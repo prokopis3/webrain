@@ -543,6 +543,24 @@ pub(crate) async fn connect(
     let model_cfg = ProviderModelConfig::new(&provider.model, "webrain")
         .with_model_id(provider.model.clone())
         .with_max_output_tokens(i64::from(args.max_output_tokens.unwrap_or(4096)));
+    // Whether the model can be shown a picture, when its own catalogue says so.
+    // Without this the runtime has no declaration to check, and a `view_image`
+    // result goes to a model that was never told images are allowed. Declared
+    // only on a vendor answer: inventing `true` would break a text-only model's
+    // every request, and inventing `false` hides the one feature this is for.
+    //
+    // Through the wire shape rather than `with_capabilities`: the SDK's override
+    // types live in a `pub(crate)` module, so an external crate cannot name them
+    // — but the field is public and `Serialize`/`Deserialize` is derived, so the
+    // documented JSON is the one path that works.
+    let model_cfg = match super::chat_server::model_vision(&provider.base_url, &provider.model) {
+        Some(v) => {
+            let mut wire = serde_json::to_value(&model_cfg).unwrap_or_default();
+            wire["capabilities"] = serde_json::json!({ "supports": { "vision": v } });
+            serde_json::from_value(wire).unwrap_or(model_cfg)
+        }
+        None => model_cfg,
+    };
     // Only when the user asked: the runtime already knows the model's real
     // limit, and overriding it upward makes a small-context model reject the
     // prompt as too long.

@@ -162,6 +162,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
+- `chat`: **whether a model can see is taken from its own catalogue, not guessed.** `view_image`
+  hands the runtime an image part, but the session never declared
+  `capabilities.supports.vision` — so a model was being sent images it had never been described as
+  accepting, and the honest answer to "will it look?" was "nobody said". `GET /models` now carries
+  the catalogue's `architecture.input_modalities` as `vision`, and `connect` declares it on the
+  model config through the SDK's documented wire shape (`with_capabilities` takes a type from a
+  `pub(crate)` module, so the JSON round-trip is the only reachable path). Measured on the live
+  OpenRouter catalogue: `anthropic/claude-sonnet-4.5 → vision=True`, and 299 of 434 rows state it.
+  A vendor that does not publish modalities declares nothing rather than a guess.
 - `chat`: **the tools checklist no longer offers switches for built-ins the session cannot call.** The
   list was the runtime's *registry* — 33 built-ins, drawn as 33 live checkboxes, "33 of 33 on" —
   while the allowlist the session was created with serves eight of them (`task`, `task_complete`,

@@ -559,6 +559,23 @@ fn model_context(base: &str, model: &str) -> Option<i64> {
         .map(|n| n as i64)
 }
 
+/// Whether this model can be shown a picture, from the same cached catalogue row
+/// `model_context` reads. `None` means the vendor did not say — and then nothing
+/// is declared, because guessing either way is a lie the model pays for.
+pub(crate) fn model_vision(base: &str, model: &str) -> Option<bool> {
+    cached_models(base)
+        .and_then(|ms| ms.into_iter().find(|m| m["id"].as_str() == Some(model)))
+        .and_then(|m| m["vision"].as_bool())
+}
+
+/// A catalogue row's input modalities, as "can it see". Absent means the vendor
+/// does not publish them, which is not the same answer as "no".
+fn catalogue_vision(m: &Value) -> Option<bool> {
+    m["architecture"]["input_modalities"]
+        .as_array()
+        .map(|mods| mods.iter().any(|x| x.as_str() == Some("image")))
+}
+
 /// DeepSeek's off-peak window, from its own pricing page: peak is 01:00–04:00 and
 /// 06:00–10:00 UTC, Monday to Friday; every other hour — weekends and Chinese
 /// public holidays in full — bills at half price. The page computes "now" from
@@ -5341,6 +5358,13 @@ async fn list_models(
                     out["reasoning"] =
                         json!(params.iter().any(|p| p.as_str() == Some("reasoning")));
                 }
+                // The same catalogue states its input modalities, which is the
+                // only machine-readable answer to "can this model see?". The
+                // session declares it (`capabilities.supports.vision`) or the
+                // runtime has no reason to accept an image part at all.
+                if let Some(v) = catalogue_vision(m) {
+                    out["vision"] = json!(v);
+                }
                 // OpenRouter publishes per-token prices and nobody else in this
                 // table does. Passing them through is what lets the page show real
                 // money instead of n/a; leaving the field absent is what keeps it
@@ -5675,6 +5699,25 @@ fn safe_name(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A catalogue that states its input modalities is the only vendor answer to
+    /// "can this model see"; a catalogue that does not state them must leave the
+    /// capability undeclared rather than guess.
+    #[test]
+    fn vision_comes_from_the_catalogues_own_modalities() {
+        let seen = json!({"id": "anthropic/claude-sonnet-4.5",
+                          "architecture": {"input_modalities": ["text", "image"]}});
+        assert_eq!(catalogue_vision(&seen), Some(true));
+        let text_only = json!({"id": "deepseek/deepseek-chat",
+                               "architecture": {"input_modalities": ["text"]}});
+        assert_eq!(catalogue_vision(&text_only), Some(false));
+        // No `architecture` block: unknown, which is not the same as "no".
+        assert_eq!(catalogue_vision(&json!({"id": "x"})), None);
+        assert_eq!(
+            catalogue_vision(&json!({"architecture": {"input_modalities": []}})),
+            Some(false)
+        );
+    }
 
     /// The elicitation answer is validated by the server against its own schema,
     /// so a coerced value that is merely close is a rejected form. These are the
