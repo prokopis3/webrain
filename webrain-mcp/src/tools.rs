@@ -3001,7 +3001,9 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     }
                     // The browserless twin of `extract`: same schema, no tab. N
                     // static pages were N `webrain_scrape` calls before this.
-                    "scrape" => batch_scrape(urls, &base, &fields, concurrency, proxy.as_deref()).await,
+                    "scrape" => {
+                        batch_scrape(urls, &base, &fields, concurrency, proxy.as_deref()).await
+                    }
                     // The batch twin of `webrain read`: HTTP markdown negotiation per
                     // URL, no tab. N docs pages were N `read` invocations before this.
                     "read" => {
@@ -3034,8 +3036,7 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                                 .unwrap_or(0),
                             proxy: None,
                         };
-                        batch_read(urls, concurrency, proxy.as_deref(), &query, top_k, &read)
-                            .await
+                        batch_read(urls, concurrency, proxy.as_deref(), &query, top_k, &read).await
                     }
                     "interact" => {
                         let interaction = match js_arg(args, "interaction") {
@@ -3751,7 +3752,10 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0)
                             .max(0) as u64;
-                        let url = args.get("url").and_then(|v| v.as_str()).filter(|u| !u.is_empty());
+                        let url = args
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .filter(|u| !u.is_empty());
                         if let Err(e) = backend.network_log(url, wait_ms).await {
                             return err(e);
                         }

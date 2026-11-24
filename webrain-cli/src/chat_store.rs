@@ -298,9 +298,11 @@ impl Store {
     pub fn context(&self, convo: &str) -> Option<(Value, String)> {
         let db = self.lock()?;
         let (body, ts): (String, String) = db
-            .query_row("SELECT body, ts FROM context WHERE convo = ?1", [convo], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT body, ts FROM context WHERE convo = ?1",
+                [convo],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .ok()?;
         Some((serde_json::from_str::<Value>(&body).ok()?, ts))
     }
@@ -624,7 +626,11 @@ mod tests {
         assert_eq!(hits[0]["convo"], "c_both", "the row with both words wins");
         assert_eq!(hits[1]["convo"], "c_one");
 
-        assert_eq!(s.search("sale zebra").len(), 1, "one word is enough to match");
+        assert_eq!(
+            s.search("sale zebra").len(),
+            1,
+            "one word is enough to match"
+        );
         assert!(s.search("apples pears").is_empty(), "no word, no row");
         drop(s);
         let _ = std::fs::remove_file(path);

@@ -727,7 +727,10 @@ fn har_from_entries(entries: &[NetEntry]) -> Value {
 /// decoding them here would invent a truth (`%2F` is not `/` to every consumer)
 /// and HAR calls the field the *decoded* form, so the raw text is the honest one.
 fn query_pairs(url: &str) -> Vec<Value> {
-    let Some(q) = url.split_once('?').map(|(_, q)| q.split('#').next().unwrap_or(q)) else {
+    let Some(q) = url
+        .split_once('?')
+        .map(|(_, q)| q.split('#').next().unwrap_or(q))
+    else {
         return Vec::new();
     };
     q.split('&')
@@ -841,7 +844,10 @@ fn absorb(method: &str, p: &Value, log: &mut Vec<NetEntry>) {
             // row instead of listing one redirect chain as N requests.
             if let Some(e) = log.iter_mut().find(|e| e.id == rid) {
                 e.url = url;
-                if let Some(st) = p.pointer("/redirectResponse/status").and_then(|x| x.as_u64()) {
+                if let Some(st) = p
+                    .pointer("/redirectResponse/status")
+                    .and_then(|x| x.as_u64())
+                {
                     e.status = st as u16;
                 }
                 e.mono = num("/timestamp");
@@ -920,7 +926,12 @@ mod net_tests {
         assert_eq!(log.len(), 1);
         let e = &log[0];
         assert_eq!(
-            (e.method.as_str(), e.status, e.kind.as_str(), e.mime.as_str()),
+            (
+                e.method.as_str(),
+                e.status,
+                e.kind.as_str(),
+                e.mime.as_str()
+            ),
             ("POST", 200, "XHR", "application/json")
         );
         assert_eq!((e.bytes, e.ms), (1234.0, 250.0));
@@ -931,10 +942,7 @@ mod net_tests {
     #[test]
     fn absorb_keeps_a_redirect_chain_as_one_row() {
         let mut log = Vec::new();
-        for (url, redirect) in [
-            ("https://x/a", false),
-            ("https://x/b", true),
-        ] {
+        for (url, redirect) in [("https://x/a", false), ("https://x/b", true)] {
             let mut p = json!({
                 "requestId": "2.1", "type": "Document", "wallTime": 1.0, "timestamp": 5.0,
                 "request": {"url": url, "method": "GET"}
@@ -944,7 +952,11 @@ mod net_tests {
             }
             absorb("Network.requestWillBeSent", &p, &mut log);
         }
-        assert_eq!(log.len(), 1, "a redirect is the same request, not a new one");
+        assert_eq!(
+            log.len(),
+            1,
+            "a redirect is the same request, not a new one"
+        );
         assert_eq!(log[0].url, "https://x/b");
         assert_eq!(log[0].status, 301);
     }
@@ -957,7 +969,11 @@ mod net_tests {
             &json!({"requestId": "3.1", "request": {"url": "https://x/c"}}),
             &mut log,
         );
-        absorb("Network.loadingFailed", &json!({"requestId": "3.1"}), &mut log);
+        absorb(
+            "Network.loadingFailed",
+            &json!({"requestId": "3.1"}),
+            &mut log,
+        );
         assert!(log[0].failed);
         assert_eq!(log[0].bytes, 0.0);
 
@@ -1088,12 +1104,7 @@ impl CdpBackend {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let net_capture = Arc::new(Mutex::new(None));
         let net_log = Arc::new(Mutex::new(Vec::new()));
-        spawn_cdp_reader(
-            in_rx,
-            pending.clone(),
-            net_capture.clone(),
-            net_log.clone(),
-        );
+        spawn_cdp_reader(in_rx, pending.clone(), net_capture.clone(), net_log.clone());
 
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -1203,12 +1214,7 @@ impl CdpBackend {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let net_capture = Arc::new(Mutex::new(None));
         let net_log = Arc::new(Mutex::new(Vec::new()));
-        spawn_cdp_reader(
-            in_rx,
-            pending.clone(),
-            net_capture.clone(),
-            net_log.clone(),
-        );
+        spawn_cdp_reader(in_rx, pending.clone(), net_capture.clone(), net_log.clone());
 
         Ok(Self {
             inner: Arc::new(Mutex::new(CdpConnection {
@@ -2370,7 +2376,11 @@ impl CdpBackend {
     /// and return every request seen. Shared by `capture_media` (filters this for
     /// playable URLs) and `webrain_network` (wants the log itself). Leaves
     /// `Network` enabled so response bodies stay reachable afterwards.
-    async fn capture_network(&self, url: Option<&str>, wait_ms: u64) -> anyhow::Result<Vec<NetEntry>> {
+    async fn capture_network(
+        &self,
+        url: Option<&str>,
+        wait_ms: u64,
+    ) -> anyhow::Result<Vec<NetEntry>> {
         self.ensure_page_attached().await?;
         let sid = self.active_session().await;
         self.send_cmd_with(sid.as_deref(), "Network.enable", json!({}))

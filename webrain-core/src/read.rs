@@ -15,12 +15,13 @@
 //! `webrain_batch op=markdown` uses, so one page reads identically whether its
 //! HTML came from a browser or from here.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// What the request says it accepts. Markdown first, then plain text (which is
 /// what `llms.txt` and many `.md` routes are served as), then HTML — a server
 /// that has none of the cheaper forms still answers.
-pub const ACCEPT: &str = "text/markdown;q=1.0, text/plain;q=0.9, application/json;q=0.8, text/html;q=0.7, */*;q=0.1";
+pub const ACCEPT: &str =
+    "text/markdown;q=1.0, text/plain;q=0.9, application/json;q=0.8, text/html;q=0.7, */*;q=0.1";
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadOpts {
@@ -43,8 +44,8 @@ fn normalize(raw: &str) -> anyhow::Result<String> {
     } else {
         format!("https://{t}")
     };
-    let mut u = url::Url::parse(&with_scheme)
-        .map_err(|e| anyhow::anyhow!("invalid URL {raw}: {e}"))?;
+    let mut u =
+        url::Url::parse(&with_scheme).map_err(|e| anyhow::anyhow!("invalid URL {raw}: {e}"))?;
     u.set_fragment(None);
     Ok(u.to_string())
 }
@@ -497,7 +498,10 @@ mod tests {
 
     #[test]
     fn normalize_adds_a_scheme_and_drops_the_fragment() {
-        assert_eq!(normalize("example.com/a#x").unwrap(), "https://example.com/a");
+        assert_eq!(
+            normalize("example.com/a#x").unwrap(),
+            "https://example.com/a"
+        );
         assert_eq!(
             normalize("http://example.com/a/").unwrap(),
             "http://example.com/a/"

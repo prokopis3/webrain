@@ -954,9 +954,9 @@ fn main() -> anyhow::Result<()> {
                 // navigate, hand over the rendered document, run the SAME tail.
                 let backend = rt.block_on(CdpBackend::connect_default())?;
                 rt.block_on(backend.navigate(&target))?;
-                let html = rt.block_on(
-                    backend.evaluate("document.documentElement ? document.documentElement.outerHTML : ''"),
-                )?;
+                let html = rt.block_on(backend.evaluate(
+                    "document.documentElement ? document.documentElement.outerHTML : ''",
+                ))?;
                 let href = rt.block_on(backend.evaluate("location.href"))?;
                 webrain_core::read::read_url_browser(
                     &target,
@@ -994,10 +994,7 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             } else {
-                println!(
-                    "{}",
-                    v.get("text").and_then(|t| t.as_str()).unwrap_or("")
-                );
+                println!("{}", v.get("text").and_then(|t| t.as_str()).unwrap_or(""));
             }
             // How the body arrived is the number that explains the token count:
             // negotiated markdown was never converted, and the `.md` fallback is
@@ -2342,9 +2339,7 @@ fn chrono_now() -> String {
 /// Pure except for `@file` reads, and separate from the arm because of the one
 /// bug this had: taking the first non-flag argument as JSON picked up `--url`'s
 /// value and tried to parse a URL as JSON.
-fn parse_tool_argv(
-    tail: &[String],
-) -> anyhow::Result<(serde_json::Value, Option<String>, bool)> {
+fn parse_tool_argv(tail: &[String]) -> anyhow::Result<(serde_json::Value, Option<String>, bool)> {
     let mut args = json!({});
     let mut url = None;
     let mut raw = false;
@@ -2387,9 +2382,7 @@ fn strip_inline_images(v: &mut serde_json::Value) {
             for (k, val) in map.iter_mut() {
                 if k.ends_with("_b64") {
                     let n = val.as_str().map(|s| s.len() / 4 * 3).unwrap_or(0);
-                    *val = Value::String(format!(
-                        "<{n} bytes of base64 - pass --raw to print it>"
-                    ));
+                    *val = Value::String(format!("<{n} bytes of base64 - pass --raw to print it>"));
                 } else {
                     strip_inline_images(val);
                 }
@@ -2722,7 +2715,7 @@ mod asset_tests {
 /// "expected value at line 1 column 1".
 #[cfg(test)]
 mod tool_argv_tests {
-    use super::{parse_tool_argv, strip_inline_images, ENV};
+    use super::{ENV, parse_tool_argv, strip_inline_images};
     use serde_json::json;
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -2772,10 +2765,12 @@ mod tool_argv_tests {
         strip_inline_images(&mut reply);
         let shot = reply["screenshot_b64"].as_str().unwrap();
         assert!(shot.contains("12 bytes"), "{shot}");
-        assert!(reply["nested"][0]["png_b64"]
-            .as_str()
-            .unwrap()
-            .contains("3 bytes"));
+        assert!(
+            reply["nested"][0]["png_b64"]
+                .as_str()
+                .unwrap()
+                .contains("3 bytes")
+        );
         assert_eq!(reply["nested"][1]["keep"], 1);
         assert_eq!(reply["bytes"], 12);
     }

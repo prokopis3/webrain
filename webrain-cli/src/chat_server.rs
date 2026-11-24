@@ -53,19 +53,17 @@ use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use copilot_sdk::rpc::{
-    AgentSelectRequest, AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest, CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    AgentSelectRequest, AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest,
+    CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
     HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpConfigAddRequest,
-    McpConfigRemoveRequest,
-    McpDisableRequest,
-    McpEnableRequest, McpListToolsRequest, McpPromptsGetRequest, McpPromptsListRequest,
-    McpResourcesReadRequest, McpResourcesListRequest,
-    McpStartServerRequest,
-    MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
-    NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest,
-    QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest,
-    SlashCommandInvocationResult, TasksSendMessageRequest, ToolsExecuteRequest,
-    ToolsGetBuiltinDescriptorsRequest,
-    UIEphemeralQueryRequest, UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
+    McpConfigRemoveRequest, McpDisableRequest, McpEnableRequest, McpListToolsRequest,
+    McpPromptsGetRequest, McpPromptsListRequest, McpResourcesListRequest, McpResourcesReadRequest,
+    McpStartServerRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
+    ModeSetRequest, NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest,
+    QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
+    SkillsEnableRequest, SlashCommandInvocationResult, TasksSendMessageRequest,
+    ToolsExecuteRequest, ToolsGetBuiltinDescriptorsRequest, UIEphemeralQueryRequest,
+    UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
 };
 use copilot_sdk::session_events::{
     ElicitationRequestedData, PermissionMode, SamplingRequestedData, SessionMode,
@@ -1695,7 +1693,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     // measured only this one — two numbers, one label.
                     let mut prev = st.usage_at.lock().await;
                     let base = prev.unwrap_or((0, 0, 0, 0, 0.0, 0));
-                    *prev = Some((t.input, t.output, t.requests, t.api_ms, t.nano_aiu, t.cached));
+                    *prev = Some((
+                        t.input, t.output, t.requests, t.api_ms, t.nano_aiu, t.cached,
+                    ));
                     drop(prev);
                     let d = |now: i64, was: i64| (now - was).max(0);
                     let input = d(t.input, base.0);
@@ -2065,7 +2065,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let server = v["server"].as_str().unwrap_or_default().to_string();
             let name = v["name"].as_str().unwrap_or_default().to_string();
             if server.is_empty() || name.is_empty() {
-                return respond(&mut stream, 400, "application/json", r#"{"error":"server and name"}"#).await;
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"server and name"}"#,
+                )
+                .await;
             }
             // Arguments are whatever the caller typed; a prompt that needs one and
             // got none answers with the server's own complaint, which names it.
@@ -2118,7 +2124,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let server = v["server"].as_str().unwrap_or_default().to_string();
             let uri = v["uri"].as_str().unwrap_or_default().to_string();
             if server.is_empty() || uri.is_empty() {
-                return respond(&mut stream, 400, "application/json", r#"{"error":"server and uri"}"#).await;
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"server and uri"}"#,
+                )
+                .await;
             }
             let live = state.live.read().await.clone();
             let out = match live
@@ -2139,9 +2151,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                         .iter()
                         .filter_map(|c| {
                             c.text.clone().or_else(|| {
-                                c.blob
-                                    .as_ref()
-                                    .map(|b| format!("[{} bytes of base64 — {}]", b.len(), c.mime_type.clone().unwrap_or_default()))
+                                c.blob.as_ref().map(|b| {
+                                    format!(
+                                        "[{} bytes of base64 — {}]",
+                                        b.len(),
+                                        c.mime_type.clone().unwrap_or_default()
+                                    )
+                                })
                             })
                         })
                         .collect();
@@ -2179,7 +2195,8 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .collect();
             let dir = webrain_core::skills::dir().join(&slug);
             let path = dir.join("SKILL.md");
-            let doc = format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let doc =
+                format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
             let out = std::fs::create_dir_all(&dir)
                 .and_then(|()| std::fs::write(&path, doc))
                 .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
@@ -2214,7 +2231,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             }
             let live = state.live.read().await.clone();
             let mcp = live.client.rpc().mcp().config();
-            let out = match mcp.add(McpConfigAddRequest { config: raw, name: name.clone() }).await {
+            let out = match mcp
+                .add(McpConfigAddRequest {
+                    config: raw,
+                    name: name.clone(),
+                })
+                .await
+            {
                 Err(e) => json!({ "error": e.to_string() }),
                 Ok(()) => {
                     let reloaded = mcp.reload().await.is_ok();
@@ -2578,7 +2601,8 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .join(".github")
                 .join("agents");
             let path = dir.join(format!("{slug}.md"));
-            let doc = format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let doc =
+                format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
             let out = std::fs::create_dir_all(&dir)
                 .and_then(|()| std::fs::write(&path, doc))
                 .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
@@ -2761,7 +2785,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let mut saved = None;
             if always && let Some((_, card)) = &entry {
                 if card["managed"].as_bool().unwrap_or(false) {
-                    saved = Some(json!({ "saved": false, "why": "a managed policy requires this approval every time" }));
+                    saved = Some(
+                        json!({ "saved": false, "why": "a managed policy requires this approval every time" }),
+                    );
                 } else {
                     let key = approval_key(card);
                     let ok = state.permission.set_approved(&key, true).await;
@@ -3902,7 +3928,11 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .get_builtin_descriptors(ToolsGetBuiltinDescriptorsRequest::default())
                 .await;
             let mut builtins: Vec<(String, String)> = match descriptors {
-                Ok(r) => r.tools.into_iter().map(|t| (t.name, t.description)).collect(),
+                Ok(r) => r
+                    .tools
+                    .into_iter()
+                    .map(|t| (t.name, t.description))
+                    .collect(),
                 // A failed call must not empty the group: no rows in `#` reads as
                 // "this build has no built-ins", which is not what happened.
                 Err(_) => ["ask_user", "skill", "task", "task_complete"]
@@ -5200,14 +5230,23 @@ mod tests {
             "serverName": "webrain",
             "toolName": "webrain-webrain_navigate",
         });
-        assert_eq!(approval_key(&permission_card("p1", &tool, false)), "webrain:navigate");
+        assert_eq!(
+            approval_key(&permission_card("p1", &tool, false)),
+            "webrain:navigate"
+        );
 
         // A memory card is its own key, so approving one never approves writes.
         let mem = json!({ "kind": "memory", "action": "store", "fact": "f", "subject": "s" });
-        assert_eq!(approval_key(&permission_card("p2", &mem, false)), "memory:remember");
+        assert_eq!(
+            approval_key(&permission_card("p2", &mem, false)),
+            "memory:remember"
+        );
 
         // Nothing to name is not a wildcard: it is a key nothing else matches.
-        assert_eq!(approval_key(&permission_card("p3", &json!({}), false)), "mcp:tool");
+        assert_eq!(
+            approval_key(&permission_card("p3", &json!({}), false)),
+            "mcp:tool"
+        );
         assert_eq!(
             approval_key(&json!({ "kind": "tool", "serverName": "", "toolName": "" })),
             "mcp:tool"
@@ -5222,13 +5261,22 @@ mod tests {
         // no file and must not ask for permission to have no preferences.
         assert_eq!(load_approvals_from(&path), Vec::<String>::new());
 
-        let keys = vec!["webrain:navigate".to_string(), "memory:remember".to_string()];
-        assert!(save_approvals_to(&path, &keys), "the nested dir should be created");
+        let keys = vec![
+            "webrain:navigate".to_string(),
+            "memory:remember".to_string(),
+        ];
+        assert!(
+            save_approvals_to(&path, &keys),
+            "the nested dir should be created"
+        );
         assert_eq!(load_approvals_from(&path), keys);
 
         // Revoking is a save of the shorter list, and it must stay short.
         assert!(save_approvals_to(&path, &keys[..1]));
-        assert_eq!(load_approvals_from(&path), vec!["webrain:navigate".to_string()]);
+        assert_eq!(
+            load_approvals_from(&path),
+            vec!["webrain:navigate".to_string()]
+        );
 
         // A truncated or hand-edited file reads as empty rather than panicking.
         std::fs::write(&path, "{oops").unwrap();
@@ -5371,7 +5419,11 @@ mod tests {
         s.stamp(&mut args);
         assert_eq!(args.memory, Some(true));
         assert_eq!(args.compact_at, Some(COMPACT_PCT.0));
-        assert_eq!(args.citations, Some(true), "the flip must reach the session");
+        assert_eq!(
+            args.citations,
+            Some(true),
+            "the flip must reach the session"
+        );
     }
 
     #[test]
@@ -5445,10 +5497,17 @@ mod tests {
         // a directory, the same picture reached by leaving the tree, an absolute
         // path, and nothing at all — every one of them none.
         assert_eq!(local_image(&root, "shots/nope.png"), None);
-        assert_eq!(local_image(&root, "notes.txt"), None, "text is not a picture");
+        assert_eq!(
+            local_image(&root, "notes.txt"),
+            None,
+            "text is not a picture"
+        );
         assert_eq!(local_image(&root, "shots"), None);
         let sibling = out.file_name().unwrap().to_str().unwrap().to_string();
-        assert_eq!(local_image(&root, &format!("../{sibling}/secret.png")), None);
+        assert_eq!(
+            local_image(&root, &format!("../{sibling}/secret.png")),
+            None
+        );
         let absolute = out.join("secret.png");
         assert_eq!(local_image(&root, absolute.to_str().unwrap()), None);
         assert_eq!(local_image(&root, ""), None);
@@ -5606,9 +5665,18 @@ mod tests {
     #[test]
     fn http_url_refuses_what_ureq_would_panic_on() {
         assert_eq!(http_url("https://x.dev/a"), Some("https://x.dev/a".into()));
-        assert_eq!(http_url("http://x.dev:8080/a?b#c"), Some("http://x.dev:8080/a?b#c".into()));
-        assert_eq!(http_url("http://[::1]:9222/json"), Some("http://[::1]:9222/json".into()));
-        assert_eq!(http_url("https://u:p@x.dev/v1"), Some("https://u:p@x.dev/v1".into()));
+        assert_eq!(
+            http_url("http://x.dev:8080/a?b#c"),
+            Some("http://x.dev:8080/a?b#c".into())
+        );
+        assert_eq!(
+            http_url("http://[::1]:9222/json"),
+            Some("http://[::1]:9222/json".into())
+        );
+        assert_eq!(
+            http_url("https://u:p@x.dev/v1"),
+            Some("https://u:p@x.dev/v1".into())
+        );
         assert_eq!(http_url("http://[::1]/x"), Some("http://[::1]/x".into()));
         assert_eq!(http_url("https://x.dev:abc/v1"), None, "InvalidPort");
         assert_eq!(http_url("https://x.dev:0/v1"), None, "port 0");
