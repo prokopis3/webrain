@@ -27,7 +27,7 @@ pdfium = ["webrain-mcp/pdfium"]
 # `github-copilot-sdk/build/in_process.rs`). `chat-bundled` brings that back for
 # anyone who wants a single-file binary.
 chat = [
-    "dep:github-copilot-sdk",
+    "dep:copilot-sdk",
     "dep:openssl",
     "dep:async-trait",
     "dep:rusqlite",
@@ -38,7 +38,7 @@ chat = [
 # Opt-in: bake the ~166 MB Copilot runtime into the binary (the SDK's
 # `bundled-cli` default) so `webrain chat` needs no separate install. Off by
 # default — see the block comment above for the measured cost.
-chat-bundled = ["chat", "github-copilot-sdk/bundled-cli"]
+chat-bundled = ["chat", "copilot-sdk/bundled-cli"]
 
 [dependencies]
 webrain-core = { path = "../webrain-core" }
@@ -58,7 +58,7 @@ sha2 = "0.11"
 # keeps managed `Client::start`; `network-forwarding` is the HTTP/TLS/WS handler
 # that `bundled-cli` used to pull in. The runtime is then resolved at run time
 # from `COPILOT_CLI_PATH` (or an explicit `CliProgram::Path`).
-github-copilot-sdk = { version = "1", optional = true, default-features = false, features = [
+copilot-sdk = { version = "2.0.1", optional = true, default-features = false, features = [
     "runtime",
     "network-forwarding",
 ] }

@@ -1,0 +1,83 @@
+---
+title: webrain vs agent-browser (command surface)
+description: What agent-browser's CLI covers that webrain does not, in crawling and scraping scope only — verified command by command, with effort for each real gap.
+---
+
+# webrain vs agent-browser
+
+**agent-browser** (vercel-labs) is a Rust CLI that gives an agent a browser one
+command at a time, with a background daemon and `@e1` element refs.
+**webrain** is a Rust MCP server with a CLI for the same job. Both drive CDP, both
+are single binaries.
+
+This page is not a feature race. agent-browser is also a **browser tester** —
+`a11y` audits, `react tree`, `vitals`, `trace`, `profiler`, `record`, `mouse`,
+`clipboard`, `frame`, `find`, `is` — and none of that is our scope. What follows
+compares only **crawling and scraping**, which is the whole of webrain.
+
+Command names were taken from the [agent-browser command reference](https://agent-browser.dev/commands)
+and from our own `HELP` table (`webrain-cli/src/main.rs:37`), and the CDP calls
+from `webrain-core/src/backends/cdp.rs` — not from memory.
+
+## Where a scraper would notice the difference
+
+| Capability | agent-browser | webrain | Verdict |
+|---|---|---|---|
+| Fetch a URL as markdown, no browser | `read` — `Accept: text/markdown`, `.md` retry, walks to the nearest `llms.txt`, `--outline`, `--filter` | `webrain read <url>` — `Accept: text/markdown` first, then `<path>.md` / `<path>/index.md`, then the page converted by the same `htmd` converter the batch path uses (`source` says which); nearest `llms.txt` reported, `--outline`, `--filter`, and the same verb reads the `llms.txt` itself | equivalent — measured on docs.sentry.io (`markdown`), docs.perplexity.ai (`html` + `llms.txt`), astro.build (`html`) |
+| See the requests a page made | `network requests`, `network request <id>`, `network har start/stop` | `webrain_network`: `op=log` buffers `requestWillBeSent` / `responseReceived` / `loadingFinished` (id, method, type, status, mime, bytes, ms, failed), `op=request` returns the body — base64-decoded, JSON re-parsed — and `op=har` exports HAR 1.2 (headers/cookies are our `-1`/`[]` unknowns, not invented) | **equivalent**, minus header capture |
+| Block resource types | `network route --abort --resource-type script` | `Network.setBlockedURLs` via `disable_resources` / `block_trackers` on navigate and batch | equivalent |
+| Save a page as PDF | `pdf <path>` (CLI) | `webrain pdf <file-or-url>` (CLI) and `webrain_pdf{op:page}` (MCP) | equivalent |
+| Download a file | `download <sel> <path>` (click triggers it) + `wait --download` | `webrain_download` takes a URL; no click→download, no `Page.setDownloadBehavior` | **gap** |
+| Emulate a viewport / device / location | `set viewport`, `set device`, `set geo`, `set media` | `Emulation.setTimezoneOverride` + `setLocaleOverride` only | **gap** |
+| Keep a background tab at full speed | `tab keep live` (opt-in, documented CPU cost) | `Emulation.setFocusEmulationEnabled` is set on **every** attach, unconditionally | we match it, without the opt-in |
+| Work inside an iframe | `frame <sel>` scopes later snapshots | `eval_in_frame` by `src` substring; no frame-scoped observe/extract | partially covered |
+| Diff two pages | `diff` (snapshot-level) | `webrain diff <a> <b>` — whitespace-normalised text, no browser, exit 1 on change | equivalent |
+| Repeat screenshots cheaply | `screenshot --if-changed`, `--threshold` | none — every capture returns an image | **gap** (token cost) |
+| Stay on one domain | `--allowed-domains` | none; `webrain_crawl` has same-domain for its own frontier | **gap** (safety) |
+| A11y tree with element refs | `snapshot` | `webrain_observe{what:a11y}` / `webrain_snapshot` | equivalent |
+| Batch many URLs | `batch` (sequential commands in one call) | `webrain_batch` — concurrency, one URL per tab, per-URL `cdp_urls` | ours is built for this |
+| Extraction | `get text/html/attr/count`, `eval` | JSON / regex / JSON-LD / table / autoschema / BM25 — **zero LLM** | ours does more |
+| Engines | chrome, lightpanda, obscura | chrome, lightpanda, obscura, plus a no-browser HTTP tier | equivalent |
+| Auth | `auth save/login`, `state save/load` | vault (AES-256-GCM) + TOTP, `launch`, `login`, cookie export/import | ours handles challenges |
+
+## The gaps worth closing, in order
+
+1. **Click-triggered download.** `Page.setDownloadBehavior` + a wait for the file,
+   so "click the CSV button, give me the file" works. Ours only fetches a URL.
+2. **Viewport / device / geo emulation.** Three CDP calls next to the timezone and
+   locale we already set. It is how you get a mobile layout, or localised results.
+3. **Frame-scoped snapshot and extraction.** `eval_in_frame` proves frame
+   addressing works; `observe` and `extract` should accept the same selector.
+4. **`--if-changed` screenshots.** Hash the bytes, return `unchanged`, so a
+   repeated capture does not spend image tokens.
+
+## Closed since the first pass
+
+- **`read`** shipped as `webrain read` (CLI, no browser, no model) — negotiation,
+  `.md` retry, `llms.txt` walk, `--outline`, `--filter`. See the row above for
+  what was measured.
+- **CLI `pdf`** shipped as `webrain pdf <file-or-url> [--json]`.
+
+## Not gaps
+
+`open`/`goto`, `click`, `dblclick`, `fill`, `type`, `press`, `hover`, `focus`,
+`select`, `check`, `scroll`, `drag`, `upload`, `wait`, `is`, `find`,
+`scrollintoview`, `dialog`, `tab`, mouse and clipboard commands exist here as the
+`webrain_interact` / `webrain_observe` surface (by element index, not `@e1` refs),
+which is the same job through one tool instead of fifteen commands. `trace`,
+`profiler`, `record`, `react`, `vitals`, `a11y` audits, `dashboard`, `stream` and
+`inspect` are browser testing and DevTools: deliberately absent.
+
+## Pick agent-browser when
+
+You want a **CLI-shaped browser tester** — one shell call per step, refs in the
+output, plus tracing, recording and React introspection.
+
+**Pick webrain** when the job is **getting data out of pages**: crawling,
+extraction without an LLM in the path, many URLs at once, and an MCP surface any
+client can call.
+
+## Related
+
+- [Overview](/overview) · [Tools](/reference/tools) · [CLI](/reference/cli)
+- [webrain vs Crawl4AI](/comparisons/crawl4ai) · [webrain vs Firecrawl](/comparisons/firecrawl) · [webrain vs Playwright](/comparisons/playwright)

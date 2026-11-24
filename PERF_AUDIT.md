@@ -1,309 +1,211 @@
 # Memory & Performance Audit — webrain
 
-**Date:** 2026-10-23
-**Scope:** whole repo, focused on memory use and speed. No feature changes proposed.
-**Method:** code graph only (`query_graph`, `search_graph`, `search_code`,
-`get_code_snippet`, `get_file_outline`, `check_index_coverage`) against
-`D-Windows-Documents-Programming-Projects-Rust-webrain` (2566 nodes / 6182 edges).
-Every finding below was re-read at the cited lines after the first pass.
+**Originally:** 2026-10-23 (whole repo). **Pruned:** 2026-11-23 — shipped findings
+are removed from this file and live in git history; what remains is what is still
+open or deliberately declined. Re-measure before trusting any number here.
 
-**Assumed load:** one long-lived process per user (an editor or agent holds the MCP
-server open) plus one attached Chrome; `webrain_batch` fanning out 4–8 tabs on that
-one browser; optionally a shared `--http` instance serving several clients.
+**Method:** `check_index_coverage` first (the graph is best-effort: `App.svelte`
+currently reports `parse_unusable` for the whole file, so read it directly), then
+`search_graph` / `query_graph` / `search_code`, then the cited lines re-read, then
+measure in the running page before calling anything a performance problem.
 
 ---
 
-## Must fix
+## Open
 
-### 1. Every browser command blocks every other tab
-`webrain-core/src/backends/cdp.rs:585-650` (`send_cmd_with`), setup at `:358-427` (`connect`)
+### 1. `handle_tools_call` is one 1,069-line function (backend)
 
-- **What this is:** One WebSocket per browser. `send_cmd_with` takes the lock on the
-  shared connection, writes the command, and keeps the lock while waiting for that
-  command's reply — 30 s normally, 120 s for screenshot/PDF.
-- **Problem:** `connect` spawns two tasks, but they only copy WebSocket frames into a
-  channel; matching a reply to its command happens *inside* the lock. So
-  `webrain_batch(concurrency: 8)` issues its 8 tabs' commands one at a time. One slow
-  `Page.captureScreenshot`, one `awaitPromise` eval, or one paused renderer makes the
-  other 7 tabs wait. A single 120 s PDF freezes the whole browser.
-- **Fix:** one dispatcher task reads the channel and resolves
-  `HashMap<u64, oneshot::Sender<Value>>`; `send_cmd_with` holds the lock only to write.
-  About 60 lines in this file, no API change.
-- **If we skip it:** batch throughput equals the slowest page, and one stuck command
-  hangs every tab.
+`webrain-mcp/src/lib.rs:280-1348`. It is out of `handle_rpc` — that was the fix
+for "one `match` answers four methods" — but it still does four jobs in sequence:
+fold the intent surface, run the no-state / no-browser guards, connect (and retry)
+a backend, then call and post-process whatever came back.
 
-### 2. Every reply is tokenized, including multi-megabyte images
-`webrain-mcp/src/lib.rs:1055-1078` (`with_token_cost`)
+**Fix:** cut at those seams — `guards`, `connect`, `execute`, `postprocess`, each
+returning `Value` — so a change to the retry policy stops being a change to the
+same function as a change to the guards.
 
-- **What this is:** Exact BPE (byte-pair encoding — the tokenizer a language model
-  uses) runs over the whole reply just to report `tokens.est_tokens`.
-- **Problem:** screenshot, vision and PDF replies carry megabytes of base64. cl100k
-  emits one `u32` per ~4 characters, so a 4 MB reply produces ~1M tokens: hundreds of
-  ms of CPU plus ~4 MB of transient memory, for a number nobody acts on. The parsed
-  vocabulary also sits in RAM (a `OnceLock`) for the life of the process.
-- **Fix:** above a small cap use the estimate the field name already promises:
-  `if text.len() > 32*1024 { chars/4 } else { exact }`. One branch. That also makes
-  `tiktoken-rs` removable.
-- **If we skip it:** the largest replies pay the most CPU and memory for a cosmetic
-  metric.
+**Why open:** the body is byte-identical to the arm it came from, this is the path
+every transport ends in, and the payoff is reviewability rather than speed. It
+needs its own change window, the way the first two cuts did.
 
-## Should fix
+### 2. `handle_http_conn` is a 724-line router that writes responses inline (backend)
 
-### 3. Network-capture buffer has no cap and is copied
-`webrain-core/src/backends/cdp.rs:632` (push), `:1333-1390` (`capture_media`, clone)
+`webrain-mcp/src/lib.rs:1780-2503`. Unlike `call_tool` and `handle_rpc` this is not
+a `match`: it parses the request line and headers, answers `/health`, enforces the
+optional bearer token, reads the body, dispatches, and formats each response in
+place — so a route's logic and its HTTP framing are the same twenty lines.
 
-- **What this is:** While capture is on, every `Network.requestWillBeSent` URL is
-  pushed into `net_urls` with no length guard. `capture_media` then clones the whole
-  vector and leaves it in the field.
-- **Problem:** a video page requests thousands of segments. `webrain_media(wait_ms:
-  60000)` can buffer tens of thousands of strings, clone them (double peak), and hold
-  them until the next capture — then report only 100.
-- **Fix:** cap the push (`if v.len() < 2048`) and use
-  `std::mem::take(&mut *self.net_urls.lock().await)` instead of `.clone()`.
-- **If we skip it:** long captures on streaming pages are where this process spikes
-  memory.
+**Fix:** separate routing (`path + method → Option<route>`) from response building
+(`fn reply(status, body) -> String`, `fn sse_chunk(..)`).
 
-### 4. Vision store reloads and rewrites whole, and re-measures every vector per query
-`webrain-core/src/vision.rs:550-631` (`index_current_page`), `:255-265` (`search`)
+**Why open:** it is the transport every HTTP client depends on; a byte-level slip
+here is a client outage, not a bad line number.
 
-- **What this is:** `index_current_page` loads the entire index for its tag, adds the
-  new tiles, and saves it all back. `search` computes each stored vector's norm (its
-  length — one square root) on every query. `add` (`:199-206`) stores the vector
-  unchanged — verified, it does not normalize.
-- **Problem:** the store is cumulative, so call #100 loads and rewrites 100 pages of
-  vectors. A vector never changes after `add`, yet every query recomputes its norm:
-  17k tiles means 17k square roots per search.
-- **Fix:** normalize inside `add` so stored vectors are unit length, then `search` is a
-  plain dot product.
-- **If we skip it:** index and retrieve get slower with every page ever indexed.
+### 3. The chat page is still one 7.5k-line component (frontend, readability)
 
-### 5. Tile images are cloned two or three times
-`webrain-core/src/vision.rs:566-601` (`index_current_page`)
+`webrain-cli/ui/src/App.svelte`, 7,523 lines. The palette, the snackbar and the
+tools chooser are out (see `CHANGELOG.md`); each took its markup, styles and
+keyframes with it, because Svelte scopes all three to the defining component, and
+the chooser also had to redeclare the dialog shell (`#modal` backdrop, `.card`,
+primary button) because `App`'s rules never reach a child's DOM.
 
-- **What this is:** `inputs` clones every tile's base64 PNG, then the
-  describe/caption branch collects `t.png_b64.clone()` for the same tiles again.
-- **Problem:** a 20-tile page of ~300 KB tiles is 6 MB held as ~18 MB across three
-  copies. This is the tool's largest single memory spike.
-- **Fix:** build the PNG `Vec<String>` once and pass slices to embed and to
-  describe/caption; keep only the single clone `EmbedInput::Image` requires.
-- **If we skip it:** vision indexing stays the easiest way to exhaust memory.
+**This is not a performance item, and the measurement says so:** opening the
+settings panel and stepping through all nine tabs produces **zero** long tasks,
+and scrolling a 55-message thread holds 16.7 ms frames. The reason to split is
+that 7,523 lines is hard to review.
 
-### 6. Three functions do the work of twenty
-`webrain-mcp/src/tools.rs:926-2322` (`call_tool`, 1396 lines),
-`webrain-mcp/src/lib.rs:154-985` (`handle_rpc`, 831), `:1255-1525` (`handle_http_conn`, 270)
+**A boundary is not free — measured, not assumed:** palette `+0.8 KB` gzipped,
+snackbar `+0.2`, tools chooser `+2.8` (it copied the dialog shell), and a
+`Dialog.svelte` shared shell written to remove that duplication cost **`+0.73`
+with only one consumer** — it was reverted rather than shipped. Call it ~0.7 KB
+per component boundary, so a full split of the remaining 7,523 lines lands
+somewhere near `+7 KB`.
 
-- **What this is:** `call_tool` is one `match` covering every tool family.
-- **Problem:** no arm can be tested without the whole dispatcher, and any edit risks an
-  unrelated arm. The serp and vision paths are well tested only because they were
-  extracted into `serp.rs` / `vision.rs`.
-- **Fix:** split by tool family into small functions returning `Value` — a mechanical
-  move, no behaviour change.
-- **If we skip it:** each new tool makes the file harder to change safely.
+**Decision (recorded, so it stops being re-discovered):** the 80 KB ceiling is a
+*bug detector*, not a decomposition budget. If the page is split further, the
+ceiling moves to 88 KB in the same commit that crosses 80, with this paragraph as
+the reason — and the split goes **per tab**, not per panel: the settings card is
+nine tabs in one 353-line block over ~40 shared values (`manage`, `toggles`,
+`skillNew`, `mcpNew`, `providers`, …), so a whole-panel move would need a
+40-prop component, which is worse code than what it replaces. One tab per
+component, each with a handful of props, measured after each. The shared atoms
+those tabs draw are in `ui/src/app.css`, so a tab costs its markup and no form CSS.
 
-### 7. Session eviction picks an arbitrary victim
-`webrain-mcp/src/lib.rs:1354-1366`
-
-- **What this is:** at 64 sessions the map drops `map.keys().next()` — hash order, not
-  age.
-- **Problem:** the 65th concurrent client evicts a session that may be mid-crawl; that
-  client's next call reconnects to a fresh backend and loses its tab, cookies and
-  session. (The auth token compare at `:97-106` is fine — constant-time and
-  length-gated.)
-- **Fix:** keep `last_used: Instant` in `SessionMeta` and evict the oldest, or refuse
-  with a clear error instead of dropping silently.
-- **If we skip it:** a busy shared instance randomly drops one user's browser state.
-
-### 8. SERP re-filters and re-parses already-processed results (`auto` only)
-`webrain-core/src/serp.rs:781-839` (`http_search`), `:1445-1664` (`serp_search` merge),
-`:676-692` (`filter_relevant`), `:622-637` (`dedupe_cap`)
-
-- **What this is:** `http_search` already calls `filter_relevant` per page and
-  `dedupe_key` (a full URL parse) per result. The `auto` arm then runs
-  `dedupe_cap(filter_relevant(merged, &query), limit)` over that merged output — so
-  relevance filtering and URL parsing each happen twice. `brave_api_search`
-  (`:1146-1203`) also filters internally before joining the same merge.
-- **Problem:** with `limit=100` across three providers the inner loop does roughly
-  twice the work needed. `specific_engine` is unaffected — it returns `http_search`
-  output directly.
-- **Fix:** have `http_search` / `brave_api_search` return already-filtered, deduped
-  results and have `auto` merge with dedupe only (`dedupe_cap`), dropping the second
-  `filter_relevant`.
-- **If we skip it:** milliseconds per call, but paid on every search.
-
-## Nice to have
-
-### 9. Media capture pumps with a fake command
-`webrain-core/src/backends/cdp.rs:1345-1350`
-
-- **What this is:** every 200 ms `capture_media` runs `eval_js("1")` to keep commands
-  flowing so the reader keeps draining events. Because of finding 1, each of those
-  holds the connection lock.
-- **Problem:** a 60 s capture issues ~300 pointless round-trips and blocks every other
-  tab for the whole capture.
-- **Fix:** one `tokio::time::sleep(wait_ms)` — the pump only exists because replies are
-  read under the lock (fixed properly by finding 1).
-- **If we skip it:** media capture is the most disruptive single call for other tabs.
-
-### 10. Screenshot keeps the PNG twice
-`webrain-mcp/src/tools.rs:1001-1031` (`webrain_screenshot` arm)
-
-- **What this is:** the raw `png` bytes, the base64 string (1.33× bigger) and the file
-  on disk are all produced; the base64 is returned even when `path` is.
-- **Problem:** a tall full-page capture means bytes + base64 in RAM at once, then both
-  are shipped back inside a JSON reply that finding 2 tokenizes.
-- **Fix:** return `path` alone when a directory was given (keep `screenshot_b64` only
-  when no path was written).
-- **Status 2026-11-19 — the fix as written was wrong, and `b64: false` is what landed.**
-  The base64 is not a duplicate: `hoist_screenshot` (`webrain-mcp/src/lib.rs:1389`) moves
-  it into the MCP `image` content block, which is the only way a client can display the
-  picture. Dropping it whenever a path exists would have removed the image from every
-  screenshot call, since `dir` defaults to `screenshots`. `b64: false` now returns the
-  file path alone for callers that only want the file; batch screenshot rows already
-  shipped paths only.
-- **If we skip it:** screenshots stay the second-largest reply after vision tiles.
-
-### 11. "Renumber positions 1..N" is written five times
-`webrain-core/src/serp.rs:689`, `:634`, `:835`, `:1015`, `:1199`
-
-- **What this is:** the same three-line loop in `filter_relevant`, `dedupe_cap`,
-  `http_search`, `browser_search`, `brave_api_search`.
-- **Problem:** five copies that must change together if positions ever change meaning.
-- **Fix:** one `fn renumber(&mut [SerpResult])`.
-- **If we skip it:** low risk today, one more copy tomorrow.
+The transcript rows stay last: one `{#each}` with a dozen locals, and the
+measurement shows they are already cheap to scroll.
 
 ---
 
-## Verification pass (what was re-read)
+## Declined on purpose
 
-| # | Claim re-checked | Result |
-|---|---|---|
-| 1 | Is there a reader task that dispatches replies? | No — `connect` spawns **transport-only** frame pumps; reply matching is inside the lock. Claim holds. |
-| 2 | Is tokenization conditional or capped? | No branch; runs on every reply. Holds. |
-| 3 | Is `net_urls` capped anywhere? | No `MAX_*` or length guard exists in `cdp.rs`. Holds. |
-| 4 | Does `add` normalize vectors? | **No** — stores the `Vec<f32>` unchanged, so per-query `norm` is real waste. Holds. |
-| 5 | Are there really 2+ tile clones? | Yes — `inputs` clone plus a second `collect` for describe/caption. Holds. |
-| 6 | Function sizes | `call_tool` 926–2322, `handle_rpc` 154–985, `handle_http_conn` 1255–1525. Holds. |
-| 7 | Eviction policy | `map.keys().next()` at `:1354-1366`, no age tracking. Holds. |
-| 8 | Is the double work everywhere? | **Corrected:** only on the `auto` merge path; single-engine returns `http_search` output directly. |
-| 9 | Pump cadence | 200 ms `eval_js("1")` loop confirmed at `:1345-1350`. Holds. |
-| 10 | Is base64 still returned with a path? | **Answered:** yes by default and deliberately — it is the MCP image block. `b64: false` opts out. |
-| 11 | How many renumber loops? | **Corrected:** five sites, not four. |
+### Long-lived caching of the UI assets
 
-Two claims were wrong on the first pass and are corrected above (8 and 11).
+SvelteKit's guide says hash the filename and cache forever. Here the assets are
+`include_str!`-embedded in the binary and served `Cache-Control: no-store`, because a
+rebuilt binary must never hand a browser the previous UI — that exact failure already
+cost a debugging round. Correctness beats a 0-byte cache hit on loopback.
 
----
+**The upgrade, if this is ever served over a tunnel:** hash the embedded bytes once at
+startup, answer `ETag` + `Cache-Control: no-cache` (revalidate, not `no-store`), so a
+reload of an unchanged binary is a `304` instead of ~220 KB. About ten lines in the
+asset route of `chat-server`.
 
-**Verdict:** healthy core — bounded caches, good parser tests, sensible caps. Fix 1 and
-2 first; they are the only two that hurt under normal batch load.
+### Virtualising the transcript
 
-**Lean:** about −150 lines possible (findings 6, 8, 11), and −1 dependency
-(`tiktoken-rs`, with its ~2 MB compiled vocabulary) once finding 2 becomes an estimate.
+Measured, then declined: the first view of a 55-message thread pays **one 134 ms
+long task** (84 ms of blocking time) laying out the rows `content-visibility: auto`
+had been skipping, and never pays it again. A virtual list would add scroll
+restoration, anchoring and `find in page` regressions to buy back 84 ms of a
+once-per-thread cost. Revisit at hundreds of messages, or if that first-view task
+crosses 200 ms.
 
-**Not checked:** internals of `pdf.rs`, `video.rs`, `login.rs`, `launch.rs`,
-`proxy.rs`, `install.rs`, `browsers.rs`; the docs-site JavaScript; CLI argument parsing
-beyond `serp`. `check_index_coverage` reported no gaps for the three crates, but a clean
-coverage signal is not proof of completeness.
+### `rollup-plugin-visualizer`
+
+A dependency for a report. The budget gate answers the same question with an
+assertion, which is the half that keeps it true.
 
 ---
 
-## Status — applied (2026-10-23)
+## The SvelteKit performance guide, and why most of it is not ours
 
-Nine of the eleven findings are implemented. `cargo clippy --workspace
---all-targets` clean, `cargo test --workspace` 92 passed (75 core + 17 mcp),
-`cargo fmt --all -- --check` clean, graph re-indexed to 2589 nodes / 6200 edges.
+<https://svelte.dev/docs/kit/performance>, walked item by item on 2026-11-23. **This
+page is not SvelteKit** — no router, `load` function, adapter, `handle` hook or
+prerender — so six of its ten "out of the box" bullets describe machinery we do not
+run. Their absence is not a gap.
 
-| # | Finding | State | Where |
-|---|---|---|---|
-| 1 | Lock held across the reply wait | **applied** | `spawn_cdp_reader` + `CdpBackend.pending`; `send_cmd_with` locks only to write |
-| 2 | Exact BPE on every reply | **applied** | `with_token_cost`: `chars/4` above 32 KiB |
-| 3 | Uncapped, cloned `net_urls` | **applied** | 2048 cap in the reader; `mem::take` in `capture_media` |
-| 4 | Per-candidate `norm` in `search` | **applied** | `vision::unit` on `add`/`load`; `search` does a plain dot product |
-| 5 | Two tile-PNG copies | **applied** | one `pngs: Vec<String>` reused by embed/describe/caption |
-| 6 | 1396/831/270-line functions | **deferred** | see below |
-| 7 | Arbitrary session eviction | **applied** | `SessionMeta.used` + `min_by_key` (true LRU) |
-| 8 | Double relevance filtering | **applied** | `auto` merge is `dedupe_cap` only |
-| 9 | 200 ms fake-eval pump | **applied** | plain sleep; reader drains with no command in flight |
-| 10 | `screenshot_b64` alongside `path` | **deferred** | see below |
-| 11 | Five renumber loops | **applied** | one `serp::renumber` helper |
-
-**Why 6 is deferred.** Splitting `call_tool` / `handle_rpc` / `handle_http_conn`
-is pure churn: ~1400 moved lines across the two most load-bearing files in the
-repo, zero change in behaviour, and a large review surface for no functional
-gain. It is a readability project, not a performance one, and it belongs in its
-own change window — not inside a performance fix where it would make the real
-diffs unreviewable.
-
-**Why 10 is deferred.** Returning `path` *instead of* `screenshot_b64` removes a
-field a client may already read. That is a feature loss, and the constraint for
-this pass was "without losing features". The memory saving is real but the
-compatibility decision is the user's, not this audit's.
-
-**Follow-ups discovered while applying.** `send_cmd_with` now fails with
-`CDP connection closed` when the reply channel drops instead of surfacing the
-underlying parse error; and because the reader task outlives every command, a
-`Network.requestWillBeSent` burst during a 120 s PDF can no longer stall the
-socket by filling the 64-slot inbound channel — both are strict improvements but
-change failure wording no test currently pins.
+| Guide item | Here |
+|---|---|
+| Code-splitting | Partial, by Vite: app + CSS + deferred markdown chunk |
+| Asset preloading, hashing, coalescing, data inlining, prerendering, link preloading | N/A — one route, no SSR, one served document |
+| Parallel loading | Already true: six mount fetches fire together; only `loadSessions().then(seed)` is a real dependency |
+| Conservative invalidation | Already true: one SSE stream, routes re-read only when a frame says so |
+| Images / video | None shipped; attachments are fetched from the server on demand |
+| Fonts | **Zero webfonts** — `@font-face` / `fonts.googleapis` / `.woff` = 0 hits, so the JS→CSS→font waterfall it warns about cannot occur |
+| External scripts | None — `index.html` is one inline module |
+| Selective loading | Done where it matters: `marked` + `DOMPurify` in a deferred, idle-warmed chunk |
+| Svelte version | 5.57.3 |
 
 ---
 
-# Phase 1 baseline — 2026-11-19
+## Baseline worth keeping: the memory contract (2026-11-19)
 
-First measured numbers for the memory contract (56 MB per tab, saturation at 8
-tabs). Nothing below changed code; this is the line every later change is judged
-against, and the source for the `PER_TAB_MB` constant in
-`webrain-core/src/backends/cdp.rs`.
+The source for `PER_TAB_MB` in `webrain-core/src/backends/cdp.rs`. Windows, 32 GB,
+headless Chrome, one 4 KB fixture page, release build.
 
-**Machine:** Windows, 32 GB RAM (32,578 MB total / 17,346 MB free at start), headless
-Chrome (`--headless=new`, port 9222), fixture served from a local `TcpListener`
-(one 4 KB HTML page, distinct `?i=` per row). Release build.
+| tabs | urls | wall ms | rows/s | driver peak MB | browser delta MB |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 100 | 9194 | 10.9 | 11 | 85 |
+| 4 | 100 | 3094 | 32.3 | 12 | 271 |
+| 8 | 100 | 2994 | 33.4 | 12 | 514 |
+| 16 | 100 | 2985 | 33.5 | 13 | 986 |
+| 32 | 100 | 4304 | 23.2 | 13 | 1841 |
 
-## Extraction, no browser
+1. Throughput saturates at 8 tabs; 32 is *slower* than 16 (23.2 vs 33.5 rows/s) for
+   1.8 GB instead of 1.0 GB. Past saturation, tabs buy memory and latency.
+2. About 56 MB of browser per tab on this fixture; seed `tabs_for()` with it.
+3. The driver process is flat at 11–13 MB, which is the evidence that batch rows are
+   streamed rather than accumulated per page.
 
-`cargo bench -p webrain-core --bench extract`
+Extraction, no browser (`cargo bench -p webrain-core --bench extract`): 10,000
+records in 92 ms (autoschema), 125 ms (4-field schema), ~14 ms (BM25 top-20) — about
+80–110 K records/s, so a batch's time is the browser, not the parser.
 
-| Benchmark | 1,000 records | 10,000 records |
-| --- | --- | --- |
-| `autoschema_candidates` | 8.83 ms | 92.1 ms |
-| `extract_fields` (4-field schema) | 11.65 ms | 124.9 ms |
-| `bm25_filter` (top_k 20) | ~1.3 ms | ~14 ms |
+---
 
-The zero-LLM path runs at roughly 80–110 K records/s, so 10,000 rows cost about a
-tenth of a second of CPU. Extraction is not where a 1,000 URL batch spends its
-time; the browser is.
+## Re-measuring
 
-## Batch memory and throughput
-
-```
-$env:CDP_URL='http://127.0.0.1:9222'; $env:SOAK_URLS='100'
-cargo run --release --example soak -p webrain-core
+```powershell
+cd webrain-cli/ui
+bun run build     # per-asset sizes
+bun run check     # ends with the gzip budget (80 / 15 / 29 KB)
 ```
 
-| tabs | urls | ok | err | wall ms | rows/s | driver peak MB | browser delta MB | delta/row KB |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 100 | 100 | 0 | 9194 | 10.9 | 11 | 85 | 25.7 |
-| 4 | 100 | 100 | 0 | 3094 | 32.3 | 12 | 271 | 30.4 |
-| 8 | 100 | 100 | 0 | 2994 | 33.4 | 12 | 514 | 32.6 |
-| 16 | 100 | 100 | 0 | 2985 | 33.5 | 13 | 986 | 38.0 |
-| 32 | 100 | 100 | 0 | 4304 | 23.2 | 13 | 1841 | 46.2 |
+Backend: `cargo clippy --workspace --all-targets`, `cargo test --workspace`, the
+`soak` example for the tab table above. After adding or moving a source file, run
+`index_repository(mode="fast")` **before** trusting a coverage signal — a new file
+reads `not_tracked` until it is indexed, which is the index being old, not the code
+being absent.
 
-`browser delta MB` is the summed RSS of browser processes at peak minus the same
-sum before the first level, so it is attributable to these tabs on a machine that
-already has a browser open.
+Painting, in the served page's console with DevTools open:
 
-Three things the roadmap can stop guessing:
+```js
+const t = [], po = new PerformanceObserver((l) => l.getEntries().forEach((e) => t.push(e.duration)));
+po.observe({ entryTypes: ["longtask"] });
+const sc = [...document.querySelectorAll("*")].find((e) => e.scrollHeight > e.clientHeight + 300 && !e.classList.contains("rail"));
+for (let i = 0; i <= 30; i++) { sc.scrollTop = ((sc.scrollHeight - sc.clientHeight) * i) / 30; await new Promise(requestAnimationFrame); }
+console.table(t);  // the first scroll may show one task; later scrolls should be empty
+```
 
-1. **Throughput saturates at 8 tabs** (33.4 rows/s), and 32 is *slower* than 16
-   (23.2 vs 33.5) while costing 1.8 GB instead of 1.0 GB. Past saturation, tabs
-   buy memory and latency, not speed.
-2. **The browser costs about 56 MB per tab** on this fixture (85 MB at one tab
-   including shared browser overhead, then +55 to +60 MB per added tab). The
-   roadmap's 96 MiB per-tab estimate was too high; phase 2 should seed
-   `tabs_for()` with this measurement and keep it as a tunable constant.
-3. **The driver process is flat** at 11 to 13 MB from 1 to 32 tabs, which is the
-   evidence that batch rows are streamed rather than accumulated per page. The
-   memory that scales is Chrome's, so the tab budget is the only lever worth
-   pulling, and `open_tab` is the right place to enforce it.
+Streaming, which is the path a chat can actually stutter on.
 
-Reproduce both tables before and after any phase 2 change.
+**Real provider turn, measured 2026-11-23** (`webrain chat --serve`, provider
+`deepseek` / `deepseek-flash`, 1,201 output tokens, the page's own footer:
+`129.9 tok/s · 9.3s`). A `MutationObserver` on the transcript recorded **62 DOM
+updates for a 1,410-char reply — median 23 chars per update, p90 39, biggest 113
+(the "webrain copy" label), median gap 17 ms — and zero long tasks.** Reasoning
+tokens arrive before any answer text: the first content update lands ~8.2 s in,
+the answer then streams in ~1.1 s. Rendering cost is therefore bounded by chunk
+size (≤ ~40 chars), not by token count, and stays far below one frame.
 
+**Synthetic stress baseline, same day:** 420 tokens 18 ms apart (≈55 tok/s)
+through the page's own `render()` from `chunk-markdown.js`, inserted into a real
+transcript row — 430 frames over 8,131 ms, P50 16.7 ms, P95 33.4 ms, max 33.6 ms,
+no frame over 34 ms, zero long tasks, TBT 0. The 33.4 ms P95 is the harness: the
+loop yields 18 ms between paints, so every few frames get two intervals. This is
+the harsher profile (finer chunks than any provider sends) and still passes.
+
+Two traps when reproducing, both of which produced wrong numbers first:
+
+- **In-page `setTimeout` is throttled when the window lacks OS focus.** A
+  `hasFocus: false` tab stretched a 12.1 s turn into 93 s of wall clock, froze
+  `requestAnimationFrame` for 91 s and coalesced the whole reply into one
+  1,427-char update — which reads exactly like "the provider sends one giant
+  chunk". Poll from outside the page (`page.evaluate` in a loop) and record with a
+  `MutationObserver`, which fires on the DOM change itself. Check
+  `document.hasFocus()` before trusting any in-page timing loop.
+- **The first turn navigates** (to the conversation URL), destroying the evaluate
+  context. Establish the thread with a throwaway turn, or re-arm on each poll.
+
+`output/mock-stream.mjs` serves the same OpenAI-shaped SSE chunks locally when the
+full transport path needs recording without spending provider credit; point a
+provider row at `http://127.0.0.1:8811/v1` for the duration and delete it after.

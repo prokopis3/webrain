@@ -657,7 +657,7 @@ on a machine with no repo checkout.
 | Variable | Why an agent cares |
 |---|---|
 | `CDP_URL` | **The real browser choice.** `127.0.0.1:9222` = real Chrome, 9224 = obscura, 9225 = lightpanda, any remote Chrome works. Every "which engine" decision in this guide is really this variable. A raw `ws://` / `wss://` URL is accepted and passed straight through (no `/json/version` probe) — that is how Lightpanda Cloud and other hosted CDP endpoints are reached. |
-| `WEBRAIN_STEALTH_NOISE=0` | The hydration fix (§2b) — drop the canvas/audio fingerprint-noise block when a page renders but never mounts. |
+   | `WEBRAIN_STEALTH_NOISE=0` | The hydration fix (§2b) — drop the canvas/audio fingerprint-noise block when a page renders but never mounts. **`webrain chat --serve` now defaults it to `0`** (it is inherited by the child `webrain mcp`), and says so in the page banner and on stderr; `WEBRAIN_STEALTH_NOISE=1` restores the shim there. Every other command keeps the shim on. |
 | `WEBRAIN_NO_STEALTH=1` | Drops *all* injected stealth JS. A diagnostic for "is our shim breaking this page?" — never present it as the fix for a Cloudflare/CAPTCHA wall. ⚠️ `webrain serp` sets it **on itself** (`main.rs:207`) — see the relaunch recipe below. |
 | `WEBRAIN_NO_STATE=1` | Shared-instance mode: vault/launch/login/session answer "disabled on this instance". That is this variable, not a bug — report it. |
 | `WEBRAIN_HTTP_TOKEN`, `WEBRAIN_ALLOW_UNAUTHENTICATED` | Bearer auth for `mcp --http`. An auth rejection is a deployment fact, never a page problem. |

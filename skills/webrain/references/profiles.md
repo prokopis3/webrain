@@ -18,26 +18,64 @@ they are, when to create vs reuse, and how they carry authentication.
 ## Session
 - **What:** a live browser instance + its CDP connection, bound to a profile. In
   MCP, `webrain_session(op=open, cdp_url=...)` creates a named session pool that
-  later tool calls route to via `session_id`.
+  later tool calls route to via `session_id`. **Measured 2026-11-21 (this build):
+  it is NOT a parallel-browser pool — the most recently opened session decides the
+  engine for *every* handle.** Two `session_id`s then answer from the same window
+  (a `window.__probe` written through one was readable through the other), so open
+  the engine you actually want LAST and re-check `webgl` before trusting a result.
 - **Lifecycle:** CREATE → PROFILE ATTACHED → REAL CHROME → SESSION ACTIVE →
   NAVIGATE → PAGE STATE → HANDLE → EXTRACT → VERIFY → PRESERVE (keep the session
   for the next call; `webrain_session(op=close)` to release).
 - **Reuse:** keep the session open across pages; re-attach an
   already-authenticated Chrome by pointing `cdp_url`/`CDP_URL` at its port.
-- **Isolation:** different sessions/browsers have isolated cookie jars. Set
-  cookies and batch on the SAME connection (`webrain_session(op=setcookies)` then
-  `webrain_batch` without `cdp_urls`), or obscura's per-connection jar isolation
-  bites you.
+- **Isolation (the rule that decides whether a cookie bridge works):** every CDP
+  *connection* has its own jar. Import the cookies **on the connection that will
+  then navigate/batch** -- `webrain_session(op=setcookies, session_id=X)` then
+  navigate/extract with the same `session_id`, or set them in the single process
+  that does the work. `set: N / readback: N` proves only that the *writer's* jar
+  holds them; it says nothing about the reader's. Verify with an authenticated
+  request from the same session, never with a readback count.
+  Measured 2026-11-21 (serper.dev, obscura on :9224): `webrain setcookies
+  serper-cookies.json --port 9224` answered `set 8 ... readback: 8`, a *fresh*
+  connection to the same running obscura answered `wrote 0 cookies`, the page
+  bounced to `/login` and `api.serper.dev/auth/me/` returned **403**. Importing
+  cookies through `webrain_session(op=setcookies, session_id="obsc3")` and then
+  navigating in `obsc3` returned **200** with the account email and the dashboard's
+  `Credits left 2,499` -- same cookies, same engine, same IP; only the holding
+  connection differed. Cold start, same rule, ONE cookie: a fresh obscura (no
+  `--storage-dir`), `op=setcookies` with only the httpOnly `connect.sid` on the
+  navigating session -> `/auth/me/` 200 and `Credits left 2,499`. The analytics and
+  consent cookies are not needed for the bridge.
+- **Verify which engine you are actually on before diagnosing anything.** Session
+  routing can silently leave you on the default browser; two handles then show the
+  same page and you will "verify" the wrong engine. The tell:
+  `webgl: !!canvas.getContext('webgl')` -- **false + UA Chrome/143 = obscura**,
+  **true + UA Chrome/15x = real Chrome**. A Chrome/143 UA with `webgl: true`, or a
+  second handle reporting byte-identical page state, means the call did not go
+  where you think it did.
 
 ## Auth state transfer (cross-browser cookies)
 1. Log in ONCE in real Chrome on a persistent profile (native login, vault+TOTP).
 2. Export cookies on the LIVE browser: `webrain_session(op=cookies)` / CLI
    `webrain cookies --port 9222 --out file.json`. ⚠️ Session cookies do NOT
    survive a Chrome restart — export while Chrome is alive.
-3. Import on the MCP session connection: `webrain_session(op=setcookies, ...)`.
+3. Import **on the connection that will do the work**:
+   `webrain_session(op=setcookies, session_id=X, cookies=[...])`, then
+   navigate/extract with that same `session_id`. A CLI `webrain setcookies --port N`
+   writes into *that process's* jar, which the MCP session cannot see.
 4. Batch WITHOUT `cdp_urls` on that same connection so it shares the cookies.
-5. Alternative portable state: `webrain_session(op=save_state)` /
+5. VERIFY from the same session before reporting success: call an authenticated
+   endpoint (`fetch('https://api.<site>/auth/me/', {credentials:'include'})` -> 200)
+   or read the logged-in page's own text. `set: N / readback: N` is not
+   verification; a 403 from the API while the SPA shell still returns 200 is the
+   classic false positive.
+6. Alternative portable state: `webrain_session(op=save_state)` /
    `webrain_session(op=restore_state)` (cookies + localStorage JSON per profile).
+   On obscura this path does NOT work: `restore_state` calls `Network.setCookies`,
+   which obscura does not implement (`-32601 'Network.setCookies' wasn't found`),
+   and when it does succeed against a `cdp_url` it fills *that* connection's jar,
+   not the navigating session's (measured: `cookies_restored: 86`, navigating
+   session still 403). Use `op=setcookies` with `session_id` instead.
 
 ⚠️ **A vendor clearance does not transfer.** An anti-bot token (`cf_clearance`,
 DataDome, `_abck`) is bound to the minting browser's TLS/JA4 fingerprint + UA + IP.
@@ -65,8 +103,11 @@ binary flags:
 - obscura refuses to serve CDP bound to `0.0.0.0` without `OBSCURA_CDP_TOKEN`
   (≥32 bytes). `webrain obscura` sidesteps it by binding 127.0.0.1; in Docker set
   the token or keep the bind on loopback.
-- `--storage-dir` also removes the per-connection jar isolation above: the store
-  is on disk, so `setcookies` on any connection persists for `batch`.
+- `--storage-dir` is **disk persistence, not live sharing**: it does not lift the
+  per-connection jar isolation while the server runs (measured 2026-11-21: cookies
+  set on one connection, then `webrain cookies --port 9224` on a fresh connection
+  -> `wrote 0 cookies`). It saves/loads the jar across a server restart. Bridge
+  cookies IN-SESSION (previous section) instead of relying on it.
 - obscura's `/json/version` still advertises its built-in UA even with
   `--user-agent` — trust `navigator.userAgent` after a navigate, not the discovery doc.
 

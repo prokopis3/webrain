@@ -129,13 +129,20 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 ## Protected sites & sessions (full: `references/profiles.md`, `workflows/protected-site.md`)
 
 Log in ONCE on a persistent profile, then reuse that profile/session across pages —
-never discard a working profile/session after a challenge. For cross-browser cookie
-transfer (real Chrome → obscura batch), follow `references/profiles.md`.
+never discard a working profile/session after a challenge.
+
+Cross-browser cookie transfer (real Chrome -> obscura) follows
+`references/profiles.md`. The rule that decides success: **import the cookies on
+the connection that will then navigate** (`webrain_session(op=setcookies,
+session_id=X)`, then navigate with `session_id=X`). A CLI `webrain setcookies
+--port N` fills *that process's* jar only; the MCP session still sees an empty jar,
+the SPA bounces to `/login`, and the shell HTML still answers 200. Verify from the
+same session with an authenticated endpoint (200 vs 403), never with `readback: N`.
 
 Cookie transfer moves **login state, not bot clearance**: `cf_clearance` is bound to
 the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the Chrome
 that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
-For an obscura/lightpanda identity, start the binary with `--storage-dir`.
+For an obscura/lightpanda identity, start the binary with `--storage-dir` (it persists cookies across a server restart; it does NOT give a live jar to another connection).
 
 **The ephemeral Chrome ("guest") is a purpose tool, and it is SERP-only**: `webrain_serp`
 engine=google|brave and interactive CAPTCHA/Turnstile are the only callers — its
@@ -161,6 +168,17 @@ consent pages as target content · write sequential loops when `webrain_batch` e
 
 ## Failure modes
 
+- In obscura a CLIENT-SIDE route change can crash the SPA (`Application error: a
+  client-side exception has occurred`) while a full `navigate` to the same URL
+  renders fine (serper.dev `/api-keys`: sidebar click -> error page, direct load ->
+  the API Keys table). Navigate to the URL; do not debug the app.
+- Cookies imported but the page still lands on `/login` -> the jar is
+  per-connection: import on the session that navigates (see above). Confirm with
+  `fetch('https://api.<site>/auth/me/', {credentials:'include'})` -> 403 vs 200.
+- `Page.navigate` / `Runtime.evaluate` hang while `/json/version` and `/json/list`
+  still answer and `Target.getTargets` is `[]` -> the engine is wedged, not the
+  site. Restart it with the same flags, re-import cookies in-session, and do not
+  retry the same call.
 - `webrain_session(op=login)` returns `waiting_for_human:true` → a 2FA/approval
   gate; the human acts in the headed browser, then login again. Tell the user,
   don't loop.

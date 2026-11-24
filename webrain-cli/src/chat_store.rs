@@ -27,6 +27,13 @@ pub fn settings_path() -> PathBuf {
     db_path().with_file_name("settings.json")
 }
 
+/// Saved `server:tool` approvals, same directory for the same reason. Beside the
+/// settings rather than in them: this list is a standing permission, and a
+/// settings file a user edits by hand is the wrong place to keep one.
+pub fn approvals_path() -> PathBuf {
+    db_path().with_file_name("approvals.json")
+}
+
 impl Store {
     /// `None` when the file cannot be opened — the caller treats that as "no
     /// history menu" rather than an error.
@@ -82,6 +89,16 @@ impl Store {
              -- whole because the page owns the shape and a diffed table would be
              -- a second copy of it to keep in sync.
              CREATE TABLE IF NOT EXISTS transcript (
+                 convo TEXT PRIMARY KEY,
+                 body  TEXT NOT NULL,
+                 ts    TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             -- The last context-window snapshot the runtime reported for a
+             -- conversation. The live attribution only exists during a turn, so a
+             -- reload or a restart answered no snapshot while the history was still
+             -- on screen; this is what lets the panel say as of the last turn
+             -- instead of going blank.
+             CREATE TABLE IF NOT EXISTS context (
                  convo TEXT PRIMARY KEY,
                  body  TEXT NOT NULL,
                  ts    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -224,6 +241,9 @@ impl Store {
                 && db
                     .execute("DELETE FROM transcript WHERE convo = ?1", [convo])
                     .is_ok()
+                && db
+                    .execute("DELETE FROM context WHERE convo = ?1", [convo])
+                    .is_ok()
         })
     }
 
@@ -256,6 +276,35 @@ impl Store {
             )
             .ok()?;
         serde_json::from_str::<Value>(&body).ok()
+    }
+
+    /// Remember the context snapshot the runtime just reported (upsert: one row
+    /// per conversation, the newest wins).
+    pub fn save_context(&self, convo: &str, body: &str) -> bool {
+        if convo.is_empty() || serde_json::from_str::<Value>(body).is_err() {
+            return false;
+        }
+        self.lock().is_some_and(|db| {
+            db.execute(
+                "INSERT INTO context (convo, body) VALUES (?1, ?2)
+                 ON CONFLICT(convo) DO UPDATE SET body = excluded.body, ts = datetime('now')",
+                params![convo, body],
+            )
+            .is_ok()
+        })
+    }
+
+    /// The last snapshot for `convo`, with the time it was taken.
+    pub fn context(&self, convo: &str) -> Option<(Value, String)> {
+        let db = self.lock()?;
+        let (body, ts): (String, String) = db
+            .query_row(
+                "SELECT body, ts FROM context WHERE convo = ?1",
+                [convo],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()?;
+        Some((serde_json::from_str::<Value>(&body).ok()?, ts))
     }
 
     /// Copy the first `upto` messages of `convo` into `into`. A fork is a
@@ -310,15 +359,23 @@ impl Store {
         })
     }
 
-    /// Substring search over every message body, newest first.
+    /// Every word of the query is matched on its own, and the rows are ranked by
+    /// how much of the query they answer: more words hit first, then words hit in
+    /// the thread's opening message (the text every menu shows as its title),
+    /// then the phrase surviving in one piece, then recency.
     ///
-    /// ponytail: `LIKE` over one table — no FTS5 shadow table, no embeddings, no
-    /// network. A personal history is thousands of rows, where this answers in
-    /// under a millisecond; switch to FTS5+bm25 (or vectors) once a LIKE scan is
-    /// measurably slow, i.e. tens of thousands of messages.
+    /// That is the difference that makes "fpv sale" find a message saying "fpv
+    /// drone for sale": one `LIKE` over the whole query needed the words adjacent
+    /// and in order, so the words a person actually types never matched.
+    ///
+    /// ponytail: `LIKE` + in-process scoring — no FTS5 shadow table, no
+    /// embeddings, no network. A personal history is thousands of rows, where
+    /// this answers in under a millisecond; switch to FTS5+bm25 (or vectors) once
+    /// a LIKE scan is measurably slow, i.e. tens of thousands of messages.
     pub fn search(&self, q: &str) -> Vec<Value> {
-        let q = q.trim();
-        if q.is_empty() {
+        let phrase = q.trim().to_lowercase();
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        if words.is_empty() {
             return Vec::new();
         }
         let Some(db) = self.lock() else {
@@ -326,42 +383,85 @@ impl Store {
         };
         // `%` and `_` are wildcards in LIKE; a user typing them means them
         // literally.
-        let pattern = format!(
-            "%{}%",
-            q.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        let mut stmt = match db.prepare(
-            // A hit in the conversation's opening message (the text every menu
-            // shows as its title) outranks one buried mid-thread; recency breaks
-            // the tie.
+        let like = |w: &str| {
+            format!(
+                "%{}%",
+                w.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        };
+        // One bound parameter per word: any word may hit, and the scoring below
+        // decides which rows answer the query best.
+        let any = (1..=words.len())
+            .map(|i| format!("t.body LIKE ?{i} ESCAPE '\\'"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
             "SELECT t.convo,
                     (SELECT body FROM messages m WHERE m.convo = t.convo AND role = 'user'
                      ORDER BY id LIMIT 1),
-                    t.role, substr(t.body, 1, 2000), t.ts,
+                    t.role, substr(t.body, 1, 2000), t.ts, t.id,
                     t.role = 'user' AND t.id = (
                         SELECT MIN(id) FROM messages m WHERE m.convo = t.convo AND role = 'user'
                     ) AS is_title
              FROM messages t
-             WHERE t.body LIKE ?1 ESCAPE '\\'
-             ORDER BY is_title DESC, t.id DESC LIMIT 40",
-        ) {
+             WHERE {any}
+             LIMIT 2000"
+        );
+        let mut stmt = match db.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map([&pattern], |r| {
-            Ok(json!({
-                "convo": r.get::<_, String>(0)?,
-                "title": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "role": r.get::<_, String>(2)?,
-                "body": r.get::<_, String>(3)?,
-                "ts": r.get::<_, String>(4)?,
-                "title_hit": r.get::<_, bool>(5)?,
-            }))
-        });
-        rows.map(|r| r.filter_map(Result::ok).collect())
-            .unwrap_or_default()
+        let params: Vec<String> = words.iter().map(|w| like(w)).collect();
+        let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok((
+                json!({
+                    "convo": r.get::<_, String>(0)?,
+                    "title": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    "role": r.get::<_, String>(2)?,
+                    "body": r.get::<_, String>(3)?,
+                    "ts": r.get::<_, String>(4)?,
+                    "title_hit": r.get::<_, bool>(6)?,
+                }),
+                r.get::<_, i64>(5)?,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        let mut ranked: Vec<(i32, i64, Value)> = rows
+            .filter_map(Result::ok)
+            .filter_map(|(hit, id)| {
+                let body = hit["body"].as_str().unwrap_or_default().to_lowercase();
+                let title = hit["title"].as_str().unwrap_or_default().to_lowercase();
+                let (mut found, mut score) = (0, 0);
+                for w in &words {
+                    let in_body = body.contains(w);
+                    let in_title = title.contains(w);
+                    if in_body || in_title {
+                        found += 1;
+                    }
+                    if in_body {
+                        score += 1;
+                    }
+                    if in_title {
+                        score += 4;
+                    }
+                }
+                if found == 0 {
+                    return None; // LIKE can only over-match, never miss
+                }
+                if words.len() > 1 && body.contains(&phrase) {
+                    score += 6;
+                }
+                if hit["title_hit"].as_bool().unwrap_or(false) {
+                    score += 2;
+                }
+                Some((found * 100 + score, id, hit))
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        ranked.into_iter().take(40).map(|(_, _, v)| v).collect()
     }
 }
 
@@ -377,6 +477,28 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&p);
         (Store::open_at(p.clone()).expect("store"), p)
+    }
+
+    /// One row per conversation, newest wins, and deleting the thread takes its
+    /// snapshot with it — a stale context block on a re-used id would be a lie.
+    #[test]
+    fn context_snapshot_is_one_row_per_conversation_and_dies_with_it() {
+        let (s, path) = temp();
+        assert!(s.context("c1").is_none(), "nothing saved yet");
+        assert!(s.save_context("c1", r#"{"totalTokens":100,"attribution":{"x":1}}"#));
+        assert!(s.save_context("c1", r#"{"totalTokens":250}"#), "upsert");
+        assert!(s.save_context("other", r#"{"totalTokens":7}"#), "per convo");
+        assert!(!s.save_context("c1", "not json"), "a broken row is refused");
+
+        let (v, ts) = s.context("c1").expect("snapshot");
+        assert_eq!(v["totalTokens"], 250, "the newest wins");
+        assert!(!ts.is_empty(), "the saved time is reported");
+
+        s.forget("c1");
+        assert!(s.context("c1").is_none(), "deleting the thread clears it");
+        assert!(s.context("other").is_some(), "and only that thread");
+        drop(s);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -466,7 +588,7 @@ mod tests {
         assert_eq!(hits[0]["title"], "find the 50% discount");
         // `%` must not act as a wildcard: this only matches the literal text.
         assert_eq!(s.search("50%").len(), 1);
-        assert_eq!(s.search("5% d").len(), 0);
+        assert_eq!(s.search("50%x").len(), 0);
         assert!(s.search("   ").is_empty());
         drop(s);
         let _ = std::fs::remove_file(path);
@@ -486,6 +608,30 @@ mod tests {
         assert_eq!(hits[0]["convo"], "c_title");
         assert_eq!(hits[0]["title_hit"], true);
         assert_eq!(hits[1]["title_hit"], false);
+        drop(s);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_multi_word_query_matches_the_words_apart_and_ranks_by_coverage() {
+        let (s, path) = temp();
+        s.append("c_both", "user", "FPV drone for sale, barely used");
+        s.append("c_one", "assistant", "the FPV build needs a camera");
+        s.append("c_none", "user", "groceries");
+
+        // "fpv sale" is not a substring of anything: the words have to be
+        // matched on their own, which is the whole point.
+        let hits = s.search("fpv sale");
+        assert_eq!(hits.len(), 2, "a row with either word is a candidate");
+        assert_eq!(hits[0]["convo"], "c_both", "the row with both words wins");
+        assert_eq!(hits[1]["convo"], "c_one");
+
+        assert_eq!(
+            s.search("sale zebra").len(),
+            1,
+            "one word is enough to match"
+        );
+        assert!(s.search("apples pears").is_empty(), "no word, no row");
         drop(s);
         let _ = std::fs::remove_file(path);
     }

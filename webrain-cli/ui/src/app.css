@@ -1,0 +1,60 @@
+/* The interface's atoms: one definition each, for every component that draws
+   them. They live here rather than in a component's <style> because Svelte scopes
+   that style to the component — so a checkbox in the settings panel and the same
+   checkbox in the tools dialog could not share one rule, and the second copy is
+   how the settings checkboxes lost their box when the dialog moved out.
+
+   Nothing here is layout for a specific screen. Tokens (--s1, --primary, …) come
+   from App's :root block, which loads first. */
+
+/* A checkbox whose tick is drawn, so it can animate on its own curve. The real
+   input stays in the tab order and the a11y tree; the box beside it is the
+   picture. */
+.tcheck { position: relative; display: flex; align-items: center; gap: var(--s2);
+  font-family: var(--mono); font-size: 11px; color: var(--on-surface-variant); cursor: pointer;
+  min-height: 2rem; animation: atom-rise 160ms var(--ease); }
+.tcheck:hover { color: var(--on-surface); }
+.tcheck input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0;
+  pointer-events: none; }
+.tcheck .box { flex: 0 0 auto; width: 1.05rem; height: 1.05rem; border-radius: 6px;
+  border: 1.5px solid var(--outline); background: var(--surface-container);
+  display: grid; place-items: center;
+  transition: background 170ms var(--ease), border-color 170ms var(--ease),
+    box-shadow 200ms var(--ease); }
+.tcheck .box::after { content: ""; width: 0.52rem; height: 0.28rem; margin-top: -2px;
+  border-left: 2px solid var(--on-primary); border-bottom: 2px solid var(--on-primary);
+  transform: rotate(-45deg) scale(0.3); opacity: 0;
+  transition: transform 180ms var(--ease), opacity 140ms var(--ease); }
+.tcheck:hover .box { border-color: var(--primary); }
+.tcheck input:checked + .box { background: var(--primary); border-color: var(--primary); }
+.tcheck input:checked + .box::after { transform: rotate(-45deg) scale(1); opacity: 1; }
+.tcheck input:focus-visible + .box { box-shadow: 0 0 0 3px var(--primary-container); }
+
+/* A text button that is not a button: "all", "none", "save runtime settings",
+   "reset every setting". */
+.linky { background: none; border: 0; color: var(--faint); font: inherit; font-size: 10px;
+  letter-spacing: 0.08em; padding: 0 var(--s1); border-radius: var(--shape-xs); cursor: pointer;
+  min-height: 0; text-transform: uppercase; }
+.linky:hover { color: var(--primary); background: var(--state-hover); }
+.linky.danger { color: var(--error); }
+
+/* Muted text, an empty note, and the icon wrapper the dock and the dialogs share. */
+.dim { color: var(--faint); }
+.none { color: var(--faint); margin: 0 0 var(--s2); }
+.gi { display: inline-grid; place-items: center; flex: 0 0 auto; line-height: 0; }
+.gi svg { width: 15px; height: 15px; display: block; }
+.mini .gi svg, .clearq .gi svg, .jump .gi svg { width: 12px; height: 12px; }
+
+/* The round icon button: dock controls and a dialog's search toggle. The size is
+   the scale pass's, because a second smaller icon set beside it read as a bug. */
+.ico { flex: 0 0 auto; width: 2.5rem; min-height: 2.5rem; padding: 0; display: grid;
+  place-items: center; background: var(--surface-container); color: var(--on-surface-variant);
+  border: 0; border-radius: var(--shape-full); font: inherit; font-size: 17px; line-height: 1;
+  cursor: pointer; transition: background var(--motion-short) var(--ease),
+    color var(--motion-short) var(--ease); }
+.ico:hover { background: var(--surface-container-high); color: var(--primary); }
+
+@keyframes atom-rise { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) {
+  .tcheck { animation: none; }
+}

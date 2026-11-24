@@ -183,8 +183,12 @@ fn find_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     if depth == 0 {
         return None;
     }
-    let entries = std::fs::read_dir(root).ok()?;
-    for e in entries.flatten() {
+    // Newest version directory first: the cache is version-keyed, so a stale
+    // sibling must not win just because the filesystem listed it first — that is
+    // how a runtime bump looks applied and stays old.
+    let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.flatten().collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(dir_version(&e.file_name())));
+    for e in entries {
         let p = e.path();
         if p.is_file() && p.file_name().and_then(|n| n.to_str()) == Some(name) {
             return Some(p);
@@ -461,13 +465,14 @@ pub fn install_pdfium(force: bool) -> Result<PathBuf> {
     Ok(lib)
 }
 
-/// The Copilot CLI release `github-copilot-sdk` is built against. The SDK pins
-/// this exact tag and its JSON-RPC surface is version-coupled, so `latest` is
-/// not interchangeable — bump this only together with the SDK.
-const COPILOT_VERSION: &str = "1.0.105";
+/// The Copilot CLI release `copilot-sdk` is built against. The SDK pins this
+/// exact tag and its JSON-RPC surface is version-coupled, so `latest` is
+/// not interchangeable — bump this only together with the SDK (`cli-version.txt`
+/// in the crate carries both the tag and these digests).
+const COPILOT_VERSION: &str = "1.0.114";
 
 /// Official runtime asset for this target, with the SHA-256 its own release
-/// publishes. These are the values `github-copilot-sdk`'s build script pins, so
+/// publishes. These are the values `copilot-sdk`'s build script pins, so
 /// a re-cut or tampered asset fails closed instead of being executed.
 fn copilot_asset() -> Option<(&'static str, &'static str)> {
     let arm = cfg!(target_arch = "aarch64");
@@ -475,24 +480,24 @@ fn copilot_asset() -> Option<(&'static str, &'static str)> {
         Some(if arm {
             (
                 "copilot-win32-arm64.zip",
-                "647876bca9ca6ea77f5a28d002e1d135d1bb899c12bcd3f2eb1e860d6199ed90",
+                "8b87093bb46d8d6700482b58ef0039d00e4445bc13755ac49795e79f8cd565a5",
             )
         } else {
             (
                 "copilot-win32-x64.zip",
-                "34e16e9cf47de0e1534920171d6f39fa246638bddbb6ece820870b382bcc061a",
+                "be5af88c044842949560535b083c47e0c2b41904769cca599ee2cbf937dc9eed",
             )
         })
     } else if cfg!(target_os = "macos") {
         Some(if arm {
             (
                 "copilot-darwin-arm64.tar.gz",
-                "34aacd03fb478d47e4b3cfc5ca045c37278c5d8d86239466521a16ea54ac84aa",
+                "35e8165a6ca811fb907b5afb7892e53d1bb85426bb77fe3f83b7f0b4e955249a",
             )
         } else {
             (
                 "copilot-darwin-x64.tar.gz",
-                "de5684eeb118ad1e54f9a01f4535cf74e121b8226d26473550b01a7565ce54f5",
+                "9ac9f8785ad036c8d6a976a386fd05d721b510b57f083f1aac0cac9e378051bb",
             )
         })
     } else if cfg!(target_os = "linux") {
@@ -500,19 +505,19 @@ fn copilot_asset() -> Option<(&'static str, &'static str)> {
         Some(match (musl, arm) {
             (true, true) => (
                 "copilot-linuxmusl-arm64.tar.gz",
-                "bdd80a5384d6e6e04ab35473e66ad87dcca98994a4dae2c1b5728a0088524606",
+                "34f0d94344b564571c6d658558dbf2a4fb57aa612fb130564307f23042e01276",
             ),
             (true, false) => (
                 "copilot-linuxmusl-x64.tar.gz",
-                "58a541c095736ffb24a239905dd46370d176e26ef73459d6abd95ef27425ed67",
+                "2ecbdb5f7b3af2a861bee2ae24854478c798863f0219ce41f417b08d10985be5",
             ),
             (false, true) => (
                 "copilot-linux-arm64.tar.gz",
-                "e7b488cc04ac3e2ed800e1bf0aace33ada42dcf167529b3d2f48a61e1535a847",
+                "a204154d4522a7c3aa73a65ba598e432f6aafe37d5fa31cf853163a27d98018e",
             ),
             (false, false) => (
                 "copilot-linux-x64.tar.gz",
-                "aba1f06f27bc0447656647f76e0a4cf58b4b2a341c75ff04a750982b6aeb6bd2",
+                "b91a96f2257297cfb67ed6784a2a658609a6b8c2ee2ded18af9c9abe8cc790ae",
             ),
         })
     } else {
@@ -525,7 +530,7 @@ fn copilot_dir() -> PathBuf {
 }
 
 /// The official artifact is one Node SEA executable, not the `copilot-runtime`
-/// + `runtime.node` pair — that pair is something the SDK's own build script
+/// plus `runtime.node` pair — that pair is something the SDK's own build script
 /// derives from this binary. Verified: the SDK spawns this directly when
 /// `CliProgram::Path` / `COPILOT_CLI_PATH` names it.
 fn copilot_bin_name() -> &'static str {

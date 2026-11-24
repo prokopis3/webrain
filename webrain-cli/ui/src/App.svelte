@@ -2,7 +2,12 @@
   // `tick` is the one thing runes do not give for free: arrowing through the
   // palette has to scroll the row that is now selected, and the class it looks
   // for only exists after the render flush.
-  import { tick } from "svelte";
+  import { untrack } from "svelte";
+  // The composer's menu lives in Palette.svelte, which owns the scroll-into-view
+  // for the selected row — that was the only reason `tick` was imported here.
+  import Palette from "./Palette.svelte";
+  import Toasts from "./Toasts.svelte";
+  import ToolsDialog from "./ToolsDialog.svelte";
   // webrain chat · Svelte 5 runes.
   // Wire contract: GET /events (SSE), POST /turn, POST /permission,
   // GET /sessions (+ /sessions/<id>). Unknown runtime events are shown, never
@@ -10,15 +15,18 @@
   const esc = (s) =>
     String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
-  // The sigils the composer understands, tinted where they are typed. Only
-  // `#tool` and `@skill` — those are the two the runtime resolves by name, and a
-  // sigil at the start of a word is the same rule the palette uses.
+  // The sigils the composer understands, tinted where they are typed. `/` only
+  // counts at the start of the draft — the same rule the palette uses, and the
+  // reason a picked command was the one kind that never got a tint — while `#`
+  // and `@` stay word-anchored so a handle mid-sentence is still prose.
   function markInput(s) {
-    return esc(s).replace(
-      /(^|[\s(])([#@])([\w.-]+)/g,
-      (_, lead, sig, name) =>
-        `${lead}<mark class="${sig === "#" ? "mt" : "ms"}">${sig}${name}</mark>`,
-    );
+    return esc(s)
+      .replace(/(^)(\/)([\w.:-]+)/, '<mark class="mc">$2$3</mark>')
+      .replace(
+        /(^|[\s(])([#@])([\w.-]+)/g,
+        (_, lead, sig, name) =>
+          `${lead}<mark class="${sig === "#" ? "mt" : "ms"}">${sig}${name}</mark>`,
+      );
   }
 
   // Markdown is a dynamic import. `marked` + DOMPurify are the largest things in
@@ -108,6 +116,11 @@
   // rows. Frames carry their conversation; this is what they say when they do
   // not belong here.
   let runningIn = $state("");
+  // The conversation this tab's own turn was started in. `current` moves the
+  // moment you open another thread, so deriving the owner from it painted the
+  // Stop button — and the rail's dot — onto whichever conversation you looked
+  // at: every chat read as running while one of them was.
+  let busyConvo = $state("");
   // Every MCP server the runtime reports on, by name. A server that dies is the
   // reason a turn suddenly has no tools, and until now that arrived as one line
   // inside the collapsed `runtime` row — the page looked like a model that had
@@ -122,8 +135,20 @@
   let asksIn = $state([]); // ask_user questions, first one shown
   let freeAnswer = $state("");
   let call = $state(null); // the model call in flight, from `assistant.usage`
+  // A turn is several model calls (plan, tools, answer), and each one reports its
+  // own usage. The panel says "this turn", so it reads this running total — not
+  // the last call, which made the numbers jump backwards mid-turn.
+  let turnUse = $state(null);
   // Restored, because an accidental reload mid-prompt should not cost the prompt.
   let draft = $state(recall("draft", ""));
+  // What was typed where. The draft is part of the conversation it was written
+  // in: carrying it across a thread switch put one chat's text in another's send
+  // box — one Enter away from being posted to the wrong thread.
+  const drafts = new Map();
+  function swapDraft(next) {
+    drafts.set(current, draft);
+    draft = drafts.get(next) ?? "";
+  }
   let copiedId = $state(-1);
   let marksEl = $state(null); // the tint layer behind the composer
   let pinned = $state(true);
@@ -158,12 +183,20 @@
       want === null
         ? catalog.items
         : catalog.items.filter((r) => r.kind === want || (want === "tool" && r.kind === "builtin"));
-    return rows.filter((r) => r.name.toLowerCase().includes(q));
+    // A builtin the Runtime tab switched off is not offered in `#`: that menu is
+    // what the model can reach this session, not a catalogue of what exists.
+    const usable = rows.filter((r) => !(r.kind === "builtin" && builtinOff.includes(r.name)));
+    // What the draft already names is not offered again — a pick always writes
+    // `@name `, so the trailing space is the boundary that keeps `@web` from
+    // hiding `@webrain`. The menu answers "what can I still add".
+    const inDraft = (r) => draft.includes(`${SIGIL[r.kind]}${r.name} `);
+    // The hint is searched too: "compact" is how you find `/compact` when you
+    // remember what it does rather than what it is called.
+    return usable.filter((r) => !inDraft(r) && `${r.name} ${r.hint || ""}`.toLowerCase().includes(q));
   });
   // The header counts what matched, the list shows the first screenful of it —
   // a menu that says "14" when 27 matched is a menu that hides the rest.
   const menuRows = $derived(options.slice(0, 14));
-  let paletteEl = $state(null);
 
   // The session panel is a column on a desktop and a drawer on a phone, so it
   // starts open only where there is room for it.
@@ -179,6 +212,10 @@
     const wide = window.matchMedia("(min-width: 861px)");
     wide.addEventListener("change", (e) => (panelOpen = e.matches));
   }
+  // The instruments rail is part of the layout above 1100px and a right-hand
+  // drawer below it — this is that drawer's door, and its state. Closed by
+  // default: a drawer nobody asked for covers the transcript it is about.
+  let instOpen = $state(false);
   // How wide the two rails are, in px, dragged by the handles between them. The
   // grid, the composer's own offset and the handles all read these two vars, so
   // there is one number per side rather than three that can disagree.
@@ -214,7 +251,8 @@
     removeEventListener("pointercancel", gripUp);
     gripDrag = null;
   }
-  // A separator that only answers to a mouse is not a separator: arrows move it.
+  // A handle that only answers to a mouse is not a handle: the arrow keys step
+  // the same number the drag sets, which is what the slider role promises.
   function gripKey(which, e) {
     const d = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
     if (!d) return;
@@ -224,8 +262,61 @@
     if (which === "rail") railW = w;
     else instW = w;
   }
+  // The field drags taller from its top edge, the same way the rails drag wider
+  // from theirs — one number, clamped, remembered. `0` is "the one row the CSS
+  // asks for", which is what an untouched page shows.
+  let composeH = $state(readJson("compose-h", 0));
+  const H_MIN = 41; // shortcut: one row at the default size, refined when the drag starts
+  const hMax = () => Math.min(420, Math.round(innerHeight * 0.55));
+  const clampH = (h) => Math.round(Math.min(hMax(), Math.max(H_MIN, h)));
+  $effect(() => {
+    document.documentElement.style.setProperty(
+      "--compose-h",
+      composeH ? `${composeH}px` : "auto",
+    );
+  });
+  let compDrag = null;
+  function compDown(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const field = e.currentTarget.parentElement?.querySelector("textarea");
+    compDrag = { y: e.clientY, start: composeH || field?.offsetHeight || H_MIN };
+    addEventListener("pointermove", compMove);
+    addEventListener("pointerup", compUp, { once: true });
+    addEventListener("pointercancel", compUp, { once: true });
+  }
+  // Up is taller: the handle sits under the field, so dragging the seam towards
+  // the top of the page is what grows it.
+  function compMove(e) {
+    if (compDrag) composeH = clampH(compDrag.start + (compDrag.y - e.clientY));
+  }
+  function compUp() {
+    removeEventListener("pointermove", compMove);
+    removeEventListener("pointercancel", compUp);
+    compDrag = null;
+  }
+  // The arrow keys step what the drag sets, which is what the slider role says.
+  function compKey(e) {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const cur = composeH || H_MIN;
+    composeH = clampH(cur + (e.key === "ArrowUp" ? 24 : -24));
+  }
+  // The corner button, labelled with what pressing it does: a control that
+  // always reads "maximize" is one you press to shrink.
+  const tall = $derived(composeH > H_MIN + 8);
+  function toggleCompose() {
+    composeH = tall ? H_MIN : clampH(Math.round(innerHeight * 0.3));
+  }
   let q = $state("");
   let hits = $state([]);
+  // The row ↵ would open. Arrow keys move it; a new answer resets it, so the
+  // first match is always what a hurried Enter takes.
+  let sel = $state(0);
+  // History search lives in a modal, not in the rail: the rail is a scrolling
+  // list, and with a long history the match list sat below the fold, so typing
+  // looked like it did nothing. One field, one place — in the middle.
+  let findOpen = $state(false);
   let searchSeq = 0;
   let searchTimer = 0;
   let attachSeq = 0;
@@ -257,6 +348,29 @@
   let instructions = $state(recall("instructions", ""));
   let language = $state(recall("language", ""));
   let suggest = $state(readJson("suggest", true));
+  // The composer's keys, settable from Settings → Chat because a keyboard is the
+  // one thing this page cannot guess. Enter always sends and Shift+Enter is
+  // always a newline; everything else is a preference.
+  const KEY_ACTIONS = [
+    ["complete", "complete a / @ # name", "Tab"],
+    ["stopSend", "stop the turn and send", "Ctrl+Enter"],
+    ["queue", "queue behind the running turn", "Alt+Enter"],
+  ];
+  let keys = $state({
+    ...Object.fromEntries(KEY_ACTIONS.map(([id, , dflt]) => [id, dflt])),
+    ...readJson("keys", {}),
+  });
+  let capturing = $state("");
+
+  // "Ctrl+Shift+K" and "Tab", never "Enter" from a modifier that was not asked
+  // for: the comparison is against this string, so it has to be canonical.
+  function keyName(e) {
+    const mod = [e.ctrlKey && "Ctrl", e.metaKey && "Meta", e.altKey && "Alt", e.shiftKey && "Shift"]
+      .filter(Boolean)
+      .join("+");
+    const k = e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    return mod ? `${mod}+${k}` : k;
+  }
   let modelOpen = $state(false);
   let providers = $state([]);
   let provTab = $state(0);
@@ -346,6 +460,110 @@
         : "",
   );
   let ctx = $state(null); // {used, limit} from session.usage_info
+  // Session info: the same accounting the runtime's own `/context` prints, asked
+  // for when the panel opens rather than per frame. The six categories are the
+  // runtime's normalisation — `free` and the reserved buffer describe window
+  // capacity, not occupancy, so they never add up to the total on their own.
+  let ctxInfo = $state(null);
+  let ctxOpen = $state(false);
+  let ctxBusy = $state(false);
+  const ctxPct = $derived(ctx?.limit ? Math.min(100, (ctx.used / ctx.limit) * 100) : 0);
+  // 230.5K / 1M, the way a window is spoken about.
+  const toks = (n) =>
+    n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+
+  async function openCtx() {
+    ctxOpen = !ctxOpen;
+    if (!ctxOpen) return;
+    ctxInfo = null;
+    try {
+      ctxInfo = await (await fetch("/context")).json();
+    } catch {
+      ctxInfo = { error: "the server is not reachable" };
+    }
+  }
+
+  // The runtime's buckets, grouped the way the Copilot chat's session-info panel
+  // groups them: System (instructions + tool definitions), User Context
+  // (messages), and the output reservation apart from both. Percentages are of
+  // the prompt allowance, which is the number the runtime actually compacts
+  // against. `free` is left out — the ring is the rest of it.
+  const ctxGroups = $derived.by(() => {
+    const a = ctxInfo?.attribution?.contextAttribution;
+    const c = a?.categories;
+    if (!c) return [];
+    const lim = a.limit || ctxInfo.promptTokenLimit || 0;
+    const row = (label, n) => {
+      const p = lim ? (n / lim) * 100 : 0;
+      // A share under a tenth of a percent is not zero, and "0.0%" reads as zero.
+      return { label, n, pct: p, show: lim ? (n > 0 && p < 0.1 ? "<0.1%" : `${p.toFixed(1)}%`) : toks(n) };
+    };
+    const system = [
+      row("System Instructions", (c.systemPrompt || 0) + (c.customInstructions || 0)),
+      row("Tool Definitions", (c.systemTools || 0) + (c.mcpTools || 0)),
+    ].filter((r) => r.n > 0);
+    const user = [row("Messages", c.messages || 0)].filter((r) => r.n > 0);
+    // Everything the runtime counted into the prompt that its own categories do
+    // not name. Derived, never guessed: the remainder, shown only when there is
+    // one. (There is no Tool Results row: this SDK reports user, assistant and
+    // tool messages as one `messages` figure, so a split would be invented.)
+    const known = (c.systemPrompt || 0) + (c.customInstructions || 0) + (c.systemTools || 0) +
+      (c.mcpTools || 0) + (c.messages || 0);
+    const other = Math.max(0, (ctxInfo.totalTokens || 0) - known);
+    const misc = [row("Other", other)].filter((r) => r.n > 0);
+    return [
+      { head: "System", tone: "sys", rows: system },
+      { head: "User Context", tone: "usr", rows: user },
+      { head: "Uncategorized", tone: "oth", rows: misc },
+    ].filter((g) => g.rows.length);
+  });
+  // A reservation is not a share: the buffer overlaps the prompt allowance, so it
+  // is printed as tokens rather than a percentage that would not add up. It gets
+  // its own segment on the bar, which is the one place the overlap is visible.
+  const ctxReserved = $derived(
+    ctxInfo?.attribution?.contextAttribution?.categories?.buffer || 0,
+  );
+  const ctxReservedPct = $derived.by(() => {
+    const lim = ctxInfo?.attribution?.contextAttribution?.limit || ctxInfo?.promptTokenLimit || 0;
+    return lim ? (ctxReserved / lim) * 100 : 0;
+  });
+
+  // A panel that only closes from its own button is a panel you hunt for. Any
+  // click outside puts it away, the rule the model dialog already follows; the
+  // button sits inside `.ctxwrap`, so the click that opens it is not the click
+  // that closes it.
+  $effect(() => {
+    if (!ctxOpen) return;
+    const away = (e) => {
+      const wrap = document.querySelector(".ctxwrap");
+      if (wrap && e.target instanceof Node && !wrap.contains(e.target)) ctxOpen = false;
+    };
+    addEventListener("click", away);
+    return () => removeEventListener("click", away);
+  });
+
+  // Compaction rewrites the conversation it runs on, so it asks first and stays
+  // off while a turn is live: the runtime is reading the history it would rewrite.
+  async function compactNow() {
+    if (ctxBusy || busy) return;
+    if (!confirm("compact this history now? the transcript becomes a summary.")) return;
+    ctxBusy = true;
+    try {
+      const j = await (
+        await fetch("/command", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "compact" }),
+        })
+      ).json();
+      push({ kind: j.error ? "err" : "note", text: `compact: ${j.text || j.error || "done"}` });
+      ctxInfo = await (await fetch("/context")).json();
+    } catch {
+      push({ kind: "err", text: "compact: the server is not reachable" });
+    } finally {
+      ctxBusy = false;
+    }
+  }
   let adding = $state(false);
   let fresh = $state({ id: "", base_url: "", model: "", key_env: "WEBRAIN_CHAT_API_KEY" });
   // A key typed into the model dialog. It goes to the vault, never to a store.
@@ -371,6 +589,11 @@
     memory: false,
     session_store: false,
     allow_agents: true,
+    parallel_tools: true,
+    // Off by default and server-side like the rest: the payload is marked
+    // experimental upstream, and asking for it spends output tokens.
+    citations: false,
+    allowed_models: '',
     max_output_tokens: 4096,
     timeout_secs: 300,
     compact_at: 80,
@@ -429,10 +652,6 @@
   // The tools chooser is a dialog, not a strip of chips: a dozen tools is a list,
   // and a list you cannot search or fold by server is a list you scroll.
   let toolsOpen = $state(false);
-  let toolsDraft = $state([]); // staged — Save commits, Close drops
-  let toolsQuery = $state("");
-  let searchOpen = $state(false);
-  let toolsClosed = $state([]); // servers whose checklist is folded away
   // Agent / plan / ask was three buttons taking a third of the dock; it is one
   // choice, so it reads as one control that opens.
   let modeOpen = $state(false);
@@ -458,8 +677,10 @@
   ];
   let theme = $state(recall("theme", "mint"));
   // Applied here, not only in the effect below, so the saved palette is on the
-  // document before the first paint instead of flashing the default.
-  document.documentElement.dataset.theme = theme;
+  // document before the first paint instead of flashing the default. `untrack`
+  // says the one-shot read is the point: a reactive read here would re-run the
+  // statement as a derived value, which is not what a pre-paint assignment is.
+  document.documentElement.dataset.theme = untrack(() => theme);
   let themeOpen = $state(false);
   let themeEl = $state(null);
   $effect(() => {
@@ -534,6 +755,10 @@
   // than the on ones means a tool added to the binary later is available without
   // anyone re-ticking it, and the default state needs no seeding.
   let builtinOff = $state(readJson("tools-builtin-off", []));
+  // The runtime's own account of what it disabled for this session, verbatim
+  // from its `configuration` event. Shown in the tools checklist because a list
+  // of what the model *has* cannot explain a tool that never appears.
+  let runtimeOff = $state("");
   const builtinOn = (name) => !builtinOff.includes(name);
   function toggleBuiltin(name) {
     builtinOff = builtinOn(name)
@@ -598,29 +823,36 @@
   // The conversation the running turn belongs to: the one a foreign frame named,
   // or this one when the turn is ours. `busy` alone is a fact about the server,
   // not about where the work is.
-  const runningConvo = $derived(runningIn || (busy ? current : ""));
+  const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));
   const shown = $derived(list.length > tail ? list.slice(-tail) : list);
   // Which ledger the panel is reading: a saved conversation shows its own, so
   // the numbers stop changing to the live one's the moment you open history.
   const ledger = $derived(past ? pastTurns : turns);
   const stats = $derived.by(() => {
-    // While a call is in flight `assistant.usage` is exact — including cache
-    // reads — where the 900 ms sample is only approximate. Cost is computed from
-    // the provider's published per-token price when there is one; the SDK's own
-    // `nano_aiu` is 0 on BYOK turns, where the key pays the provider.
-    if (call) {
-      const speed = call.duration > 0 ? (call.outputTokens / (call.duration / 1000)).toFixed(1) : "—";
+    // While a turn runs the panel's own label is "this turn", so it reads the
+    // running total of every call in it. Reading `call` here is what made the
+    // numbers flicker: each new call replaced the last one's figures, so the
+    // cost and the counts appeared to jump backwards as the turn progressed.
+    // Cost is computed from the provider's published per-token price when there
+    // is one; the SDK's own `nano_aiu` is 0 on BYOK turns, where the key pays.
+    // `!past` because a turn is not the property of a thread you are only
+    // reading: the panel shows that conversation's own ledger row instead.
+    if (turnUse && !past) {
+      const speed =
+        turnUse.duration > 0 ? (turnUse.outputTokens / (turnUse.duration / 1000)).toFixed(1) : "—";
       return {
-        model: call.model || "—",
-        tok: `${call.inputTokens} / ${call.outputTokens}`,
+        model: turnUse.model || "—",
+        tok: `${turnUse.inputTokens} / ${turnUse.outputTokens}`,
         speed,
-        // The share of this call's input the provider served from its prompt
+        // The share of this turn's input the provider served from its prompt
         // cache. `inputTokens` already includes the cached part, so this is a
         // ratio of that, not an addition to it.
-        hit: call.inputTokens > 0
-          ? `${Math.round(((call.cacheReadTokens ?? 0) / call.inputTokens) * 100)}%`
-          : "—",
-        cost: money(spend(call.inputTokens, call.outputTokens, call.cacheReadTokens ?? 0)),
+        hit:
+          turnUse.inputTokens > 0
+            ? `${Math.round(((turnUse.cacheReadTokens ?? 0) / turnUse.inputTokens) * 100)}%`
+            : "—",
+        cost: money(spend(turnUse.inputTokens, turnUse.outputTokens, turnUse.cacheReadTokens ?? 0)),
+        calls: turnUse.calls > 1 ? `${turnUse.calls} calls` : "",
       };
     }
     const t = ledger[0];
@@ -630,7 +862,7 @@
   });
   // Nothing measured yet: the header and the panel say so once, instead of
   // printing six em-dashes and calling it data.
-  const measured = $derived(!!call || ledger.length > 0);
+  const measured = $derived(!!turnUse || ledger.length > 0);
 
   // What the model is doing right now, in one line, read off the events already
   // on screen: the tool that is running, the reasoning stream, or the wait for
@@ -745,8 +977,23 @@
     }
   }
 
+  // `steered: false` means the runtime kept the prompt in the queue because the
+  // running turn would not yield — which looks exactly like success unless it is
+  // said out loud. If it refused, stopping the turn is the only thing that
+  // forces it, and that is what "send now" promised in the first place.
   async function promote(q) {
-    await queueCall({ id: q.id });
+    let j = await queueCall({ id: q.id });
+    if (j && j.steered === false) {
+      await fetch("/stop", { method: "POST" }).catch(() => {});
+      j = await queueCall({ id: q.id });
+      push({
+        kind: j && j.steered ? "note" : "err",
+        text:
+          j && j.steered
+            ? "queued prompt forced — the turn was stopped"
+            : "queue: still queued after stopping the turn",
+      });
+    }
   }
 
   // A queued prompt you can send but not correct is one you retype in the
@@ -772,6 +1019,8 @@
         })
       ).json();
       if (j.error) push({ kind: "note", text: `queue: ${j.error}` });
+      await loadQueue();
+      return j;
     } catch {
       push({ kind: "note", text: "queue: the server is not reachable" });
     }
@@ -906,6 +1155,15 @@
   function handle(f) {
     const d = f.data || {};
     switch (f.type) {
+      // What the runtime switched off, in its own words. This is why the
+      // checklist has no `edit` or `view` row: the session's tool set is fixed
+      // when it is created, and the ones it withheld are named here rather than
+      // silently missing from a list that only shows what it kept.
+      case "configuration": {
+        const said = d.message || d.reason || "";
+        runtimeOff = String(said).trim() || JSON.stringify(d).slice(0, 600);
+        return activity(f.type, d);
+      }
       // The agent's own one-line description of what it is doing. Cheaper than a
       // guess and better than "working", so it replaces the spinner's label.
       case "assistant.intent":
@@ -952,10 +1210,19 @@
         // field on the row, removed from the text — the transcript stores what a
         // reader would copy, and the chips come back on reload.
         const said = parseSuggest(d.content || d.message || d.text || streamText);
+        // Sources the provider attributed the answer to, when `citations` is on
+        // in settings. The runtime sends `{sources, spans}`; only `sources` is
+        // drawn — a span list would need offsets re-mapped onto the rendered
+        // markdown, and a source list a reader can open is the useful half.
+        // Turn-scoped by the protocol's own wording, so it is not persisted.
+        const cites = Array.isArray(d.citations?.sources) && d.citations.sources.length
+          ? d.citations.sources
+          : undefined;
         push({
           kind: "assistant",
           text: said.clean,
           suggest: said.list.length ? said.list : undefined,
+          cites,
         });
         return clearStream();
       }
@@ -1015,8 +1282,10 @@
         return; // the 900 ms live sample; superseded by assistant.usage when it lands
       case "assistant.usage":
         // Exact per-call numbers, straight from the runtime: tokens, cache reads,
-        // reasoning tokens, TTFT, wall duration.
+        // reasoning tokens, TTFT, wall duration. Summed into the turn as well,
+        // because the panel's label is "this turn" and a turn is many calls.
         call = d;
+        turnUse = addUse(turnUse, d);
         return;
       case "webrain.usage":
         return usage(d);
@@ -1025,6 +1294,42 @@
       case "session.usage_info":
         ctx = { used: d.currentTokens ?? 0, limit: d.tokenLimit ?? 0 };
         return;
+      // The runtime stopping to ask for more credits. It is a stop with a reason,
+      // and the only thing that explains a turn ending early with no error row.
+      case "session_limits_exhausted.requested":
+        return push({
+          kind: "err",
+          text: `credits: ${Math.round(d.usedAiCredits ?? 0)} of ${Math.round(d.maxAiCredits ?? 0)} used — the turn is waiting on a limit decision`,
+        });
+      // The provider's own balance. `usage_checkpoint` counts what we spent; this
+      // says how much is left, when the provider reports it. A zero quantity does
+      // not mean exhausted — the runtime says so separately — so the verdict is
+      // printed beside the number instead of being inferred from it.
+      case "session.quota_observation": {
+        const q = d.observation || {};
+        const left = q.availableQuantity;
+        const of = q.entitledQuantity;
+        if (left == null && !q.capacityState) return;
+        const bits = [];
+        if (left != null) {
+          // -1 is the runtime's unlimited sentinel, not a quantity.
+          if (of != null && of >= 0) bits.push(`${left} of ${of} left`);
+          else bits.push(left < 0 ? "unlimited" : `${left} left`);
+        }
+        if (q.capacityState) bits.push(`capacity ${q.capacityState}`);
+        if (q.accessState && q.accessState !== "allowed") bits.push(`access ${q.accessState}`);
+        const who = q.provider?.name || q.provider?.id;
+        if (who) bits.push(who);
+        return push({ kind: "note", text: `quota: ${bits.join(" · ")}` });
+      }
+      // The session's own credit ceiling moved — the number is the whole point.
+      case "session.session_limits_changed": {
+        const max = d.sessionLimits?.maxAiCredits;
+        return push({
+          kind: "note",
+          text: max == null ? "session credit limit: none" : `session credit limit: ${max}`,
+        });
+      }
       case "webrain.permission": {
         // An approval is a row in the transcript, not a modal over it: the
         // arguments it is asking about belong beside the tool calls they follow,
@@ -1052,6 +1357,10 @@
             d.exit === null || d.exit === undefined ? "ended" : `exit ${d.exit}`
           }`,
         });
+      case "webrain.note":
+        // A line the server has to say outside a turn: a declined elicitation, an
+        // MCP server asking to spend credits. Not an error — it is information.
+        return push({ kind: "note", text: d.text });
       case "webrain.error":
       case "model.call_failure":
       case "session.error":
@@ -1114,7 +1423,17 @@
         // A queued prompt starts the moment this turn ends, so the rail is stale
         // in the one frame it matters.
         loadQueue();
-        return loadSessions();
+        loadSessions();
+        // A tab that joined this turn mid-flight holds only its tail, and the
+        // copy it cached at boot predates this turn's answer. Now that the turn
+        // is over, read once more and put the rows it never saw in front of the
+        // ones it has; `seedLive` only claims the conversation once the pane is
+        // whole.
+        if (rowsFor !== current) {
+          cache.delete(current);
+          seedLive();
+        }
+        return;
       }
       // The runtime renamed the conversation itself, so the rail's row — built
       // from our own store — would keep the old title until the next reload.
@@ -1202,6 +1521,54 @@
           kind: "note",
           text: `context cut: ${d.tokensRemovedDuringTruncation} tokens and ${d.messagesRemovedDuringTruncation} messages removed to fit ${d.tokenLimit}`,
         });
+      // The compaction note above says it happened; this one says how it went.
+      // Only a failure is news — and it used to be invisible.
+      case "session.compaction_summarized":
+        if (d.success !== false) return;
+        return push({
+          kind: "err",
+          text: `compaction failed: ${d.failureReason || d.error || d.outcome || "unknown reason"}`,
+        });
+      // A message the runtime addresses to the reader rather than to the model.
+      case "system.message": {
+        const text = typeof d.content === "string" ? d.content.trim() : "";
+        if (!text) return;
+        return push({ kind: "note", text: text.slice(0, 300) });
+      }
+      // A server-side notice we can only name — the payload is opaque to us.
+      case "session.custom_notification":
+        return push({
+          kind: "note",
+          text: `notice · ${d.source || "runtime"}${d.name ? `/${d.name}` : ""}`,
+        });
+      // A tool asking a human something. Without a row the turn just looks stuck.
+      case "tool.user_requested":
+        return push({ kind: "note", text: `waiting on ${d.toolName} for your input` });
+      // An approval reused instead of asked: the policy grew, and only the card
+      // for the new request would have said so.
+      case "permission.carriedForward":
+        return push({
+          kind: "note",
+          text: `approval reused · ${d.decisionSource || "session policy"}`,
+        });
+      // Spend as it happens, not only in the shutdown bill. AIU, not dollars:
+      // the runtime reports credits and only the provider knows their price.
+      case "session.usage_checkpoint": {
+        const aiu = Number(d.totalNanoAiu) / 1e9;
+        if (!(aiu > 0)) return;
+        return push({ kind: "note", text: `spent so far · ${aiu.toFixed(4)} AIU` });
+      }
+      // The tool/skill/MCP set changed mid-session. The drawer re-reads when
+      // asked, so say what moved and how to see it.
+      case "session.tools_updated":
+        return push({
+          kind: "note",
+          text: `tool set changed${d.model ? ` for ${d.model}` : ""} · /mcp re-reads it`,
+        });
+      case "session.mcp_servers_loaded":
+        return push({ kind: "note", text: "tool servers reloaded · /mcp re-reads them" });
+      case "session.skills_loaded":
+        return push({ kind: "note", text: "skills reloaded · /skills re-reads them" });
       // The only evidence a skill was actually resolved from the directories the
       // session registers — without it the `@` menu is an unchecked promise.
       case "skill.invoked":
@@ -1278,6 +1645,37 @@
           text: `agent · ${name} ${failed ? "failed" : "done"}${bits.length ? ` — ${bits.join(", ")}` : ""}`,
         });
       }
+      // The parent picked which agent definition to run. Its `tools` list is the
+      // permission answer a reader actually asks about ("what can that worker
+      // touch"), so it becomes one line rather than a dump.
+      case "subagent.selected": {
+        const name = d.agentDisplayName || d.agentName || "agent";
+        const n = Array.isArray(d.tools) ? d.tools.length : 0;
+        return push({
+          kind: "note",
+          text: `delegate: ${name}${n ? ` — ${n} tools` : ""}`,
+        });
+      }
+      // Which model the child will actually run, which is the question behind
+      // "did that delegate use the cheap model". The payload carries no agent
+      // name, so it is attributed only while exactly one worker is running;
+      // with two, guessing would caption the wrong row.
+      case "subagent.configured": {
+        if (agents.length !== 1) return;
+        const [only] = agents;
+        agents = [
+          {
+            ...only,
+            model: d.model || only.model || "",
+            turns: d.multiTurn ? "multi-turn" : "one-shot",
+          },
+        ];
+        return;
+      }
+      // A selection was cleared. The payload is empty by contract, so there is
+      // nothing to name and nothing to read — recognised, not rendered.
+      case "subagent.deselected":
+        return;
       default:
         // A reasoning/thinking stream, if this build emits one. Matched by name
         // because the exact event id is not part of anything we can verify — and
@@ -1398,6 +1796,9 @@
       kind: "usage",
       text: [
         `${u.model} · ${u.input} in / ${u.output} out · ${u.requests} request(s)`,
+        // The cached share is the number that explains a cheap long turn, and it
+        // was in the payload and never printed.
+        u.cached ? `${u.cached} cached` : "",
         `${speed} tok/s`,
         cost,
         // Always counted, even at zero: "0 steps" is the fact that the turn was
@@ -1424,6 +1825,7 @@
       // just started cannot be cancelled by a list refresh that raced it.
       if (j.busy) {
         busy = true;
+        busyConvo = current;
         state = "running";
       }
       // The live ledger survives a reload the same way the transcript does;
@@ -1451,6 +1853,7 @@
   function backToLive() {
     past = null;
     viewing = "";
+    swapDraft(current);
     restoreSetup(current);
     route(current);
   }
@@ -1475,6 +1878,7 @@
     } catch {
       return push({ kind: "note", text: "new chat: the server is not reachable" });
     }
+    swapDraft(j.current || "");
     current = j.current || "";
     seededFor = current;
     rowsFor = current;
@@ -1545,6 +1949,11 @@
       const r = await fetch(url, { method: "POST" });
       if (!r.ok) return null;
       const j = await r.json();
+      // The claim moved the live conversation; this puts the runtime's own
+      // session back under it, so the next turn continues with context instead
+      // of a blank one. A failure is silent by design: the transcript is still
+      // there and the chat still works, it just starts from scratch.
+      fetch("/resume", { method: "POST" }).catch(() => {});
       if (!light) cache.set(id, j);
       return j;
     } catch {
@@ -1552,14 +1961,54 @@
     }
   }
 
-  // This tab is the live conversation, so show what it already said. A fresh tab
-  // used to open on an empty pane over a conversation that had a transcript —
-  // and, worse, could then be painted by a turn still running in it.
+  // The rows to put in front of the pane so it shows the whole thread. The count
+  // comes from the server's message log — appended once per message and never
+  // replaced — so it cannot drift: a tab that joined a turn mid-flight holds only
+  // the messages that landed after it attached, and `total - held` is the front
+  // it never saw.
+  function missingHead(disk, items, total) {
+    const msg = (r) => r.kind === "user" || r.kind === "assistant";
+    let want = total - items.filter(msg).length;
+    const out = [];
+    if (want <= 0) return out;
+    for (const r of disk) {
+      out.push(r);
+      if (msg(r) && --want === 0) break;
+    }
+    return out;
+  }
+
+  // This tab is the live conversation, so show what is already on disk. A fresh
+  // tab used to open on an empty pane over a conversation that had a transcript
+  // — and, worse, could then be painted by a turn still running in it.
+  //
+  // `busy` still holds it back, but the idle handler calls it again, and the
+  // merge is what makes that safe: a tab that reloaded mid-turn holds only the
+  // turn's tail, so the rows it never saw go in *front* of the ones it has
+  // instead of replacing them. `rowsFor` is only set once the pane is whole —
+  // the transcript save is a whole-array replace, so a partial pane that claimed
+  // this conversation would overwrite a complete transcript with its tail.
   async function seedLive() {
-    if (!current || items.length || busy) return;
+    if (!current || busy || viewing) return;
     const j = await loadConvo(current);
-    if (!j || items.length) return;
-    items = rowsOf(j);
+    if (!j || busy || viewing) return;
+    const disk = rowsOf(j);
+    if (!disk.length) return;
+    // First sight of this conversation: the stored copy is the whole thread.
+    if (!items.length) {
+      items = disk;
+    } else if (rowsFor === current) {
+      return; // this tab drew it; a pane cannot fall behind its own save
+    } else {
+      const head = missingHead(disk, items, (j.messages || []).length);
+      if (!head.length) return;
+      // Re-keyed above the live ids: the stored rows were written by another
+      // tab and count from 1 as well, so keeping them would hand the keyed list
+      // two rows with one key.
+      const base = seq;
+      items = [...head.map((r, i) => ({ ...r, id: base + i + 1 })), ...items];
+      seq = base + head.length;
+    }
     rowsFor = current;
     // The saved rows keep the ids they were written with while `push` counts
     // from zero, so without this the next row re-used id 1 and the keyed list
@@ -1602,6 +2051,7 @@
     // with it. Left behind, `current` names the thread you were in before, and
     // every frame the turn streams is dropped as "another conversation's" while
     // the transcript save lands on the wrong id.
+    swapDraft(id);
     current = id;
     seededFor = id;
     turns = pastTurns;
@@ -1716,6 +2166,7 @@
     back: stroke('<path d="M14.5 5.5L8 12l6.5 6.5"/>'),
     forward: stroke('<path d="M9.5 5.5L16 12l-6.5 6.5"/>'),
     down: stroke('<path d="M5.5 9.5L12 16l6.5-6.5"/>'),
+    up: stroke('<path d="M5.5 14.5L12 8l6.5 6.5"/>'),
     right: stroke('<path d="M9.5 5.5L16 12l-6.5 6.5"/>'),
     arrowDown: stroke('<path d="M12 4.8v14.4"/><path d="M6.4 13.6L12 19.2l5.6-5.6"/>'),
     gear: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m9.25 22-.4-3.2q-.32-.13-.61-.3t-.56-.37L4.7 19.38l-2.75-4.75 2.58-1.95q-.03-.18-.03-.34t0-.34 0-.34.03-.34L1.95 9.38 4.7 4.63l2.98 1.25q.27-.2.57-.38t.6-.3l.4-3.2h5.5l.4 3.2q.33.13.61.3t.56.38l2.98-1.25 2.75 4.75-2.57 1.95q.02.18.02.34t0 .34 0 .34-.05.34l2.57 1.95-2.75 4.75-2.95-1.25q-.27.2-.57.38t-.6.3l-.4 3.28h-5.5ZM11 20h1.98l.35-2.65q.78-.2 1.44-.59t1.21-.94l2.47 1.03.98-1.7-2.15-1.63q.13-.35.17-.74t.05-.78-.05-.79q-.05-.39-.17-.74l2.15-1.63-.98-1.7-2.47 1.06q-.55-.57-1.21-.96t-1.44-.59L13 4h-1.97l-.35 2.65q-.78.2-1.44.59t-1.21.93L5.55 7.15l-.97 1.7 2.15 1.6q-.13.38-.18.75t-.05.8q0 .4.05.77t.17.75l-2.14 1.63.98 1.7 2.47-1.05q.55.58 1.21.96t1.44.59zm1.05-4.5q1.45 0 2.47-1.03T15.55 12t-1.02-2.48-2.48-1.02q-1.47 0-2.49 1.02T8.55 12t1.01 2.47 2.49 1.03"/></svg>',
@@ -1967,88 +2418,50 @@
 
   const toolRows = $derived(catalog.items.filter((r) => r.kind === "tool"));
 
-  // Tools by the server that owns them, so the checklist folds. `webrain-navigate`
-  // is server `webrain`, tool `navigate`; a second server gets its own section
-  // without this code changing.
-  const toolGroups = $derived.by(() => {
-    const q = toolsQuery.trim().toLowerCase();
-    const groups = new Map();
-    for (const { name: full } of toolRows) {
-      // Tool names come off the MCP server as `webrain_navigate`; the checklist
-      // reads better without the server's own prefix inside its own section.
-      const bare = full.replace(/^webrain[-_]/, "");
-      const cut = bare.indexOf("-");
-      const server = cut > 0 ? bare.slice(0, cut) : "webrain";
-      const name = cut > 0 ? bare.slice(cut + 1) : bare;
-      if (q && !full.toLowerCase().includes(q) && !server.toLowerCase().includes(q)) continue;
-      if (!groups.has(server)) groups.set(server, []);
-      groups.get(server).push({ full, name });
-    }
-    return [...groups].map(([server, tools]) => ({ server, tools }));
-  });
-
-  const draftCount = $derived(toolsDraft.length);
-
   // Every builtin this build installs, unfiltered — the footer count has to add
   // them to the MCP ones or "18 of 18" contradicts the 9 boxes below it.
   const builtinAll = $derived(
     catalog.items.filter((r) => r.kind === "builtin").map((r) => r.name),
   );
-  // Same search box filters both lists.
-  const builtinShown = $derived.by(() => {
-    const q = toolsQuery.trim().toLowerCase();
-    return builtinAll.filter((n) => !q || n.toLowerCase().includes(q));
-  });
   const builtinOnCount = $derived(builtinAll.filter(builtinOn).length);
 
-  // The search field opens from a click, so it should already have the caret.
-  // `autofocus` on the element would also fire on first paint, which is the
-  // wrong moment and an a11y complaint; an action runs where it is used.
-  const focusNow = (node) => node.focus();
-
-  function openTools() {
-    toolsDraft = [...toolsSel];
-    toolsQuery = "";
-    searchOpen = false;
-    toolsOpen = true;
-  }
-
-  function toggleDraft(full) {
-    toolsDraft = toolsDraft.includes(full)
-      ? toolsDraft.filter((t) => t !== full)
-      : [...toolsDraft, full];
-  }
-
-  // A server row ticks all of its children, or clears them — the same two
-  // gestures VS Code's tool picker has, because that is the one people know.
-  function allOf(server, on) {
-    const names = toolGroups.find((g) => g.server === server)?.tools.map((t) => t.full) || [];
-    toolsDraft = on
-      ? [...new Set([...toolsDraft, ...names])]
-      : toolsDraft.filter((t) => !names.includes(t));
-  }
-
-  // The builtin list is the inverse of `builtinOff`, and it is a fold like any
-  // server: `toolsClosed` holds server names, so "builtin" is the one key that
-  // is not a server.
-  function allBuiltin(on) {
-    builtinOff = on
-      ? builtinOff.filter((n) => !builtinShown.includes(n))
-      : [...new Set([...builtinOff, ...builtinShown])];
-  }
-
-  function toggleClosed(server) {
-    toolsClosed = toolsClosed.includes(server)
-      ? toolsClosed.filter((s) => s !== server)
-      : [...toolsClosed, server];
-  }
+  // The checklist itself lives in `ToolsDialog`: its query, its folds and its
+  // draft are nobody else's business. What stays here is the open flag and the
+  // two persisted sets the dialog reports back.
+  const openTools = () => (toolsOpen = true);
 
   const lastUser = $derived([...shown].reverse().find((i) => i.kind === "user")?.text || "");
 
   function retry() {
-    if (!lastUser || busy) return;
+    if (!lastUser || busy || past) return;
     draft = lastUser;
     send();
+  }
+
+  // Editing the last turn is a rewind plus a prefilled field. The runtime keeps
+  // one rewind point per user turn, so going back to the newest one drops exactly
+  // that turn, and its own text is what comes back to the composer. ChatGPT (and
+  // the VS Code chat) do the same thing; appending the correction instead would
+  // leave two versions of a question the model can only see one of.
+  async function editLast() {
+    if (busy || past) return;
+    let j;
+    try {
+      j = await (await fetch("/rewind")).json();
+    } catch {
+      return push({ kind: "note", text: "edit: the server is not reachable" });
+    }
+    if (j.error) return push({ kind: "note", text: `edit: ${j.error}` });
+    if (j.unavailable) return push({ kind: "note", text: `edit: ${j.unavailable}` });
+    const p = (j.points || []).at(-1);
+    const was = p?.text || lastUser;
+    if (!was) return push({ kind: "note", text: "edit: no turn recorded yet" });
+    // Dropping a turn and its answer is not undoable, so it is asked first.
+    if (!confirm(`Go back to your last message and drop the answer after it?\n\n${was.slice(0, 200)}`))
+      return;
+    await doRewind(p.event, was, false);
+    draft = was;
+    document.querySelector("textarea")?.focus();
   }
 
   // `delivery` is the runtime's own three-way choice, which is why the page
@@ -2067,7 +2480,9 @@
     const files = attached.map((a) => ({
       name: a.name,
       bytes: a.bytes,
-      src: `/attach/${encodeURIComponent(current)}/${encodeURIComponent(baseOf(a.path))}`,
+      // The conversation the upload belongs to, not the one on screen now: the
+      // server stores a file under the convo that was live when it arrived.
+      src: `/attach/${encodeURIComponent(a.convo || current)}/${encodeURIComponent(baseOf(a.path))}`,
     }));
     for (const a of attached) if (a.url) URL.revokeObjectURL(a.url);
     attached = [];
@@ -2076,9 +2491,11 @@
       past = null; // a new turn belongs to the live conversation
       viewing = "";
       busy = true;
+      busyConvo = current;
       state = "running";
-      // A new turn starts with a fresh reasoning block, open again: last turn's
-      // collapse does not carry over to a turn the user has not seen yet.
+      // A new turn starts with no spend, and with a fresh reasoning block, open
+      // again: last turn's collapse does not carry over to a turn not yet seen.
+      turnUse = null;
       think = "";
       thinkMs = null;
       thinkAt = 0;
@@ -2145,9 +2562,12 @@
   }
 
   // Stop is the runtime's abort; the page clears `busy` when the turn's own
-  // wait returns, so a slow abort cannot leave the button dead.
+  // wait returns, so a slow abort cannot leave the button dead. The owner check
+  // is the same one the composer draws its button with: `/stop` aborts whatever
+  // the one live session is running, which is not this conversation's turn when
+  // you are reading another thread.
   async function stopTurn() {
-    if (!busy) return;
+    if (!busy || runningConvo !== current) return;
     try {
       await fetch("/stop", { method: "POST" });
     } catch (e) {
@@ -2155,13 +2575,27 @@
     }
   }
 
+  // Stop, then send: two buttons already existed, but between them sat a turn
+  // that had to die first, and `send()` refuses while `busy` — so the draft just
+  // stayed in the field. `/stop` clears the busy flag now that the abort returns,
+  // which is what makes this one action instead of two.
+  async function stopAndSend() {
+    if (!busy || runningConvo !== current) return;
+    await stopTurn();
+    busy = false;
+    state = "ready";
+    await send();
+  }
+
   /// Answer a pending permission request by id, whether or not its card is the
   /// one on screen — the auto-allow path answers requests that never showed one.
-  async function answerPermission(id, allow) {
+  /// `always` sends the standing grant to the server, which is the side that
+  /// knows whether it could be written.
+  async function answerPermission(id, allow, always = false) {
     await fetch("/permission", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, allow }),
+      body: JSON.stringify({ id, allow, always }),
     });
   }
 
@@ -2172,7 +2606,7 @@
     items = items.map((it) =>
       it.id === item.id ? { ...it, ans: allow ? (always ? "always" : "once") : "deny" } : it,
     );
-    await answerPermission(item.pid, allow);
+    await answerPermission(item.pid, allow, always);
   }
 
   // What an `html` reply may build with, and the shape it should reach for
@@ -2275,6 +2709,23 @@
     }
   }
 
+  // A path in an answer only became a picture because it *looked* like one, and
+  // the file may not be there. The `<code>` the parser would have produced is put
+  // back in the frame's place, so a miss costs the picture and nothing else.
+  // `error` does not bubble, so this is the capture phase; the mark is on the tag,
+  // set by the renderer, so no other image on the page can be caught by it.
+  addEventListener(
+    "error",
+    (e) => {
+      const img = e.target;
+      if (!(img instanceof HTMLImageElement) || !img.hasAttribute("data-local")) return;
+      const code = document.createElement("code");
+      code.textContent = img.getAttribute("alt") || "";
+      (img.closest("figure.fig") ?? img).replaceWith(code);
+    },
+    true,
+  );
+
   // Model output is untrusted: it can carry HTML, and this page can approve
   // shell commands. The sanitiser lives in the markdown chunk, so until that
   // lands this returns escaped text — never model HTML.
@@ -2303,6 +2754,16 @@
     if (!m || (m[2] === "/" && m[1] !== "")) return (palette = null);
     if (palette && palette.trigger === m[2] && palette.query === m[3]) return;
     palette = { trigger: m[2], query: m[3], index: 0 };
+  }
+
+  // Tab writes the name into the draft and stops there. Enter is the key that
+  // runs something: a completion key that executes a command is one you cannot
+  // finish typing, which is why `/clear` never needed a second keystroke.
+  function fillIn(o) {
+    const q = palette.query;
+    palette = null;
+    draft = `${draft.slice(0, draft.length - (q.length + 1))}${SIGIL[o.kind]}${o.name} `;
+    document.querySelector("textarea")?.focus();
   }
 
   async function pick(o) {
@@ -2504,6 +2965,41 @@
         } catch {
           push({ kind: "note", text: "quota: the server is not reachable" });
         }
+      } else if (o.runtime) {
+        // One of the runtime's own commands. What comes back is either what to
+        // show, a prompt it wants run as a turn, or nothing it can hand a page.
+        try {
+          const r = await fetch("/command", {
+            method: "POST",
+            body: JSON.stringify({ name: o.name, input: query.trim() }),
+          });
+          const j = await r.json();
+          if (j.error) push({ kind: "err", text: `/${o.name}: ${j.error}` });
+          else if (j.set_model) {
+            // It chose a model. `pickModel` is the route that knows whether that
+            // keeps this transcript's context or replaces the session.
+            await pickModel(activeProvider.id, j.set_model);
+          } else if (j.open === "model-picker") {
+            // A dialog the page already has: the picker, not a second one.
+            modelOpen = true;
+          } else if (j.prompt) {
+            // Its own words for the prompt, in the composer: starting a turn the
+            // reader never saw would be the wrong kind of helpful.
+            draft = j.prompt;
+            push({ kind: "note", text: `/${o.name} — ${j.notice || "press enter to run it"}` });
+          } else if (j.pick) {
+            // A parent command: the reader names the subcommand, not a guess.
+            draft = `/${o.name} `;
+            push({ kind: "note", text: j.text || `/${o.name}: pick a subcommand` });
+          } else {
+            // `/env` and friends answer in markdown; `/cwd` does not. The note row
+            // only parses when the runtime said the text was markdown.
+            push({ kind: "note", md: j.markdown, text: `/${o.name}: ${j.text || "ran"}` });
+            if (j.prefill) draft = j.prefill;
+          }
+        } catch {
+          push({ kind: "err", text: `/${o.name}: the server is not reachable` });
+        }
       } else {
         const named = catalog.items.filter((r) => r.kind !== "cmd").map((r) => r.name);
         push({ kind: "note", text: named.join(" · ") });
@@ -2525,41 +3021,108 @@
       const mine = ++searchSeq;
       if (!term) {
         hits = [];
+        sel = 0;
         return;
       }
       try {
         const r = await fetch(`/search?q=${encodeURIComponent(term)}`);
         if (!r.ok || mine !== searchSeq) return;
         const j = await r.json();
-        if (mine === searchSeq) hits = j.hits || [];
+        if (mine === searchSeq) {
+          hits = j.hits || [];
+          sel = 0;
+        }
       } catch {
         /* history search is a convenience: a failed read just shows nothing */
       }
     }, 60);
   }
 
-  // Search is a field at the top of the rail, not a modal on top of the page:
-  // Ctrl-K opens the rail and puts the cursor in it, so there is exactly one
-  // place a query can go.
+  // Ctrl-K and the rail's field both land here: the modal owns the query, so the
+  // results are always on screen whatever the thread list is doing.
   function openSearch() {
-    panelOpen = true;
-    requestAnimationFrame(() => document.getElementById("railq")?.focus());
+    findOpen = true;
+    focusFind();
+  }
+
+  // Focus, three ways. The frame callback is the fast path; the timer is the one
+  // that always runs — a background tab never paints, so `requestAnimationFrame`
+  // never fires there, and a streaming turn can hand focus back to the composer
+  // after the field was focused. The late try only reclaims focus that fell to
+  // the page or the composer; a click on a result is a decision, not a slip.
+  function focusFind() {
+    const grab = () => document.getElementById("findq")?.focus();
+    grab();
+    requestAnimationFrame(grab);
+    setTimeout(() => {
+      const el = document.getElementById("findq");
+      if (!el) return;
+      const at = document.activeElement;
+      // Already inside the dialog (this field, or a row the reader tabbed to):
+      // leave it alone. Anything else — the composer, the rail's own field, the
+      // page — lost the focus this keystroke meant to place.
+      if (at === el || (at instanceof HTMLElement && at.closest("#modal"))) return;
+      el.focus();
+    }, 120);
+  }
+
+  // ↑/↓ walk the results and wrap, so a long list never traps the keyboard on the
+  // field. The selected row is scrolled into view as it moves.
+  function moveSel(step) {
+    if (!hits.length) return;
+    sel = (sel + step + hits.length) % hits.length;
+    requestAnimationFrame(() =>
+      document.querySelector(".mlist .rhit.sel")?.scrollIntoView({ block: "nearest" }),
+    );
+  }
+
+  // The words a query is made of. One-letter words are dropped from the
+  // highlight (not from the search): bolding every "a" is noise, and the server
+  // already ranked the rows.
+  function needles(term) {
+    return [...new Set((term || "").toLowerCase().split(/\s+/).filter((w) => w.length > 1))].sort(
+      (a, b) => b.length - a.length,
+    );
+  }
+
+  // The matched words, with each match wrapped in <b class="hl">. Escaped BEFORE
+  // matching — and every needle is escaped too — so a query containing & or <
+  // cannot split an entity or inject anything into {@html}.
+  function hi(text, term) {
+    const t = esc(text ?? "");
+    const words = needles(term);
+    if (!words.length) return t;
+    const rx = new RegExp(
+      words.map((w) => esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+      "gi",
+    );
+    return t.replace(rx, (m) => `<b class="hl">${m}</b>`);
   }
 
   // Picking a match opens that conversation and clears the field, so the rail
   // returns to being a list.
   function pickHit(h) {
+    if (!h) return;
     q = "";
     hits = [];
+    sel = 0;
+    findOpen = false;
     openConvo(h.convo);
   }
 
-  // The matched words, not the first 80 characters of the message.
+  // The matched words, not the first 80 characters of the message — and the
+  // earliest of them, so a row is snipped where the reader is looking.
   function snippet(body, term) {
-    const at = body.toLowerCase().indexOf(term.trim().toLowerCase());
+    const low = body.toLowerCase();
+    const words = needles(term);
+    const at = words.reduce((best, w) => {
+      const i = low.indexOf(w);
+      return i >= 0 && (best < 0 || i < best) ? i : best;
+    }, -1);
     if (at < 0) return body.slice(0, 120);
+    const len = words.find((w) => low.startsWith(w, at))?.length || 1;
     const from = Math.max(0, at - 50);
-    const to = Math.min(body.length, at + term.trim().length + 90);
+    const to = Math.min(body.length, at + len + 90);
     return `${from > 0 ? "…" : ""}${body.slice(from, to)}${to < body.length ? "…" : ""}`;
   }
 
@@ -2601,7 +3164,11 @@
         // message is sent it points at the server's own copy instead, so nothing
         // has to stay alive in this tab for the picture to survive a reload.
         const url = kindOf(j.name) === "k-img" ? URL.createObjectURL(f) : "";
-        attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url }];
+        // The convo it was uploaded under, not whichever thread is on screen when
+        // it is finally sent: `/attach/<convo>/<name>` is the server's own path,
+        // so building it from `current` at send time pointed at a directory the
+        // file was never in — a broken image and a wrong-conversation prompt.
+        attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url, convo: current }];
       } catch (e) {
         push({ kind: "err", text: `${f.name}: ${e.message}` });
       }
@@ -2625,7 +3192,7 @@
     const n = ++attachSeq;
     try {
       const j = await upload(new Blob([text], { type: "text/markdown" }), `pasted-${n}.md`);
-      attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url: "" }];
+      attached = [...attached, { name: j.name, path: j.path, bytes: j.bytes, url: "", convo: current }];
     } catch (err) {
       push({ kind: "err", text: `paste: ${err.message}` });
     }
@@ -2845,6 +3412,31 @@
     if (n == null || !Number.isFinite(n)) return "n/a";
     if (n === 0) return "$0";
     return n < 0.01 ? `$${n.toFixed(5)}` : `$${n.toFixed(3)}`;
+  }
+
+  // One model call added to a turn's running total. `assistant.usage` arrives
+  // once per call, and a turn that uses tools makes several — so a "this turn"
+  // figure has to be a sum, and the sum only grows. `model` is taken from the
+  // latest call: a turn that switched models is described by where it ended.
+  function addUse(acc, u) {
+    if (!acc) {
+      return {
+        model: u.model || "",
+        inputTokens: u.inputTokens || 0,
+        outputTokens: u.outputTokens || 0,
+        cacheReadTokens: u.cacheReadTokens || 0,
+        duration: u.duration || 0,
+        calls: 1,
+      };
+    }
+    return {
+      model: u.model || acc.model,
+      inputTokens: acc.inputTokens + (u.inputTokens || 0),
+      outputTokens: acc.outputTokens + (u.outputTokens || 0),
+      cacheReadTokens: acc.cacheReadTokens + (u.cacheReadTokens || 0),
+      duration: acc.duration + (u.duration || 0),
+      calls: acc.calls + 1,
+    };
   }
 
   // Providers publish per-token prices; a per-million figure is the one a person
@@ -3112,12 +3704,14 @@
       localStorage.setItem("webrain-chat-tools-builtin-off", JSON.stringify(builtinOff));
       localStorage.setItem("webrain-chat-rail-w", JSON.stringify(railW));
       localStorage.setItem("webrain-chat-inst-w", JSON.stringify(instW));
+      localStorage.setItem("webrain-chat-compose-h", JSON.stringify(composeH));
       localStorage.setItem("webrain-chat-instructions", instructions);
       localStorage.setItem("webrain-chat-language", language);
       localStorage.setItem("webrain-chat-suggest", JSON.stringify(suggest));
       localStorage.setItem("webrain-chat-rawhtml", JSON.stringify(rawHtml));
       localStorage.setItem("webrain-chat-allow", JSON.stringify(autoTools));
       localStorage.setItem("webrain-chat-settab", setTab);
+      localStorage.setItem("webrain-chat-keys", JSON.stringify(keys));
       // The half-written message is the one thing a reload would otherwise eat,
       // and it costs a few hundred bytes: losing a pasted prompt is worse than
       // the store. Attachments are not part of it — the file is on disk already,
@@ -3159,11 +3753,17 @@
 
   // Read once on load; a failure leaves the defaults above, which are what the
   // server uses when it cannot read the file.
+  // `chat --serve` defaults the fingerprint-noise shim off — it is what stops an
+  // SPA mounting — and the server reports the effective switch, so the page can
+  // say so instead of letting a site's odd behaviour look like ours.
+  let stealthOff = $state(false);
+
   async function loadSettings() {
     try {
       const r = await fetch("/settings");
       if (!r.ok) return;
       const j = await r.json();
+      stealthOff = j.stealth?.noise === false;
       // The page appended the standing hints to what is stored; the field shows
       // the operator's own words only, so they come back out here.
       if (j.settings) rt = { ...rt, ...j.settings, instructions: stripHints(j.settings.instructions) };
@@ -3326,6 +3926,215 @@
     }
   }
 
+  // Settings > Skills / MCP read the same two routes the `/skills` and `/mcp`
+  // cards read, into rows `flip` already knows how to act on — one toggle
+  // implementation whether the switch is in the transcript or in the panel.
+  let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [], agentCurrent: null });
+  // The settings lists are the model picker's list, so they get its filter too —
+  // the cross-tool skill tree alone can be hundreds of rows.
+  let skillFilter = $state("");
+  async function loadManage() {
+    try {
+      const [s, m, items, ag] = await Promise.all([
+        fetch("/skills").then((r) => r.json()),
+        fetch("/mcp").then((r) => r.json()),
+        fetch("/mcp/items")
+          .then((r) => r.json())
+          .catch(() => ({})),
+        fetch("/agents")
+          .then((r) => r.json())
+          .catch(() => ({})),
+      ]);
+      manage = {
+        skills: (s.skills || [])
+          .filter((x) => typeof x !== "string")
+          // `live: false` is the cross-tool tree (`~/.agents/skills`): on disk, in
+          // the list, and not loadable by this session — so it gets no switch.
+          .map((x) => ({ name: x.name, on: x.enabled, note: x.source, live: x.live !== false })),
+        mcp: (m.servers || []).map((x) => ({
+          name: typeof x === "string" ? x : x.name,
+          on: typeof x !== "string" && x.status === "connected",
+          note: typeof x === "string" ? "" : x.status,
+        })),
+        // A server's own prompts and resources, which only ever reached the model.
+        // The server and the uri travel with the row: without them the list could
+        // name a prompt and nothing could ask for it.
+        prompts: (items.prompts || []).map((p) => ({
+          name: p.name,
+          note: p.description || "",
+          server: p.server || "",
+          args: (p.arguments || []).map((a) => a.name).filter(Boolean).join(", "),
+        })),
+        resources: (items.resources || []).map((r) => ({
+          name: r.name || r.uri,
+          note: r.uri || "",
+          server: r.server || "",
+          uri: r.uri || "",
+        })),
+        // Agent definitions, which `read_agent`/`list_agents` give the model and
+        // nothing gave a person — `/env` only ever said "no custom agents loaded".
+        agents: ag.agents || [],
+        // Which one the session runs now. `session.agent.select` moves this on a
+        // live session, so the list is a picker and not just an inventory.
+        agentCurrent: ag.current && ag.current.id ? ag.current : null,
+      };
+      if (ag.current && ag.current.error) toast(`agents: ${ag.current.error}`, "err");
+    } catch {
+      /* a panel with no rows beats one that lies about what is installed */
+    }
+  }
+
+  // A prompt is text and a resource is a document, so both land where a person
+  // can act on them — the composer. One handler, because the two differ only in
+  // which route answers; an error (a prompt that needs arguments names them) is
+  // shown rather than swallowed.
+  async function useMcpItem(route, row) {
+    const body = route === "/mcp/prompt" ? { server: row.server, name: row.name } : { server: row.server, uri: row.uri };
+    try {
+      const r = await fetch(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`${route}: ${j.error}`, "err");
+      if (!j.text) return toast(`${route}: nothing to insert`, "err");
+      draft = draft.trim() ? `${j.text}\n\n${draft}` : j.text;
+      toast(`${row.name} → composer`);
+    } catch {
+      toast(`${route}: the server is not reachable`, "err");
+    }
+  }
+
+  // Choose the agent the next turns run as, or go back to the built-in one.
+  async function useAgent(name) {
+    try {
+      const r = await fetch("/agents/select", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/agents/select: ${j.error}`, "err");
+      await loadManage();
+      toast(name ? `agent: ${name}` : "agent: default");
+    } catch {
+      toast("/agents/select: the server is not reachable", "err");
+    }
+  }
+
+  // Removing a server from the runtime's user config. `attached` says whether the
+  // live session still holds it, which is the difference between "gone" and
+  // "gone at the next start" — and the note never claims the stronger one.
+  async function removeMcp(name) {
+    try {
+      const r = await fetch("/mcp/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/mcp/remove: ${j.error}`, "err");
+      await loadManage();
+      toast(
+        j.attached
+          ? `${name} removed from the user config — this session still has it until it restarts`
+          : `${name} removed`,
+      );
+    } catch {
+      toast("/mcp/remove: the server is not reachable", "err");
+    }
+  }
+
+  // A definition this page can write. The runtime gives the model `write_agent`
+  // and gave a person nothing, so the tab could only ever say "none". Same for a
+  // skill: the directory was readable and never writable from the page.
+  let agentNew = $state({ name: "", description: "", instructions: "" });
+  let skillNew = $state({ name: "", description: "", instructions: "" });
+  let mcpNew = $state({
+    name: "",
+    config: '{\n  "command": "npx",\n  "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]\n}',
+  });
+  async function createAgent() {
+    await createIn("/agents/new", agentNew, (t) => (agentNew = t));
+  }
+  async function createSkill() {
+    await createIn("/skills/new", skillNew, (t) => (skillNew = t));
+  }
+  // Different promise from the other two: saving the config and having the tools
+  // in *this* session are two things, so the note repeats whichever came back.
+  // The server starts it in the live session (`startServer`), which is why the
+  // first sentence is usually true — and it is still read from `attached`.
+  async function createMcp() {
+    try {
+      const r = await fetch("/mcp/new", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(mcpNew),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`/mcp/new: ${j.error}`, "err");
+      mcpNew = { ...mcpNew, name: "" };
+      await loadManage();
+      if (j.attached) {
+        toast(`${j.added} saved and running — its tools are available now`);
+      } else {
+        toast(
+          `${j.added} saved${j.attach_error ? `, but it did not start: ${j.attach_error}` : ""} — it arrives on the next start`,
+          "err",
+        );
+      }
+    } catch {
+      toast("/mcp/new: the server is not reachable", "err");
+    }
+  }
+  async function createIn(route, form, clear) {
+    try {
+      const r = await fetch(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      const j = await r.json();
+      if (j.error) return toast(`${route}: ${j.error}`, "err");
+      clear({ name: "", description: "", instructions: "" });
+      await loadManage();
+      // A skill is on disk and in the menus immediately; the runtime loads it when
+      // it lists the directory again, which is a session start.
+      toast(`${j.name} written — /catalog has it now, the runtime loads it at session start`);
+    } catch {
+      toast(`${route}: the server is not reachable`, "err");
+    }
+  }
+
+  // A line from a conversation that is not on screen. The transcript cannot show
+  // it — the rows belong to another thread — so it lands here and goes away.
+  let toasts = $state([]);
+  let toastSeq = 0;
+  function toast(text, kind = "note") {
+    const id = ++toastSeq;
+    toasts = [...toasts.slice(-3), { id, text, kind }];
+    setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 6000);
+  }
+
+  /// Which frames from another conversation are worth a snackbar. Deltas, tool
+  /// rows and thinking chunks are not: they would turn the corner into a ticker.
+  function notify(f) {
+    const d = f.data || {};
+    const bad = /error|fail/.test(f.type);
+    const text =
+      f.type === "webrain.job"
+        ? `job #${d.id} ${d.command} — ${d.exit == null ? "ended" : `exit ${d.exit}`}`
+        : f.type === "permission.requested" || f.type === "webrain.permission"
+          ? `${d.tool || d.name || "a tool"} is waiting for approval in that chat`
+          : bad
+            ? `error in that chat: ${d.message || f.type}`
+            : f.type === "assistant.idle" || f.type === "session.idle"
+              ? "that chat finished its turn"
+              : "";
+    if (text) toast(text, bad ? "err" : "note");
+  }
+
   // The runtime signals that its todo table was written and leaves the rows to a
   // separate read. Announcing only a *changed* list is what keeps a chatty agent
   // from printing the same three lines after every step; the `/todos` command
@@ -3372,6 +4181,9 @@
     });
     loadCatalog();
     loadProviders();
+    // Saved approvals are the server's, so they are read on boot: a grant made in
+    // another tab (or a previous run) must silence the prompt here too.
+    loadApprovals();
     const es = new EventSource("/events");
     es.onmessage = (e) => {
       try {
@@ -3382,8 +4194,12 @@
         // forever with nothing running.
         const ends =
           f.type === "assistant.idle" || f.type === "session.idle" || f.type === "session.shutdown";
-        if (f.convo && current && f.convo !== current && !ends) {
-          runningIn = f.convo;
+        if (f.convo && current && f.convo !== current) {
+          // Not this thread's rows, so they cannot join its transcript — but a
+          // permission waiting in it or a job that ended there is exactly what a
+          // snackbar is for. Dropping them read as "nothing happened".
+          runningIn = ends ? "" : f.convo;
+          notify(f);
           return;
         }
         if (ends) runningIn = "";
@@ -3406,7 +4222,28 @@
         e.preventDefault();
         return openSearch();
       }
+      // The modal owns the keyboard while it is open. Handling arrows and Enter
+      // here, not only on the field, is what keeps it usable mid-turn: a
+      // streaming render can hand focus back to the composer, and the keys must
+      // still walk the list.
+      if (findOpen) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          return moveSel(e.key === "ArrowDown" ? 1 : -1);
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          return pickHit(hits[sel] ?? hits[0]);
+        }
+      }
       if (e.key === "Escape") {
+        if (findOpen) {
+          findOpen = false;
+          q = "";
+          hits = [];
+          sel = 0;
+          return;
+        }
         if (modelOpen) return (modelOpen = false);
         if (effortOpen) return (effortOpen = false);
         if (settingsOpen) return (settingsOpen = false);
@@ -3738,19 +4575,53 @@
   // arriving again is allowed without asking. It is keyed on the server and the
   // TOOL, not on the `kind` the runtime names — a kind like `tool` would grant
   // every tool there is, which is not what the button said.
+  //
+  // The list lives on the SERVER (`/approvals`), not in this browser: the grant
+  // is about this session's tools, so a second tab must not be asked again and a
+  // reload must not forget. This copy is only what the panel draws.
   let autoTools = $state(readJson("allow", []));
 
-  function allowTool(key) {
-    if (key && !autoTools.includes(key)) autoTools = [...autoTools, key];
+  async function loadApprovals() {
+    try {
+      const j = await (await fetch("/approvals")).json();
+      if (Array.isArray(j.approved)) {
+        autoTools = j.approved;
+      }
+    } catch {
+      /* the panel keeps the last list it had rather than emptying itself */
+    }
   }
 
-  // The same list, as a policy the reader can see and undo. Kept in this browser
-  // rather than on the server: it answers "may this page approve without
-  // asking", which is a fact about the person at this screen, not the session.
+  function allowTool(key) {
+    if (key && !autoTools.includes(key)) {
+      autoTools = [...autoTools, key];
+      void saveApproval(key, true);
+    }
+  }
+
+  // The same list, as a policy the reader can see and undo.
   function toggleAllow(key) {
-    autoTools = autoTools.includes(key)
-      ? autoTools.filter((k) => k !== key)
-      : [...autoTools, key];
+    const on = !autoTools.includes(key);
+    autoTools = on ? [...autoTools, key] : autoTools.filter((k) => k !== key);
+    void saveApproval(key, on);
+  }
+
+  async function saveApproval(key, on) {
+    try {
+      const r = await fetch("/approvals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key, on }),
+      });
+      const j = await r.json();
+      if (j.error || j.saved === false) {
+        toast(`/approvals: ${j.error || "could not save the approval"}`, "err");
+      } else if (Array.isArray(j.approved)) {
+        autoTools = j.approved;
+      }
+    } catch {
+      toast("/approvals: the server is not reachable", "err");
+    }
   }
 
   const toolKey = (a) => `${a.server || "mcp"}:${a.tool || a.kind || "tool"}`;
@@ -3787,7 +4658,11 @@
 <header class="topbar">
   <button
     class="icon"
-    onclick={() => (panelOpen = !panelOpen)}
+    onclick={() => {
+      panelOpen = !panelOpen;
+      // Two overlays, one screen: opening this one puts the other away.
+      if (panelOpen) instOpen = false;
+    }}
     aria-expanded={panelOpen}
     aria-label="toggle sessions"
     title="sessions"
@@ -3797,6 +4672,21 @@
   <span class="wordmark">webrain<i>chat</i></span>
   <span class="state {state}" role="status">{state === "running" ? "running" : state}</span>
   <span class="grow"></span>
+  <!-- Below 1100px the instruments rail is gone from the layout; this is its
+       door there, and hidden above the breakpoint where the rail is the door. -->
+  <button
+    class="icon instbtn"
+    onclick={() => {
+      instOpen = !instOpen;
+      // The mirror of the sessions door: one drawer at a time.
+      if (instOpen) panelOpen = false;
+    }}
+    aria-expanded={instOpen}
+    aria-label="toggle session instruments"
+    title="session instruments"
+  >
+    <span class="gi" aria-hidden="true">{@html ICON.pulse}</span>
+  </button>
   {#if measured}
     <span class="meter-inline" title="tokens in / out">
       <b>{stats.tok}</b><u>tok</u>
@@ -3827,7 +4717,9 @@
           {#each agents as a (a.name)}
             <div>
               <b>{a.name}</b>
-              {#if a.type || a.mode}<small>{[a.type, a.mode].filter(Boolean).join(" · ")}</small>{/if}
+              {#if a.type || a.mode || a.model || a.turns}
+                <small>{[a.type, a.mode, a.model, a.turns].filter(Boolean).join(" · ")}</small>
+              {/if}
               {#if a.what}<div>{a.what}</div>{/if}
             </div>
           {/each}
@@ -3891,7 +4783,7 @@
   {/if}
 </header>
 
-<div class="deck" class:open={panelOpen}>
+<div class="deck" class:open={panelOpen} class:instopen={instOpen}>
   <!-- `click` is delegated from a document listener (see the effect): the
        markdown renderer's code-copy buttons are real buttons. -->
   <main
@@ -3912,6 +4804,20 @@
           </span>
           <button onclick={() => reconnectMcp(s.name)}>reconnect</button>
         {/each}
+      </div>
+    {/if}
+
+    {#if stealthOff}
+      <!-- The other banner that has to be visible before the first turn: the
+           browser presents its own fingerprint, so a site that blocks here but
+           works in a hand-opened tab is this switch, not a webrain bug. The way
+           back is one variable and a restart, so it is said in the same line. -->
+      <div class="banner">
+        <span>
+          stealth fingerprint noise <b>off</b> — pages mount reliably here, but a site
+          that fingerprints the browser sees its real values. Set
+          <code>WEBRAIN_STEALTH_NOISE=1</code> and restart this server to restore the shim.
+        </span>
       </div>
     {/if}
 
@@ -4217,7 +5123,8 @@
           {/each}
         </div>
       {:else if item.kind === "note"}
-        <div class="note">{item.text}</div>
+        <!-- Escaped before it is parsed: command output is not trusted HTML. -->
+        <div class="note">{#if item.md}{@html md(esc(item.text))}{:else}{item.text}{/if}</div>
       {:else if item.kind === "think"}
         <!-- The reasoning that produced the row below it. Folded, because it is
              evidence rather than the answer, and above its tool call because
@@ -4267,6 +5174,24 @@
               {copiedId === item.id ? "copied" : "copy"}
             </button>
             <div class="body md" class:html5={rawHtml}>{@html md(item.text)}</div>
+            {#if item.cites?.length}
+              <!-- Only when the provider attributed the answer: `citations` is
+                   opt-in in settings, so a page that always showed this strip
+                   would promise sources a turn does not have. A file source has
+                   no url, and it prints its path — a link that goes nowhere is
+                   worse than a name. -->
+              <div class="cites">
+                <span class="eyebrow">sources</span>
+                {#each item.cites as s (s.id)}
+                  {#if s.url}
+                    <a class="cite" href={s.url} target="_blank" rel="noreferrer noopener"
+                       title={s.provider}>{s.title || s.url}</a>
+                  {:else}
+                    <span class="cite" title={s.provider}>{s.title || s.path || s.id}</span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           {:else}
             <div class="body">
               <!-- What you sent stays sent: the image is the server's copy, so it
@@ -4346,19 +5271,27 @@
 
     <!-- Every url any tool returned, deduplicated across the whole turn. It is
          the same data as the chips on each tool row, collected where you can
-         actually count it. -->
+         actually count it. Collapsed by default, and that is not only a layout
+         choice: opening it is what asks the server for each source's title and
+         image, so a reopened scrape does not spend 200 round trips painting a
+         list nobody opened. -->
     {#if sources.length}
-      <section class="evidence">
-        <h3>sources <span class="dim">{sources.length}</span></h3>
+      <details
+        class="evidence"
+        ontoggle={(e) => e.currentTarget.open && primePreviews(sources.map((s) => s.url))}
+      >
+        <summary><h3>sources <span class="dim">{sources.length}</span></h3></summary>
         <ol>
           {#each sources as s (s.url)}
+            {@const p = previews[s.url]}
             <li>
-              <a href={s.url} target="_blank" rel="noopener noreferrer">{host(s.url)}</a>
+              {#if p?.image}<img class="fav" src={p.image} alt="" loading="lazy" />{/if}
+              <a href={s.url} target="_blank" rel="noopener noreferrer">{p?.title || host(s.url)}</a>
               <span class="dim">{s.tool}</span>
             </li>
           {/each}
         </ol>
-      </section>
+      </details>
     {/if}
 
     <!-- Next steps are derived from what this turn actually did — a failed
@@ -4407,14 +5340,17 @@
       <input
         id="railq"
         bind:value={q}
-        oninput={onSearchInput}
-        placeholder="search history"
+        oninput={() => {
+          onSearchInput();
+          if (!findOpen && q.trim()) openSearch();
+        }}
+        placeholder="search history · ⌘K"
         aria-label="search threads and messages"
         spellcheck="false"
         autocomplete="off"
       />
       {#if q}
-        <button class="clearq" onclick={() => { q = ""; hits = []; }} aria-label="clear search">
+        <button class="clearq" onclick={() => { q = ""; hits = []; sel = 0; }} aria-label="clear search">
           <span class="gi" aria-hidden="true">{@html ICON.x}</span>
         </button>
       {/if}
@@ -4424,23 +5360,11 @@
       <span class="gi" aria-hidden="true">{@html ICON.plus}</span> new chat
     </button>
 
-    {#if q.trim()}
-      <div class="side-h">matches <span class="count">{hits.length}</span></div>
-      {#if hits.length === 0}
-        <p class="none">nothing matches “{q.trim()}”</p>
-      {/if}
-      {#each hits as h, i (i)}
-        <button class="rhit" onclick={() => pickHit(h)}>
-          <span class="rtitle">{h.title || h.convo}</span>
-          <span class="rsnip">{snippet(h.body, q)}</span>
-        </button>
-      {/each}
-    {:else}
-      <div class="side-h">threads</div>
-      {#if convos.length === 0}
-        <p class="none">no history yet</p>
-      {/if}
-      {#each convos as c (c.id)}
+    <div class="side-h">threads</div>
+    {#if convos.length === 0}
+      <p class="none">no history yet</p>
+    {/if}
+    {#each convos as c (c.id)}
         {#if editing === c.id}
           <div class="convo editing">
             <input
@@ -4503,7 +5427,6 @@
           </div>
         {/if}
       {/each}
-    {/if}
 
     <div class="side-foot">
       <!-- One line each: a rail this narrow turned a second line into a letter.
@@ -4553,37 +5476,6 @@
       <p class="none">nothing measured yet — the numbers land with the first answer</p>
     {/if}
 
-    <!-- Context budget, straight from `session.usage_info`: the one number that
-         says whether this conversation is about to be compacted. -->
-    {#if ctx?.limit}
-      <div class="side-h">context</div>
-      <div
-        class="ctx"
-        role="meter"
-        aria-valuenow={ctx.used}
-        aria-valuemin="0"
-        aria-valuemax={ctx.limit}
-        aria-label="context used"
-      >
-        <i style="width: {Math.min(100, (ctx.used / ctx.limit) * 100).toFixed(1)}%"></i>
-      </div>
-      <p class="ctx-n">
-        {((ctx.used / ctx.limit) * 100).toFixed(0)}% · {(ctx.used / 1000).toFixed(1)}k of
-        {(ctx.limit / 1000).toFixed(0)}k
-      </p>
-      <!-- The model's advertised window and the budget the runtime actually sends
-           are two different numbers: the runtime compacts at its own, and a 1M
-           model behind a 128k session budget will never see 1M here. Say both. -->
-      {#if ctxOf && ctxOf !== ctx.limit}
-        <p
-          class="ctx-n dim"
-          title="This session's budget is the runtime's, not the model's advertised window — it compacts at the smaller number."
-        >
-          {ctxText(ctxOf)} model · {ctxText(ctx.limit)} session
-        </p>
-      {/if}
-    {/if}
-
     <!-- The conversation, not the turn. The list below is per turn; this is the
          question a session actually asks once it is three hours old. -->
     {#if totals.turns}
@@ -4624,21 +5516,31 @@
   </aside>
 
   <!-- The two handles. Absolutely placed because what they resize is the grid
-       columns themselves, and they follow the same two vars the grid does. -->
+       columns themselves, and they follow the same two vars the grid does.
+       `slider`, not `separator`: what these own is a number between two bounds,
+       dragged by pointer and stepped by the arrow keys — which is the slider
+       contract, and it is why the tabindex and the two listeners are correct
+       here rather than the a11y heuristic's usual defect. -->
   <div
     class="grip l"
-    role="separator"
-    aria-orientation="vertical"
+    role="slider"
+    aria-orientation="horizontal"
     aria-label="resize the sessions rail"
+    aria-valuemin={W_MIN}
+    aria-valuemax={W_MAX}
+    aria-valuenow={railW}
     tabindex="0"
     onpointerdown={(e) => gripDown("rail", e)}
     onkeydown={(e) => gripKey("rail", e)}
   ></div>
   <div
     class="grip r"
-    role="separator"
-    aria-orientation="vertical"
+    role="slider"
+    aria-orientation="horizontal"
     aria-label="resize the session instruments"
+    aria-valuemin={W_MIN}
+    aria-valuemax={W_MAX}
+    aria-valuenow={instW}
     tabindex="0"
     onpointerdown={(e) => gripDown("inst", e)}
     onkeydown={(e) => gripKey("inst", e)}
@@ -4646,29 +5548,29 @@
 </div>
 
 <div id="composer" use:measureComposer>
-  {#if palette && options.length}
-    <div class="palette" role="listbox" bind:this={paletteEl}>
-      <div class="head">
-        {palette.trigger === "/" ? "everything" : palette.trigger === "@" ? "skills" : "tools"}
-        <span class="dim"
-          >{options.length}{menuRows.length < options.length ? " · " + menuRows.length + " shown" : ""}</span
-        >
-      </div>
-      {#each menuRows as o, i (o.kind + o.name)}
-        <button
-          class="opt k-{o.kind}"
-          class:on={i === palette.index}
-          role="option"
-          aria-selected={i === palette.index}
-          onclick={() => pick(o)}
-          onmouseenter={() => (palette.index = i)}
-        >
-          <b>{SIGIL[o.kind]}{o.name}</b>
-          {#if o.hint}<span class="dim">{o.hint}</span>{/if}
-        </button>
-      {/each}
-    </div>
-  {/if}
+  <!-- The field's top edge is its handle, the way the rails' seam is theirs. A
+       role of its own so a keyboard can step the same number the pointer drags. -->
+  <div
+    class="cgrab"
+    role="separator"
+    aria-orientation="horizontal"
+    aria-label="resize the input field"
+    aria-valuemin={H_MIN}
+    aria-valuemax={hMax()}
+    aria-valuenow={composeH || H_MIN}
+    tabindex="0"
+    onpointerdown={compDown}
+    onkeydown={compKey}
+  ></div>
+  <Palette
+    {palette}
+    selected={palette?.index ?? 0}
+    total={options.length}
+    rows={menuRows}
+    sigil={SIGIL}
+    onpick={pick}
+    onselect={(i) => palette && (palette.index = i)}
+  />
   <!-- The agent's todo rows, above the field and above the attachments: during a
        long run this is what says what it is doing, and a row three screens up in
        the transcript has already scrolled past. -->
@@ -4711,7 +5613,7 @@
   <!-- What is waiting behind the turn in flight. The composer can enqueue
        (Alt+Enter), so a queued prompt that is invisible is indistinguishable
        from a message that was dropped. -->
-  {#if queued.length}
+  {#if queued.length && !past}
     <div class="qrail">
       <span class="eyebrow">queued · {queued.length}</span>
       {#each queued as q (q.id)}
@@ -4726,12 +5628,14 @@
       {/each}
     </div>
   {/if}
-  {#if busy && runningIn && runningIn !== current}
+  {#if busy && runningConvo && runningConvo !== current}
     <!-- There is one live session, and it is busy in another conversation. Saying
          which one is the difference between "this page is stuck" and "it is
-         waiting for another chat to finish". -->
+         waiting for another chat to finish". The owner is `runningConvo`, not
+         `runningIn`: a turn this tab started belongs to a conversation too, and
+         opening a second thread used to hand it this one's stop button. -->
     <p class="runhint">
-      a turn is running in <b>{convos.find((c) => c.id === runningIn)?.title || runningIn}</b> — this
+      a turn is running in <b>{convos.find((c) => c.id === runningConvo)?.title || runningConvo}</b> — this
       conversation waits for it
     </p>
   {/if}
@@ -4755,7 +5659,7 @@
       <textarea
         bind:value={draft}
         onscroll={(e) => marksEl && (marksEl.scrollTop = e.currentTarget.scrollTop)}
-      placeholder="Ask, scrape, extract — / commands, @ skills, # tools, + attach"
+      placeholder="Ask, scrape, extract…"
       oninput={() => scanMenu()}
       onpaste={onPaste}
       onkeydown={(e) => {
@@ -4764,19 +5668,23 @@
             e.preventDefault();
             const n = menuRows.length;
             const d = e.key === "ArrowDown" ? 1 : -1;
+            // The Palette keeps the selected row in view itself; the field only
+            // has to move the index the two halves share.
             palette.index = (palette.index + d + n) % n;
-            // The list is taller than the box it sits in, so a row past the fold
-            // was selected without being visible. Scroll it into view after the
-            // flush, when the selected class has actually moved.
-            tick().then(() => {
-              paletteEl?.querySelector(".opt.on")?.scrollIntoView({ block: "nearest" });
-            });
             return;
           }
-          if (e.key === "Enter" || e.key === "Tab") {
+          if (e.key === "Enter") {
             e.preventDefault();
             return pick(menuRows[palette.index]);
           }
+          if (keyName(e) === keys.complete) {
+            e.preventDefault();
+            return fillIn(menuRows[palette.index]);
+          }
+        }
+        if (e.key === "Escape" && palette) {
+          e.preventDefault();
+          return (palette = null);
         }
         if (e.key === "Escape" && listening) {
           e.preventDefault();
@@ -4784,15 +5692,30 @@
         }
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
-          // While a turn runs, Enter steers it and Alt+Enter queues behind it —
-          // the two choices the runtime has that a plain send does not.
-          if (e.altKey) return send("queue");
-          if (busy) return send("steer");
+          // While a turn runs, Enter steers it and the queue key sends behind it —
+          // the two choices the runtime has that a plain send does not. Only for
+          // the conversation the turn belongs to: a turn running elsewhere gets
+          // neither, because both would be delivered to that one.
+          const mine = busy && runningConvo === current;
+          if ((!busy || mine) && keyName(e) === keys.queue) return send("queue");
+          // Stop, then send, in one keystroke.
+          if (mine && keyName(e) === keys.stopSend) return stopAndSend();
+          if (mine) return send("steer");
           send();
         }
       }}
     ></textarea>
     </div>
+    <!-- The field's own corner control: one row, or a panel tall enough to read a
+         long prompt in. Glyph and label both follow the state. -->
+    <button
+      class="size"
+      onclick={toggleCompose}
+      title={tall ? "minimise the input" : "maximise the input"}
+      aria-label={tall ? "minimise the input" : "maximise the input"}
+    >
+      {@html tall ? ICON.down : ICON.up}
+    </button>
     <!-- Dictation sits beside Send, where the thumb is: record, transcribe
          locally, and the text lands in the field above. -->
     <button
@@ -4830,7 +5753,7 @@
         </svg>
       {/if}
     </button>
-    {#if busy}
+    {#if busy && runningConvo === current}
       <!-- One small icon each, and they are the runtime's own two ways to
            deliver a message mid-turn: queue behind it, or make it yield. -->
       <button
@@ -4858,6 +5781,23 @@
           <path d="M20 7v5h-5" />
         </svg>
       </button>
+      <!-- Steer asks the turn to yield; this one does not ask. It is the only
+           control that stops the turn *and* sends, so it is the one to reach for
+           when the agent is not listening. -->
+      <button
+        class="mini"
+        onclick={stopAndSend}
+        disabled={!draft.trim()}
+        title="stop this turn and send what you typed now — Ctrl+Enter"
+        aria-label="stop and send"
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="8" width="8" height="8" rx="1" fill="currentColor" stroke="none" />
+          <path d="M14 12h7" />
+          <path d="M18 9l3 3-3 3" />
+        </svg>
+      </button>
       <button aria-label="stop" class="send stop" onclick={stopTurn} title="stop this turn">
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -4872,7 +5812,15 @@
         
       </button>
     {:else}
-      <button aria-label="stop" title="send this prompt" class="send" onclick={() => send()} disabled={!draft.trim()}>
+      <button
+        aria-label="send"
+        title={busy
+          ? "a turn is running in another conversation — this one waits for it"
+          : "send this prompt"}
+        class="send"
+        onclick={() => send()}
+        disabled={!draft.trim() || busy}
+      >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 24 24"
@@ -4953,11 +5901,94 @@
       <span class="gi" aria-hidden="true">{@html ICON.tools}</span>
       {toolsSel.length ? `tools ${toolsSel.length}` : "tools"}
     </button>
-    {#if lastUser && !busy}
+    {#if lastUser && !busy && !past}
       <button class="ghost" onclick={retry} title="send the last prompt again">
         <span class="gi" aria-hidden="true">{@html ICON.refresh}</span>
         retry
       </button>
+      <button
+        class="ghost"
+        onclick={editLast}
+        title="go back to your last message, drop the answer after it, and rewrite it"
+      >
+        <span class="gi" aria-hidden="true">{@html ICON.pencil}</span>
+        edit
+      </button>
+    {/if}
+    <!-- Session info, in the dock rather than the instruments rail: the rail is
+         gone below 1100px, and the context budget is the one number that has to
+         stay reachable on a phone. The ring is the button; the breakdown behind
+         it is the runtime's own accounting, because a category this page invented
+         would be a lie. -->
+    {#if ctx?.limit}
+      <div class="ctxwrap">
+        <button
+          class="ghost ctxb"
+          onclick={openCtx}
+          aria-expanded={ctxOpen}
+          aria-label="session info, {ctxPct.toFixed(0)}% of the context window used"
+          title="{toks(ctx.used)} of {toks(ctx.limit)} tokens — where the context window goes"
+        >
+          <svg class="ring" viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="15.5" pathLength="100" />
+            <circle cx="18" cy="18" r="15.5" pathLength="100" style="stroke-dasharray: {ctxPct} 100" />
+          </svg>
+          {ctxPct.toFixed(0)}%
+        </button>
+        {#if ctxOpen}
+          <div class="ctxpop">
+            {#if !ctxInfo}
+              <p class="none">reading the runtime's accounting…</p>
+            {:else if ctxInfo.error}
+              <p class="none">{ctxInfo.error}</p>
+            {:else}
+              <p class="ctxpop-h">
+                <b>{toks(ctx.used)} / {toks(ctx.limit)} tokens</b>
+                <span>{ctxPct.toFixed(0)}%</span>
+              </p>
+              <!-- One line, the window split the way the rows below read: each
+                   segment is a share of the allowance, and the darker one on the
+                   end is the output reservation — the only place the overlap
+                   between "reserved" and "used" can be seen at once. -->
+              <div class="ctxbar" aria-hidden="true">
+                {#each ctxGroups as g (g.head)}
+                  {#each g.rows as r (r.label)}
+                    <i class={g.tone} style="width: {r.pct}%" title="{r.label} {r.show}"></i>
+                  {/each}
+                {/each}
+                {#if ctxReserved}
+                  <i class="res" style="width: {ctxReservedPct}%" title="reserved for response {toks(ctxReserved)}"></i>
+                {/if}
+              </div>
+              {#if ctxReserved}
+                <p class="ctx-row"><span>Reserved for response</span><b>{toks(ctxReserved)}</b></p>
+              {/if}
+              {#each ctxGroups as g (g.head)}
+                <p class="ctx-h">{g.head}</p>
+                {#each g.rows as r (r.label)}
+                  <p class="ctx-row" title="{r.n} tokens">
+                    <span>{r.label}</span><b>{r.show}</b>
+                  </p>
+                {/each}
+              {/each}
+            {/if}
+            <!-- The model's advertised window and the budget the runtime actually
+                 sends are two numbers: it compacts at its own, and a 1M model
+                 behind a 128k session budget will never see 1M here. -->
+            {#if ctxOf && ctxOf !== ctx.limit}
+              <p
+                class="ctx-n dim"
+                title="This session's budget is the runtime's, not the model's advertised window — it compacts at the smaller number."
+              >
+                {ctxText(ctxOf)} model · {ctxText(ctx.limit)} session
+              </p>
+            {/if}
+            <button class="ctxcompact" onclick={compactNow} disabled={ctxBusy || busy}>
+              {ctxBusy ? "compacting…" : "compact history"}
+            </button>
+          </div>
+        {/if}
+      </div>
     {/if}
     <button
       class="modelbtn"
@@ -4985,163 +6016,64 @@
 <!-- The tools chooser. A preference the prompt states, not a switch the runtime
      obeys: the tool set is fixed when the session is created. Staged until Save,
      so closing the dialog is the same as changing your mind. -->
-{#if toolsOpen}
+<ToolsDialog
+  open={toolsOpen}
+  tools={toolRows}
+  builtin={builtinAll}
+  off={builtinOff}
+  allow={autoTools}
+  sel={toolsSel}
+  {runtimeOff}
+  icons={ICON}
+  onclose={() => (toolsOpen = false)}
+  onsave={(d) => {
+    toolsSel = d;
+    toolsOpen = false;
+  }}
+  onoff={(next) => (builtinOff = next)}
+  onallow={(key) => toggleAllow(key)}
+/>
+
+{#if findOpen}
   <div
-    id="tools-modal"
-    onclick={(e) => e.target === e.currentTarget && (toolsOpen = false)}
+    id="modal"
+    onclick={(e) => e.target === e.currentTarget && (findOpen = false)}
     role="presentation"
   >
-    <div class="card tools">
-      <div class="thead">
-        <span class="ttitle">tools</span>
-        <div class="tsearch" class:open={searchOpen}>
-          {#if searchOpen}
-            <input
-              bind:value={toolsQuery}
-              placeholder="search tools"
-              aria-label="search tools"
-              use:focusNow
-              onkeydown={(e) => {
-                if (e.key === "Escape") {
-                  toolsQuery = "";
-                  searchOpen = false;
-                }
-              }}
-            />
-            {#if toolsQuery}
-              <button class="clearx" onclick={() => (toolsQuery = "")} aria-label="clear search">
-                <span class="gi" aria-hidden="true">{@html ICON.x}</span>
-              </button>
-            {/if}
-          {/if}
-          <button
-            class="ico"
-            onclick={() => (searchOpen = !searchOpen)}
-            title="search tools"
-            aria-label="search tools"
-            aria-expanded={searchOpen}
-          >
-            <span class="gi" aria-hidden="true">{@html ICON.search}</span>
-          </button>
-        </div>
+    <div class="card">
+      <div class="mhead">
+        <span>search history</span>
+        <span class="dim">{q.trim() ? `${hits.length} matches` : "threads and messages"}</span>
       </div>
-      <div class="tlist">
-        {#if builtinShown.length}
-          {@const onCount = builtinShown.filter(builtinOn).length}
-          {@const closed = toolsClosed.includes("builtin")}
-          <div class="tgroup">
-            <div class="trow">
-              <button
-                class="tfold"
-                onclick={() => toggleClosed("builtin")}
-                aria-expanded={!closed}
-                title="tools this build installs itself; unticking one asks the agent to prefer the others"
-              >
-                <span class="tcaret" aria-hidden="true"
-                  >{@html closed ? ICON.right : ICON.down}</span
-                >
-                builtin
-                <span class="dim">{onCount} of {builtinShown.length} on</span>
-              </button>
-              <button class="linky" onclick={() => allBuiltin(true)}>all</button>
-              <button class="linky" onclick={() => allBuiltin(false)}>none</button>
-            </div>
-            {#if !closed}
-              <div class="tchecks">
-                {#each builtinShown as name (name)}
-                  <label
-                    class="tcheck"
-                    title="a tool this build installs itself — unticking only tells the agent to prefer others"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={builtinOn(name)}
-                      onchange={() => toggleBuiltin(name)}
-                    />
-                    <span class="box" aria-hidden="true"></span>
-                    <span>{name}</span>
-                  </label>
-                {/each}
-              </div>
-            {/if}
-          </div>
+      <input
+        id="findq"
+        class="mfilter"
+        bind:value={q}
+        oninput={onSearchInput}
+        placeholder="type words — any of them may match"
+        aria-label="search threads and messages"
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <div class="mlist">
+        {#if !q.trim()}
+          <p class="none">type a word or two — titles and message bodies are searched</p>
+        {:else if hits.length === 0}
+          <p class="none">nothing matches “{q.trim()}”</p>
         {/if}
-        {#each toolGroups as g (g.server)}
-          {@const picked = g.tools.filter((t) => toolsDraft.includes(t.full)).length}
-          {@const closed = toolsClosed.includes(g.server)}
-          <div class="tgroup">
-            <div class="trow">
-              <button
-                class="tfold"
-                onclick={() => toggleClosed(g.server)}
-                aria-expanded={!closed}
-              >
-                <span class="tcaret" aria-hidden="true"
-                  >{@html closed ? ICON.right : ICON.down}</span
-                >
-                {g.server}
-                <span class="dim">{picked} of {g.tools.length}</span>
-              </button>
-              <button class="linky" onclick={() => allOf(g.server, true)}>all</button>
-              <button class="linky" onclick={() => allOf(g.server, false)}>none</button>
-            </div>
-            {#if !closed}
-              <div class="tchecks">
-                {#each g.tools as t (t.full)}
-                  {@const key = `${g.server}:${t.name}`}
-                  <!-- One cell per tool: what it is, and whether this page may
-                       approve it without asking. The second half is the policy
-                       the "Always allow" button on a card writes into. -->
-                  <div class="tcell">
-                    <label class="tcheck">
-                      <input
-                        type="checkbox"
-                        checked={toolsDraft.includes(t.full)}
-                        onchange={() => toggleDraft(t.full)}
-                      />
-                      <span class="box" aria-hidden="true"></span>
-                      <span>{t.name}</span>
-                    </label>
-                    <button
-                      class="tallow"
-                      class:on={autoTools.includes(key)}
-                      onclick={() => toggleAllow(key)}
-                      aria-pressed={autoTools.includes(key)}
-                      title={autoTools.includes(key)
-                        ? "approved without asking — click to be asked again"
-                        : "approve this tool without asking"}
-                    >
-                      {autoTools.includes(key) ? "always" : "ask"}
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
+        {#each hits as h, i (i)}
+          <button
+            class="rhit"
+            class:sel={i === sel}
+            onmouseenter={() => (sel = i)}
+            onclick={() => pickHit(h)}
+          >
+            <span class="rtitle">{@html hi(h.title || h.convo, q)}</span>
+            <span class="rsnip">{@html hi(snippet(h.body, q), q)}</span>
+          </button>
         {/each}
-        {#if !toolGroups.length && !builtinShown.length}
-          <p class="none">no tool matches “{toolsQuery}”</p>
-        {/if}
       </div>
-      <div class="tfoot">
-        <p class="note">
-          Sent as a prompt instruction — the runtime's tool set is fixed when the session starts.
-        </p>
-        <div class="row">
-          <span class="dim tcount"
-            >{draftCount + builtinOnCount} of {toolRows.length + builtinAll.length} preferred</span
-          >
-          <button class="deny" onclick={() => (toolsOpen = false)}>Close</button>
-          <button
-            onclick={() => {
-              toolsSel = toolsDraft;
-              toolsOpen = false;
-            }}
-          >
-            Save · {draftCount}
-          </button>
-        </div>
-      </div>
+      <p class="hint">↑↓ move · ↵ opens · esc closes · every word matches on its own</p>
     </div>
   </div>
 {/if}
@@ -5163,6 +6095,8 @@
         >
         <div
           class="tabs"
+          role="group"
+          aria-label="providers"
           use:measureTabs
           onscroll={tabsSync}
           onpointerdown={tabsDown}
@@ -5445,6 +6379,8 @@
   </div>
 {/if}
 
+<Toasts {toasts} ondismiss={(id) => (toasts = toasts.filter((x) => x.id !== id))} />
+
 {#if settingsOpen}
   <div
     id="modal"
@@ -5453,8 +6389,17 @@
   >
     <div class="card settings">
       <div class="stabs">
-        {#each [["instructions", "Instructions"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
-          <button class="tab" class:on={setTab === k} onclick={() => (setTab = k)}>{label}</button>
+        {#each [["instructions", "Instructions"], ["skills", "Skills"], ["mcp", "MCP"], ["agents", "Agents"], ["approvals", "Approvals"], ["chat", "Chat"], ["runtime", "Runtime"], ["connection", "Connection"], ["storage", "Storage"], ["about", "About"]] as [k, label] (k)}
+          <button
+            class="tab"
+            class:on={setTab === k}
+            onclick={() => {
+              setTab = k;
+              // The live lists are read when shown, not when the panel opens: a
+              // server that died since then must not still look up.
+              if (k === "skills" || k === "mcp" || k === "agents") loadManage();
+              if (k === "approvals") loadApprovals();
+            }}>{label}</button>
         {/each}
       </div>
       <div class="sbody">
@@ -5477,6 +6422,205 @@
               <input maxlength="40" bind:value={language} placeholder="English" />
               <small>Becomes “reply in …”. Empty lets the model choose.</small>
             </label>
+          </div>
+        {:else if setTab === "skills" || setTab === "mcp"}
+          {@const isSkills = setTab === "skills"}
+          {@const rows = isSkills ? manage.skills : manage.mcp}
+          {@const needle = skillFilter.trim().toLowerCase()}
+          {@const shown = needle
+            ? rows.filter((r) => `${r.name} ${r.note || ""}`.toLowerCase().includes(needle))
+            : rows}
+          {@const item = isSkills ? { route: "/skills", key: "name" } : { route: "/mcp", key: "server" }}
+          <div class="form">
+            <div class="sfld">
+              <span>{isSkills ? "available skills" : "mcp servers"}</span>
+              <small>
+                {#if isSkills}
+                  Read from the skills directory. A skill's tools are offered only while it
+                  is on — adding one is <code>webrain install skills</code>, which puts it there.
+                  Rows from <code>~/.agents/skills</code> are the skills installed for every
+                  agent on this machine; this session never loaded them, so they carry no switch.
+                {:else}
+                  The servers this session attached. A stopped server is why a turn suddenly
+                  has no tools; adding one writes it to the runtime's user configuration.
+                {/if}
+              </small>
+            </div>
+            <input
+              class="mfilter"
+              placeholder="filter {rows.length} {isSkills ? "skills" : "servers"}"
+              bind:value={skillFilter}
+            />
+            {#if !shown.length}
+              <p class="mngempty">
+                {needle
+                  ? `nothing matches “${skillFilter.trim()}”`
+                  : isSkills
+                    ? "no skills installed"
+                    : "no servers reported"}
+              </p>
+            {:else}
+              <ul class="mng">
+                {#each shown as row (row.name)}
+                  {@const on = toggles[`${item.route}:${row.name}`] ?? row.on}
+                  <li>
+                    <span class="mngname"><b>{row.name}</b>{#if row.note}<small>{row.note}</small>{/if}</span>
+                    {#if !isSkills}
+                      <button
+                        class="mact"
+                        onclick={() => removeMcp(row.name)}
+                        title="forget this server from the runtime's user config"
+                      >remove</button>
+                    {/if}
+                    <!-- A skill from the cross-tool tree has no switch: the session
+                         never loaded it, so a switch here could only fail. -->
+                    {#if row.live !== false}
+                      <button
+                        class="mswitch"
+                        class:on
+                        onclick={() => flip(item, row)}
+                        role="switch"
+                        aria-checked={on}
+                        aria-label={`${row.name} ${on ? "on" : "off"}`}
+                        title={on ? "switch off" : "switch on"}
+                      ><i aria-hidden="true"></i></button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if isSkills}
+              <label class="sfld">
+                <span>add one</span>
+                <input bind:value={skillNew.name} placeholder="name — e.g. price-watch" maxlength="64" />
+                <input bind:value={skillNew.description} placeholder="one line: when to reach for it" maxlength="200" />
+                <textarea rows="4" bind:value={skillNew.instructions} placeholder="its instructions"></textarea>
+                <button onclick={createSkill} disabled={!skillNew.name.trim()}>create skill</button>
+                <small>The file lands in the skills directory; the runtime loads it at session start.</small>
+              </label>
+            {:else}
+              <!-- The config is the runtime's own shape (stdio `command` or a
+                   remote `url`), so it is pasted rather than rebuilt as two
+                   half-correct forms. -->
+              <label class="sfld">
+                <span>add one</span>
+                <input bind:value={mcpNew.name} placeholder="name — e.g. filesystem" maxlength="64" />
+                <textarea rows="5" bind:value={mcpNew.config} spellcheck="false"></textarea>
+                <button onclick={createMcp} disabled={!mcpNew.name.trim() || !mcpNew.config.trim()}>add server</button>
+                <small>
+                  Written to the runtime's user MCP configuration with <code>mcp.config.add</code>,
+                  then started in <em>this</em> session with <code>session.mcp.startServer</code> —
+                  so its tools are usually available at once. The note under it says which of the
+                  two happened.
+                </small>
+              </label>
+            {/if}
+            {#if !isSkills}
+              <!-- What else a server ships. Prompts and resources are invoked by
+                   whoever asks, not only by the model, so each row can put its
+                   text in the composer instead of being an inventory line. -->
+              {#each [["prompts", "prompts", "/mcp/prompt"], ["resources", "resources", "/mcp/resource"]] as [key, label, route] (key)}
+                {#if manage[key].length}
+                  <div class="sfld">
+                    <span>{label}</span>
+                    <ul class="mng">
+                      {#each manage[key] as row (row.name)}
+                        <li>
+                          <span class="mngname">
+                            <b>{row.name}</b>
+                            {#if row.note}<small>{row.note}</small>{/if}
+                            {#if row.args}<small>args: {row.args}</small>{/if}
+                          </span>
+                          <button class="mact" onclick={() => useMcpItem(route, row)}>use</button>
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              {/each}
+            {/if}
+          </div>
+        {:else if setTab === "agents"}
+          <div class="form">
+            <div class="sfld">
+              <span>agent definitions</span>
+              <small>
+                What the runtime can run as or delegate to. The picked one becomes
+                this session's agent immediately — <code>session.agent.select</code>
+                moves it live, so nothing restarts.
+              </small>
+            </div>
+            {#if !manage.agents.length}
+              <p class="mngempty">
+                none found — a definition added to the workspace or the user
+                configuration appears here, and the model can write one with
+                <code>write_agent</code>
+              </p>
+            {:else}
+              {#if manage.agentCurrent}
+                <ul class="mng">
+                  <li>
+                    <span class="mngname">
+                      <b>{manage.agentCurrent.title || manage.agentCurrent.name}</b>
+                      <small>running now</small>
+                    </span>
+                    <button class="mact" onclick={() => useAgent("")}>use default</button>
+                  </li>
+                </ul>
+              {/if}
+              <ul class="mng">
+                {#each manage.agents as row (row.id)}
+                  {@const cur = manage.agentCurrent && manage.agentCurrent.id === row.id}
+                  <li>
+                    <span class="mngname">
+                      <b>{row.title || row.name}</b>
+                      {#if row.description}<small>{row.description}</small>{/if}
+                    </span>
+                    {#if row.manual_only}<small class="dim">manual only</small>{/if}
+                    {#if cur}
+                      <small class="dim">in use</small>
+                    {:else}
+                      <button class="mact" onclick={() => useAgent(row.name)}>use</button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <label class="sfld">
+              <span>add one</span>
+              <input bind:value={agentNew.name} placeholder="name — e.g. page-auditor" maxlength="64" />
+              <input bind:value={agentNew.description} placeholder="one line: what it is for" maxlength="200" />
+              <textarea rows="4" bind:value={agentNew.instructions} placeholder="its instructions: what to do, what to avoid"></textarea>
+              <button onclick={createAgent} disabled={!agentNew.name.trim()}>create agent</button>
+              <small>
+                Written to <code>.github/agents/&lt;name&gt;.md</code>. The list above is
+                the runtime's own read, so a definition it refuses shows up as nothing.
+              </small>
+            </label>
+          </div>
+        {:else if setTab === "approvals"}
+          <div class="form">
+            <div class="sfld">
+              <span>approved without asking</span>
+              <small>
+                Tools you answered “always allow” for, keyed
+                <code>server:tool</code>. Kept on the server, so a second tab — and
+                a turn the model runs on its own — is approved without a card.
+                Revoking one means the next call asks again.
+              </small>
+            </div>
+            {#if !autoTools.length}
+              <p class="mngempty">none — “always allow” on an approval card adds one</p>
+            {:else}
+              <ul class="mng">
+                {#each autoTools as key (key)}
+                  <li>
+                    <span class="mngname"><b>{key}</b></span>
+                    <button class="mact" onclick={() => toggleAllow(key)}>revoke</button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           </div>
         {:else if setTab === "chat"}
           <div class="form">
@@ -5511,6 +6655,36 @@
               <span class="box" aria-hidden="true"></span>
               <span>suggest next steps after a turn</span>
             </label>
+            <!-- A keyboard is the one preference this page cannot read, so the
+                 three keys the composer listens for are captured rather than
+                 guessed. Enter stays send and Shift+Enter stays a newline. -->
+            <div class="sfld">
+              <span>shortcut keys</span>
+              {#each KEY_ACTIONS as [id, label, dflt] (id)}
+                <div class="krow">
+                  <span>{label}</span>
+                  <button
+                    class="ghost kbd"
+                    class:capturing={capturing === id}
+                    aria-label={`${label} — press to change`}
+                    onclick={(e) => {
+                      capturing = id;
+                      e.currentTarget.focus();
+                    }}
+                    onkeydown={(e) => {
+                      if (capturing !== id) return;
+                      e.preventDefault();
+                      keys = { ...keys, [id]: keyName(e) };
+                      capturing = "";
+                    }}
+                  >{capturing === id ? "press a key…" : keys[id] || dflt}</button>
+                </div>
+              {/each}
+              <small>
+                Tab completes a <code>/</code>, <code>@</code> or <code>#</code> name into the
+                field and leaves it there; Enter is what runs it. Enter and Shift+Enter are fixed.
+              </small>
+            </div>
             <div class="sfld">
               <span>reply rendering</span>
               <div class="seg">
@@ -5552,6 +6726,21 @@
               <input type="checkbox" bind:checked={rt.allow_agents} />
               <span class="box" aria-hidden="true"></span>
               <span>let the agent delegate to sub-agents</span>
+            </label>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rt.parallel_tools} />
+              <span class="box" aria-hidden="true"></span>
+              <span>let one turn ask for several tools at once</span>
+            </label>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rt.citations} />
+              <span class="box" aria-hidden="true"></span>
+              <span>ask for citations — an answer lists the sources it used</span>
+            </label>
+            <label class="sfld">
+              <span>models the runtime may use</span>
+              <input type="text" placeholder="empty = whatever the provider serves" bind:value={rt.allowed_models} />
+              <small>Comma-separated. A name outside the list is refused when the session is built, not mid-turn.</small>
             </label>
             <label class="sfld">
               <span>completion budget</span>
@@ -5617,10 +6806,10 @@
           </dl>
           <h3 class="sub-h">keys</h3>
           <dl class="facts">
-            <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn</dd>
+            <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn · Ctrl+Enter stop it and send</dd>
             <dt>Esc</dt><dd>close a menu or dialog · discard a recording</dd>
-            <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer</dd>
-            <dt>Ctrl K</dt><dd>search every stored message</dd>
+            <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer; <kbd>Tab</kbd> fills the name, <kbd>Enter</kbd> runs it</dd>
+            <dt>Ctrl K</dt><dd>search every stored message — each word matches on its own, ↑↓ move · ↵ opens</dd>
           </dl>
           <button class="linky danger" onclick={resetSettings}>reset every setting</button>
         {/if}
@@ -5693,6 +6882,15 @@
     --secondary-container: #1f3a30;
     --on-secondary-container: #b8d9c9;
     --tertiary: #e8c268; /* warnings, queued work */
+    /* One hue per composer sigil, so `/` `#` `@` are three colours everywhere
+       they are drawn — the field's tint and the menu's badge read the same
+       token. Kept beside the roles because a theme that changes one has to
+       change the other two, or mint and cyan collide. */
+    --m-cmd: #4edea3;
+    --m-tool: #7fd3ff;
+    /* Violet, not the amber this used to be: amber sat next to the mint tint and
+       read as a warning highlight, and `--error` already owns peach. */
+    --m-skill: #c3a6ff;
     --error: #ffb4a9;
     --on-error-container: #ffdad5;
     --error-container: #3d1512;
@@ -5758,6 +6956,7 @@
     --outline: #6e6e6e; --outline-variant: #3c3c3c;
     --secondary-container: #1f3347; --on-secondary-container: #b8d4ea;
     --tertiary: #d7ba7d; --error: #f48771;
+    --m-cmd: #4daafc; --m-tool: #4ec9b0; --m-skill: #b48ee8;
     --on-error-container: #ffd7cf; --error-container: #5a1d1d;
     --faint: #6e6e6e; --scroll-thumb: #424242;
   }
@@ -5774,6 +6973,7 @@
     --outline: #7c7f6d; --outline-variant: #3b3c34;
     --secondary-container: #4a2340; --on-secondary-container: #f9a8c4;
     --tertiary: #fd971f; --error: #ff6188;
+    --m-cmd: #a6e22e; --m-tool: #66d9ef; --m-skill: #ae81ff;
     --on-error-container: #ffd6e2; --error-container: #4d1024;
     --faint: #7c7f6d; --scroll-thumb: #4a4b41;
   }
@@ -5790,6 +6990,7 @@
     --outline: #8e8e93; --outline-variant: #dcdcdf;
     --secondary-container: #dbe9f7; --on-secondary-container: #123a5c;
     --tertiary: #8a5300; --error: #b3261e;
+    --m-cmd: #0060b0; --m-tool: #0f766e; --m-skill: #6d4aa8;
     --on-error-container: #410e0b; --error-container: #fbe2e0;
     /* the M3 state layers are white alpha; on white they have to be black */
     --state-hover: #0000000f; --state-focus: #0000001a; --state-press: #00000024;
@@ -5896,7 +7097,6 @@
   .side-h { color: var(--faint); font-family: var(--mono); font-size: 9px; font-weight: 600;
     letter-spacing: 0.18em; text-transform: uppercase; margin: var(--s4) 0 var(--s2); }
   .side-h:first-child { margin-top: 0; }
-  .none { color: var(--faint); margin: 0 0 var(--s2); }
 
   /* Compose sits above the thread list, where a mail client puts it. */
   .newchat { display: flex; align-items: center; justify-content: center; gap: var(--s2);
@@ -5911,6 +7111,7 @@
   .loadearlier:hover { color: var(--on-surface); }
 
   /* A readout, not a card: label left, value right, tabular numerals. */
+  .instbtn { display: none; }
   .readout { display: grid; grid-template-columns: auto 1fr; gap: 3px var(--s2); margin: 0; }
   .readout :global(dt) { color: var(--faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.12em; }
   .readout :global(dd) { margin: 0; text-align: right; font-variant-numeric: tabular-nums;
@@ -5962,6 +7163,14 @@
      only thing that changes colour. Nothing floats and nothing is boxed: on a
      page that streams, a card per message is a wall of boxes. */
   .msg, .tool, .act, .think, .usage, .note, .steps, .evidence, .next { position: relative; }
+  /* The transcript keeps up to 120 rows of tool cards, and off-screen ones still
+     cost layout. `content-visibility: auto` skips everything outside the
+     viewport; `contain-intrinsic-size: auto 3rem` seeds the placeholder with a
+     collapsed-card height and then remembers the real one, so the scroll height
+     the pinned-to-bottom logic reads does not jump. Messages are left out: their
+     height is what a reader scrolls by, and a guess there is felt. */
+  .tool, .act, .think, .usage, .note, .steps { content-visibility: auto;
+    contain-intrinsic-size: auto 3rem; }
   .msg { border-top: 1px solid var(--rule); padding: var(--s4) 0; margin: 0;
     white-space: pre-wrap; word-break: break-word; animation: rise var(--motion-short) var(--ease); }
   .msg::after { content: ""; position: absolute; left: -1.32rem; top: calc(var(--s4) + 3px);
@@ -5982,9 +7191,6 @@
     font-family: var(--mono); font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.2em; margin-bottom: var(--s2); }
   .msg.assistant .who { color: var(--primary); }
-  .linky { background: none; border: 0; color: var(--faint); font: inherit; font-size: 10px;
-    letter-spacing: 0.08em; padding: 0 var(--s1); border-radius: var(--shape-xs); cursor: pointer;
-    min-height: 0; text-transform: uppercase; }
   .linky:hover { color: var(--primary); background: var(--state-hover); }
   .copy { float: right; background: none; border: 0; color: var(--faint); border-radius: var(--shape-full);
     padding: 0 var(--s2); font: inherit; font-size: 10px; text-transform: uppercase;
@@ -6057,6 +7263,13 @@
     background: var(--surface-container-high); cursor: zoom-in; }
   .md :global(img:hover) { border-color: var(--primary); }
   .md :global(a img) { border-color: transparent; }
+  /* A framed picture — `![]()`, a link to an image, or a path to one on this
+     machine — is capped: a 1080×1920 screenshot is a screen and a half tall, and
+     an answer is read, not scrolled through. The caption under it is the file, so
+     the frame never claims to be something it is not. */
+  .md :global(figure.fig img) { max-height: 22rem; width: auto; max-width: 100%; }
+  .md :global(figure.fig figcaption) { font-family: var(--mono); font-size: 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   /* ── html5 replies ─────────────────────────────────────────────────────
      In `html` mode the model lays the answer out itself. Inline `style` is
      stripped by the sanitiser — `position:fixed;inset:0` over the approval card
@@ -6154,11 +7367,6 @@
   .dock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
     padding: var(--s2) clamp(1rem, 4vw, 3rem) var(--s3); }
   .dock .modelbtn { margin-left: auto; }
-  .ico { flex: 0 0 auto; width: 2.2rem; min-height: 2.2rem; padding: 0; display: grid; place-items: center;
-    background: var(--surface-container); color: var(--on-surface-variant); border: 0;
-    border-radius: var(--shape-full); font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
-    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
-  .ico:hover { background: var(--surface-container-high); color: var(--primary); }
   .ico.rec { color: var(--error); }
   .ico.rec.live { width: auto; gap: var(--s1); padding: 0 var(--s2) 0 var(--s3);
     background: var(--error-container); color: var(--error); display: flex; }
@@ -6242,88 +7450,10 @@
   .modelbtn:hover { background: var(--surface-container-high); color: var(--primary); }
   .modelbtn .gi { margin-left: var(--s1); }
 
-  /* Every control icon is an inline SVG in a `.gi` box, never a font character:
-     glyph coverage differs per OS and some of them simply do not exist. */
-  .gi { display: inline-grid; place-items: center; flex: 0 0 auto; line-height: 0; }
-  .gi :global(svg) { width: 15px; height: 15px; display: block; }
-  .mini .gi :global(svg), .clearx .gi :global(svg), .clearq .gi :global(svg),
-  .jump .gi :global(svg), .tcaret :global(svg) { width: 12px; height: 12px; }
-
-  /* The tools chooser. A list, so it is a dialog with a fold per server, a
-     search that opens on demand, and one Save — not a strip of chips that
-     rewrites the setting on every stray click. */
-  .card.tools { width: min(38rem, 92vw); display: grid; gap: 0; padding: 0; }
-  .thead { display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2); }
-  .ttitle { font-family: var(--mono); font-size: 9px; text-transform: uppercase;
-    letter-spacing: 0.16em; color: var(--faint); }
-  .tsearch { margin-left: auto; display: flex; align-items: center; gap: var(--s1); }
-  /* The field grows out of the icon instead of appearing: width, fill and the
-     caret's own fade on one curve, so it reads as one motion. The colours are
-     set here because a bare <input> inherits the browser's white fill. */
-  .tsearch input { width: 0; min-width: 0; opacity: 0; padding: 0; border: 1px solid transparent;
-    border-radius: var(--shape-full); background: var(--surface-container-highest);
-    color: var(--on-surface); font: inherit; font-size: 13px; caret-color: var(--primary);
-    transition: width 260ms var(--ease), opacity 160ms var(--ease), padding 260ms var(--ease),
-      border-color 200ms var(--ease); }
-  .tsearch input::placeholder { color: var(--faint); }
-  /* Open, it takes the whole row: the field is the only thing you are reading
-     at that moment, and 15rem of it in a 38rem dialog is a postage stamp. */
-  .tsearch.open { flex: 1; }
-  .tsearch.open input { width: 100%; opacity: 1; padding: 0 var(--s3);
-    min-height: 2.2rem; border-color: var(--outline-variant); }
-  .tsearch.open input:focus { outline: none; border-color: var(--primary); }
-  .tsearch .ico { transition: color var(--motion-short) var(--ease),
-    background var(--motion-short) var(--ease), transform 260ms var(--ease); }
-  .tsearch.open .ico { transform: scale(0.92); color: var(--primary); }
-  .clearx { background: none; border: 0; color: var(--faint); cursor: pointer; font: inherit;
-    font-size: 11px; padding: 0 var(--s1); }
-  .clearx:hover { color: var(--on-surface); }
-  .tlist { max-height: min(58vh, 30rem); overflow-y: auto; padding: 0 var(--s2) var(--s2); }
-  .tgroup { border-top: 1px solid var(--outline-variant); }
-  .trow { display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s1) var(--s1) 0; }
-  .tfold { background: none; border: 0; color: var(--on-surface); font: inherit; font-size: 12px;
-    display: flex; align-items: center; gap: var(--s2); flex: 1; cursor: pointer; text-align: left;
-    padding: var(--s1) 0; }
-  .tcaret { color: var(--primary); width: 1rem; display: grid; place-items: center; flex: 0 0 auto; }
-  .tchecks { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-    gap: var(--s1) var(--s2); padding: 0 0 var(--s2) calc(1rem + var(--s2)); }
-  .tcheck { position: relative; display: flex; align-items: center; gap: var(--s2);
-    font-family: var(--mono); font-size: 11px; color: var(--on-surface-variant); cursor: pointer;
-    min-height: 2rem; animation: rise 160ms var(--ease); }
-  .tcheck:hover { color: var(--on-surface); }
-  .tcell { display: flex; align-items: center; gap: var(--s1); min-width: 0; }
-  .tcell .tcheck { flex: 1; min-width: 0; }
-  .tallow { flex: none; border: 0; background: none; cursor: pointer; padding: 0 var(--s1);
-    font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
-    color: var(--faint); border-radius: var(--shape-xs); }
-  .tallow:hover { color: var(--on-surface); background: var(--state-hover); }
-  .tallow.on { color: var(--primary); }
-  /* The real input stays in the tab order and the a11y tree; the box beside it is
-     the picture. A drawn box beats `appearance: none` on the input itself because
-     the tick can then animate on its own curve. */
-  .tcheck input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0;
-    pointer-events: none; }
-  .tcheck .box { flex: 0 0 auto; width: 1.05rem; height: 1.05rem; border-radius: 6px;
-    border: 1.5px solid var(--outline); background: var(--surface-container);
-    display: grid; place-items: center;
-    transition: background 170ms var(--ease), border-color 170ms var(--ease),
-      box-shadow 200ms var(--ease); }
-  .tcheck .box::after { content: ""; width: 0.52rem; height: 0.28rem; margin-top: -2px;
-    border-left: 2px solid var(--on-primary); border-bottom: 2px solid var(--on-primary);
-    transform: rotate(-45deg) scale(0.3); opacity: 0;
-    transition: transform 180ms var(--ease), opacity 140ms var(--ease); }
-  .tcheck:hover .box { border-color: var(--primary); }
-  .tcheck input:checked + .box { background: var(--primary); border-color: var(--primary); }
-  .tcheck input:checked + .box::after { transform: rotate(-45deg) scale(1); opacity: 1; }
-  .tcheck input:focus-visible + .box { box-shadow: 0 0 0 3px var(--primary-container); }
-  .tfoot { display: grid; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3);
-    border-top: 1px solid var(--outline-variant); }
-  .tfoot .note { margin: 0; }
-  .tfoot .row { justify-content: flex-end; gap: var(--s2); align-items: center; }
-  /* The count moved here from the header: it describes what Save will send, so
-     it belongs beside Save, not floating over the list it counts. */
-  .tcount { margin-right: auto; font-family: var(--mono); font-size: 11px;
-    font-variant-numeric: tabular-nums; }
+  /* Icons, checkboxes, `.dim`, `.none` and `.linky` are in src/app.css: a
+     component's <style> is scoped to that component, so a second consumer could
+     only copy them — which is how the settings checkboxes lost their box when
+     the tools dialog moved out. */
 
   .chips { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); }
   .chip { background: var(--surface-container-high); color: var(--on-surface-variant);
@@ -6503,21 +7633,28 @@
      Both are derived from the turn, never generated: the sources are the urls
      tools returned, the suggestions are what those results make possible. */
   .evidence { margin-top: var(--s4); border-top: 1px solid var(--rule); padding-top: var(--s3); }
-  .evidence h3 { display: flex; gap: var(--s2); align-items: baseline; margin: 0 0 var(--s2);
+  /* A disclosure whose header is the old heading: the marker is replaced by the
+     chevron below, so the row reads as one line whether it is open or shut. */
+  .evidence > summary { display: flex; align-items: center; gap: var(--s2); cursor: pointer;
+    list-style: none; }
+  .evidence > summary::-webkit-details-marker { display: none; }
+  .evidence > summary::before { content: "▸"; font-size: 9px; color: var(--faint); }
+  .evidence[open] > summary::before { content: "▾"; }
+  .evidence h3 { display: flex; gap: var(--s2); align-items: baseline; margin: 0;
     font-family: var(--mono); font-size: 9px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.18em; color: var(--faint); }
-  .evidence ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px;
+  .evidence ol { margin: var(--s2) 0 0; padding: 0; list-style: none; display: grid; gap: 2px;
     font-family: var(--mono); font-size: 11.5px; }
   .evidence li { display: flex; gap: var(--s2); align-items: baseline; }
   .evidence li a { color: var(--primary); text-decoration: none; }
   .evidence li a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .evidence li .dim { font-size: 10px; }
+  .evidence li .fav { width: 1.15rem; height: 1.15rem; object-fit: cover; border-radius: 3px; }
   .next { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
   .eyebrow { font-family: var(--mono); font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.18em; color: var(--faint); }
   .next .chip { color: var(--on-surface); }
 
-  .dim { color: var(--faint); }
   /* A failure's reason is one line here and in full on hover: an MCP error is a
      paragraph, and a paragraph inside a summary row turns one step into four. */
   .bad { color: var(--error); font-size: 11px; min-width: 0; max-width: 26rem;
@@ -6534,6 +7671,15 @@
   .steps { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
     margin: var(--s2) 0; font-family: var(--mono); font-size: 10.5px; }
   .steps .route { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+  /* Where an answer's claims came from. Sits under the body like `.steps` sits
+     above it: same eyebrow, same chips, so a cited answer reads as one row with
+     two facts attached rather than four new styles. */
+  .cites { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+    margin: var(--s2) 0 0; font-family: var(--mono); font-size: 10.5px; }
+  .cites .cite { max-width: 22rem; padding: 2px 8px; border-radius: var(--shape-full);
+    background: var(--surface-container-low); color: var(--on-surface-variant);
+    text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cites a.cite:hover { color: var(--on-surface); text-decoration: underline; }
   .steps .arrow { color: var(--faint); }
   .steps .stp { display: inline-flex; align-items: center; gap: 5px; max-width: 16rem;
     padding: 2px 8px; border-radius: var(--shape-full); background: var(--surface-container-low);
@@ -6622,14 +7768,34 @@
      spans the page, but its content belongs to the transcript column — when the
      rail opens the field has to shrink with the transcript, not stay full width
      and slide out of alignment. */
+  /* 12, not 3: the dock's panels (context, mode) open upward over the transcript,
+     and the "latest" button is 10 — inside a 3 the popover painted under it. */
   #composer { position: absolute; left: var(--rail-w, 16rem); right: var(--inst-w, 15rem);
-    bottom: 0; z-index: 3; background: var(--surface-container-low);
+    bottom: 0; z-index: 12; background: var(--surface-container-low);
     border-top: 1px solid var(--outline-variant); }
   /* The field belongs to the column between the rails, so it follows the same two
      numbers the grid does — no padding hack, and nothing to drift. */
   :global(#app:not(:has(.deck.open)) #composer) { left: 0; }
   @media (max-width: 1100px) { #composer { right: 0; } }
   @media (max-width: 860px) { #composer { left: 0; } }
+  /* The drag band on the field's top edge. Thin, because it sits over the
+     transcript's last line, and it only shows itself on hover or focus. */
+  .cgrab { position: absolute; inset: 0 0 auto; height: 9px; z-index: 14; cursor: ns-resize;
+    border: 0; padding: 0; background: none; }
+  .cgrab::after { content: ""; position: absolute; left: 50%; top: 4px; width: 2.6rem;
+    height: 2px; margin-left: -1.3rem; border-radius: 1px; background: var(--outline-variant);
+    transition: background var(--motion-short) var(--ease); }
+  .cgrab:hover::after, .cgrab:focus-visible::after, .cgrab:active::after {
+    background: var(--primary); }
+  .cgrab:focus-visible { outline: none; }
+  /* The corner button shares the field's top edge, so it never sits in the
+     middle of a tall box with nothing to do. */
+  #composer .size { flex: 0 0 auto; align-self: flex-start; width: 2rem; min-height: 2rem;
+    padding: 0; display: grid; place-items: center; background: none; border: 0;
+    border-radius: var(--shape-full); color: var(--faint); cursor: pointer;
+    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
+  #composer .size:hover { background: var(--state-hover); color: var(--primary); }
+  #composer .size:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
   .attached { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1);    padding: var(--s2) clamp(1rem, 4vw, 3rem) 0; }
   .attached .chip { cursor: default; border-left: 3px solid var(--hue, var(--outline));
     display: inline-flex; align-items: center; gap: var(--s1); }
@@ -6661,19 +7827,49 @@
   .k-doc { --hue: var(--on-surface-variant); }
   footer { display: flex; gap: var(--s2); align-items: center;
     padding: var(--s3) clamp(1rem, 4vw, 3rem) 0; }
-  textarea { flex: 1; min-width: 0; resize: none; min-height: 2.6rem; max-height: 200px; background: none;
+  textarea { flex: 1; min-width: 0; resize: none; min-height: 2.6rem;
+    height: var(--compose-h, auto); max-height: var(--compose-h, none); background: none;
     color: var(--on-surface); border: 0; border-radius: 0; padding: var(--s2) 0; font: inherit;
-    font-size: 14px; caret-color: var(--primary); }
+    caret-color: var(--primary);
+    /* Above the tint layer: an absolutely positioned sibling paints over in-flow
+       text, so a token whose tint was opaque hid its own letters. */
+    position: relative; z-index: 1; }
   /* The tint layer. It repeats the draft in transparent ink — same padding,
      font, size and wrapping as the field — and paints only the token's
-     background, so the letters you read are always the textarea's own. */
-  .markwrap { position: relative; flex: 1; min-width: 0; display: flex; }
+     background, so the letters you read are always the textarea's own. Every
+     effect here is colour: no padding, no weight, nothing that would move a
+     glyph out from under the caret.
+     The size lives on this wrapper, not on either layer: when the two were set
+     apart (field 15px, tint 14px) every box was narrower than its word and the
+     tint slid into the next one. */
+  .markwrap { position: relative; flex: 1; min-width: 0; display: flex; font-size: 14px; }
   .marks { position: absolute; inset: 0; overflow: hidden; pointer-events: none;
-    padding: var(--s2) 0; font: inherit; font-size: 14px; color: transparent;
+    padding: var(--s2) 0; font: inherit; color: transparent;
     white-space: pre-wrap; overflow-wrap: break-word; }
-  .marks :global(mark) { color: transparent; border-radius: 3px; }
-  .marks :global(mark.mt) { background: color-mix(in srgb, var(--primary) 24%, transparent); }
-  .marks :global(mark.ms) { background: color-mix(in srgb, var(--tertiary) 26%, transparent); }
+  /* `<mark>` ships a UA background that is literally yellow, and it survives a
+     rule that only sets `background-image` — that is what painted every token
+     as a highlighter. Cleared here, the gradient is the only paint. */
+  .marks :global(mark) { color: transparent; background-color: transparent; border-radius: 0.34em;
+    -webkit-box-decoration-break: clone; box-decoration-break: clone;
+    background-image: linear-gradient(var(--tint), var(--tint));
+    background-repeat: no-repeat; background-position: 0 94%;
+    /* 62% of the mark's own box, which is its line box: the pill covers the
+       letters and not the leading, so it fits the word at any zoom, font size
+       or device pixel ratio — nothing here is a pixel value. */
+    background-size: 100% 62%;
+    animation: tintin 180ms var(--ease) both; }
+  /* One tint per sigil — the same three tokens the palette's badge uses, so a
+     `/`, `#` or `@` is the same colour wherever it is drawn. A hairline ring in
+     the same hue does the work an opaque fill used to: it reads as a token at a
+     glance without turning the line into a highlighter. */
+  .marks :global(mark.mc) { --tint: color-mix(in srgb, var(--m-cmd) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-cmd) 38%, transparent); }
+  .marks :global(mark.mt) { --tint: color-mix(in srgb, var(--m-tool) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-tool) 38%, transparent); }
+  .marks :global(mark.ms) { --tint: color-mix(in srgb, var(--m-skill) 24%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-skill) 40%, transparent); }
+  /* The wipe: the pill grows up from the baseline. Only the paint moves. */
+  @keyframes tintin { from { background-size: 100% 0; } to { background-size: 100% 62%; } }
   textarea:focus { outline: none; }
   textarea::placeholder { color: var(--faint); }
   .send { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--s1);
@@ -6706,26 +7902,8 @@
   .ghost.on { background: var(--secondary-container); color: var(--on-secondary-container);
     border-color: transparent; }
 
-  /* The command palette floats above the composer, inside it. */
-  .palette { position: absolute; bottom: calc(100% + var(--s2)); left: clamp(1rem, 4vw, 3rem);
-    right: clamp(1rem, 4vw, 3rem); max-height: 17rem; overflow-y: auto; z-index: 5;
-    background: var(--surface-container-high); border-radius: var(--shape-md);
-    box-shadow: 0 8px 24px #000a; animation: pop var(--motion-short) var(--ease); }
-  .palette .head { position: sticky; top: 0; display: flex; justify-content: space-between;
-    padding: var(--s1) var(--s3); background: var(--surface-container-high);
-    border-bottom: 1px solid var(--outline-variant); color: var(--faint);
-    font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.16em; }
-  .opt { display: flex; gap: var(--s2); align-items: baseline; width: 100%; text-align: left;
-    background: none; border: 0; color: var(--on-surface); font: inherit; font-size: 13px;
-    padding: var(--s1) var(--s3); cursor: pointer; min-height: 0; }
-  .opt.on { background: var(--secondary-container); }
-  .opt b { color: var(--primary); font-family: var(--mono); font-weight: 500; white-space: nowrap; }
-  /* The sigil carries the kind, so the three lists are told apart at a glance:
-     / command is the signal colour, @ skill is the warning colour, # tool is mint. */
-  .opt.k-skill b { color: var(--tertiary); }
-  .opt.k-tool b { color: var(--on-secondary-container); }
-  .opt .dim { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
+  /* The command palette lives in Palette.svelte: it is the piece the page
+     redraws on every keystroke, and its styles belong beside it. */
   /* ── dialogs ───────────────────────────────────────────────────────────
      A dialog interrupts, so it is the only surface allowed an elevation
      shadow. Everything else is tone. */
@@ -6736,7 +7914,7 @@
      taller than the window is clipped at both ends with nothing to scroll, so
      the action row at the bottom of a long dialog was unreachable. This centres
      while the card fits and scrolls the backdrop when it does not. */
-  #modal, #tools-modal { position: fixed; inset: 0; background: #000a;
+  #modal { position: fixed; inset: 0; background: #000a;
     display: flex; overflow-y: auto; padding: var(--s4);
     backdrop-filter: blur(3px); animation: fade var(--motion-short) var(--ease); z-index: 40; }
   .card { margin: auto; }
@@ -6800,12 +7978,51 @@
   .askcard .args :global(dd) { font-family: var(--mono); }
   .askcard .row { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
 
-  /* Context meter — the only gauge in the rail, and the only number that says a
-     conversation is about to be compacted. */
-  .ctx { height: 3px; border-radius: var(--shape-full); overflow: hidden;
-    background: var(--surface-container-highest); }
-  .ctx i { display: block; height: 100%; border-radius: inherit; background: var(--primary);
-    transition: width var(--motion-medium) var(--ease); }
+  /* Session info: a ring that opens. It sits in the dock (the rail that used to
+     hold it is hidden below 1100px), and the panel opens upward from it, the way
+     the mode menu does. It carries the `auto` margin when it is present, so the
+     ring and the model share the right corner; without a ring the model keeps it. */
+  .ctxwrap { position: relative; margin-left: auto; }
+  .dock:has(.ctxwrap) .modelbtn { margin-left: 0; }
+  .ctxb { gap: var(--s1); font-variant-numeric: tabular-nums; }
+  .ring { width: 1.35rem; height: 1.35rem; flex: 0 0 auto; transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 4; stroke: var(--surface-container-highest); }
+  .ring circle + circle { stroke: var(--primary); stroke-linecap: round;
+    transition: stroke-dasharray var(--motion-medium) var(--ease); }
+  .ctxpop { position: absolute; bottom: calc(100% + var(--s2)); right: 0; z-index: 25;
+    width: min(19rem, 88vw); padding: var(--s2) var(--s3); border-radius: var(--shape-md);
+    background: var(--surface-container-high); border: 1px solid var(--outline-variant);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.45); animation: rise var(--motion-short) var(--ease); }
+  /* Header says the window, rows say the share of it — the same reading as the
+     Copilot chat's session-info panel, in the type this page already uses. */
+  .ctxpop-h { display: flex; align-items: baseline; justify-content: space-between;
+    gap: var(--s2); margin: 0 0 var(--s2); font-size: 11.5px;
+    font-variant-numeric: tabular-nums; }
+  .ctxpop-h b { font-weight: 500; }
+  .ctxpop-h span { color: var(--primary); }
+  .ctx-h { margin: var(--s2) 0 var(--s1); color: var(--faint); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.14em; }
+  /* The bar is the groups at a glance: system, the user's own words, then the
+     output reservation. A share too small to see still gets 2px, because a
+     segment that vanishes reads as zero. */
+  .ctxbar { display: flex; gap: 1px; height: 4px; margin: 0 0 var(--s1);
+    border-radius: var(--shape-full); overflow: hidden; background: var(--surface-container-highest); }
+  .ctxbar i { display: block; min-width: 2px; }
+  .ctxbar i.sys { background: var(--primary); }
+  .ctxbar i.usr { background: var(--tertiary); }
+  .ctxbar i.oth { background: var(--secondary-container); }
+  /* Dashed, not filled: the reservation is not a share of the prompt it sits
+     against — it is a band that overlaps it, and a solid block would read as
+     tokens already spent. */
+  .ctxbar i.res { background: repeating-linear-gradient(90deg,
+    var(--outline) 0 2px, transparent 2px 5px); }
+  .ctx-row { display: flex; justify-content: space-between; gap: var(--s2); margin: 0;
+    font-size: 11px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
+  .ctx-row b { color: var(--on-surface); font-weight: 500; }
+  .ctxcompact { width: 100%; margin-top: var(--s2); padding: var(--s1) var(--s2);
+    border-radius: var(--shape-full); background: var(--surface-container-highest);
+    color: var(--on-surface); font-family: var(--mono); font-size: 10.5px; }
+  .ctxcompact:disabled { opacity: 0.5; }
   .ctx-n { margin: var(--s1) 0 0; color: var(--faint); font-size: 10px;
     font-variant-numeric: tabular-nums; }
 
@@ -6907,19 +8124,77 @@
   .sfld textarea::placeholder, .sfld input::placeholder { color: var(--faint); }
   .sub-h { margin: var(--s4) 0 var(--s2); font-family: var(--mono); font-size: 9px;
     text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); }
+  /* A shortcut row: what it does on the left, the key as a keycap on the right. */
+  .krow { display: flex; align-items: center; justify-content: space-between;
+    gap: var(--s3); width: 100%; font-size: 12px; color: var(--on-surface-variant); }
+  .kbd { font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 7px;
+    border: 1px solid var(--outline-variant); background: var(--surface-container-highest);
+    color: var(--on-surface); min-width: 5.5rem; }
+  .kbd.capturing { border-color: var(--primary); color: var(--primary); }
   .linky.danger { color: var(--error); }
   .facts { display: grid; grid-template-columns: 8rem 1fr; gap: var(--s2) var(--s3); margin: 0;
     font-family: var(--mono); font-size: 12px; }
   .facts :global(dt) { color: var(--on-surface-variant); }
   .facts :global(dd) { margin: 0; color: var(--on-surface); word-break: break-all; }
-  .card.settings { display: grid; grid-template-columns: 9rem 1fr; gap: var(--s4); }
-  /* Settings navigates vertically, so its tabs are a rail, not an underline strip. */
-  .stabs { display: flex; flex-direction: column; gap: 2px;
-    border-right: 1px solid var(--outline-variant); padding-right: var(--s3); }
-  .stabs .tab { text-align: left; border-radius: var(--shape-full); width: 100%;
-    border-bottom: 0; min-height: 2.2rem; padding: var(--s2) var(--s3); }
-  .stabs .tab.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+  .card.settings { display: grid; grid-template-columns: 1fr; gap: var(--s4); }
+  /* The same strip the provider picker uses: one row of 12px labels with a 2px
+     underline for the active one, scrolling sideways instead of wrapping — eight
+     tabs do not fit a phone, and a wrapped tab bar pushes the body down twice. */
+  .stabs { display: flex; gap: var(--s1); overflow-x: auto; scrollbar-width: none;
+    border-bottom: 1px solid var(--outline-variant); padding-right: 0; }
+  .stabs::-webkit-scrollbar { display: none; }
+  .stabs .tab { flex: 0 0 auto; width: auto; text-align: left; background: none;
+    border: 0; border-bottom: 2px solid transparent; color: var(--on-surface-variant);
+    font: inherit; font-size: 12px; min-height: 2.4rem; padding: var(--s2) var(--s3);
+    border-radius: var(--shape-xs) var(--shape-xs) 0 0; cursor: pointer; }
+  .stabs .tab:hover { color: var(--on-surface); }
+  .stabs .tab.on { background: none; color: var(--on-surface); border-bottom-color: var(--primary); }
   .sbody { min-height: 9rem; }
+
+  /* Settings > Skills / MCP: one row per thing, one switch per row. The track is
+     34×20 but the button is 44px, so a thumb finds it on a phone and a mouse
+     still gets a target bigger than the paint. */
+  .mng { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px;
+    /* The same window as the model picker's list: a long registry scrolls inside
+       its box instead of pushing the form (and the Save under it) off the card. */
+    max-height: 40vh; overflow-y: auto; }
+  .mng li { display: flex; align-items: center; gap: var(--s3); min-height: 44px;
+    padding: 0 var(--s1) 0 var(--s2); border-radius: var(--shape-md);
+    transition: background var(--motion-short) var(--ease); }
+  .mng li:hover { background: var(--state-hover); }
+  .mngname { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .mngname b { font-weight: 600; font-size: 13.5px; letter-spacing: 0.1px; }
+  .mngname small { color: var(--dim); font-size: 11.5px; }
+  .mngempty { margin: var(--s3) var(--s2); color: var(--dim); font-size: 13px; }
+  .mswitch { flex: none; width: 44px; height: 44px; display: grid; place-items: center;
+    border: 0; background: none; cursor: pointer; border-radius: var(--shape-full); }
+  .mswitch i { width: 34px; height: 20px; border-radius: var(--shape-full);
+    border: 2px solid var(--outline); position: relative; display: block;
+    transition: background var(--motion-short) var(--ease),
+      border-color var(--motion-short) var(--ease); }
+  .mswitch i::after { content: ""; position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%; background: var(--outline);
+    transition: transform var(--motion-short) var(--ease),
+      background var(--motion-short) var(--ease); }
+  .mswitch.on i { background: var(--secondary-container); border-color: var(--secondary-container); }
+  .mswitch.on i::after { transform: translateX(14px); background: var(--on-secondary-container); }
+  /* The row's one text action (use / remove / revoke). Quiet until hovered: the
+     switch is the primary control on these rows, and a second loud button on
+     every line would read as two equal decisions. */
+  .mact { flex: none; border: 0; background: none; cursor: pointer; padding: 8px 10px;
+    border-radius: var(--shape-full); color: var(--dim); font: inherit; font-size: 12.5px;
+    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
+  .mact:hover { background: var(--state-hover); color: var(--on-surface, inherit); }
+  /* The form's own action — create skill, add server, create agent — is the same
+     button the dialogs use for theirs (`Save`, `apply`). It was a bare <button>,
+     which read as a quieter, different thing two tabs away from Save. */
+  .sfld > button { background: var(--primary); color: var(--on-primary); border: 0;
+    border-radius: var(--shape-full); padding: 0 var(--s4); font: inherit; font-weight: 600;
+    cursor: pointer; min-height: 2.4rem; }
+  .sfld > button:disabled { opacity: 0.5; cursor: default; }
+
+  /* The snackbar lives in Toasts.svelte: one more presentational scope out of
+     this file, and its styles with it. */
 
   /* Provider tab body: the live catalogue, filterable, one row per model. It is
      the provider's own list — not a copy of the default model in the config. */
@@ -6976,10 +8251,17 @@
     cursor: pointer; min-height: 0; margin-bottom: 2px;
     transition: background var(--motion-short) var(--ease), border-color var(--motion-short) var(--ease); }
   .rhit:hover, .rhit:focus-visible { background: var(--state-hover); border-left-color: var(--primary); }
+  /* The row ↵ would open. One state with hover, so moving with the keyboard and
+     pointing at a row look like the same act — the accent edge is the tell. */
+  .rhit.sel { background: var(--state-hover); border-left-color: var(--primary); }
   .rhit .rtitle { color: var(--primary); font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   .rhit .rsnip { color: var(--on-surface-variant); font-size: 11px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  /* The matched words: the theme's own accent, bold. `{@html}` builds these <b>
+     nodes at run time, so they carry no svelte hash — the rule must be global
+     or it matches nothing (same trap as the ripple's ::after). */
+  .rhit :global(b.hl) { color: var(--primary); font-weight: 700; }
   /* Scoped to the dialog: `.row` is also the rail's list row, and an unscoped
      `button` rule here painted every thread with the primary fill. */
   .card .row { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s3); }
@@ -7020,7 +8302,15 @@
   @media (max-width: 1100px) {
     .deck.open { grid-template-columns: var(--rail-w, 16rem) minmax(0, 1fr); }
     .deck:not(.open) { grid-template-columns: minmax(0, 1fr); }
-    .inst { display: none; }
+    /* One door per rail: the sessions rail slides in from the left, the
+       instruments from the right. Both stop above the composer, and both are
+       30 — above the composer's popovers, below the dialogs. */
+    .instbtn { display: grid; }
+    .inst { display: flex; flex-direction: column; position: fixed; top: 44px; right: 0;
+      bottom: var(--composer-h, 8rem); z-index: 30; width: min(84vw, 17rem);
+      border-left: 1px solid var(--outline-variant);
+      transform: translateX(100%); transition: transform var(--motion-short) var(--ease); }
+    .deck.instopen .inst { transform: none; box-shadow: 0 0 60px #000c; }
     .grip.r { display: none; }
   }
 
@@ -7047,16 +8337,10 @@
     .dock { padding-inline: var(--s3); gap: var(--s1) var(--s2); }
     footer { padding: var(--s2) var(--s3) 0; }
     .attached { padding-inline: var(--s3); }
-    .palette { left: var(--s3); right: var(--s3); }
     .card { padding: var(--s4); }
     .card.settings { grid-template-columns: 1fr; }
-    .stabs { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--outline-variant); }
-    .stabs .tab { width: auto; }
-    /* One column of boxes: three across a phone is a wall of 11px labels. */
-    .card.tools { width: min(100%, 38rem); }
-    .tchecks { grid-template-columns: 1fr; padding-left: var(--s2); }
-    .tfoot .row { flex-wrap: wrap; }
-    .tcount { width: 100%; margin: 0 0 var(--s1); }
+    /* The strip is already horizontal and scrolls; a phone only needs it shorter. */
+    .stabs .tab { padding: var(--s2); }
     .ghost { padding: 0 var(--s2); }
     .dock { justify-content: flex-start; }
   }
@@ -7066,16 +8350,15 @@
     .dock { gap: var(--s1); }
     .dock .modelbtn { margin-left: 0; flex: 1 1 100%; }
     .modemenu { min-width: 0; width: min(88vw, 17rem); }
-    .card.tools { border-radius: var(--shape-md); }
     .card { padding: var(--s4); border-radius: var(--shape-md); }
-    .tlist { max-height: min(52vh, 24rem); }
-    #modal, #tools-modal { padding: var(--s2); }
+    #modal { padding: var(--s2); }
   }
 
   /* Motion is decoration here: none of it carries meaning. */
   @media (prefers-reduced-motion: reduce) {
-    .msg, .card, .starter, #modal, #tools-modal, .palette { animation: none; }
+    .msg, .card, .starter, #modal { animation: none; }
     .caret, .rec-stop, .tool.run::after, .tool.run summary::before { animation: none; }
+    .marks :global(mark) { animation: none; }
     /* Loading keeps its shape and loses the travel: a bar that jumps is worse
        than a bar that sits still. The two sweeps that only say "still going" go
        away entirely — the running marker and the pill already say it in words. */
@@ -7089,13 +8372,13 @@
      Type and hit targets, raised together. A UI feels expensive when nothing is
      small enough to squint at; these override the sizes above and nothing here
      changes a layout rule, only its measure. */
-  textarea { font-size: 15px; min-height: 3rem; }
+  .markwrap { font-size: 15px; }
+  textarea { min-height: 3rem; }
   .md { font-size: 15px; }
   .md :global(pre) { font-size: 13.5px; }
   .md :global(h1) { font-size: 1.24em; }
   .md :global(code) { font-size: 0.92em; padding: 1px 6px; }
 
-  .ico { width: 2.5rem; min-height: 2.5rem; font-size: 17px; }
   .seg { padding: 3px; }
   .seg button { min-height: 2.1rem; font-size: 13px; padding: 0 var(--s4); }
   .ghost, .modelbtn { min-height: 2.5rem; font-size: 13px; }
@@ -7122,7 +8405,6 @@
   .readout { font-size: 12px; }
   .readout :global(dt) { font-size: 10px; }
   .tool summary, .act summary, .think summary { font-size: 13px; padding: var(--s1) 0; }
-  .opt { font-size: 14px; }
   .empty h1 { font-size: clamp(1.9rem, 3.8vw, 2.7rem); }
   .empty .lede { font-size: 15px; max-width: 32rem; }
   .starter { font-size: 14px; padding: var(--s3) var(--s4); }

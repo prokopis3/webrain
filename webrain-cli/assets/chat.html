@@ -3,6 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The docs site's own logo, downscaled. Declared here so a fresh load never
+         reaches the implicit /favicon.ico request; the server answers that path
+         too, for a tab that was already open when this build started. -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <title>webrain chat</title>
     <link rel="stylesheet" href="/chat.css" />
     <script type="module" src="/chat.js"></script>

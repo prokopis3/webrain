@@ -49,22 +49,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use github_copilot_sdk::handler::{
+use copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
-use github_copilot_sdk::rpc::{
-    FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
-    HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
-    McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
+use copilot_sdk::rpc::{
+    AgentSelectRequest, AgentsDiscoverRequest, AgentsGetDiscoveryPathsRequest,
+    CommandsInvokeRequest, FleetStartRequest, HandlePendingToolCallRequest,
+    HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest, McpConfigAddRequest,
+    McpConfigRemoveRequest, McpDisableRequest, McpEnableRequest, McpListToolsRequest,
+    McpPromptsGetRequest, McpPromptsListRequest, McpResourcesListRequest, McpResourcesReadRequest,
+    McpStartServerRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
     ModeSetRequest, NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest,
     QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
-    SkillsEnableRequest, TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
+    SkillsEnableRequest, SlashCommandInvocationResult, TasksSendMessageRequest,
+    ToolsExecuteRequest, ToolsGetBuiltinDescriptorsRequest, UIEphemeralQueryRequest,
+    UIHandlePendingElicitationRequest, UIHandlePendingSamplingRequest,
 };
-use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
-use github_copilot_sdk::types::{
+use copilot_sdk::session_events::{
+    ElicitationRequestedData, PermissionMode, SamplingRequestedData, SessionMode,
+};
+use copilot_sdk::types::{
     DeliveryMode, PermissionRequestData, RequestId, SessionId, SetModelOptions,
 };
-use github_copilot_sdk::{Client, session::Session};
+use copilot_sdk::{Client, session::Session};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -87,6 +94,9 @@ const PERMISSION_WAIT: Duration = Duration::from_secs(120);
 /// `ask_user` gets longer than a permission: it needs a typed answer.
 const INPUT_WAIT: Duration = Duration::from_secs(300);
 
+/// The tab icon: the docs site's own logo, downscaled to 64×64 and stripped.
+const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
+
 pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{}", args.port);
     // Before the port is taken and before a runtime is started: a page that
@@ -106,6 +116,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     let permission = Arc::new(WebPermission {
         bus: bus.clone(),
         pending: Mutex::new(HashMap::new()),
+        approved: Mutex::new(load_approvals()),
         seq: AtomicU64::new(1),
     });
     let input = Arc::new(WebInput {
@@ -141,6 +152,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         store.clone(),
         convo.clone(),
         &settings,
+        None,
     )
     .await?;
 
@@ -158,6 +170,16 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         }
     })?;
     eprintln!("webrain chat · serving on http://{addr}/ · Ctrl-C to stop");
+    // Said here as well as in the page: the terminal is where this was started,
+    // and "why is this site different here" is answered before opening a tab.
+    if !webrain_core::backends::cdp::stealth_noise_on() {
+        eprintln!(
+            "· stealth fingerprint noise OFF (default for --serve) — pages mount where the\n  \
+             noise shim stops them hydrating; a fingerprinting site sees real values.\n  \
+             WEBRAIN_STEALTH_NOISE=1 restores the shim (Cloudflare managed challenges\n  \
+             then pass, but some SPAs stop mounting)."
+        );
+    }
     let state = Arc::new(State {
         bus,
         permission,
@@ -167,6 +189,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         timeout: AtomicU64::new(settings.timeout_secs),
         settings: Mutex::new(settings),
         busy: AtomicBool::new(false),
+        usage_at: Mutex::new(None),
         store,
         convo: Mutex::new(convo),
         provider: Mutex::new(provider.clone()),
@@ -219,6 +242,9 @@ async fn spawn_live(
     store: Option<Arc<chat_store::Store>>,
     convo: String,
     settings: &RuntimeSettings,
+    // `Some(id)` restores the runtime's session for this conversation instead of
+    // starting a blank one; every other caller starts fresh.
+    resume: Option<SessionId>,
 ) -> anyhow::Result<Live> {
     // The runtime's own idea of a window is Copilot's 128k, so a 1M-token model
     // was measured at 7% of 128k and compacted at a quarter of its real size.
@@ -233,15 +259,22 @@ async fn spawn_live(
         &args,
         provider,
         Some(permission as Arc<dyn PermissionHandler>),
-        Some(input as Arc<dyn UserInputHandler>),
+        // The same card answers `ask_user`, exit-plan-mode and auto-mode.
+        Some(input.clone()),
         // The conversation id names the runtime's copy of this session, so the
         // runtime can list it from creation and a later resume has a handle.
         Some(format!("webrain-{convo}")),
+        // `resume` is filled by the caller that has a runtime session id to
+        // restore; a plain spawn starts a fresh one.
+        resume,
     )
     .await?;
     let session = Arc::new(session);
     let mut events = session.subscribe();
     let out = bus;
+    let asked = input.clone();
+    // The reader owns a clone: the session itself is handed back in `Live`.
+    let reader_session = session.clone();
     let reader = tokio::spawn(async move {
         while let Ok(event) = events.recv().await {
             // The final text per reply, written once — the deltas before it are
@@ -251,6 +284,22 @@ async fn spawn_live(
                 && let Some(store) = &store
             {
                 store.append(&convo, "assistant", text);
+            }
+            // Two events that block a turn until someone answers them. Stacked
+            // off the loop rather than awaited in it: the answer is a person's,
+            // and the loop is the only drain for every other event.
+            if event.event_type == "elicitation.requested" {
+                let s = reader_session.clone();
+                let w = asked.clone();
+                let o = out.clone();
+                let d = event.data.clone();
+                tokio::spawn(async move { answer_elicitation(&s, &w, d, &o).await });
+            }
+            if event.event_type == "sampling.requested" {
+                let s = reader_session.clone();
+                let o = out.clone();
+                let d = event.data.clone();
+                tokio::spawn(async move { refuse_sampling(&s, d, &o).await });
             }
             let frame = json!({
                 // Which conversation this belongs to. There is exactly one live
@@ -305,6 +354,7 @@ async fn reseed(state: &Arc<State>) -> String {
         state.store.clone(),
         convo,
         &settings,
+        None,
     )
     .await
     {
@@ -789,6 +839,15 @@ struct RuntimeSettings {
     /// Standing instructions for every turn, applied by the runtime. Empty means
     /// none.
     instructions: String,
+    /// One turn may ask for several tool calls at once. Creation-time only, so
+    /// flipping it costs a restart — the trade nobody minds for a faster turn.
+    parallel_tools: bool,
+    /// Ask the provider to mark which sources support each span of the answer.
+    /// Off by default: the SDK calls the payload experimental, and asking costs
+    /// output tokens. Creation-time only, like `parallel_tools`.
+    citations: bool,
+    /// Comma-separated models the runtime may use; empty means unrestricted.
+    allowed_models: String,
 }
 
 impl Default for RuntimeSettings {
@@ -802,6 +861,9 @@ impl Default for RuntimeSettings {
             compact_at: 80,
             effort: String::new(),
             instructions: String::new(),
+            parallel_tools: true,
+            citations: false,
+            allowed_models: String::new(),
         }
     }
 }
@@ -835,6 +897,9 @@ impl RuntimeSettings {
                 .clamp(COMPACT_PCT.0, COMPACT_PCT.1),
             effort: v["effort"].as_str().unwrap_or_default().to_string(),
             instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
+            parallel_tools: v["parallel_tools"].as_bool().unwrap_or(d.parallel_tools),
+            citations: v["citations"].as_bool().unwrap_or(d.citations),
+            allowed_models: v["allowed_models"].as_str().unwrap_or_default().to_string(),
         }
     }
 
@@ -848,6 +913,9 @@ impl RuntimeSettings {
             "compact_at": self.compact_at,
             "effort": self.effort,
             "instructions": self.instructions,
+            "parallel_tools": self.parallel_tools,
+            "citations": self.citations,
+            "allowed_models": self.allowed_models,
         })
     }
 
@@ -858,7 +926,17 @@ impl RuntimeSettings {
         // and `instructions` are all reachable through `session.options.update`,
         // and rebuilding the session for them threw away the prompt cache for a
         // save that is usually just a wording change.
-        let session = |s: &Self| (s.memory, s.allow_agents, s.max_output_tokens, s.compact_at);
+        let session = |s: &Self| {
+            (
+                s.memory,
+                s.allow_agents,
+                s.max_output_tokens,
+                s.compact_at,
+                s.parallel_tools,
+                s.citations,
+                s.allowed_models.clone(),
+            )
+        };
         let before = session(self);
         if let Some(b) = v["memory"].as_bool() {
             self.memory = b;
@@ -888,6 +966,15 @@ impl RuntimeSettings {
         if let Some(t) = v["instructions"].as_str() {
             self.instructions = t.to_string();
         }
+        if let Some(b) = v["parallel_tools"].as_bool() {
+            self.parallel_tools = b;
+        }
+        if let Some(b) = v["citations"].as_bool() {
+            self.citations = b;
+        }
+        if let Some(m) = v["allowed_models"].as_str() {
+            self.allowed_models = m.to_string();
+        }
         before != session(self)
     }
 
@@ -911,6 +998,9 @@ impl RuntimeSettings {
         // empty is "unset", which is what `connect` already treats as the default.
         args.effort = Some(self.effort.clone());
         args.instructions = Some(self.instructions.clone());
+        args.parallel_tools = Some(self.parallel_tools);
+        args.citations = Some(self.citations);
+        args.allowed_models = Some(self.allowed_models.clone());
     }
 }
 
@@ -930,6 +1020,11 @@ struct State {
     /// `POST /settings`.
     settings: Mutex<RuntimeSettings>,
     busy: AtomicBool,
+    /// The runtime's usage counters as they stood when the running turn began.
+    /// `usage.get_metrics` is session-cumulative, so the closing line has to
+    /// subtract this to describe the turn — otherwise the page showed a session
+    /// total next to a per-turn panel and both said "this turn".
+    usage_at: Mutex<Option<(i64, i64, i64, i64, f64, i64)>>,
     store: Option<Arc<chat_store::Store>>,
     /// The conversation new turns are stored in. Mutable: opening a past
     /// conversation moves it, so a continued chat lands where the page shows it.
@@ -960,7 +1055,72 @@ struct WebPermission {
     // runtime waited for an answer the page could no longer give, and nothing
     // was on screen to answer.
     pending: Mutex<HashMap<String, (oneshot::Sender<bool>, Value)>>,
+    // `server:tool` keys the reader approved with "always allow", loaded once and
+    // written back on every change. On the server rather than in the page's
+    // localStorage: the approval is a statement about this session's tools, so a
+    // second tab — or a reload — must not be asked again, and the CLI's own turn
+    // must not be able to slip past a grant the page already gave.
+    approved: Mutex<Vec<String>>,
     seq: AtomicU64,
+}
+
+/// The key an approval is remembered under, and the same key the page uses:
+/// the server and the TOOL, never the runtime's `kind` — a kind like `tool`
+/// would stand for every tool there is. An unnamed server reads as `mcp`, which
+/// is what the page's `a.server || "mcp"` produces for the empty string a card
+/// carries when the runtime names none.
+fn approval_key(card: &Value) -> String {
+    let server = card["server"].as_str().unwrap_or("");
+    let server = if server.is_empty() { "mcp" } else { server };
+    let tool = card["tool"].as_str().unwrap_or("");
+    let tool = if tool.is_empty() { "tool" } else { tool };
+    format!("{server}:{tool}")
+}
+
+fn load_approvals() -> Vec<String> {
+    load_approvals_from(&chat_store::approvals_path())
+}
+
+fn load_approvals_from(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    v["approved"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_approvals(keys: &[String]) -> bool {
+    save_approvals_to(&chat_store::approvals_path(), keys)
+}
+
+fn save_approvals_to(path: &std::path::Path, keys: &[String]) -> bool {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, json!({ "approved": keys }).to_string()).is_ok()
+}
+
+impl WebPermission {
+    /// Add or drop one key and persist. A store that cannot be written is
+    /// reported rather than swallowed: the answer still applies to this prompt,
+    /// but the promise "you will not be asked again" would be a lie.
+    async fn set_approved(&self, key: &str, on: bool) -> bool {
+        let mut keys = self.approved.lock().await;
+        keys.retain(|k| k != key);
+        if on {
+            keys.push(key.to_string());
+        }
+        save_approvals(&keys)
+    }
 }
 
 #[async_trait::async_trait]
@@ -972,12 +1132,26 @@ impl PermissionHandler for WebPermission {
         data: PermissionRequestData,
     ) -> PermissionResult {
         let id = format!("p{}", self.seq.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
+        let managed = data.managed_approval_required.unwrap_or(false);
         // The runtime packs a structured request inside `extra` — server, tool,
         // arguments, whether it only reads. `format!("{data:?}")` was what turned
         // the dialog into a wall of text; these are the fields a person decides on.
         let req = &data.extra["permissionRequest"];
-        let card = permission_card(&id, req, data.managed_approval_required.unwrap_or(false));
+        let card = permission_card(&id, req, managed);
+        // A saved approval answers a tool prompt without a card — but never a
+        // managed one, where the runtime is saying a policy requires a human. The
+        // note keeps the grant visible: silence would hide a standing permission.
+        let key = approval_key(&card);
+        if !managed && self.approved.lock().await.iter().any(|k| *k == key) {
+            let _ = self.bus.send(
+                json!({ "type": "webrain.note", "data": { "text": format!(
+                    "{key} approved without asking — you saved this approval; remove it in settings to be asked again"
+                ) } })
+                .to_string(),
+            );
+            return PermissionResult::approve_once();
+        }
+        let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .await
@@ -992,6 +1166,20 @@ impl PermissionHandler for WebPermission {
             Ok(Ok(false)) => PermissionResult::reject(Some("denied in the web UI".into())),
             _ => PermissionResult::reject(Some("no answer from the web UI".into())),
         }
+    }
+}
+
+/// The agent definition the session is running right now, in the shape the page
+/// lists definitions in. `null` is the built-in agent (nothing selected); an
+/// object with `error` is a call that failed — the two are different facts and
+/// the page must not read a failure as "nothing selected".
+async fn current_agent(live: &Live) -> Value {
+    match live.session.rpc().agent().get_current().await {
+        Ok(r) => match r.agent {
+            Some(a) => json!({ "id": a.id, "name": a.name, "title": a.display_name }),
+            None => Value::Null,
+        },
+        Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
@@ -1039,10 +1227,42 @@ fn permission_card(id: &str, req: &Value, managed: bool) -> Value {
     })
 }
 
-struct WebInput {
+pub(crate) struct WebInput {
     bus: Bus,
     pending: Mutex<HashMap<String, oneshot::Sender<(String, bool)>>>,
     seq: AtomicU64,
+}
+
+impl WebInput {
+    /// Ask the page a question and wait for the answer. `ask_user`, exit-plan-mode
+    /// and auto-mode all land here: from the page's side it is always one card.
+    pub(crate) async fn ask(
+        &self,
+        question: String,
+        choices: Option<Vec<String>>,
+    ) -> Option<(String, bool)> {
+        let id = format!("u{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        let ask = json!({
+            "type": "webrain.ask",
+            "data": {
+                "id": id,
+                "question": question,
+                "choices": choices.unwrap_or_default(),
+                "allow_freeform": true,
+            },
+        });
+        let _ = self.bus.send(ask.to_string());
+
+        // Longer than a permission: a person has to read and type an answer.
+        let answer = tokio::time::timeout(INPUT_WAIT, rx).await;
+        self.pending.lock().await.remove(&id);
+        match answer {
+            Ok(Ok(pair)) => Some(pair),
+            _ => None,
+        }
+    }
 }
 
 /// Answers `ask_user`, which is not a permission: it is a question, and a turn
@@ -1053,35 +1273,177 @@ impl UserInputHandler for WebInput {
     async fn handle(
         &self,
         _session: SessionId,
+        _request_id: Option<copilot_sdk::types::RequestId>,
         question: String,
         choices: Option<Vec<String>>,
-        allow_freeform: Option<bool>,
+        _allow_freeform: Option<bool>,
     ) -> Option<UserInputResponse> {
-        let id = format!("u{}", self.seq.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
-        let ask = json!({
-            "type": "webrain.ask",
-            "data": {
-                "id": id,
-                "question": question,
-                "choices": choices.unwrap_or_default(),
-                "allow_freeform": allow_freeform.unwrap_or(true),
-            },
-        });
-        let _ = self.bus.send(ask.to_string());
-
-        // Longer than a permission: a person has to read and type an answer.
-        let answer = tokio::time::timeout(INPUT_WAIT, rx).await;
-        self.pending.lock().await.remove(&id);
-        match answer {
-            Ok(Ok((answer, was_freeform))) => Some(UserInputResponse {
-                answer,
-                was_freeform,
-            }),
-            _ => None,
-        }
+        let (answer, was_freeform) = self.ask(question, choices).await?;
+        Some(UserInputResponse {
+            answer,
+            was_freeform,
+        })
     }
+}
+
+/// The type an elicitation field declares, or `""` when this page cannot type it.
+/// A nested object, an array or an unrecognised type is not guessed at.
+fn prop_kind(prop: &Value) -> &'static str {
+    match prop.get("type").and_then(Value::as_str) {
+        Some("boolean") => "boolean",
+        Some("integer") => "integer",
+        Some("number") => "number",
+        Some("string") => "string",
+        _ => "",
+    }
+}
+
+/// Coerce a typed answer to what the schema declares. The card's only input is
+/// freeform text, so this is where "yes" becomes `true` and "3" becomes `3` — a
+/// string in a boolean field is a form the server rejects, not a near miss.
+fn coerce(kind: &str, answer: &str) -> Option<Value> {
+    let a = answer.trim();
+    match kind {
+        "boolean" => match a.to_ascii_lowercase().as_str() {
+            "yes" | "true" | "y" => Some(Value::Bool(true)),
+            "no" | "false" | "n" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        "integer" => a.parse::<i64>().ok().map(Value::from),
+        "number" => a
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        "string" => Some(Value::String(a.to_string())),
+        _ => None,
+    }
+}
+
+/// A form the runtime could not fill in itself.
+///
+/// The reply must be a `content` object matching `requestedSchema`, so every
+/// field is coerced to the type it declares and anything this page cannot type
+/// declines the whole request. A near-miss form is worse than a refusal: the
+/// server would act on values it never validated.
+async fn answer_elicitation(session: &Arc<Session>, input: &Arc<WebInput>, data: Value, out: &Bus) {
+    let Ok(req) = serde_json::from_value::<ElicitationRequestedData>(data) else {
+        return;
+    };
+    let who = req
+        .elicitation_source
+        .clone()
+        .unwrap_or_else(|| "the agent".to_string());
+    let note = |text: String| {
+        let _ = out.send(json!({ "type": "webrain.note", "data": { "text": text } }).to_string());
+    };
+    note(format!("{who} asks: {}", req.message));
+
+    let mut content = serde_json::Map::new();
+    let mut no: Option<String> = None;
+    if let Some(url) = req.url.clone() {
+        no = Some(format!("it wants a browser at {url}"));
+    } else if let Some(schema) = req.requested_schema.clone() {
+        // A HashMap has no order; a form does, so the questions are stable.
+        let mut props: Vec<(String, Value)> = schema.properties.into_iter().collect();
+        props.sort_by(|a, b| a.0.cmp(&b.0));
+        let required = schema.required.unwrap_or_default();
+        for (name, prop) in props {
+            let kind = prop_kind(&prop);
+            if kind.is_empty() {
+                no = Some(format!("`{name}` is not a field the page can draw"));
+                break;
+            }
+            let choices: Vec<String> = prop
+                .get("enum")
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|e| e.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let label = prop
+                .get("title")
+                .or_else(|| prop.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or(&name)
+                .to_string();
+            let Some((answer, _)) = input
+                .ask(label, (!choices.is_empty()).then_some(choices))
+                .await
+            else {
+                no = Some(format!("no answer for `{name}`"));
+                break;
+            };
+            let typed = if answer.trim().is_empty() {
+                prop.get("default").cloned()
+            } else {
+                coerce(kind, &answer)
+            };
+            match typed {
+                Some(v) if !v.is_null() => {
+                    content.insert(name, v);
+                }
+                _ => {
+                    no = Some(format!("`{name}` is not a {kind}"));
+                    break;
+                }
+            }
+        }
+        if no.is_none()
+            && let Some(missing) = required.iter().find(|n| !content.contains_key(*n))
+        {
+            no = Some(format!("`{missing}` is required"));
+        }
+    } else {
+        no = Some("it asked for nothing the page can fill".to_string());
+    }
+
+    let body = match no {
+        Some(why) => {
+            note(format!("elicitation declined — {why}"));
+            json!({ "requestId": req.request_id, "result": { "action": "decline" } })
+        }
+        None => json!({
+            "requestId": req.request_id,
+            "result": { "action": "accept", "content": content },
+        }),
+    };
+    let Ok(params) = serde_json::from_value::<UIHandlePendingElicitationRequest>(body) else {
+        return;
+    };
+    if let Err(e) = session.rpc().ui().handle_pending_elicitation(params).await {
+        note(format!("elicitation: {e}"));
+    }
+}
+
+/// An MCP server asking the model for a completion.
+///
+/// There is no answer to give it from here. `UIHandlePendingSamplingResponse` is
+/// an empty struct, so a completion we ran could not be returned, and the
+/// runtime's own runner takes `McpExecuteSamplingRequest`, also empty — the raw
+/// MCP messages are explicitly opaque at the schema layer. So the request is
+/// declined, which the protocol allows and the server understands, instead of
+/// being left to hang until its timeout and stall the turn.
+async fn refuse_sampling(session: &Arc<Session>, data: Value, out: &Bus) {
+    let Ok(req) = serde_json::from_value::<SamplingRequestedData>(data) else {
+        return;
+    };
+    let _ = out.send(
+        json!({ "type": "webrain.note", "data": { "text": format!(
+            "mcp sampling: {} asked the model for a completion — declined, it would spend your credits \
+             and this client cannot carry the answer back",
+            req.server_name,
+        ) } })
+        .to_string(),
+    );
+    let Ok(params) = serde_json::from_value::<UIHandlePendingSamplingRequest>(
+        json!({ "requestId": req.request_id }),
+    ) else {
+        return;
+    };
+    let _ = session.rpc().ui().handle_pending_sampling(params).await;
 }
 
 async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<()> {
@@ -1106,6 +1468,17 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         }
         ("GET", "/chat.css") => {
             respond(&mut stream, 200, "text/css; charset=utf-8", &state.ui.css).await
+        }
+        // The tab icon, from the same artwork the docs site uses
+        // (`docs/images/webrain-logo-rounded.png`, downscaled to 64×64). Embedded
+        // with `include_bytes!` rather than added to the verified asset set: it is
+        // 5 KB, it is not code, and it cannot ask anyone to approve anything — the
+        // reason the page itself is digested and read from disk does not apply to a
+        // picture. Browsers ask for `/favicon.ico` by themselves; `/favicon.png` is
+        // what the page's own `rel="icon"` points at, so a fresh load never reaches
+        // the implicit request at all.
+        ("GET", "/favicon.ico") | ("GET", "/favicon.png") => {
+            respond_bytes(&mut stream, 200, "image/png", &[], FAVICON).await
         }
         // The markdown renderer's chunk. `chat.js` imports it dynamically, so the
         // first paint never parses `marked` or DOMPurify; the page warms it when
@@ -1223,7 +1596,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     store.append(&state.convo().await, "user", &raw);
                 }
                 let live = state.live.read().await.clone();
-                let opts = github_copilot_sdk::MessageOptions::new(prompt.as_str()).with_mode(
+                let opts = copilot_sdk::MessageOptions::new(prompt.as_str()).with_mode(
                     if delivery == "steer" {
                         DeliveryMode::Immediate
                     } else {
@@ -1248,7 +1621,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let st = state.clone();
             let plan_mode = mode == "plan";
             tokio::spawn(async move {
-                let wait = github_copilot_sdk::MessageOptions::new(prompt.as_str())
+                let wait = copilot_sdk::MessageOptions::new(prompt.as_str())
                     .with_wait_timeout(Duration::from_secs(st.timeout.load(Ordering::SeqCst)));
                 let turn = live.session.send_and_wait(wait);
                 tokio::pin!(turn);
@@ -1314,16 +1687,35 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 // inventing one.
                 if let Ok(m) = live.session.rpc().usage().get_metrics().await {
                     let t = chat_session::totals_of(&m);
+                    // `get_metrics` counts the whole session. The difference from
+                    // when this turn began is the turn; without it the closing
+                    // line reported every earlier turn too, next to a panel that
+                    // measured only this one — two numbers, one label.
+                    let mut prev = st.usage_at.lock().await;
+                    let base = prev.unwrap_or((0, 0, 0, 0, 0.0, 0));
+                    *prev = Some((
+                        t.input, t.output, t.requests, t.api_ms, t.nano_aiu, t.cached,
+                    ));
+                    drop(prev);
+                    let d = |now: i64, was: i64| (now - was).max(0);
+                    let input = d(t.input, base.0);
+                    let output = d(t.output, base.1);
+                    let api_ms = d(t.api_ms, base.3);
+                    let cached = d(t.cached, base.5);
                     let _ = st.bus.send(
                         json!({"type": "webrain.usage", "data": {
                             "model": live.model(),
-                            "input": t.input,
-                            "output": t.output,
-                            "cached": t.cached,
-                            "requests": t.requests,
-                            "api_ms": t.api_ms,
-                            "tokens_per_sec": t.tokens_per_sec(),
-                            "nano_aiu": t.nano_aiu,
+                            "input": input,
+                            "output": output,
+                            "cached": cached,
+                            "requests": d(t.requests, base.2),
+                            "api_ms": api_ms,
+                            "tokens_per_sec": if api_ms > 0 {
+                                output as f64 / (api_ms as f64 / 1000.0)
+                            } else {
+                                0.0
+                            },
+                            "nano_aiu": (t.nano_aiu - base.4).max(0.0),
                         }})
                         .to_string(),
                     );
@@ -1337,7 +1729,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         ("POST", "/stop") => {
             let live = state.live.read().await.clone();
             let reply = match live.session.abort().await {
-                Ok(()) => json!({ "stopped": true }),
+                Ok(()) => {
+                    // The turn's own wait clears this too, but not before the
+                    // abort returns — so a page that stops and immediately sends
+                    // used to race a 409 that said "busy" about a dead turn.
+                    state.busy.store(false, Ordering::SeqCst);
+                    json!({ "stopped": true })
+                }
                 Err(e) => json!({ "stopped": false, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
@@ -1370,7 +1768,12 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // chat database so they outlive the process.
         ("GET", "/settings") => {
             let s = state.settings.lock().await.clone().to_json();
-            let body = json!({ "settings": s }).to_string();
+            // The page says out loud which fingerprint the browser will present:
+            // `chat --serve` defaults the noise shim off, and a user who wonders
+            // why a site behaves differently here than in their own tab needs to
+            // read the switch, not guess it.
+            let noise = webrain_core::backends::cdp::stealth_noise_on();
+            let body = json!({ "settings": s, "stealth": { "noise": noise } }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
         ("POST", "/settings") => {
@@ -1381,13 +1784,23 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             state.timeout.store(s.timeout_secs, Ordering::SeqCst);
             // The three that do not need a rebuild go into the live session now;
             // `None` means "leave it", so an empty effort sends nothing.
-            let patch = github_copilot_sdk::rpc::SessionUpdateOptionsParams {
-                organization_custom_instructions: Some(s.instructions.clone()),
-                enable_session_store: Some(s.session_store),
-                reasoning_effort: if s.effort.is_empty() {
+            // 2.0.1 groups the flat patch: instructions / state / inference.
+            let patch = copilot_sdk::rpc::SessionUpdateOptionsParams {
+                instructions: Some(copilot_sdk::rpc::SessionUpdateInstructionOptions {
+                    organization_text: Some(s.instructions.clone()),
+                    ..Default::default()
+                }),
+                state: Some(copilot_sdk::rpc::SessionUpdateStateOptions {
+                    enable_cross_session_store: Some(s.session_store),
+                    ..Default::default()
+                }),
+                inference: if s.effort.is_empty() {
                     None
                 } else {
-                    Some(s.effort.clone())
+                    Some(copilot_sdk::rpc::SessionUpdateInferenceOptions {
+                        reasoning_effort: Some(s.effort.clone()),
+                        ..Default::default()
+                    })
                 },
                 ..Default::default()
             };
@@ -1516,6 +1929,42 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             if let Some(e) = heaviest_error {
                 body["heaviestError"] = json!(e);
             }
+            // The attribution only exists during a turn, so after a reload or a
+            // restart this answered "no snapshot" while the history was still on
+            // screen. Remember the last real one per conversation and serve it as
+            // `stale: true` — an honest "as of the last turn", not zeros.
+            if let Some(store) = state.store.as_ref() {
+                let convo = state.convo().await;
+                if body["attribution"].is_null() {
+                    if let Some((saved, ts)) = store.context(&convo) {
+                        for k in [
+                            "totalTokens",
+                            "promptTokenLimit",
+                            "systemTokens",
+                            "conversationTokens",
+                            "attribution",
+                        ] {
+                            if let Some(v) = saved.get(k) {
+                                body[k] = v.clone();
+                            }
+                        }
+                        body["stale"] = json!(true);
+                        body["savedAt"] = json!(ts);
+                    }
+                } else {
+                    store.save_context(
+                        &convo,
+                        &json!({
+                            "totalTokens": body["totalTokens"],
+                            "promptTokenLimit": body["promptTokenLimit"],
+                            "systemTokens": body["systemTokens"],
+                            "conversationTokens": body["conversationTokens"],
+                            "attribution": body["attribution"],
+                        })
+                        .to_string(),
+                    );
+                }
+            }
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
         // Whether the server this session attached to itself is actually up:
@@ -1543,18 +1992,335 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // An MCP server's own prompts and resources. Both have been namespaces
+        // since the migration (`session.mcp.prompts` / `.resources`) and were
+        // never read, so a server that ships a slash command or a document was
+        // invisible: only its tools ever reached the page.
+        ("GET", "/mcp/items") => {
+            let live = state.live.read().await.clone();
+            let mcp = live.session.rpc().mcp();
+            // Every connected server is asked, not just ours: measured, our own
+            // answers `-32601 Unknown method` to both, and a third-party one may
+            // not. That code is an absence, not a failure, so it is not reported.
+            let mut prompts: Vec<Value> = Vec::new();
+            let mut resources: Vec<Value> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+            if let Ok(list) = mcp.list().await {
+                for s in list.servers {
+                    let name = s.name.clone();
+                    match mcp
+                        .prompts()
+                        .list(McpPromptsListRequest {
+                            server_name: name.clone(),
+                            cursor: None,
+                        })
+                        .await
+                    {
+                        Ok(r) => {
+                            for p in r.prompts {
+                                let mut v = serde_json::to_value(&p).unwrap_or(Value::Null);
+                                v["server"] = json!(name);
+                                prompts.push(v);
+                            }
+                        }
+                        Err(e) if !e.to_string().contains("-32601") => {
+                            errors.push(format!("{name} prompts: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                    match mcp
+                        .resources()
+                        .list(McpResourcesListRequest {
+                            server_name: name.clone(),
+                            cursor: None,
+                        })
+                        .await
+                    {
+                        Ok(r) => {
+                            for p in r.resources {
+                                let mut v = serde_json::to_value(&p).unwrap_or(Value::Null);
+                                v["server"] = json!(name);
+                                resources.push(v);
+                            }
+                        }
+                        Err(e) if !e.to_string().contains("-32601") => {
+                            errors.push(format!("{name} resources: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            let body = json!({
+                "prompts": prompts,
+                "resources": resources,
+                "errors": errors,
+            });
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // A prompt a server ships is text, so a person can use it too: render it
+        // and hand it back for the composer. Without this the list above was the
+        // only thing a `/mcp/items` prompt did — it "only ever reached the model".
+        ("POST", "/mcp/prompt") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let server = v["server"].as_str().unwrap_or_default().to_string();
+            let name = v["name"].as_str().unwrap_or_default().to_string();
+            if server.is_empty() || name.is_empty() {
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"server and name"}"#,
+                )
+                .await;
+            }
+            // Arguments are whatever the caller typed; a prompt that needs one and
+            // got none answers with the server's own complaint, which names it.
+            let args = v["arguments"].as_object().map(|o| {
+                o.iter()
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            });
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .mcp()
+                .prompts()
+                .get(McpPromptsGetRequest {
+                    arguments: args,
+                    prompt_name: name.clone(),
+                    server_name: server.clone(),
+                })
+                .await
+            {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(r) => {
+                    // `content` is the raw MCP content block, so text is taken
+                    // where it is text and printed as JSON otherwise — a block the
+                    // page cannot render is still worth showing verbatim.
+                    let mut parts: Vec<String> = Vec::new();
+                    for m in &r.messages {
+                        let text = match m.content.get("text").and_then(Value::as_str) {
+                            Some(t) => t.to_string(),
+                            None => m.content.to_string(),
+                        };
+                        parts.push(text);
+                    }
+                    json!({
+                        "server": server,
+                        "prompt": name,
+                        "messages": r.messages.len(),
+                        "text": parts.join("\n\n"),
+                    })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // Same shape, for a document a server publishes. A blob is base64 and is
+        // reported as such rather than decoded into the composer.
+        ("POST", "/mcp/resource") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let server = v["server"].as_str().unwrap_or_default().to_string();
+            let uri = v["uri"].as_str().unwrap_or_default().to_string();
+            if server.is_empty() || uri.is_empty() {
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"server and uri"}"#,
+                )
+                .await;
+            }
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .mcp()
+                .resources()
+                .read(McpResourcesReadRequest {
+                    server_name: server.clone(),
+                    uri: uri.clone(),
+                })
+                .await
+            {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(r) => {
+                    let text: Vec<String> = r
+                        .contents
+                        .iter()
+                        .filter_map(|c| {
+                            c.text.clone().or_else(|| {
+                                c.blob.as_ref().map(|b| {
+                                    format!(
+                                        "[{} bytes of base64 — {}]",
+                                        b.len(),
+                                        c.mime_type.clone().unwrap_or_default()
+                                    )
+                                })
+                            })
+                        })
+                        .collect();
+                    json!({ "server": server, "uri": uri, "parts": text.len(), "text": text.join("\n\n") })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // Write a skill into the directory the `@` menu already reads. Measured
+        // against the runtime: the skill's own tools arrive when the runtime next
+        // lists the directory, and one switched off can be switched on from here.
+        ("POST", "/skills/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let description = v["description"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .replace(['\n', '\r'], " ");
+            let instructions = v["instructions"].as_str().unwrap_or_default().to_string();
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ');
+            if !named || instructions.len() > 32 * 1024 || description.len() > 200 {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer, no dots or slashes; instructions under 32 KB" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let slug: String = name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let dir = webrain_core::skills::dir().join(&slug);
+            let path = dir.join("SKILL.md");
+            let doc =
+                format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let out = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, doc))
+                .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
+                .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // Persist an MCP server into the runtime's **own** user configuration —
+        // `mcp.config.add`, not the internal `reloadWithConfig` shape — and then
+        // start it in the session that is running right now.
+        //
+        // Two calls because they do two jobs: `reload` re-reads the config file,
+        // while `startServer` with **no config** starts an already-registered
+        // server *in this session*. The reply reports both, and `attached` comes
+        // from the session's own `list()` — the config write and the reload are
+        // not evidence that a turn can use it.
+        ("POST", "/mcp/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let raw = match &v["config"] {
+                Value::String(s) => serde_json::from_str::<Value>(s.trim()).unwrap_or(Value::Null),
+                other => other.clone(),
+            };
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            if !named || !raw.is_object() {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer (letters, digits, - _ .); config must be a JSON object" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let live = state.live.read().await.clone();
+            let mcp = live.client.rpc().mcp().config();
+            let out = match mcp
+                .add(McpConfigAddRequest {
+                    config: raw,
+                    name: name.clone(),
+                })
+                .await
+            {
+                Err(e) => json!({ "error": e.to_string() }),
+                Ok(()) => {
+                    let reloaded = mcp.reload().await.is_ok();
+                    // No config: start what was just registered. A failure here is
+                    // reported and not folded into `attached`, because "saved but
+                    // could not start" is a different thing to fix than "not saved".
+                    let started = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .start_server(McpStartServerRequest {
+                            config: None,
+                            expected_installation_id: None,
+                            server_name: name.clone(),
+                        })
+                        .await;
+                    // Both facts from the same list: presence says the session
+                    // knows it, `status` says it can be used. Reporting only the
+                    // first made a server that failed to spawn come back
+                    // `attached: true` next to `attach_error` — the shape of a
+                    // failure that reads as success.
+                    let mut attached = false;
+                    let mut status = String::from("not_configured");
+                    if let Ok(l) = live.session.rpc().mcp().list().await
+                        && let Some(s) = l.servers.iter().find(|s| s.name == name)
+                    {
+                        status = serde_json::to_value(&s.status)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or(status);
+                        attached = status == "connected";
+                    }
+                    let mut out = json!({ "added": name, "reloaded": reloaded, "attached": attached, "status": status });
+                    if let Err(e) = started {
+                        out["attach_error"] = json!(e.to_string());
+                    }
+                    out
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
         // Which skills exist is one question, which ones the agent used is
         // another — an unused skill is a prompt problem, not a missing file.
         ("GET", "/skills") => {
             let live = state.live.read().await.clone();
             let list = live.session.rpc().skills().list().await;
             let invoked = live.session.rpc().skills().get_invoked().await;
-            let body = match (list, invoked) {
-                (Ok(l), Ok(i)) => json!({ "skills": l.skills, "invoked": i.skills }),
-                (Ok(l), Err(e)) => {
-                    json!({ "skills": l.skills, "invoked": [], "error": e.to_string() })
+            // The runtime knows only its own directory. The cross-tool tree the
+            // `npx`-style installers write (`~/.agents/skills`) is a second root,
+            // so a skill installed for every other agent on this machine is listed
+            // rather than invisible — off, and marked not-live, because a tool this
+            // session did not load cannot be switched on from the page.
+            let mut skills: Vec<Value> = match &list {
+                Ok(l) => l
+                    .skills
+                    .iter()
+                    .map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let mut taken: std::collections::HashSet<String> = skills
+                .iter()
+                .filter_map(|s| s["name"].as_str().map(str::to_owned))
+                .collect();
+            if let Some(dir) = webrain_core::skills::agents_dir() {
+                for (name, _) in webrain_core::skills::list(&dir) {
+                    if taken.insert(name.clone()) {
+                        skills.push(json!({
+                            "name": name,
+                            "enabled": false,
+                            "live": false,
+                            "source": "~/.agents/skills · not loaded by this session",
+                        }));
+                    }
                 }
-                (Err(e), _) => json!({ "skills": [], "invoked": [], "error": e.to_string() }),
+            }
+            let body = match (list, invoked) {
+                (Ok(_), Ok(i)) => json!({ "skills": skills, "invoked": i.skills }),
+                (Ok(_), Err(e)) => {
+                    json!({ "skills": skills, "invoked": [], "error": e.to_string() })
+                }
+                (Err(e), _) => json!({ "skills": skills, "invoked": [], "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
@@ -1597,11 +2363,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let r = if on {
                 mcp.enable(McpEnableRequest {
                     server_name: name.clone(),
+                    // We attach at session creation, so there is no receipt to match.
+                    expected_installation_id: None,
                 })
                 .await
             } else {
                 mcp.disable(McpDisableRequest {
                     server_name: name.clone(),
+                    expected_installation_id: None,
                 })
                 .await
             };
@@ -1610,6 +2379,44 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 Err(e) => json!({ "server": name, "enabled": !on, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Forget a server from the runtime's user configuration. Adding one had a
+        // route and removing one had none, so a server added by mistake stayed in
+        // every new session. The reload after it is best-effort for the same
+        // reason the add reports it: a running session keeps what it attached.
+        ("POST", "/mcp/remove") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() || name.len() > 64 {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let mcp = live.client.rpc().mcp().config();
+            let out = match mcp
+                .remove(McpConfigRemoveRequest {
+                    name: name.clone(),
+                    auth_client_id_metadata_url: None,
+                })
+                .await
+            {
+                Err(e) => json!({ "removed": false, "error": e.to_string() }),
+                Ok(()) => {
+                    let reloaded = mcp.reload().await.is_ok();
+                    // A server still attached to this live session shows up here,
+                    // which is the honest answer to "is it gone".
+                    let still = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .list()
+                        .await
+                        .map(|l| l.servers.iter().any(|s| s.name == name))
+                        .unwrap_or(false);
+                    json!({ "removed": true, "name": name, "reloaded": reloaded, "attached": still })
+                }
+            };
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // Run one tool directly, with arguments the page can edit. This is the
         // difference between "the model called the wrong selector" and "let me fix
@@ -1653,6 +2460,166 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let body = match r.get_mode().await {
                 Ok(m) => json!({ "mode": mode_name(&m.mode) }),
                 Err(e) => json!({ "mode": "unknown", "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // What the runtime can delegate to. `read_agent`/`write_agent`/`list_agents`
+        // let the *model* manage definitions; nothing let a person see them, and
+        // `/env` only says "no custom agents loaded". Selection is creation-time
+        // (`agents.selected`), so this is the list, not a picker.
+        ("GET", "/agents") => {
+            let live = state.live.read().await.clone();
+            let body = match live
+                .client
+                .rpc()
+                .agents()
+                .discover(AgentsDiscoverRequest {
+                    // The workspace is where a definition is most likely to be;
+                    // without it discovery only looks at whatever the runtime
+                    // considers its own configuration.
+                    project_paths: Some(vec![
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ]),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(list) => {
+                    let mut rows: Vec<Value> = list
+                        .agents
+                        .iter()
+                        .map(|a| {
+                            json!({
+                                "id": a.id,
+                                "name": a.name,
+                                "title": a.display_name,
+                                "description": a.description,
+                                // An agent the model may not pick on its own is the
+                                // interesting one: it can only be chosen by a person.
+                                "manual_only": a.disable_model_invocation.unwrap_or(false),
+                            })
+                        })
+                        .collect();
+                    rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                    json!({ "agents": rows })
+                }
+                Err(e) => json!({ "agents": [], "error": e.to_string() }),
+            };
+            // Where the runtime actually looks. Without this the empty state is a
+            // guess about a directory the runtime never named.
+            let paths = match live
+                .client
+                .rpc()
+                .agents()
+                .get_discovery_paths(AgentsGetDiscoveryPathsRequest {
+                    project_paths: Some(vec![
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ]),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(p) => serde_json::to_value(p.paths).unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            };
+            let mut body = body;
+            body["paths"] = paths;
+            // Which definition the session is running. `agents.selected` is a
+            // creation option, but `session.agent.select` moves it on a live
+            // session — so a picker needs no restart, only a list that says what
+            // is chosen now.
+            body["current"] = current_agent(&live).await;
+            respond(&mut stream, 200, "application/json", &body.to_string()).await
+        }
+        // Choose the agent the next turns run as. `name` empty (or "default")
+        // deselects, which is the only way back to the built-in agent.
+        ("POST", "/agents/select") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let live = state.live.read().await.clone();
+            let agents = live.session.rpc().agent();
+            let r = if name.is_empty() || name == "default" {
+                agents.deselect().await.map(|_| ())
+            } else {
+                agents
+                    .select(AgentSelectRequest { name: name.clone() })
+                    .await
+                    .map(|_| ())
+            };
+            let reply = match r {
+                // `selected` is read back from the session, not from the request:
+                // asking for `default` is a request to have NOTHING selected, and
+                // echoing the name back reported the opposite of what happened.
+                Ok(()) => {
+                    let current = current_agent(&live).await;
+                    let selected = !current.is_null() && current.get("error").is_none();
+                    json!({ "selected": selected, "current": current })
+                }
+                Err(e) => json!({ "selected": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
+        // Create an agent definition. The runtime ships `write_agent` for the
+        // model and nothing for a person, which is why this tab could only ever
+        // say "none". The file goes where discovery already looks — the
+        // workspace's `.github/agents` — so the next `discover` finds it.
+        //
+        // Everything a filename may contain is decided here, not by the caller:
+        // no separators, no dots, no `..`, and a byte cap on the body. A route
+        // that writes a file from a web request is a trust boundary.
+        ("POST", "/agents/new") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            let description = v["description"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .replace(['\n', '\r'], " ");
+            let instructions = v["instructions"].as_str().unwrap_or_default().to_string();
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ');
+            if !named || instructions.len() > 32 * 1024 || description.len() > 200 {
+                let out = json!({ "error": "name must be 64 ASCII chars or fewer, no dots or slashes; instructions under 32 KB" });
+                return respond(&mut stream, 400, "application/json", &out.to_string()).await;
+            }
+            let slug: String = name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let dir = std::env::current_dir()
+                .unwrap_or_default()
+                .join(".github")
+                .join("agents");
+            let path = dir.join(format!("{slug}.md"));
+            let doc =
+                format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n");
+            let out = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, doc))
+                .map(|()| json!({ "created": path.to_string_lossy(), "name": name }))
+                .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            let code = if out.get("error").is_some() { 500 } else { 200 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
+        }
+        // What the runtime will accept as an approval rule, and what it holds now.
+        // A per-request approve/deny has no "always" — that is `modifyRules`, and
+        // writing a rule without knowing the kind vocabulary would be a guess that
+        // either does nothing or allows more than it says.
+        ("GET", "/permission-rules") => {
+            let live = state.live.read().await.clone();
+            let caps = live.session.rpc().permissions().get_capabilities().await;
+            let body = match caps {
+                Ok(c) => json!({ "capabilities": serde_json::to_value(c).unwrap_or(Value::Null) }),
+                Err(e) => json!({ "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
@@ -1811,12 +2778,51 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let id = v["id"].as_str().unwrap_or_default().to_string();
             let allow = v["allow"].as_bool().unwrap_or(false);
-            let sent = match state.permission.pending.lock().await.remove(&id) {
+            // "Always allow" is a standing grant, so it is recorded here rather
+            // than only remembered by the tab that clicked it.
+            let always = v["always"].as_bool().unwrap_or(false) && allow;
+            let entry = state.permission.pending.lock().await.remove(&id);
+            let mut saved = None;
+            if always && let Some((_, card)) = &entry {
+                if card["managed"].as_bool().unwrap_or(false) {
+                    saved = Some(
+                        json!({ "saved": false, "why": "a managed policy requires this approval every time" }),
+                    );
+                } else {
+                    let key = approval_key(card);
+                    let ok = state.permission.set_approved(&key, true).await;
+                    saved = Some(json!({ "key": key, "saved": ok }));
+                }
+            }
+            let sent = match entry {
                 Some((tx, _)) => tx.send(allow).is_ok(),
                 None => false,
             };
-            let body = json!({ "answered": sent }).to_string();
+            let mut out = json!({ "answered": sent });
+            if let Some(s) = saved {
+                out["approval"] = s;
+            }
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // The approvals that outlive a card: listed so a reader can undo one, and
+        // written only by an explicit "always allow".
+        ("GET", "/approvals") => {
+            let keys = state.permission.approved.lock().await.clone();
+            let body = json!({ "approved": keys }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
+        }
+        ("POST", "/approvals") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let key = v["key"].as_str().unwrap_or_default().trim().to_string();
+            if key.is_empty() || key.len() > 200 {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"key"}"#).await;
+            }
+            let on = v["on"].as_bool().unwrap_or(false);
+            let ok = state.permission.set_approved(&key, on).await;
+            let keys = state.permission.approved.lock().await.clone();
+            let out = json!({ "key": key, "on": on, "saved": ok, "approved": keys });
+            let code = if ok { 200 } else { 500 };
+            respond(&mut stream, code, "application/json", &out.to_string()).await
         }
         // The approvals still waiting for an answer. A reload used to lose them:
         // the runtime kept waiting, the page had no card, and the turn sat there
@@ -1975,6 +2981,65 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     "sessions": serde_json::to_value(&l).unwrap_or(Value::Null),
                 }),
                 Err(e) => json!({ "sessions": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // Restore the runtime's own session for this conversation, instead of
+        // replaying our transcript onto a blank one. The transcript stays (the
+        // page still draws it); what changes is that the model gets its context
+        // back — plan file, rewind points, tool history included.
+        ("POST", "/resume") => {
+            // The conversation is whatever `POST /sessions/{id}` last claimed —
+            // that route already owns switching, so this one only restores.
+            let convo = state.convo().await;
+            let want = format!("webrain-{convo}");
+            let live = state.live.read().await.clone();
+            let id = live
+                .client
+                .rpc()
+                .sessions()
+                .list()
+                .await
+                .ok()
+                .and_then(|l| serde_json::to_value(&l).ok())
+                .and_then(|v| v.get("sessions").and_then(Value::as_array).cloned())
+                .and_then(|rows| {
+                    rows.into_iter().find_map(|s| {
+                        (s["name"].as_str() == Some(want.as_str()))
+                            .then(|| s["sessionId"].as_str().map(str::to_string))
+                            .flatten()
+                    })
+                });
+            let Some(id) = id else {
+                let out = json!({
+                    "resumed": false,
+                    "error": "the runtime has no session for this conversation",
+                });
+                return respond(&mut stream, 200, "application/json", &out.to_string()).await;
+            };
+            let provider = state.provider.lock().await.clone();
+            let settings = state.settings.lock().await.clone();
+            let out = match spawn_live(
+                &state.args,
+                &provider,
+                state.permission.clone(),
+                state.input.clone(),
+                state.bus.clone(),
+                state.store.clone(),
+                convo,
+                &settings,
+                Some(SessionId::new(id)),
+            )
+            .await
+            {
+                Ok(fresh) => {
+                    let old = std::mem::replace(&mut *state.live.write().await, Arc::new(fresh));
+                    // Stop the fan-out before the runtime it reads from.
+                    old.reader.abort();
+                    drop(old);
+                    json!({ "resumed": true, "name": want })
+                }
+                Err(e) => json!({ "resumed": false, "error": e.to_string() }),
             };
             respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
@@ -2379,6 +3444,10 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .unwrap_or_default()
                 .to_string();
             let renamed = state.store.as_ref().is_some_and(|s| s.rename(id, &title));
+            // The runtime's session NAME is this server's resume key (`POST /resume`
+            // looks up `webrain-{convo}`), so it is not ours to overwrite with a
+            // title: renaming it here made every renamed thread unresumable, and the
+            // failure was silent. The rail reads our store; the runtime keeps its name.
             let out = json!({ "renamed": renamed }).to_string();
             let code = if renamed { 200 } else { 400 };
             respond(&mut stream, code, "application/json", &out).await
@@ -2722,6 +3791,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 state.store.clone(),
                 state.convo().await,
                 &settings,
+                None,
             )
             .await
             {
@@ -2766,6 +3836,18 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 json!({"name": "mcp", "kind": "cmd", "hint": "the MCP server this session attached to, and its tools"}),
                 json!({"name": "skills", "kind": "cmd", "hint": "installed skills and which ones the agent used"}),
             ];
+            // Reachability, not inventory. A skill switched off contributes no
+            // tools, so offering it in the `@` menu is offering a dead end — and
+            // the runtime, not the disk, is what knows which are on.
+            let live = state.live.read().await.clone();
+            let mut off: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Ok(l) = live.session.rpc().skills().list().await {
+                for s in l.skills {
+                    if !s.enabled {
+                        off.insert(s.name);
+                    }
+                }
+            }
             for name in skill_names() {
                 // A reference chapter is a `.md` with no frontmatter `name:`, and
                 // `skills::list` names it after the folder holding it — so without
@@ -2774,6 +3856,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 let Some(hint) = skill_hint(&name) else {
                     continue;
                 };
+                if off.contains(&name) {
+                    continue;
+                }
                 items.push(json!({"name": name, "kind": "skill", "hint": hint}));
             }
             for (name, hint) in webrain_mcp::tool_briefs() {
@@ -2789,16 +3874,170 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     "hint": "installed by this binary, path-fenced",
                 }));
             }
-            // The four the session actually allows. `task` and `task_complete`
-            // were missing here, so delegation had no checkbox at all and the
-            // only place to switch it was the Runtime tab.
-            for name in ["ask_user", "skill", "task", "task_complete"] {
-                items.push(
-                    json!({"name": name, "kind": "builtin", "hint": "installed by the runtime"}),
-                );
+            // Every name already on the list. The menu is one flat list and a
+            // name typed into the draft means the same thing whatever its sigil,
+            // so a row is offered once — first kind to claim the name wins.
+            let mut seen: std::collections::HashSet<String> = items
+                .iter()
+                .filter_map(|i| i["name"].as_str().map(str::to_owned))
+                .collect();
+            // Every other configured MCP server. Only this binary's own server
+            // was ever listed, so a second one's tools existed for the model and
+            // in no menu at all.
+            if let Ok(list) = live.session.rpc().mcp().list().await {
+                for s in list.servers {
+                    if s.name == "webrain" {
+                        continue;
+                    }
+                    let Ok(t) = live
+                        .session
+                        .rpc()
+                        .mcp()
+                        .list_tools(McpListToolsRequest {
+                            server_name: s.name.clone(),
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    for tool in t.tools {
+                        let v = serde_json::to_value(&tool).unwrap_or(Value::Null);
+                        let name = v["name"].as_str().unwrap_or_default().to_string();
+                        if name.is_empty() || !seen.insert(name.clone()) {
+                            continue;
+                        }
+                        let hint = v["description"]
+                            .as_str()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| format!("{} · {d}", s.name))
+                            .unwrap_or_else(|| s.name.clone());
+                        items.push(json!({"name": name, "kind": "tool", "hint": hint}));
+                    }
+                }
+            }
+            // The runtime's built-ins, asked for rather than assumed. The four
+            // names this used to hard-code were only a sample: everything else
+            // (`runSubagent`, the todo list, the file tools) was given to the
+            // model and offered in no menu. The descriptors are the set this
+            // session is actually handed.
+            let agents_on = state.settings.lock().await.allow_agents;
+            let descriptors = live
+                .session
+                .rpc()
+                .tools()
+                .get_builtin_descriptors(ToolsGetBuiltinDescriptorsRequest::default())
+                .await;
+            let mut builtins: Vec<(String, String)> = match descriptors {
+                Ok(r) => r
+                    .tools
+                    .into_iter()
+                    .map(|t| (t.name, t.description))
+                    .collect(),
+                // A failed call must not empty the group: no rows in `#` reads as
+                // "this build has no built-ins", which is not what happened.
+                Err(_) => ["ask_user", "skill", "task", "task_complete"]
+                    .iter()
+                    .map(|n| ((*n).to_string(), "installed by the runtime".to_string()))
+                    .collect(),
+            };
+            // `tool_filter` withholds these when delegation is off, so offering
+            // them would be offering a call the session refuses.
+            if !agents_on {
+                builtins.retain(|(n, _)| !n.contains("agent"));
+            }
+            for (name, hint) in builtins {
+                if seen.insert(name.clone()) {
+                    items.push(json!({"name": name, "kind": "builtin", "hint": hint}));
+                }
+            }
+            // The runtime's own slash commands. `session.commands.list` is the
+            // namespace that lists them — the page's menu was ours alone, so
+            // `/compact` and friends existed and were never offered. Marked
+            // `runtime` so `pick` can tell one from a command this page handles
+            // itself without keeping a second copy of the names.
+            if let Ok(list) = live.session.rpc().commands().list().await {
+                for c in list.commands {
+                    if !seen.insert(c.name.clone()) {
+                        continue;
+                    }
+                    let exp = if c.experimental.unwrap_or(false) {
+                        "experimental · "
+                    } else {
+                        ""
+                    };
+                    items.push(json!({
+                        "name": c.name,
+                        "kind": "cmd",
+                        "runtime": true,
+                        "cmdKind": serde_json::to_value(&c.kind).unwrap_or(Value::Null),
+                        "hint": format!("{exp}{}", c.description),
+                    }));
+                }
             }
             let body = json!({ "items": items }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Run one of the runtime's slash commands. `commands.execute` refused all
+        // 29 of them ("No client found for command") — that path is for a host
+        // that registered handlers — so this is `invoke`, which returns what to
+        // show: text, a message, or a prompt the host should submit.
+        ("POST", "/command") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let input = v["input"].as_str().unwrap_or_default().to_string();
+            let mut req = CommandsInvokeRequest::default();
+            req.name = name.clone();
+            req.input = (!input.is_empty()).then_some(input);
+            let live = state.live.read().await.clone();
+            let reply = match live.session.rpc().commands().invoke(req).await {
+                Ok(SlashCommandInvocationResult::Text(t)) => {
+                    json!({ "name": name, "text": t.text, "markdown": t.markdown.unwrap_or(false) })
+                }
+                Ok(SlashCommandInvocationResult::Completed(c)) => {
+                    json!({ "name": name, "text": c.message.unwrap_or_default() })
+                }
+                // The command wants a turn run with a prompt it wrote. Handing the
+                // prompt back lets the page put it in the composer rather than
+                // starting a turn the reader never chose.
+                Ok(SlashCommandInvocationResult::AgentPrompt(p)) => json!({
+                    "name": name, "prompt": p.display_prompt, "notice": p.notice,
+                }),
+                // It switched the model itself. The page owns the switch route
+                // because only that one knows whether it keeps this context.
+                Ok(SlashCommandInvocationResult::SetModel(m)) => json!({
+                    "name": name, "set_model": m.model, "effort": m.reasoning_effort,
+                }),
+                // A row for the conversation, in the command's own words.
+                Ok(SlashCommandInvocationResult::AddTimelineEntry(a)) => json!({
+                    "name": name, "text": a.entry.text, "url": a.entry.url,
+                    "prefill": a.prefill_input,
+                }),
+                // The model picker is a surface this page already has.
+                Ok(SlashCommandInvocationResult::ShowDialog(_)) => {
+                    json!({ "name": name, "open": "model-picker" })
+                }
+                // A parent command that needs its subcommand named. The list goes
+                // back so the page can put the parent in the field and let the
+                // reader pick, instead of contributing a guess.
+                Ok(SlashCommandInvocationResult::SelectSubcommand(s)) => json!({
+                    "name": name,
+                    "pick": s.options.iter().map(|o| json!({
+                        "name": o.name, "hint": o.description,
+                    })).collect::<Vec<_>>(),
+                    "text": format!("/{} wants one of: {}", s.command,
+                        s.options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>().join(" · ")),
+                }),
+                // Plan-model switches only mean something in plan mode, and the
+                // runtime applies those itself; a note keeps them from vanishing.
+                Ok(SlashCommandInvocationResult::SetPlanModel(_)) => {
+                    json!({ "name": name, "text": "the plan model changed" })
+                }
+                Err(e) => json!({ "name": name, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
         }
         ("GET", "/search") => {
             let q = param(query, "q").unwrap_or_default();
@@ -2849,7 +4088,17 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             match (stored_segment(convo, false), stored_segment(file, true)) {
                 (Some(convo), Some(file)) => {
                     let path = attach_dir().join(&convo).join(&file);
-                    let Ok(bytes) = tokio::fs::read(&path).await else {
+                    // An upload from before this moved into the workspace is
+                    // still in the temp directory: serve it from there rather
+                    // than break a transcript that already shows it.
+                    let legacy = std::env::temp_dir()
+                        .join("webrain-chat")
+                        .join(&convo)
+                        .join(&file);
+                    let Ok(bytes) = (match tokio::fs::read(&path).await {
+                        Ok(bytes) => Ok(bytes),
+                        Err(_) => tokio::fs::read(&legacy).await,
+                    }) else {
                         return respond(
                             &mut stream,
                             404,
@@ -2885,6 +4134,58 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     .await
                 }
             }
+        }
+        // A file this machine already has — a screenshot a batch wrote, a
+        // download — at the relative path an answer named it by. The page marks
+        // such a path itself (a picture's extension plus a separator), so this is
+        // the model's suggestion, not the model's authority: `local_image` decides,
+        // and it only ever answers with a picture inside the directory the chat
+        // was started in.
+        ("GET", "/local") => {
+            let rel = param(query, "p").unwrap_or_default();
+            let root = std::env::current_dir().and_then(|d| d.canonicalize()).ok();
+            let Some(path) = root.as_deref().and_then(|r| local_image(r, &rel)) else {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            };
+            // 32 MB is a screenshot many times over; past that it is not something
+            // anyone reads inside a transcript. Checked before the read, so a huge
+            // file is refused without being pulled into memory.
+            let fits = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.is_file() && m.len() <= 32 * 1024 * 1024)
+                .unwrap_or(false);
+            if !fits {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                return respond(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    r#"{"error":"not found"}"#,
+                )
+                .await;
+            };
+            respond_bytes(
+                &mut stream,
+                200,
+                mime_of(&path),
+                &[("X-Content-Type-Options", "nosniff")],
+                &bytes,
+            )
+            .await
         }
         // Dictation. The take arrives as raw bytes, ffmpeg turns it into the
         // 16 kHz mono WAV the recognizer needs, the recognizer runs locally, and
@@ -3099,6 +4400,21 @@ fn mime_of(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// The picture a `/local` request names, or `None` if it names anything else.
+/// Three fences, because this is the one route that reads a path a model chose:
+/// relative only, still inside `root` after `canonicalize` (which collapses `..`
+/// and resolves a symlink to wherever it really points), and an image by
+/// `mime_of` — that match is the whole allow-list, so JSON, CSV and HTML cannot be
+/// read back out through here.
+fn local_image(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    let asked = std::path::Path::new(rel);
+    if rel.is_empty() || asked.is_absolute() {
+        return None;
+    }
+    let path = root.join(asked).canonicalize().ok()?;
+    (path.starts_with(root) && mime_of(&path).starts_with("image/")).then_some(path)
+}
+
 /// One path segment of a stored upload. No slash, no `..`, and a dot only where
 /// a file extension belongs — the upload route's names are `{stamp}-{stem}.{ext}`,
 /// so anything else is not a file this server wrote.
@@ -3144,6 +4460,33 @@ fn mode_word(m: &SessionMode) -> &'static str {
     }
 }
 
+/// A URL `ureq` can parse, or `None`.
+///
+/// `ureq::get()` **panics** on a malformed port (`InvalidPort` in its url parser)
+/// instead of returning an error, so a single bad link — or a provider base_url
+/// with a typo — took the whole server down. The check has to happen before the
+/// call; there is no error to catch afterwards.
+fn http_url(raw: &str) -> Option<String> {
+    let (scheme, rest) = raw.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // A bracketed IPv6 host contains colons of its own; only a port after `]`.
+    let port = match host_port.find(']') {
+        Some(i) => host_port[i + 1..].strip_prefix(':'),
+        None => host_port.rsplit_once(':').map(|(_, p)| p),
+    };
+    match port {
+        Some(p) => {
+            let n: u32 = p.parse().ok()?;
+            (n > 0 && n <= 65535).then(|| raw.to_string())
+        }
+        None => Some(raw.to_string()),
+    }
+}
+
 /// `interactive` for anything unrecognised: it is the mode that asks before it
 /// acts, and the alternative is putting the agent in autopilot by typo.
 fn session_mode_of(name: &str) -> SessionMode {
@@ -3161,10 +4504,9 @@ fn session_mode_of(name: &str) -> SessionMode {
 /// Only `http`/`https` is followed — the URL arrives from the page, and a
 /// `file:` or `data:` preview would turn a link into a local read.
 async fn link_preview(url: &str) -> Value {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let Some(owned) = http_url(url) else {
         return json!({ "url": url, "error": "not an http(s) url" });
-    }
-    let owned = url.to_string();
+    };
     let got = tokio::task::spawn_blocking(move || -> Result<String, String> {
         let body = ureq::get(&owned)
             .header("accept", "text/html,application/xhtml+xml")
@@ -3443,6 +4785,10 @@ async fn list_models(
     typ: &'static str,
 ) -> Result<Vec<Value>, String> {
     let url = format!("{}/models", base.trim_end_matches('/'));
+    // A base_url with a typo in the port would panic inside ureq, not error.
+    let Some(url) = http_url(&url) else {
+        return Err("provider base url is not http(s) with a valid port".to_string());
+    };
     let key = key.map(str::to_string);
     let call = tokio::task::spawn_blocking(move || {
         let mut req = ureq::get(&url).header("Accept", "application/json");
@@ -3710,10 +5056,22 @@ fn valid_provider(id: &str, base_url: &str, model: &str, key_env: &str) -> bool 
         && (base_url.starts_with("http://") || base_url.starts_with("https://"))
 }
 
+/// Where an upload lands. Inside the working directory, beside the tool-output
+/// spill, so the agent's own file tools can open what the user attached — the
+/// path fence stops at the directory, and a file in the temp folder was readable
+/// by the page but never by the model, which answered "outside the directory
+/// this session is allowed to read". `WEBRAIN_CHAT_FILES` still names a
+/// directory outright; a read-only checkout falls back to temp, where at least
+/// the page can show the file.
 fn attach_dir() -> PathBuf {
-    std::env::var_os("WEBRAIN_CHAT_FILES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("webrain-chat"))
+    if let Some(dir) = std::env::var_os("WEBRAIN_CHAT_FILES") {
+        return PathBuf::from(dir);
+    }
+    let inside = PathBuf::from(".webrain").join("attachments");
+    if std::fs::create_dir_all(&inside).is_ok() {
+        return inside;
+    }
+    std::env::temp_dir().join("webrain-chat")
 }
 
 /// The client's filename is data, never a path. One basename, a small alphabet,
@@ -3752,6 +5110,58 @@ fn safe_name(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The elicitation answer is validated by the server against its own schema,
+    /// so a coerced value that is merely close is a rejected form. These are the
+    /// shapes a card can actually produce.
+    #[test]
+    fn an_elicitation_answer_becomes_the_type_the_schema_declares() {
+        assert_eq!(coerce("boolean", "yes"), Some(Value::Bool(true)));
+        assert_eq!(coerce("boolean", " NO "), Some(Value::Bool(false)));
+        assert_eq!(coerce("integer", "42"), Some(json!(42)));
+        assert_eq!(coerce("number", "1.5"), Some(json!(1.5)));
+        assert_eq!(coerce("string", "  hi  "), Some(json!("hi")));
+        // What cannot be typed is refused, never guessed: "maybe" is not false,
+        // and a number is not a string just because it parses as one.
+        assert_eq!(coerce("boolean", "maybe"), None);
+        assert_eq!(coerce("integer", "3.5"), None);
+        assert_eq!(coerce("", "anything"), None);
+    }
+
+    /// A field this page cannot draw must not become an empty string in the
+    /// form: the request is declined instead of submitting a value the server
+    /// never asked for.
+    #[test]
+    fn only_the_four_field_types_a_card_can_draw_are_recognised() {
+        for (t, kind) in [
+            ("boolean", "boolean"),
+            ("integer", "integer"),
+            ("number", "number"),
+            ("string", "string"),
+        ] {
+            assert_eq!(prop_kind(&json!({ "type": t })), kind, "{t}");
+        }
+        for t in ["object", "array", "null"] {
+            assert_eq!(prop_kind(&json!({ "type": t })), "", "{t}");
+        }
+        assert_eq!(prop_kind(&json!({ "enum": ["a", "b"] })), "");
+    }
+
+    /// An upload has to sit inside the fence the agent's own file tools enforce,
+    /// or the model can name the attachment and still not open it — the exact
+    /// answer it gave: "the file sits in Temp, outside the directory this session
+    /// is allowed to read".
+    #[test]
+    fn an_attachment_lands_inside_the_fence() {
+        let cwd = std::fs::canonicalize(".").expect("cwd");
+        let stored = attach_dir().join("c1").join("1-shot.png");
+        assert!(
+            crate::chat_tools::within(&cwd, &stored.display().to_string()),
+            "{} is outside {}",
+            stored.display(),
+            cwd.display()
+        );
+    }
 
     #[test]
     fn only_a_conversation_id_is_a_page() {
@@ -3807,6 +5217,71 @@ mod tests {
         assert_eq!(card["args"]["url"], "https://example.com");
         // No name at all must not produce a card claiming to be something.
         assert_eq!(permission_card("p4", &json!({}), false)["tool"], "tool");
+    }
+
+    #[test]
+    fn an_approval_is_remembered_under_server_and_tool() {
+        // The same key the page computes, so a grant saved here silences the card
+        // the page would have drawn. `kind` is deliberately NOT part of it: the
+        // runtime calls almost everything "tool", and keying on that would stand
+        // for every tool there is.
+        let tool = json!({
+            "kind": "tool",
+            "serverName": "webrain",
+            "toolName": "webrain-webrain_navigate",
+        });
+        assert_eq!(
+            approval_key(&permission_card("p1", &tool, false)),
+            "webrain:navigate"
+        );
+
+        // A memory card is its own key, so approving one never approves writes.
+        let mem = json!({ "kind": "memory", "action": "store", "fact": "f", "subject": "s" });
+        assert_eq!(
+            approval_key(&permission_card("p2", &mem, false)),
+            "memory:remember"
+        );
+
+        // Nothing to name is not a wildcard: it is a key nothing else matches.
+        assert_eq!(
+            approval_key(&permission_card("p3", &json!({}), false)),
+            "mcp:tool"
+        );
+        assert_eq!(
+            approval_key(&json!({ "kind": "tool", "serverName": "", "toolName": "" })),
+            "mcp:tool"
+        );
+    }
+
+    #[test]
+    fn an_approval_survives_a_round_trip_through_its_file() {
+        let dir = std::env::temp_dir().join(format!("webrain-approvals-{}", std::process::id()));
+        let path = dir.join("nested/approvals.json");
+        // A missing file is "nothing approved", not an error — the first run has
+        // no file and must not ask for permission to have no preferences.
+        assert_eq!(load_approvals_from(&path), Vec::<String>::new());
+
+        let keys = vec![
+            "webrain:navigate".to_string(),
+            "memory:remember".to_string(),
+        ];
+        assert!(
+            save_approvals_to(&path, &keys),
+            "the nested dir should be created"
+        );
+        assert_eq!(load_approvals_from(&path), keys);
+
+        // Revoking is a save of the shorter list, and it must stay short.
+        assert!(save_approvals_to(&path, &keys[..1]));
+        assert_eq!(
+            load_approvals_from(&path),
+            vec!["webrain:navigate".to_string()]
+        );
+
+        // A truncated or hand-edited file reads as empty rather than panicking.
+        std::fs::write(&path, "{oops").unwrap();
+        assert_eq!(load_approvals_from(&path), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3924,11 +5399,31 @@ mod tests {
         assert_eq!(s.compact_at, 60);
         s.merge(&json!({"compact_at": 5}));
         assert_eq!(s.compact_at, COMPACT_PCT.0);
+        // Parallel tool calls are creation-time in 2.0.1, so the switch is a
+        // session field too — on by default, and a flip rebuilds.
+        assert!(s.parallel_tools);
+        assert!(s.merge(&json!({"parallel_tools": false})));
+        assert!(!s.merge(&json!({"parallel_tools": false})));
+        // Citations are the same shape: the live `options.update` inference
+        // options have no `enableCitations`, so the only honest answer to a flip
+        // is "this rebuilds the session". Off unless asked — it costs tokens.
+        assert!(!s.citations);
+        assert!(
+            s.merge(&json!({"citations": true})),
+            "enabling citations must be reported as a session change"
+        );
+        assert!(s.citations);
+        assert!(!s.merge(&json!({"citations": true})));
         // And the stamp is what `connect` actually reads.
         let mut args = Args::default();
         s.stamp(&mut args);
         assert_eq!(args.memory, Some(true));
         assert_eq!(args.compact_at, Some(COMPACT_PCT.0));
+        assert_eq!(
+            args.citations,
+            Some(true),
+            "the flip must reach the session"
+        );
     }
 
     #[test]
@@ -3980,6 +5475,45 @@ mod tests {
             mime_of(std::path::Path::new("1700-a.md")),
             "text/plain; charset=utf-8"
         );
+    }
+
+    #[test]
+    fn a_local_picture_is_readable_and_nothing_else_is() {
+        let tag = std::process::id();
+        let dir = std::env::temp_dir().join(format!("webrain-local-{tag}"));
+        let out = std::env::temp_dir().join(format!("webrain-outside-{tag}"));
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(dir.join("shots/shot.png"), b"png").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"secret").unwrap();
+        std::fs::write(out.join("secret.png"), b"png").unwrap();
+        let root = dir.canonicalize().unwrap();
+
+        // What an answer names: a picture, by a path inside the tree the chat was
+        // started in.
+        assert!(local_image(&root, "shots/shot.png").is_some());
+
+        // A name with no file behind it, text (the whole allow-list is `mime_of`),
+        // a directory, the same picture reached by leaving the tree, an absolute
+        // path, and nothing at all — every one of them none.
+        assert_eq!(local_image(&root, "shots/nope.png"), None);
+        assert_eq!(
+            local_image(&root, "notes.txt"),
+            None,
+            "text is not a picture"
+        );
+        assert_eq!(local_image(&root, "shots"), None);
+        let sibling = out.file_name().unwrap().to_str().unwrap().to_string();
+        assert_eq!(
+            local_image(&root, &format!("../{sibling}/secret.png")),
+            None
+        );
+        let absolute = out.join("secret.png");
+        assert_eq!(local_image(&root, absolute.to_str().unwrap()), None);
+        assert_eq!(local_image(&root, ""), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
@@ -4124,5 +5658,32 @@ mod tests {
         assert_eq!(op["peak"], json!([[1, 4], [6, 10]]));
         assert_eq!(op["days"], json!([1, 2, 3, 4, 5]));
         assert!(off_peak("openrouter").is_null());
+    }
+
+    /// `ureq` panics on these rather than returning an error, so the guard is the
+    /// only thing between a stray link and a dead server.
+    #[test]
+    fn http_url_refuses_what_ureq_would_panic_on() {
+        assert_eq!(http_url("https://x.dev/a"), Some("https://x.dev/a".into()));
+        assert_eq!(
+            http_url("http://x.dev:8080/a?b#c"),
+            Some("http://x.dev:8080/a?b#c".into())
+        );
+        assert_eq!(
+            http_url("http://[::1]:9222/json"),
+            Some("http://[::1]:9222/json".into())
+        );
+        assert_eq!(
+            http_url("https://u:p@x.dev/v1"),
+            Some("https://u:p@x.dev/v1".into())
+        );
+        assert_eq!(http_url("http://[::1]/x"), Some("http://[::1]/x".into()));
+        assert_eq!(http_url("https://x.dev:abc/v1"), None, "InvalidPort");
+        assert_eq!(http_url("https://x.dev:0/v1"), None, "port 0");
+        assert_eq!(http_url("https://x.dev:70000/v1"), None, "port overflow");
+        assert_eq!(http_url("https://x.dev:/v1"), None, "empty port");
+        assert_eq!(http_url("file:///etc/passwd"), None);
+        assert_eq!(http_url("javascript:alert(1)"), None);
+        assert_eq!(http_url("x.dev/a"), None);
     }
 }

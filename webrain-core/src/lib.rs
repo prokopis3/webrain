@@ -21,6 +21,7 @@ pub mod install;
 pub mod launch;
 pub mod login;
 pub mod proxy;
+pub mod read;
 pub mod serp;
 pub mod skills;
 pub mod vault;

@@ -72,7 +72,9 @@
               "comparisons/playwright",
               "comparisons/browser-use",
               "comparisons/firecrawl",
-              "comparisons/crawl4ai"
+              "comparisons/crawl4ai",
+              "comparisons/agent-browser",
+              "comparisons/performance"
             ]
           },
           {

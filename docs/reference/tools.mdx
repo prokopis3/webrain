@@ -5,7 +5,7 @@ description: The 18-tool consolidated MCP surface (63 legacy capabilities folded
 
 # Tools Reference
 
-All 18 tools are discovered dynamically — `webrain_guide` lists them for the
+All 19 tools are discovered dynamically — `webrain_guide` lists them for the
 LLM. The surface is **intent-based** (firecrawl-style): each tool has a `what`
 / `action` / `op` / `mode` selector that routes to the legacy capability via
 `map_surface()`. This page is the authoritative reference; descriptions match
@@ -33,10 +33,11 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 |---|---|---|
 | `webrain_navigate` | navigate · page state + challenge detection | ✅ CDP |
 | `webrain_observe` (`what=…`) | state · a11y · semantic · html · images · assets (every link internal+external+non-http, images incl. CSS `background-image`, video sources+embeds in one pass; `only`+`max`) · console · flatten · fit · clean · screenshot (`format`+`quality`) · pixel (`tiles_dir`) · page_info · annotate · media | ✅ CDP |
+| `webrain_network` (`op=…`) | log (arm capture, optional `url`+`wait_ms` → every request with id/method/type/status/mime/bytes/ms) · request (`id` → that response body) · requests (last log) · har (HAR 1.2) · clear | ✅ CDP |
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
-| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · autoschema · interact · eval · screenshot · pdf (urls[] → markdown, browserless) · assets (link/image/video inventory; `max`) (+ `cdp_urls` fan-out, per-URL `wait_selectors`) | 🔶 mixed |
+| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · scrape (the same CSS schema over plain HTTP — no tab, no render) · read (the batch twin of `webrain read`: markdown negotiation, `.md` retry, nearest `llms.txt` — no tab; `filter`/`outline`/`max_chars` per row, `query`+`top_k` prune each row's markdown) · autoschema · interact · eval · screenshot · assets (link/image/video inventory; `max`) (+ `cdp_urls` fan-out, per-URL `wait_selectors`). PDFs are `webrain_pdf`, not an op here | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
@@ -141,6 +142,48 @@ Semantic-tree text snapshot of the current page: `role "name"` lines for the LLM
 
 <Accordion title="webrain_console">
 Return captured page errors/warnings (uncaught errors + unhandled rejections) since the last call. Injects a listener on first call.
+</Accordion>
+
+<Accordion title="webrain_network">
+The page's **own HTTP traffic** — every request the app makes, including the XHR/fetch
+that carries the data a rendered page may never show. This is the path for a JS app
+whose content arrives after mount: log the requests, then read the one that has it.
+
+- `op=log` arms CDP Network capture, optionally navigates (`url`) and keeps capturing
+  for `wait_ms`, then returns one row per request: `id`, `url`, `method`, `type`
+  (`XHR`, `Fetch`, `Document`, `Script`, …), `status`, `mime`, `bytes`, `at` (epoch ms),
+  `ms`, `failed`.
+- `op=request` + `id` returns that response body — base64-decoded, capped at 200 KB
+  (`truncated` says so), and a JSON body also comes back parsed as `json`. Chrome only
+  keeps a body while the renderer holds it: measured, an entry with `bytes: 0` (served
+  from cache, or already released) answers *"No data found for resource with given
+  identifier"*, while every request that transferred data inside the capture window
+  reads back fine.
+- `op=requests` re-reads the buffer; `op=clear` empties it. **The arm stays on after
+  `log`**, so the sequence that matters for a search UI — `log`, then a click through
+  `webrain_interact`, then `op=requests` — reads one continuous buffer.
+- `op=har` exports the same rows as **HAR 1.2** for a tool that speaks HAR (DevTools
+  import, a proxy replay, a test fixture). Headers and cookies are events this server
+  does not subscribe to, so they are HAR's own *unknown* values (`[]` with
+  `headersSize: -1`) rather than invented, and `timings` carries only what was
+  measured (`wait` = the request's duration).
+- Narrow with `filter` (URL substring), `type`, `status`, `limit` (default 200).
+
+A redirect chain is one row, not one per hop, and the buffer caps at 2,048 entries so a
+chatty page cannot grow it without bound. Bodies are never buffered — they are fetched on
+request — which is why the log stays small enough to return whole.
+
+**What each engine actually delivers** (measured, not assumed):
+
+| engine | `op=log` | `op=har` | `op=request` (body) |
+|---|---|---|---|
+| Chrome 157 | ✅ 2 requests, ids like `21376.21` | ✅ HAR 1.2 | ✅ 577-char body |
+| Obscura 0.2.5 | ✅ 2 requests, ids like `loader-<uuid>` | ✅ HAR 1.2 | ❌ `-32601 No response body found for requestId …` — the engine keeps no body, and the reply says so rather than returning empty |
+| Lightpanda | not verified (not installed) | — | — |
+
+So on obscura this is a request **log** and a HAR export; the body half needs Chrome.
+An empty log is reported with a `note` saying the page may have made no requests *or*
+the engine may not emit Network events, because a bare `total: 0` reads as the wrong one.
 </Accordion>
 
 <Accordion title="webrain_screenshot">
@@ -364,7 +407,7 @@ Full composed page text including Shadow DOM (crawl4ai flatten_shadow_dom). Web-
 <AccordionGroup>
 
 <Accordion title="webrain_batch">
-Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdown` (full page as Markdown) | `extract` (CSS schema: base_selector+fields) | `autoschema` (propose base selectors per URL — the step that produces a `base_selector` for `extract`, same in-page heuristic as `webrain_extract{mode:"autoschema"}`, `min_occurrences` default 3) | `interact` (async JS interaction, then optional extract) | `eval` (run JS in each tab) | `screenshot` (save PNGs to `dir`).
+Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdown` (full page as Markdown) | `extract` (CSS schema: base_selector+fields, in a browser tab) | `scrape` (the **same** schema over plain HTTP — no tab, no render; the batch twin of `webrain_scrape`, and the cheap choice for N static pages) | `read` (the batch twin of `webrain read` — HTTP markdown negotiation, `.md` retry and the nearest `llms.txt` per URL, no tab; `data.source` says `markdown` / `text` / `html`) | `autoschema` (propose base selectors per URL — the step that produces a `base_selector` for `extract`, same in-page heuristic as `webrain_extract{mode:"autoschema"}`, `min_occurrences` default 3) | `interact` (async JS interaction, then optional extract) | `eval` (run JS in each tab) | `screenshot` (save PNGs to `dir`). PDFs are `webrain_pdf`; `op=pdf` used to be advertised here and never dispatched, so it silently returned an empty fetch row.
 
 ```json
 {
@@ -376,7 +419,7 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdow
 }
 ```
 
-`cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate.
+`cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate. `proxy` applies to the browserless ops (`scrape`, `read`) only — omit it and each request rotates the `WEBRAIN_PROXIES` pool; an explicit URL pins one exit. A browser op's exit is the browser's, set at launch or by `cdp_urls`.
 
 `wait_selector` + `wait_selector_state` (`attached\|visible\|hidden\|detached`, default `visible`) poll after navigate. The state is satisfied by **any** match — an SPA list page renders the cards twice (hidden mobile copy first), so `visible` on the first match used to stall the whole `wait_timeout_secs`. Prefer `attached` with `wait_timeout_secs: 6` on a list: measured 27 URLs in **10 s** versus **159 s**, identical rows.
 

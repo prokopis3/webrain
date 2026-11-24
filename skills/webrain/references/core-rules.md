@@ -27,3 +27,17 @@ Highest-priority operational rules. Follow these before anything else.
    by the target content actually loading.
 10. **Verify final content before returning results.** Confirm the target data
     exists (not a block/consent/empty page), then report success.
+11. **A cookie bridge is only as good as the connection holding it.** Import
+    cookies on the *same* connection that will navigate/batch, and prove it with
+    an authenticated endpoint (200) - never with `set: N / readback: N`, which
+    only describes the writer's jar. Measured 2026-11-21: same cookies, same
+    engine, 403 on one connection and 200 on the other.
+12. **Know which engine answered before diagnosing.** Probe identity in the page:
+    `webgl:false` + UA Chrome/143 = obscura, `webgl:true` + Chrome/15x = real
+    Chrome. Two `session_id`s returning identical page state are ONE browser, not
+    two - that is a routing bug, not a working bridge.
+13. **One retry, then diagnose.** A call that fails twice is a state bug (wedged
+    engine, jar on another connection, unattached target), not bad luck. Wedged
+    obscura signature: `/json/version` + `/json/list` answer, `Target.getTargets`
+    is empty, `Page.navigate`/`Runtime.evaluate` hang. Restart the engine; do not
+    re-run the same call and call it a flaky site.

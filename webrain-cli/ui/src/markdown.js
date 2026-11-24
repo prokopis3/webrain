@@ -54,6 +54,34 @@ function hostOf(href) {
   }
 }
 
+// A destination that *is* a picture. The extension is read off the path with the
+// query and fragment cut away — `…/x.jpg?w=800` is still a jpeg — because a model
+// links the picture it just took far more often than it writes `![]()`, and a
+// reader given a link has not been shown anything. `svg` is deliberately absent:
+// an `<img>` cannot run one, but the link beside it opens the file as a document,
+// and a reply does not get to hand out a script.
+const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|bmp)$/i;
+function imageOf(href) {
+  const s = String(href || "");
+  // A real destination only: `javascript:alert(1).png` ends in a picture's
+  // extension and is not one. Protocol-relative `//cdn/…` still counts.
+  if (!/^(https?:\/\/|\/|\.\/)/i.test(s)) return "";
+  const path = s.split(/[?#]/)[0];
+  return IMG_EXT.test(path) ? path : "";
+}
+
+// A file this machine already has — a screenshot a batch wrote, a download — as
+// an answer names it. The rule is narrow on purpose: a relative path, with a
+// separator, ending in a picture's extension. The separator is what keeps a bare
+// `logo.png` in a table from turning into a broken frame. Whether the file exists
+// is the server's question, never the parser's: `/local` answers 404 and the page
+// drops the frame, leaving the path as the caption it already was.
+const LOCAL_PATH = /^(?!-)[\w.\-/\\]+\.(png|jpe?g|gif|webp|avif|bmp)$/i;
+function localOf(text) {
+  const s = String(text || "").trim();
+  return LOCAL_PATH.test(s) && /[\\/]/.test(s) ? s : "";
+}
+
 // A fenced block becomes a card with its language and its own copy button. The
 // code text is re-escaped here because a renderer receives it raw.
 marked.use({
@@ -76,11 +104,35 @@ marked.use({
       return `<figure class="fig"><a href="${esc(href)}" target="_blank" rel="noopener noreferrer"><img src="${esc(href)}" alt="${esc(alt)}" loading="lazy"></a>${tag}</figure>`;
     },
 
+    // Inline code that happens to name a file on this machine is evidence too,
+    // and a name you cannot see is not. It renders as the same frame a picture
+    // does, captioned with the path — so a 404 costs the frame and never the
+    // text: the page puts the `<code>` back where the frame stood.
+    codespan(token) {
+      const text = typeof token === "string" ? token : (token.text ?? "");
+      const rel = localOf(text);
+      if (!rel) return `<code>${esc(text)}</code>`;
+      const src = `/local?p=${encodeURIComponent(rel.replace(/\\/g, "/"))}`;
+      return `<figure class="fig"><a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="${esc(rel)}" loading="lazy" data-local></a><figcaption>${esc(rel)}</figcaption></figure>`;
+    },
+
     // A link whose text *is* the url is a destination, not a word in a sentence:
     // it gets a card with the host read apart from the path. A normal `[label]`
     // stays an inline link, because a card mid-paragraph breaks the line.
     link(token) {
       const href = token.href || "";
+      // Unless it points at a picture — then the reader wants the picture, and the
+      // label, the only caption the model offered, becomes the caption. A label
+      // that merely repeats the url is not worth printing twice, so the file name
+      // stands in for it. A frame, not an inline thumbnail: the picture is the
+      // point, and a tall image set into a sentence scatters the words around it.
+      const shot = imageOf(href);
+      if (shot) {
+        const cap = String(token.text || "").replace(/`/g, "").trim();
+        const name = shot.slice(shot.lastIndexOf("/") + 1);
+        const alt = cap && cap !== href ? cap : name;
+        return `<figure class="fig"><a href="${esc(href)}" target="_blank" rel="noopener noreferrer"><img src="${esc(href)}" alt="${esc(alt)}" loading="lazy"></a><figcaption>${esc(alt)}</figcaption></figure>`;
+      }
       const bare = !!href && token.text === href;
       const label =
         bare || !token.tokens?.length ? esc(token.text || href) : this.parser.parseInline(token.tokens);
@@ -100,6 +152,15 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "A") {
     node.setAttribute("target", "_blank");
     node.setAttribute("rel", "noopener noreferrer");
+  }
+  // A reply can point an image at any host. Without this, reopening a thread
+  // fetches every one of them at paint time — from third parties, for rows the
+  // reader has not scrolled to. Lazy loading is the platform's own answer: the
+  // request happens when the row enters the viewport, including inside a
+  // collapsed `details`, which fetches nothing until it is opened.
+  if (node.tagName === "IMG") {
+    node.setAttribute("loading", "lazy");
+    node.setAttribute("decoding", "async");
   }
 });
 

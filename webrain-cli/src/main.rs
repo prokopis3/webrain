@@ -156,6 +156,12 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "",
     ),
     (
+        "tool",
+        "webrain tool [<name>] ['<json args>'] [--url URL] [--raw]",
+        "Run any MCP tool from the shell — no model, no client. Bare `webrain tool` lists them.",
+        "This is the whole 19-tool surface, offline: args and reply are the tool's own JSON,\n  so it cannot drift from `webrain_mcp::list_tools()`. `--url` navigates first (most\n  tools read the current page), `@file.json` passes args from a file, and a reply's\n  base64 images are replaced by their size unless --raw is given. Exit 1 when the\n  tool reports an error. Examples:\n    webrain tool webrain_extract '{\"mode\":\"table\"}' --url https://example.com\n    webrain tool webrain_network '{\"op\":\"log\",\"url\":\"https://x/\",\"wait_ms\":3000}'\n  Needs a reachable browser (CDP_URL). `diff`, `pdf`, `serp --http` and `watch` are\n  the verbs that do not.",
+    ),
+    (
         "serp",
         "webrain serp \"query\" [--engine duckduckgo|bing|google|brave|yahoo|baidu|yandex|auto]\n    [--limit N] [--page N] [--safe] [--region R] [--http] [--no-fallback] [--json]\n    [--proxy URL] [--headless] [--fresh] [--pipe] [--hold]",
         "Structured SERP JSON: one query per call, pages fetched sequentially.",
@@ -166,6 +172,18 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "webrain watch <video-url-or-file> [--vision] [--detail D] [--start S] [--end S]",
         "Timestamped transcript plus frames, no browser needed.",
         "",
+    ),
+    (
+        "read",
+        "webrain read <url> [--outline] [--filter TEXT] [--max N] [--json] [--proxy URL] [--browser]",
+        "A page as markdown — plain HTTP by default, or `--browser` when the host refuses an HTTP client.",
+        "No model. The request asks for text/markdown first, so a docs site that\n  already publishes markdown sends it and nothing is converted; otherwise the page is asked\n  for as `.md` (and `<path>/index.md`), also HTTP only. When neither exists the HTML is\n  converted by the same converter `webrain_batch op=markdown` uses, and `source` in the\n  stderr line says which of the three happened. **`--browser` renders the page in the\n  attached Chrome instead** (same tail, `source: browser`) — the answer for a host that\n  answers 403 to every plain HTTP client, which the error now names. --outline prints the\n  heading tree instead of the body (20 lines instead of 40 000 chars) and --filter returns\n  one section, stopping at the next heading of the same or a higher level; a heading that\n  does not exist lists the page's own instead of answering an empty section. The nearest\n  non-empty llms.txt above the page is reported, and `webrain read <that url>` reads it —\n  it is plain text. Relative links stay as the page wrote them: resolve them against\n  `fetched_url`.",
+    ),
+    (
+        "pdf",
+        "webrain pdf <file.pdf | url> [--json]",
+        "Extract a PDF's text as markdown — no browser, no model.",
+        "--json prints the whole payload: per-page text with `needs_ocr`, embedded images\n  (inventory), layout flags, and `pages_needing_vision` — the pages whose figures the\n  text layer cannot deliver. Needs no Chrome and no key.",
     ),
     (
         "obscura",
@@ -241,6 +259,10 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
             (
                 "WEBRAIN_DOWNLOAD_MAX_BYTES",
                 "per-file cap for `webrain_download` http (512 MiB)",
+            ),
+            (
+                "WEBRAIN_RESPONSE_BUDGET",
+                "row-text bytes a batch reply may carry before later rows truncate (8 MiB)",
             ),
         ],
     ),
@@ -357,11 +379,28 @@ const ENV: &[(&str, &[(&str, &str)])] = &[
         &[("RUST_LOG", "log verbosity (webrain=info,tungstenite=warn)")],
     ),
     (
+        "Captcha",
+        &[
+            (
+                "CAPSOLVER_API_KEY",
+                "paid reCAPTCHA-v2 solver (preferred: cheaper + faster per solve)",
+            ),
+            (
+                "WEBRAIN_2CAPTCHA_KEY / TWOCAPTCHA_API_KEY",
+                "the older reCAPTCHA solver — used only when CapSolver is unset; 2CAPTCHA_API_KEY is NOT read",
+            ),
+        ],
+    ),
+    (
         "Chat runtime",
         &[
             (
                 "WEBRAIN_CHAT_DEBUG",
                 "mirror every raw session event to stderr (the provider's own error)",
+            ),
+            (
+                "WEBRAIN_CHAT_UI",
+                "a directory holding the four `chat --serve` files, digest-checked against the build",
             ),
             (
                 "WEBRAIN_CHAT_HOME",
@@ -646,6 +685,17 @@ fn main() -> anyhow::Result<()> {
     if is_serp && no_stealth_engine {
         unsafe { std::env::set_var("WEBRAIN_NO_STEALTH", "1") };
     }
+    // `chat --serve` drives pages through a child `webrain mcp` (env inherited,
+    // see chat_session.rs), and the fingerprint-noise shim is the one thing
+    // measured to make a page render without ever mounting. Default it OFF for
+    // the served UI, and only for it: an explicit value always wins, and every
+    // other command keeps the shim. Set before the runtime spawns threads, for
+    // the reason above.
+    let chat_serve = args.get(1).map(|s| s.as_str()) == Some("chat")
+        && args.iter().skip(2).any(|a| a == "--serve");
+    if chat_serve && std::env::var_os("WEBRAIN_STEALTH_NOISE").is_none() {
+        unsafe { std::env::set_var("WEBRAIN_STEALTH_NOISE", "0") };
+    }
     let rt = tokio::runtime::Runtime::new()?;
 
     // `webrain doctor` / `--doctor`: diagnose install — MCP, CDP ports, engines,
@@ -847,6 +897,171 @@ fn main() -> anyhow::Result<()> {
             let backend = rt.block_on(CdpBackend::connect_default())?;
             let result = rt.block_on(backend.evaluate(js))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Some("tool") => {
+            // The whole MCP surface from a shell, with no model in the loop.
+            // Args and reply are the tool's own JSON, so this cannot drift from
+            // `list_tools()` — and a tool added tomorrow is reachable today.
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if name.is_empty() || name.starts_with("--") {
+                for n in webrain_mcp::tool_names() {
+                    println!("{n}");
+                }
+                return Ok(());
+            }
+            // One pass over the tail: `--flag value` pairs and the single JSON
+            // argument, which may sit anywhere.
+            let (tool_args, nav_to, raw) = parse_tool_argv(&args[3.min(args.len())..])?;
+            let backend = rt.block_on(CdpBackend::connect_default())?;
+            if let Some(u) = nav_to {
+                rt.block_on(backend.navigate(&u))?;
+            }
+            let mut reply = rt.block_on(webrain_mcp::call_tool(&backend, name, &tool_args));
+            if !raw {
+                strip_inline_images(&mut reply);
+            }
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            if reply.get("status").and_then(|s| s.as_str()) == Some("error")
+                || reply.get("error").is_some()
+            {
+                std::process::exit(1);
+            }
+        }
+        Some("read") => {
+            // Browserless by default, model-free always: markdown negotiation, a
+            // `.md` retry, and the nearest llms.txt — all HTTP. `--browser` swaps
+            // the transport for the attached Chrome and keeps the same tail.
+            let target = args.get(2).cloned().unwrap_or_default();
+            if target.is_empty() || target.starts_with("--") {
+                print!("{}", help_page("read"));
+                std::process::exit(2);
+            }
+            let flag = |name: &str| -> Option<String> {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let opts = webrain_core::read::ReadOpts {
+                outline_only: args.contains(&"--outline".to_string()),
+                filter: flag("--filter"),
+                max_chars: flag("--max").and_then(|v| v.parse().ok()).unwrap_or(0),
+                proxy: flag("--proxy"),
+            };
+            let v = if args.contains(&"--browser".to_string()) {
+                // A host that refuses a plain HTTP client (a shop host, a challenge,
+                // anything that only answers a real browser) still answers Chrome:
+                // navigate, hand over the rendered document, run the SAME tail.
+                let backend = rt.block_on(CdpBackend::connect_default())?;
+                rt.block_on(backend.navigate(&target))?;
+                let html = rt.block_on(backend.evaluate(
+                    "document.documentElement ? document.documentElement.outerHTML : ''",
+                ))?;
+                let href = rt.block_on(backend.evaluate("location.href"))?;
+                webrain_core::read::read_url_browser(
+                    &target,
+                    html.as_str().unwrap_or(""),
+                    href.as_str().unwrap_or(&target),
+                    &opts,
+                )?
+            } else {
+                match webrain_core::read::read_url(&target, &opts) {
+                    Ok(v) => v,
+                    // The one failure the caller can fix with a flag: a plain HTTP
+                    // client is refused, not the page missing.
+                    Err(e) if e.to_string().contains("http status: 40") => anyhow::bail!(
+                        "{e}\n  That host refuses a plain HTTP client - retry with --browser (needs Chrome on CDP_URL)."
+                    ),
+                    Err(e) => return Err(e),
+                }
+            };
+            if args.contains(&"--json".to_string()) {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if opts.outline_only {
+                for h in v
+                    .get("outline")
+                    .and_then(|o| o.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    let level = h.get("level").and_then(|l| l.as_u64()).unwrap_or(1) as usize;
+                    println!(
+                        "{}{}",
+                        "  ".repeat(level.saturating_sub(1)),
+                        h.get("title").and_then(|t| t.as_str()).unwrap_or("")
+                    );
+                }
+            } else {
+                println!("{}", v.get("text").and_then(|t| t.as_str()).unwrap_or(""));
+            }
+            // How the body arrived is the number that explains the token count:
+            // negotiated markdown was never converted, and the `.md` fallback is
+            // one request the caller did not have to write.
+            eprintln!(
+                "-- {} ({}), {} chars{}{}",
+                v.get("source").and_then(|s| s.as_str()).unwrap_or("?"),
+                v.get("fetched_url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or(&target),
+                v.get("chars").and_then(|c| c.as_u64()).unwrap_or(0),
+                // An outline that printed nothing has to say why: no headings is
+                // a fact about the page, not a failure of the command.
+                if opts.outline_only {
+                    format!(
+                        ", {} heading(s)",
+                        v.get("headings").and_then(|h| h.as_u64()).unwrap_or(0)
+                    )
+                } else {
+                    String::new()
+                },
+                v.get("llms_txt")
+                    .and_then(|l| l.get("url"))
+                    .and_then(|u| u.as_str())
+                    .map(|u| format!(", llms.txt: {u}"))
+                    .unwrap_or_default()
+            );
+        }
+        Some("pdf") => {
+            // Browserless, like `diff`: the extractor opens the file or fetches
+            // the URL itself, so this needs neither a model nor a Chrome.
+            let src = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if src.is_empty() {
+                eprintln!("usage: webrain pdf <file.pdf | https://…/file.pdf> [--json]");
+                std::process::exit(2);
+            }
+            let v = webrain_core::engines::pdf_extract(src)?;
+            if args.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let md = v.get("markdown").and_then(|m| m.as_str()).unwrap_or("");
+            println!("{md}");
+            // Where the text layer fails is the one thing a reader must know
+            // before trusting the output — the vision list is why it exists.
+            let need = v
+                .pointer("/layout/pages_needing_vision")
+                .and_then(|p| p.as_array())
+                .cloned()
+                .unwrap_or_default();
+            eprintln!(
+                "-- {} pages, {} image(s), vision needed on {}",
+                v.get("pages").and_then(|p| p.as_u64()).unwrap_or(0),
+                v.get("images")
+                    .and_then(|i| i.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                if need.is_empty() {
+                    "no page".to_string()
+                } else {
+                    need.iter()
+                        .filter_map(|p| p.as_u64())
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            );
         }
         Some("watch") => {
             // webrain watch <video-url-or-path> [--detail transcript|efficient|balanced]
@@ -2119,6 +2334,65 @@ fn chrono_now() -> String {
     format!("{}", t.as_secs())
 }
 
+/// Split the tail of `webrain tool <name> …` into (json args, --url, --raw).
+///
+/// Pure except for `@file` reads, and separate from the arm because of the one
+/// bug this had: taking the first non-flag argument as JSON picked up `--url`'s
+/// value and tried to parse a URL as JSON.
+fn parse_tool_argv(tail: &[String]) -> anyhow::Result<(serde_json::Value, Option<String>, bool)> {
+    let mut args = json!({});
+    let mut url = None;
+    let mut raw = false;
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i].as_str() {
+            "--raw" => {
+                raw = true;
+                i += 1;
+            }
+            "--url" => {
+                url = tail.get(i + 1).cloned();
+                i += 2;
+            }
+            // An unknown flag is a pair too: skipping only the flag would make
+            // its value the JSON argument, which is the same bug again.
+            a if a.starts_with("--") => i += 2,
+            a => {
+                let text = match a.strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path)?,
+                    None => a.to_string(),
+                };
+                args = serde_json::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("args must be JSON (or @file.json): {e}"))?;
+                i += 1;
+            }
+        }
+    }
+    Ok((args, url, raw))
+}
+
+/// A tool reply can carry megabytes of base64 (a screenshot, pixel tiles, a PDF
+/// render) — dumping that at a terminal buries the answer and jams the shell.
+/// Replacing it with its size keeps `webrain tool` readable; `--raw` prints the
+/// real thing for a caller that redirects to a file.
+fn strip_inline_images(v: &mut serde_json::Value) {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if k.ends_with("_b64") {
+                    let n = val.as_str().map(|s| s.len() / 4 * 3).unwrap_or(0);
+                    *val = Value::String(format!("<{n} bytes of base64 - pass --raw to print it>"));
+                } else {
+                    strip_inline_images(val);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_inline_images),
+        _ => {}
+    }
+}
+
 fn upgrade_forced() -> bool {
     std::env::args().any(|a| a == "--force")
 }
@@ -2280,7 +2554,7 @@ fn big_stack<T: Send + 'static>(
 /// instead of the ~211 MB one.
 #[cfg(feature = "chat")]
 fn chat_runtime() -> bool {
-    github_copilot_sdk::HAS_BUNDLED_CLI || webrain_core::install::find_copilot().is_some()
+    copilot_sdk::HAS_BUNDLED_CLI || webrain_core::install::find_copilot().is_some()
 }
 #[cfg(not(feature = "chat"))]
 fn chat_runtime() -> bool {
@@ -2432,5 +2706,105 @@ mod asset_tests {
         // binary for the architecture they are run on.
         assert!(release_asset("macos", "x86_64", true).is_err());
         assert!(release_asset("freebsd", "x86_64", false).is_err());
+    }
+}
+
+/// `webrain tool` argument split. The regression this covers: the first
+/// non-flag argument was taken as the JSON, so `--url <u>` fed a URL to
+/// `serde_json` and every call with `--url` and no explicit args failed with
+/// "expected value at line 1 column 1".
+#[cfg(test)]
+mod tool_argv_tests {
+    use super::{ENV, parse_tool_argv, strip_inline_images};
+    use serde_json::json;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_flag_value_is_never_the_json_argument() {
+        let (args, url, raw) = parse_tool_argv(&argv(&[
+            "--url",
+            "https://example.com/",
+            r#"{"mode":"table"}"#,
+            "--raw",
+        ]))
+        .unwrap();
+        assert_eq!(url.as_deref(), Some("https://example.com/"));
+        assert_eq!(args["mode"], "table");
+        assert!(raw);
+    }
+
+    #[test]
+    fn flags_only_leave_an_empty_object() {
+        let (args, url, raw) = parse_tool_argv(&argv(&["--url", "https://x/"])).unwrap();
+        assert_eq!(args, json!({}));
+        assert_eq!(url.as_deref(), Some("https://x/"));
+        assert!(!raw);
+
+        let (args, url, raw) = parse_tool_argv(&[]).unwrap();
+        assert_eq!(args, json!({}));
+        assert!(url.is_none());
+        assert!(!raw);
+    }
+
+    #[test]
+    fn junk_args_are_an_error_naming_the_shape() {
+        let err = parse_tool_argv(&argv(&["not-json"])).unwrap_err();
+        assert!(err.to_string().contains("JSON"), "{err}");
+    }
+
+    #[test]
+    fn inline_images_are_replaced_but_their_size_survives() {
+        let mut reply = json!({
+            "bytes": 12,
+            "screenshot_b64": "AAAAAAAAAAAAAAAA",
+            "nested": [{"png_b64": "AAAA"}, {"keep": 1}],
+        });
+        strip_inline_images(&mut reply);
+        let shot = reply["screenshot_b64"].as_str().unwrap();
+        assert!(shot.contains("12 bytes"), "{shot}");
+        assert!(
+            reply["nested"][0]["png_b64"]
+                .as_str()
+                .unwrap()
+                .contains("3 bytes")
+        );
+        assert_eq!(reply["nested"][1]["keep"], 1);
+        assert_eq!(reply["bytes"], 12);
+    }
+
+    /// `webrain help env` is the offline copy of `docs/reference/environment.mdx`,
+    /// and the table's own comment says the two lists must stay equal. They had
+    /// drifted by seven names (four advertised nowhere, three documented but
+    /// undiscoverable from a terminal), so this fails instead of drifting again.
+    ///
+    /// A name may legitimately appear in two groups — `OPENAI_API_KEY` is a vision
+    /// hop and a chat row, with a different hint in each — so repeats are allowed
+    /// here; only coverage is enforced.
+    #[test]
+    fn every_env_var_the_terminal_advertises_is_documented() {
+        const DOC: &str = include_str!("../../docs/reference/environment.mdx");
+        let mut missing = Vec::new();
+        for (_, vars) in ENV {
+            for (names, _) in *vars {
+                for raw in names.split('/') {
+                    // "WEBRAIN_HTTP_CACHE=0" and the abbreviated "_MODEL" in a
+                    // combined row are not names of their own.
+                    let name = raw.trim().split('=').next().unwrap_or("").trim();
+                    if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if !DOC.contains(name) {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "help env and docs/reference/environment.mdx disagree: {missing:?}"
+        );
     }
 }

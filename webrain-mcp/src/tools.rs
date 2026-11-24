@@ -28,8 +28,9 @@ pub fn close_launched(key: &str) -> bool {
 use serde_json::{Value, json};
 use webrain_core::engines::{
     BatchResult, CrawlStrategy, SpiderEngine, TileEngine, batch_eval, batch_extract, batch_fetch,
-    batch_interact, batch_markdown, batch_screenshot, bm25_filter, build_adaptive_extract_js,
-    build_clean_js, build_extract_js, download_files, regex_extract, sitemap_urls, validate_urls,
+    batch_interact, batch_markdown, batch_read, batch_scrape, batch_screenshot, bm25_filter,
+    build_adaptive_extract_js, build_clean_js, build_extract_js, download_files, regex_extract,
+    sitemap_urls, validate_urls,
 };
 use webrain_core::vision::{ask_viewport, index_current_page, retrieve as vision_retrieve};
 
@@ -62,13 +63,17 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-18 TOOLS — match the request to a boundary:
+19 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
                      annotate|media) — assets = every link internal+external+
                      non-http scheme, images incl. CSS background-image, video
                      sources+embeds, in one pass
+  webrain_network    the page's OWN HTTP traffic (op: log|requests|request|clear) —
+                     log captures every request the app makes; request <id> returns
+                     that response body, which is how a JS app with no visible data
+                     gets scraped
   webrain_interact   drive the page (action: click|click_coords|type|press|scroll|
                      nav|tab|select|hover|check|dialog|wait|upload|dismiss_overlays|
                      add_init_script)
@@ -76,8 +81,10 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
                      autoschema|bm25)
   webrain_scrape     fast no-browser GET of one URL (static pages only)
   webrain_batch      same op across many URLs in parallel tabs (op: fetch|markdown|
-                     extract|interact|eval|assets|screenshot|pdf) + cdp_urls
-                     per-proxy fan-out
+                     extract|scrape|read|interact|eval|assets|screenshot) + cdp_urls
+                     per-proxy fan-out. scrape = the CSS schema over plain HTTP,
+                     no tab; read = `webrain read` for N URLs; extract = same
+                     schema in a browser tab
   webrain_crawl      site traversal (mode: spider|sitemap|scan|validate).
                      spider: the frontier dedupes on path + sorted query (anchor
                      ignored, `#/` route kept) so facet permutations are ONE
@@ -142,11 +149,24 @@ BROWSER / PROFILE / SESSION / CHALLENGE MODEL
   obscura (--user-agent, 4/4 cookies, 46s wait) both stayed on "Just a moment...",
   while the Chrome that minted the cookie returned 200. Batch gated pages on THAT
   Chrome (batch with cdp_urls=["http://127.0.0.1:9222"]); do not call it a cookie bug.
+- A COOKIE BRIDGE IS PER-CONNECTION. `setcookies` fills the jar of the connection
+  that wrote it: a CLI `webrain setcookies --port N` and the MCP session are two
+  different jars, so the page bounces to /login while the shell HTML still answers
+  200. Import on the session that will navigate (`webrain_session(op=setcookies,
+  session_id=X)` then navigate with session_id=X) and VERIFY with an authenticated
+  endpoint (200 vs 403) — `readback: N` only describes the writer's jar. MEASURED
+  2026-11-21, serper.dev on obscura :9224: 8 cookies set on one connection, a fresh
+  connection read 0 and /auth/me/ answered 403; the same cookies imported through
+  the navigating session answered 200 with the dashboard.
+- WEDGED ENGINE IS NOT A BLOCKED SITE. If /json/version and /json/list answer but
+  Target.getTargets is [] and Page.navigate / Runtime.evaluate hang, the engine is
+  wedged: restart it with the same flags and re-import cookies in-session. Do not
+  re-run the same call.
 - ENGINE IDENTITY (profiles exist beyond Chrome):
     obscura     serve --host 127.0.0.1 --port 9224 --stealth [--user-agent UA]
-                [--storage-dir DIR]     # DIR is a real profile: persists cookies
-                                        # across server restarts, and lifts per-conn
-                                        # jar isolation
+                [--storage-dir DIR]     # DIR persists the jar ACROSS RESTARTS only
+                                        # (load at boot / save); it does NOT lift per-conn
+                                        # jar isolation while the server is running
     lightpanda  serve [--user-agent UA] [--cookie in.json] [--cookie-jar out.json]
   `webrain obscura` passes ONLY --stealth (no --storage-dir/--user-agent) — launch
   the binary directly from WEBRAIN_BROWSERS_DIR for those. obscura refuses a
@@ -412,7 +432,7 @@ ENVIRONMENT — read at PROCESS START, a tool call cannot change them
 /// Is this line a guide section header?
 ///
 /// Headers are the unindented lines that OPEN with an all-caps word ("RULES",
-/// "EXTRACTION MATRIX", "17 TOOLS — …", "FROM-SCRATCH DISCOVERY (…)"); body lines
+/// "EXTRACTION MATRIX", "19 TOOLS — …", "FROM-SCRATCH DISCOVERY (…)"); body lines
 /// are indented or start with a bullet, so the shape is enough and the const needs
 /// no markers. Testing the whole line would miss the three headers that carry a
 /// lowercase tail after their title.
@@ -524,7 +544,7 @@ pub fn guide_from_args(args: &Value) -> Value {
         );
         for (title, body) in &sections {
             // The tool list is used on nearly every call, so it stays inline.
-            if title.starts_with("18 TOOLS") {
+            if title.starts_with("19 TOOLS") {
                 text.push_str(&format!("\n{title}\n{body}"));
                 continue;
             }
@@ -803,9 +823,10 @@ mod stats_tests {
 /// them: the router has always accepted it, but an UNDECLARED parameter is one
 /// no client will ever send, which made `webrain_session{op:open, cdp_url}`
 /// write-only for everything except batch and session itself.
-const SESSION_ROUTED_TOOLS: [&str; 11] = [
+const SESSION_ROUTED_TOOLS: [&str; 12] = [
     "webrain_navigate",
     "webrain_observe",
+    "webrain_network",
     "webrain_interact",
     "webrain_eval",
     "webrain_eval_in_frame",
@@ -835,7 +856,7 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_eval",
             "description": "Run arbitrary JavaScript in the current page and return the JSON result. The escape hatch for anything a tool doesn't cover (probe DOM, read scripts, call APIs).",
             "inputSchema": {"type": "object", "properties": {
-                "js": {"type": "string", "description": "JS expression. Return a JSON-serializable value (JSON.stringify(...))."}
+                "js": {"type": "string", "description": "JS expression. Return a JSON-serializable value (JSON.stringify(...)). Or `@path/to/file.js` to read the script from disk, which spares you escaping quotes and backslashes into JSON twice."},
             }, "required": ["js"]}
         }),
         json!({
@@ -843,7 +864,7 @@ pub fn list_tools() -> Vec<Value> {
             "description": "Run JS inside a cross-origin iframe (isolated world). url_contains selects the iframe by src substring; js runs in that frame and returns the JSON result.",
             "inputSchema": {"type": "object", "properties": {
                 "url_contains": {"type": "string", "description": "Substring of the target iframe's src to select it"},
-                "js": {"type": "string", "description": "JS expression to run inside the iframe"}
+                "js": {"type": "string", "description": "JS expression to run inside the iframe, or `@path/to/file.js` to read it from disk."}
             }, "required": ["url_contains", "js"]}
         }),
         json!({
@@ -885,6 +906,20 @@ pub fn list_tools() -> Vec<Value> {
                 "url": {"type": "string", "description": "media: URL to load and capture network requests"},
                 "wait_ms": {"type": "integer", "default": 0, "description": "media: keep capturing after load"}
             }, "required": ["what"]}
+        }),
+        json!({
+            "name": "webrain_network",
+            "description": "The page's OWN HTTP traffic — every request the app makes, not just what it paints. op=log arms CDP Network capture (optionally navigating first with url, then capturing for wait_ms) and returns entries: id, url, method, type, status, mime, bytes, at (epoch ms), ms, failed. The arm stays on afterwards, so log → interact (a click) → requests reads one buffer. op=request returns ONE response body by that id — this is how a JS app with no visible data gets scraped; ask while the renderer still holds it, and note an entry with bytes:0 has no body to give. op=requests re-reads the buffer; op=har exports the same rows as HAR 1.2 (headers/cookies are not captured, so they are HAR's -1/[] unknowns); op=clear empties it. Narrow with filter (URL substring), type, status, limit.",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["log","requests","request","har","clear"]},
+                "url": {"type": "string", "description": "log: navigate first and capture the whole load"},
+                "wait_ms": {"type": "integer", "default": 0, "description": "log: keep capturing this long after load, for late XHR"},
+                "id": {"type": "string", "description": "request: the id from op=log"},
+                "filter": {"type": "string", "description": "only entries whose URL contains this"},
+                "type": {"type": "string", "description": "only this resource type: XHR, Fetch, Document, Script, Image…"},
+                "status": {"type": "integer", "description": "only this status code"},
+                "limit": {"type": "integer", "default": 200, "description": "max entries returned"}
+            }, "required": ["op"]}
         }),
         json!({
             "name": "webrain_interact",
@@ -949,17 +984,21 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_batch",
-            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields) | interact (async JS per tab) | eval (custom JS extractor) | assets (every link internal+external, images incl. CSS backgrounds, video sources+embeds — counts plus a `max` sample per URL) | screenshot | pdf (PDF urls[] → markdown + tables + layout, browserless). concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping.",
+            "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields, in a browser tab) | scrape (the SAME schema over plain HTTP — no tab, no render, the batch twin of webrain_scrape) | read (the batch twin of `webrain read`: HTTP markdown negotiation, `.md` retry, nearest llms.txt — no tab) | interact (async JS per tab) | eval (custom JS extractor) | assets (every link internal+external, images incl. CSS backgrounds, video sources+embeds — counts plus a `max` sample per URL) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping. PDFs are webrain_pdf, not an op here. Every row is {url, title, text, data, error, ms}: extract/scrape/read/eval/interact put the payload in `data` (text stays empty), fetch/markdown put it in `text`; `title` is the document that was actually read, so a challenge/consent/404 title means you did NOT read the page you asked for.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","interact","eval","screenshot","autoschema","pdf","assets"], "description": "pdf: PDF extraction over urls[] (http(s) links or local paths) — download + pure-Rust parse, NO browser or tab. Use it for PDF lists; fetch/markdown on a PDF URL return an empty page because Chrome renders PDFs in a viewer plugin with no DOM. assets: per-array cap comes from `max` (default 20)."},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","scrape","read","interact","eval","screenshot","autoschema","assets"], "description": "pdf moved to its own tool (webrain_pdf) — it was advertised here but never dispatched, so `op=pdf` silently returned an empty fetch row. scrape: the CSS schema over plain HTTP, no tab (the batch twin of webrain_scrape); extract: the same schema in a browser tab; read: the batch twin of `webrain read` — HTTP markdown negotiation + `.md` retry + nearest llms.txt, no tab, payload in `data` with `source`. assets: per-array cap comes from `max` (default 20)."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
                 "max": {"type": "integer", "description": "assets: per-array cap per URL (default 20, max 500)"},
                 "urls": {"type": "array", "items": {"type": "string"}},
-                "query": {"type": "string", "description": "markdown: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM)"},
-                "top_k": {"type": "integer", "description": "markdown: keep this many query-relevant chunks (requires query; 0 = whole document)"},
+                "query": {"type": "string", "description": "markdown/read: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM). For read it prunes the markdown the row produced, so N pages can be read for ONE question"},
+                "proxy": {"type": "string", "description": "scrape/read ONLY (the browserless ops): HTTP(S)/SOCKS exit for the fetches. Omit to rotate the WEBRAIN_PROXIES pool per request; an explicit URL is honored as-is and never rotates. Browser ops (fetch/markdown/extract/interact/eval/screenshot) ignore it — their exit is the browser's, set at launch or via cdp_urls."},
+                "top_k": {"type": "integer", "description": "markdown/read: keep this many query-relevant chunks (requires query; 0 = whole document)"},
+                "filter": {"type": "string", "description": "read ONLY: return just the section whose heading contains this text — the verb's `--filter`, applied per row"},
+                "outline": {"type": "boolean", "default": false, "description": "read ONLY: answer the heading tree instead of the body — the verb's `--outline`, applied per row"},
+                "max_chars": {"type": "integer", "description": "read ONLY: cap the returned text after selection — the verb's `--max`"},
                 "cdp_urls": {"type": "array", "items": {"type": "string"}, "description": "Round-robin URLs across these CDP backends (per-proxy isolation)"},
-                "js": {"type": "string", "description": "eval: JS extractor to run in each tab (required when op=eval)"},
-                "interaction": {"type": "string", "description": "interact: async JS to run in each tab"},
+                "js": {"type": "string", "description": "eval: JS extractor to run in each tab (required when op=eval); `@path/to/file.js` reads it from disk instead"},
+                "interaction": {"type": "string", "description": "interact: async JS to run in each tab; `@path/to/file.js` reads it from disk instead"},
                 "base_selector": {"type": "string", "description": "extract/interact: repeated-item selector"},
                 "fields": {"type": "array", "items": {"type": "object"}, "description": "extract/interact: schema"},
                 "concurrency": {"type": "integer", "default": 4},
@@ -1823,6 +1862,69 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
 /// Dispatch one tool call. The span carries the FOLDED tool name, so a
 /// `webrain_observe{what:screenshot}` shows up as `webrain_screenshot` in
 /// `RUST_LOG=debug` — the name that actually did the work.
+// Parse Scrapling-style request-quality params from tool args (shared by
+// navigate + batch). All optional; defaults keep legacy behavior.
+fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
+    use webrain_core::backends::cdp::NavOpts;
+    NavOpts {
+        disable_resources: args
+            .get("disable_resources")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        block_trackers: args
+            .get("block_trackers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        network_idle: args
+            .get("network_idle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        wait_selector: args
+            .get("wait_selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wait_selector_state: args
+            .get("wait_selector_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("visible")
+            .to_string(),
+        css_selector: args
+            .get("css_selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
+    }
+}
+/// `js` / `interaction` may be a literal expression or `@path` — the convention
+/// `webrain tool` already uses for its args, so a script full of quotes and regexes
+/// never has to survive a second round of JSON escaping. A leading `@` that names no
+/// file stays literal, so a typo runs (and fails loudly) instead of silently emptying.
+fn js_arg(args: &Value, key: &str) -> Result<String, String> {
+    let s = args.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    match s
+        .strip_prefix('@')
+        .filter(|p| std::path::Path::new(p).is_file())
+    {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("{s}: {e}")),
+        None => Ok(s.to_string()),
+    }
+}
+
+/// A bad `js`/`interaction` argument, as one row per URL — the same shape batch uses
+/// for "js required", so a failed `@path` never reads as a successful empty batch.
+fn batch_js_err(urls: &[String], msg: String) -> Vec<BatchResult> {
+    urls.iter()
+        .map(|u| BatchResult {
+            url: u.clone(),
+            title: String::new(),
+            text: String::new(),
+            data: None,
+            error: Some(msg.clone()),
+            ms: 0,
+        })
+        .collect()
+}
+
 #[tracing::instrument(skip_all, fields(tool = %name))]
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
@@ -1833,52 +1935,97 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);
     let args: &Value = mapped.as_ref().map(|(_, a)| a).unwrap_or(args);
 
-    // Parse Scrapling-style request-quality params from tool args (shared by
-    // navigate + batch). All optional; defaults keep legacy behavior.
-    fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
-        use webrain_core::backends::cdp::NavOpts;
-        NavOpts {
-            disable_resources: args
-                .get("disable_resources")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            block_trackers: args
-                .get("block_trackers")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            network_idle: args
-                .get("network_idle")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            wait_selector: args
-                .get("wait_selector")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            wait_selector_state: args
-                .get("wait_selector_state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("visible")
-                .to_string(),
-            css_selector: args
-                .get("css_selector")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
-        }
-    }
-
     match name {
         "webrain_guide" => guide_from_args(args),
         "webrain_add_init_script" => {
-            let js = args.get("js").and_then(|v| v.as_str()).unwrap_or("");
+            let js = match js_arg(args, "js") {
+                Ok(js) => js,
+                Err(m) => return json!({"status": "error", "message": m}),
+            };
             if js.is_empty() {
                 return json!({"status": "error", "message": "js required"});
             }
-            match backend.add_init_script(js).await {
+            match backend.add_init_script(&js).await {
                 Ok(_) => json!({"status": "ok"}),
                 Err(e) => err(e),
             }
         }
+        other => match family_of(other) {
+            Some("page") => call_page(backend, name, args).await,
+            Some("session") => call_session(backend, name, args).await,
+            Some("crawl") => call_crawl(backend, name, args).await,
+            Some("extract") => call_extract(backend, name, args).await,
+            Some("interact") => call_interact(backend, name, args).await,
+            Some("read") => call_read(backend, name, args).await,
+            Some("batch") => call_batch(backend, name, args).await,
+            Some("media") => call_media(backend, name, args).await,
+            Some("toolbox") => call_toolbox(backend, name, args).await,
+            _ => json!({"error": format!("Unknown tool: {name}")}),
+        },
+    }
+}
+
+/// Which family function owns a tool name.
+///
+/// Kept as data rather than as literal patterns inside `call_tool`, because a
+/// 61-arm dispatcher has one silent failure mode: a tool that is advertised
+/// and dispatched nowhere. `every_advertised_tool_has_a_family` holds that.
+fn family_of(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "webrain_navigate"
+        | "webrain_eval"
+        | "webrain_screenshot"
+        | "webrain_click"
+        | "webrain_type"
+        | "webrain_click_coords"
+        | "webrain_hold"
+        | "webrain_drag"
+        | "webrain_eval_in_frame"
+        | "webrain_scroll"
+        | "webrain_get_html" => "page",
+        "webrain_cookies" | "webrain_setcookies" => "session",
+        "webrain_spider" | "webrain_sitemap" | "webrain_snapshot" => "crawl",
+        "webrain_pixel"
+        | "webrain_extract_json"
+        | "webrain_extract_regex"
+        | "webrain_get_jsonld"
+        | "webrain_table"
+        | "webrain_scan"
+        | "webrain_autoschema"
+        | "webrain_fetch_http"
+        | "webrain_bm25"
+        | "webrain_fit"
+        | "webrain_flatten"
+        | "webrain_annotate" => "extract",
+        "webrain_select" | "webrain_hover" | "webrain_check" | "webrain_dialog"
+        | "webrain_wait" | "webrain_upload" => "interact",
+        "webrain_validate_urls"
+        | "webrain_pdf"
+        | "webrain_tab"
+        | "webrain_page_info"
+        | "webrain_a11y"
+        | "webrain_semantic_tree" => "read",
+        "webrain_batch" => "batch",
+        "webrain_download" | "webrain_watch" | "webrain_search" | "webrain_serp"
+        | "webrain_nav" | "webrain_press" | "webrain_get_images" | "webrain_assets" => "media",
+        "webrain_media"
+        | "webrain_network"
+        | "webrain_console"
+        | "webrain_dismiss_overlays"
+        | "webrain_vision_index"
+        | "webrain_vision_retrieve"
+        | "webrain_vision_ask"
+        | "webrain_clean"
+        | "webrain_profiles"
+        | "webrain_captcha"
+        | "webrain_login" => "toolbox",
+        _ => return None,
+    })
+}
+
+async fn call_page(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_navigate" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if url.is_empty() {
@@ -1893,8 +2040,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
         }
         "webrain_eval" => {
-            let js = args.get("js").and_then(|v| v.as_str()).unwrap_or("");
-            match backend.evaluate(js).await {
+            let js = match js_arg(args, "js") {
+                Ok(js) => js,
+                Err(m) => return json!({"status": "error", "message": m}),
+            };
+            match backend.evaluate(&js).await {
                 Ok(v) => json!({"status": "ok", "result": v}),
                 Err(e) => err(e),
             }
@@ -2047,11 +2197,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let js = args
-                .get("js")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let js = match js_arg(args, "js") {
+                Ok(js) => js,
+                Err(m) => return json!({"status": "error", "message": m}),
+            };
             if url_contains.is_empty() || js.is_empty() {
                 return json!({"status": "error", "message": "url_contains and js required"});
             }
@@ -2091,6 +2240,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             Ok(html) => json!({"status": "ok", "html": html}),
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_session(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         // Cross-browser session migration: read/write cookies ON THE SESSION
         // BACKEND. Set + batch on the same connection so per-connection
         // isolated browsers (obscura stealth) share the imported session.
@@ -2159,6 +2315,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 },
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_spider" => {
             let seed = args.get("seed_url").and_then(|v| v.as_str()).unwrap_or("");
             if seed.is_empty() {
@@ -2332,6 +2495,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_extract(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_pixel" => {
             let tw = args
                 .get("tile_width")
@@ -2408,7 +2578,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
         }
         "webrain_table" => {
             // browsemind extract_table: HTML tables -> JSON rows, zero LLM.
-            let js = r#"JSON.stringify(Array.from(document.querySelectorAll('table')).slice(0,20).map(t => { const headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.trim()); const rows = Array.from(t.querySelectorAll('tr')).slice(headers.length ? 1 : 0).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.textContent.trim())); return headers.length ? rows.map(r => Object.fromEntries(headers.map((h,i) => [h, r[i] ?? null]))) : rows; }))"#;
+            // Header cells are object KEYS, so their whitespace is normalised:
+            // HTML pads headers with `&nbsp;` (U+00A0) for layout, and
+            // `trim()` only strips the ends, which left `row["First\u00a0appeared"]`
+            // — a key that looks right and is not. Verified on a Wikipedia
+            // infobox: the key is now `First appeared` (U+0020). Cell values are
+            // left verbatim, because a <br> in a cell is real structure.
+            let js = r#"JSON.stringify(Array.from(document.querySelectorAll('table')).slice(0,20).map(t => { const headers = Array.from(t.querySelectorAll('th')).map(th => th.textContent.replace(/\s+/g, ' ').trim()); const rows = Array.from(t.querySelectorAll('tr')).slice(headers.length ? 1 : 0).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.textContent.trim())); return headers.length ? rows.map(r => Object.fromEntries(headers.map((h,i) => [h, r[i] ?? null]))) : rows; }))"#;
             match backend.evaluate(js).await {
                 Ok(v) => {
                     let arr = parse_json_str(&v);
@@ -2518,6 +2694,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_interact(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_select" => {
             // agent-browser select_option borrow: value|text match, change event,
             // error lists available options on no-match.
@@ -2617,6 +2800,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_read(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_validate_urls" => {
             // browsemind seed(from_links, validate=True): which URLs are alive vs dead.
             let urls: Vec<String> = args
@@ -2724,6 +2914,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             Err(e) => err(e),
         },
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    match name {
         "webrain_batch" => {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("fetch");
             let urls: Vec<String> = args
@@ -2790,17 +2986,63 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                // Only the browserless ops can take an exit per call; a browser op's
+                // exit is the browser's (set at launch, or via cdp_urls). Omitted →
+                // the engine rotates the WEBRAIN_PROXIES pool per request.
+                let proxy = args
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .filter(|p| !p.is_empty())
+                    .map(String::from);
                 match op {
                     "extract" => {
                         batch_extract(b, urls, &base, &base_fields, &fields, concurrency, opts)
                             .await
                     }
-                    "interact" => {
-                        let interaction = args
-                            .get("interaction")
+                    // The browserless twin of `extract`: same schema, no tab. N
+                    // static pages were N `webrain_scrape` calls before this.
+                    "scrape" => {
+                        batch_scrape(urls, &base, &fields, concurrency, proxy.as_deref()).await
+                    }
+                    // The batch twin of `webrain read`: HTTP markdown negotiation per
+                    // URL, no tab. N docs pages were N `read` invocations before this.
+                    "read" => {
+                        let query = args
+                            .get("query")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let top_k = args
+                            .get("top_k")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.max(0) as usize)
+                            .unwrap_or(0);
+                        // `--filter`/`--outline`/`--max` of the verb, per row: the
+                        // caller should not have to re-implement the selection.
+                        let read = webrain_core::read::ReadOpts {
+                            outline_only: args
+                                .get("outline")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            filter: args
+                                .get("filter")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(String::from),
+                            max_chars: args
+                                .get("max_chars")
+                                .and_then(|v| v.as_i64())
+                                .map(|n| n.max(0) as usize)
+                                .unwrap_or(0),
+                            proxy: None,
+                        };
+                        batch_read(urls, concurrency, proxy.as_deref(), &query, top_k, &read).await
+                    }
+                    "interact" => {
+                        let interaction = match js_arg(args, "interaction") {
+                            Ok(js) => js,
+                            Err(m) => return batch_js_err(&urls, m),
+                        };
                         batch_interact(
                             b,
                             urls,
@@ -2822,20 +3064,12 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         batch_screenshot(b, urls, &dir, concurrency, opts).await
                     }
                     "eval" => {
-                        let js = args
-                            .get("js")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        let js = match js_arg(args, "js") {
+                            Ok(js) => js,
+                            Err(m) => return batch_js_err(&urls, m),
+                        };
                         if js.is_empty() {
-                            return vec![BatchResult {
-                                url: urls[0].clone(),
-                                title: String::new(),
-                                text: String::new(),
-                                data: None,
-                                error: Some("js required (op=eval)".to_string()),
-                                ms: 0,
-                            }];
+                            return batch_js_err(&urls, "js required (op=eval)".to_string());
                         }
                         batch_eval(b, urls, &js, concurrency, opts).await
                     }
@@ -3199,6 +3433,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             }
             payload
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_media(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_download" => {
             // Combined download: single or batch. engine 'ytdlp' routes to the
             // installed yt-dlp binary (video/audio/HLS/playlists/features);
@@ -3383,6 +3624,13 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Err(e) => err(e),
             }
         }
+        _ => json!({"error": format!("Unknown tool: {name}")}),
+    }
+}
+
+async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
+    match name {
         "webrain_media" => {
             let wait_ms = args.get("wait_ms").and_then(|v| v.as_i64()).unwrap_or(0);
             let url = args.get("url").and_then(|v| v.as_str()).map(String::from);
@@ -3413,6 +3661,121 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         json!({"status": "ok", "mode": "performance", "total_resources": total, "count": arr_len(&media), "media": media})
                     }
                     Err(e) => err(e),
+                }
+            }
+        }
+        "webrain_network" => {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("log");
+            let filt = args.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            let want_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let want_status = args.get("status").and_then(|v| v.as_i64());
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(200)
+                .clamp(1, 2048) as usize;
+            // One filter for both read ops, so `log` and `requests` answer the
+            // same question the same way.
+            let keep = |e: &Value| {
+                if !filt.is_empty()
+                    && !e
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .contains(filt)
+                {
+                    return false;
+                }
+                if !want_type.is_empty()
+                    && !e
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case(want_type)
+                {
+                    return false;
+                }
+                if let Some(s) = want_status {
+                    if e.get("status").and_then(|x| x.as_i64()) != Some(s) {
+                        return false;
+                    }
+                }
+                true
+            };
+            let pack = |op: &str, all: Vec<Value>| {
+                let total = all.len();
+                let rows: Vec<Value> = all.into_iter().filter(|e| keep(e)).take(limit).collect();
+                let mut out = json!({"status": "ok", "op": op, "total": total, "count": rows.len(), "requests": rows});
+                // A capture that saw nothing is either a page with no traffic or an
+                // engine that does not emit Network events (lightpanda/obscura are
+                // unverified). Say so — a bare `total: 0` reads as "this page made
+                // no requests", which is the wrong conclusion.
+                if op == "log" && total == 0 {
+                    out["note"] = json!(
+                        "no Network events captured — the page made no requests, or this engine does not implement the CDP Network domain (verified on Chrome only)"
+                    );
+                }
+                out
+            };
+            match op {
+                "request" => {
+                    let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        return json!({"status": "error", "message": "id required (from op=log)"});
+                    }
+                    match backend.network_body(id).await {
+                        Ok(mut v) => {
+                            // An API-driven page answers in JSON; hand it back
+                            // typed instead of making the agent parse the string.
+                            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                                    v["json"] = parsed;
+                                }
+                            }
+                            v
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                "clear" => {
+                    backend.network_clear().await;
+                    json!({"status": "ok", "op": "clear", "cleared": true})
+                }
+                "requests" => pack("requests", backend.network_entries().await),
+                // `har` with a url/`wait_ms` captures first: the buffer lives on
+                // the connection, so a one-shot CLI call (`log` then `har`) would
+                // otherwise export an empty log from a fresh process.
+                "har" => {
+                    if args.get("url").is_some() || args.get("wait_ms").is_some() {
+                        let wait_ms = args
+                            .get("wait_ms")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        let url = args
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .filter(|u| !u.is_empty());
+                        if let Err(e) = backend.network_log(url, wait_ms).await {
+                            return err(e);
+                        }
+                    }
+                    backend.network_har().await
+                }
+                _ => {
+                    let wait_ms = args
+                        .get("wait_ms")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let url = args
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .filter(|u| !u.is_empty());
+                    match backend.network_log(url, wait_ms).await {
+                        Ok(all) => pack("log", all),
+                        Err(e) => err(e),
+                    }
                 }
             }
         }
@@ -3909,7 +4272,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("18 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("19 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 
@@ -4164,5 +4527,81 @@ mod surface_tests {
         assert!(map_surface("webrain_navigate", &json!({})).is_none());
         assert!(map_surface("webrain_guide", &json!({})).is_none());
         assert!(map_surface("webrain_observe", &json!({})).is_none()); // missing selector
+    }
+
+    /// Every tool the server advertises either reaches a family or is answered
+    /// earlier by `lib.rs`. The one failure a dispatcher this wide can hide is a
+    /// name that is listed, documented and dead — `family_of` is the table that
+    /// says which family owns what, so drift shows up here and nowhere else.
+    #[test]
+    fn every_advertised_tool_is_dispatched_somewhere() {
+        // Answered before `call_tool` is reached: the session and pdf ops that
+        // `lib.rs` intercepts on their folded names, the two arms still in
+        // `call_tool` itself, and the intent umbrellas, which need a selector to
+        // fold and are refused by `map_surface` when called bare.
+        const HANDLED_EARLIER: &[&str] = &[
+            "webrain_guide",
+            "webrain_add_init_script",
+            "webrain_stats",
+            "webrain_observe",
+            "webrain_interact",
+            "webrain_extract",
+            "webrain_crawl",
+            "webrain_pdf",
+            "webrain_session",
+            "webrain_vision",
+            "webrain_scrape",
+            "webrain_open_session",
+            "webrain_close_session",
+            "webrain_list_sessions",
+            "webrain_pdf_extract",
+            "webrain_pdf_render",
+            "webrain_pdf_images",
+            "webrain_save_state",
+            "webrain_restore_state",
+            "webrain_close_launch",
+        ];
+        let mut orphans = Vec::new();
+        for t in list_tools() {
+            let Some(advertised) = t["name"].as_str() else {
+                continue;
+            };
+            let folded = map_surface(advertised, &json!({}))
+                .map(|(n, _)| n)
+                .unwrap_or(advertised);
+            if HANDLED_EARLIER.contains(&folded) {
+                continue;
+            }
+            if family_of(folded).is_none() {
+                orphans.push(advertised.to_string());
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "advertised but dispatched nowhere: {orphans:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod js_arg_tests {
+    use super::js_arg;
+    use serde_json::json;
+
+    /// A literal must stay literal (including one that merely LOOKS like a path),
+    /// and a real file must be read — the whole point is escaping never happens twice.
+    #[test]
+    fn js_arg_reads_a_file_only_when_it_exists() {
+        assert_eq!(js_arg(&json!({"js": "1+1"}), "js").unwrap(), "1+1");
+        assert_eq!(
+            js_arg(&json!({"js": "@no/such/file.js"}), "js").unwrap(),
+            "@no/such/file.js",
+            "a missing @param is JS that fails loudly, not a silent empty script"
+        );
+
+        let path = std::env::temp_dir().join("webrain_js_arg_test.js");
+        std::fs::write(&path, "document.title").unwrap();
+        let arg = json!({ "js": format!("@{}", path.display()) });
+        assert_eq!(js_arg(&arg, "js").unwrap(), "document.title");
     }
 }

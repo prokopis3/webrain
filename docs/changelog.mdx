@@ -12,6 +12,94 @@ All notable changes, in reverse chronological order. The full version lives in
 
 <p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
 
+### Added
+
+- **chat**: the composer's field resizes. A handle on its own top edge drags it taller
+  (arrow keys step it too), clamped to one row and `min(420px, 55vh)` and remembered per
+  browser; a corner button toggles one row ↔ 30% of the viewport, with its glyph and label
+  following the state.
+- **mcp**: `webrain_batch` takes a `proxy` for its browserless ops (`scrape`, `read`) —
+  browser ops keep the browser's exit, set at launch or by `cdp_urls`. Omit it and each
+  request rotates the `WEBRAIN_PROXIES` pool.
+- **mcp**: `webrain_batch op=read` — `webrain read` for N URLs with no tab: markdown
+  negotiation, `.md` retry and the nearest `llms.txt` per URL, payload in `data` with
+  `source` naming what arrived. The reader itself was single-URL, so a docs crawl was N
+  invocations; `read`'s payload now carries the document `title` too. The verb's selection
+  applies per row (`filter`, `outline`, `max_chars`) and `query`+`top_k` bm25-prune the
+  markdown each row produced — one `prune_md` shared with `op=markdown`.
+- **mcp**: `webrain_batch op=scrape` — the CSS schema as a batch over plain HTTP. The
+  schema used to exist in two places and only one scaled: `op=extract` runs it in a browser
+  tab, while `webrain_scrape` runs it browserless for one URL, so N static pages meant N
+  calls or N tabs. `op=scrape` takes the same `base_selector`+`fields` with no tab, no
+  render, and reports a refused host as that row's 403 instead of an empty row. The HTTP
+  path also reports the document `title` now.
+- **cli**: `webrain read <url> --browser` — the one-URL markdown reader now has a
+  browser transport. Plain HTTP stays the default (markdown negotiation, `.md` retry,
+  nearest `llms.txt`); `--browser` renders the page in the attached Chrome and runs the
+  same tail, so `--outline`, `--filter` and `--max` behave identically and `source` says
+  `browser`. It is the answer for a host that refuses every plain HTTP client, and the
+  HTTP error now names the flag.
+- **mcp**: a `js` / `interaction` argument can be `@path/to/file.js` and runs verbatim,
+  so a script with quotes, backslashes or `\s+` no longer has to be escaped into JSON
+  twice; a leading `@` that names no file stays literal and fails loudly.
+- **chat**: Settings → Skills lists the cross-tool tree `~/.agents/skills` beside the
+  runtime's own skills, with a filter box for the long tail — and the `#` catalogue is
+  built from the runtime's own descriptor list instead of four hard-coded names, so MCP
+  servers, skills and agent tools appear as soon as they are enabled.
+- **chat**: a context ring in the composer dock opens a session-info panel — per-category
+  percentages, a dashed slot for the response reservation, and a Compact button.
+- **chat**: a picture link in a reply renders as a figure with a caption instead of a
+  bare URL, and local image paths are served through `/local`.
+
+### Changed
+
+- **chat**: below 1100 px the right rail becomes a header drawer, and the two drawers
+  close each other; settings lists scroll inside their own pane and their create/add
+  actions match the primary pill used elsewhere.
+
+### Fixed
+
+- **chat**: an attachment is readable by the agent it was attached to. Uploads went to
+  `%TEMP%\webrain-chat\<conversation>\` while the file tools — ours and the `preToolUse`
+  fence on the runtime's built-ins — resolve against the directory the chat was started in,
+  so the prompt named a path and the model answered *"outside the directory this session is
+  allowed to read"*. They now land in `.webrain\attachments\<conversation>\` beside the
+  tool-output spill (already gitignored), with `WEBRAIN_CHAT_FILES` for another directory and
+  temp only as the read-only fallback; files uploaded before the move are still served.
+- **chat**: history search is a dialog now, not a rail field. Filtering the rail in place
+  pushed the matches below the fold on a long history; `Ctrl/⌘+K` (or the first keystroke
+  in the rail box) opens the model picker's shell with the results in the middle, `↵` opens
+  the selected row, `esc` closes, and the matched words are bolded in the theme's accent.
+- **chat**: history search matches a query **word by word**. One `LIKE '%whole query%'` only
+  found the words adjacent and in order, so `fpv sale` missed *fpv drone for sale*. Each
+  word is matched on its own and the rows are ranked — more words hit first, then a hit in
+  the thread's title message, then the phrase intact, then recency. `↑`/`↓` walk the
+  results (hover moves the same selection), `↵` opens the selected one, Ctrl+K focuses the
+  field even in a background tab (a timer, not only a frame callback — that was the
+  "Ctrl+K does nothing mid-turn"), and one-letter words are never bolded.
+- **chat**: the model's context now outlives a restart. The runtime's session store —
+  the context itself: session state, rewind points, plan, tool history — defaulted to the
+  **temp dir** while the transcript lived in app data, so any temp cleanup deleted the
+  context behind a history still on screen and `resume` had nothing to restore. It lives
+  beside `chat.db` now, with a one-time move of an existing temp home.
+- **chat**: renaming a thread no longer overwrites the runtime session *name*, which is
+  the key `resume` looks up — a renamed thread had silently become unresumable.
+- **chat**: the context panel keeps the last snapshot per conversation and serves it as
+  `stale: true` when the live attribution is unavailable, instead of showing zeros.
+- **proxy**: `WEBRAIN_PROXIES` now reaches every HTTP fetch. The pool was consulted only
+  where a caller resolved it (`http_search` and nine handlers that called
+  `.or_else(next_proxy)`), while the shared agent still fell back to a direct connection —
+  so `read`, `batch op=scrape|read` and engine-level fetches went out from the host IP
+  even with the pool set. The fallback now lives in the agent, per request, so a batch
+  spreads across exits; an explicit `proxy` still wins and never rotates.
+- **mcp**: `webrain_batch op=pdf` was advertised in the op list and never dispatched — it
+  fell through to `fetch`, so a PDF URL answered `status: ok` with zero text. The op is
+  gone; PDFs are `webrain_pdf`.
+- **webrain_batch**: every row now reports the document it actually read (`title`), so a
+  challenge, consent or 404 page is visible instead of looking like "no matches".
+- **webrain read**: the first 401/403 ends the `.md` retry loop, instead of spending
+  three blocked requests on a URL that is refusing the client.
+
 ## v0.19.0
 
 <p className="text-[#888] text-sm">2026-11-21 — the chat page becomes something you can read a table in, the browser fixes it needed, and a recording of it in the README</p>

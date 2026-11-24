@@ -199,4 +199,4 @@ count (only what the model may call), and the runtime's builtin
 allows 7000 input tokens/minute — `413 ... Requested 10020 ... Limit 7000` — and
 the second key on hand can afford 171 tokens. The guide and the CLI's error path
 both explain this; proving the turn needs a key with headroom, or a deliberate
-decision to expose fewer than 18 tools.
+decision to expose fewer tools than the surface advertises.

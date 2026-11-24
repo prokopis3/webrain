@@ -57,6 +57,24 @@ fn wait_state_js(sel: &str) -> String {
 ///
 /// CORE is always on (webdriver→false, real plugins, window.chrome, Function.toString
 /// spoof — the bits Cloudflare/Google don't punish). NOISE is ON by default:
+/// Whether the fingerprint-noise shim is injected.
+///
+/// Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
+/// measures hardwareConcurrency + WebGL vendor, and real values leave it stuck on
+/// "Just a moment…". The noise evasions are applied always, and a site that
+/// distrusts the spoofed profile can opt out with `WEBRAIN_STEALTH_NOISE=0`.
+///
+/// One definition, because the CLI now reports this switch to the user and a
+/// report that disagrees with what was injected is worse than no report.
+pub fn stealth_noise_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("WEBRAIN_STEALTH_NOISE")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
+}
+
 /// ponytail: canvas/audio/WebGL spoofs + hardwareConcurrency/deviceMemory/connection
 /// lies — the managed Cloudflare challenge (scrapingcourse cf-antibot) measures
 /// exactly these, and real values leave it stuck on "Just a moment…" (verified:
@@ -213,17 +231,7 @@ fn stealth_js() -> String {
       return _cpt.call(this, arg);
     };
   } catch (e) {}"#;
-    static NOISE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *NOISE_ON.get_or_init(|| {
-        // Default ON: the managed Cloudflare challenge (scrapingcourse cf-antibot)
-        // checks hardwareConcurrency + WebGL vendor — real values get it stuck on
-        // "Just a moment…". The noise evasions are applied always. Opt out with
-        // WEBRAIN_STEALTH_NOISE=0 for the rare site that distrusts the spoofed profile.
-        std::env::var("WEBRAIN_STEALTH_NOISE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    });
-    if on {
+    if stealth_noise_on() {
         CORE.replace("/*STEALTH_NOISE*/", NOISE)
     } else {
         CORE.replace("/*STEALTH_NOISE*/", "")
@@ -580,10 +588,12 @@ pub struct CdpBackend {
     /// D1 fingerprint cache: (element count, text hash) → last PageState.
     fp: Arc<Mutex<Option<(usize, usize)>>>,
     snap: Arc<Mutex<Option<PageState>>>,
-    /// Network capture: `Some(session)` arms the reader to buffer
-    /// requestWillBeSent URLs for that session ("" = browser-level); None = off.
+    /// Network capture: `Some(session)` arms the reader to buffer that session's
+    /// requests ("" = browser-level); None = off. One buffer feeds both media
+    /// discovery and `webrain_network`, so the two can never disagree about what
+    /// the page fetched.
     net_capture: Arc<Mutex<Option<String>>>,
-    net_urls: Arc<Mutex<Vec<String>>>,
+    net_log: Arc<Mutex<Vec<NetEntry>>>,
     /// User-registered init scripts (agent-browser `--init-script` borrow):
     /// replayed via Page.addScriptToEvaluateOnNewDocument in attach_and_init so
     /// they run before every new document on every tab.
@@ -625,6 +635,137 @@ struct Tab {
     url: String,
 }
 
+/// One request seen while capture is armed. `id` is CDP's requestId, which is
+/// what `webrain_network{op:"request"}` needs to fetch that response body.
+#[derive(Clone, Default)]
+struct NetEntry {
+    id: String,
+    url: String,
+    method: String,
+    /// CDP resource type: XHR, Fetch, Document, Script, Image…
+    kind: String,
+    status: u16,
+    mime: String,
+    /// Encoded bytes on the wire; 0 until loadingFinished.
+    bytes: f64,
+    /// Epoch ms (requestWillBeSent.wallTime).
+    at: f64,
+    /// Request duration in ms; 0 until it finishes.
+    ms: f64,
+    failed: bool,
+    /// CDP monotonic start (seconds) — the base `ms` is measured from.
+    mono: f64,
+}
+
+impl NetEntry {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id, "url": self.url, "method": self.method, "type": self.kind,
+            "status": self.status, "mime": self.mime, "bytes": self.bytes,
+            "at": self.at.round(), "ms": self.ms.round(), "failed": self.failed,
+        })
+    }
+}
+
+/// Cap on buffered entries: a chatty page emits thousands per load and nothing
+/// truncates them later. Bodies are not buffered at all — `network_body` asks
+/// the renderer on demand, so the log stays a few hundred KB at most.
+const NET_LOG_CAP: usize = 2048;
+/// Cap on one response body handed to an agent (~200 KB of text).
+const NET_BODY_CAP: usize = 200_000;
+
+/// HAR 1.2 from captured rows. A free function so the format is unit-tested
+/// without a browser, and shared by `op=har`.
+fn har_from_entries(entries: &[NetEntry]) -> Value {
+    let list: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "startedDateTime": iso8601_ms(e.at),
+                "time": e.ms.round(),
+                "request": {
+                    "method": e.method,
+                    "url": e.url,
+                    "httpVersion": "",
+                    "cookies": [],
+                    "headers": [],
+                    "queryString": query_pairs(&e.url),
+                    "headersSize": -1,
+                    "bodySize": -1,
+                },
+                "response": {
+                    "status": e.status,
+                    "statusText": "",
+                    "httpVersion": "",
+                    "cookies": [],
+                    "headers": [],
+                    "content": {"size": e.bytes, "mimeType": e.mime},
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": e.bytes,
+                },
+                "cache": {},
+                "timings": {"send": 0.0, "wait": e.ms.round(), "receive": 0.0},
+                // HAR's `_`-prefixed extension fields are the documented place
+                // for what the spec has no slot for.
+                "_resourceType": e.kind,
+                "_failed": e.failed,
+                "_requestId": e.id,
+            })
+        })
+        .collect();
+    json!({
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "webrain", "version": env!("CARGO_PKG_VERSION")},
+            "entries": list,
+        }
+    })
+}
+
+/// `?a=1&b=2` → `[{"name":"a","value":"1"},…]`. Values stay percent-encoded:
+/// decoding them here would invent a truth (`%2F` is not `/` to every consumer)
+/// and HAR calls the field the *decoded* form, so the raw text is the honest one.
+fn query_pairs(url: &str) -> Vec<Value> {
+    let Some(q) = url
+        .split_once('?')
+        .map(|(_, q)| q.split('#').next().unwrap_or(q))
+    else {
+        return Vec::new();
+    };
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            json!({"name": k, "value": v})
+        })
+        .collect()
+}
+
+/// Epoch ms → `1970-01-01T00:00:00.000Z`. HAR requires ISO-8601 and the crate
+/// carries no date library, so this is Hinnant's civil-from-days, which is exact
+/// for every date a request can carry.
+fn iso8601_ms(epoch_ms: f64) -> String {
+    let ms = epoch_ms.max(0.0) as i64;
+    let (secs, millis) = (ms.div_euclid(1000), ms.rem_euclid(1000));
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{millis:03}Z")
+}
+
 struct CdpConnection {
     /// JSON payloads out to the browser (WS Text frame, or pipe length-framed).
     write: tokio::sync::mpsc::Sender<String>,
@@ -643,7 +784,7 @@ fn spawn_cdp_reader(
     mut in_rx: tokio::sync::mpsc::Receiver<String>,
     pending: Pending,
     net_capture: Arc<Mutex<Option<String>>>,
-    net_urls: Arc<Mutex<Vec<String>>>,
+    net_log: Arc<Mutex<Vec<NetEntry>>>,
 ) {
     tokio::spawn(async move {
         while let Some(text) = in_rx.recv().await {
@@ -656,7 +797,14 @@ fn spawn_cdp_reader(
                 }
                 continue;
             }
-            if v.get("method").and_then(|m| m.as_str()) != Some("Network.requestWillBeSent") {
+            let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if !matches!(
+                method,
+                "Network.requestWillBeSent"
+                    | "Network.responseReceived"
+                    | "Network.loadingFinished"
+                    | "Network.loadingFailed"
+            ) {
                 continue;
             }
             let ev_session = v.get("sessionId").and_then(|s| s.as_str());
@@ -671,22 +819,228 @@ fn spawn_cdp_reader(
             if armed != Some(true) {
                 continue;
             }
-            let Some(u) = v
-                .get("params")
-                .and_then(|p| p.get("request"))
-                .and_then(|r| r.get("url"))
-                .and_then(|u| u.as_str())
-            else {
-                continue;
-            };
-            let mut urls = net_urls.lock().await;
-            // Cap: a chatty page emits thousands of requests and only the media
-            // ones matter — an uncapped buffer grows without bound on long sessions.
-            if urls.len() < 2048 {
-                urls.push(u.to_string());
-            }
+            let params = v.get("params").cloned().unwrap_or(Value::Null);
+            let mut log = net_log.lock().await;
+            absorb(method, &params, &mut log);
         }
     });
+}
+
+/// Fold one Network event into the capture buffer. Pure, so the mapping is
+/// testable without a socket — the reader is the only caller.
+fn absorb(method: &str, p: &Value, log: &mut Vec<NetEntry>) {
+    let rid = p.get("requestId").and_then(|x| x.as_str()).unwrap_or("");
+    let num = |ptr: &str| p.pointer(ptr).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let s = |ptr: &str| {
+        p.pointer(ptr)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    match method {
+        "Network.requestWillBeSent" => {
+            let url = s("/request/url");
+            // A redirect re-emits requestWillBeSent for the SAME id: update that
+            // row instead of listing one redirect chain as N requests.
+            if let Some(e) = log.iter_mut().find(|e| e.id == rid) {
+                e.url = url;
+                if let Some(st) = p
+                    .pointer("/redirectResponse/status")
+                    .and_then(|x| x.as_u64())
+                {
+                    e.status = st as u16;
+                }
+                e.mono = num("/timestamp");
+                return;
+            }
+            if log.len() >= NET_LOG_CAP {
+                return;
+            }
+            log.push(NetEntry {
+                id: rid.to_string(),
+                url,
+                method: s("/request/method"),
+                kind: s("/type"),
+                at: num("/wallTime") * 1000.0,
+                mono: num("/timestamp"),
+                ..Default::default()
+            });
+        }
+        "Network.responseReceived" => {
+            if let Some(e) = log.iter_mut().rev().find(|e| e.id == rid) {
+                if let Some(st) = p.pointer("/response/status").and_then(|x| x.as_u64()) {
+                    e.status = st as u16;
+                }
+                e.mime = s("/response/mimeType");
+                if e.kind.is_empty() {
+                    e.kind = s("/type");
+                }
+            }
+        }
+        "Network.loadingFinished" => {
+            if let Some(e) = log.iter_mut().rev().find(|e| e.id == rid) {
+                e.bytes = num("/encodedDataLength");
+                let end = num("/timestamp");
+                if end > 0.0 && e.mono > 0.0 {
+                    e.ms = ((end - e.mono) * 1000.0).max(0.0);
+                }
+            }
+        }
+        "Network.loadingFailed" => {
+            if let Some(e) = log.iter_mut().rev().find(|e| e.id == rid) {
+                e.failed = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod net_tests {
+    use super::*;
+
+    #[test]
+    fn absorb_folds_one_request_into_one_row() {
+        let mut log = Vec::new();
+        absorb(
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "1.1", "type": "XHR", "wallTime": 1_700_000_000.5,
+                "timestamp": 100.0, "request": {"url": "https://x/api/p?page=1", "method": "POST"}
+            }),
+            &mut log,
+        );
+        absorb(
+            "Network.responseReceived",
+            &json!({
+                "requestId": "1.1", "type": "XHR",
+                "response": {"status": 200, "mimeType": "application/json"}
+            }),
+            &mut log,
+        );
+        absorb(
+            "Network.loadingFinished",
+            &json!({"requestId": "1.1", "encodedDataLength": 1234.0, "timestamp": 100.25}),
+            &mut log,
+        );
+        assert_eq!(log.len(), 1);
+        let e = &log[0];
+        assert_eq!(
+            (
+                e.method.as_str(),
+                e.status,
+                e.kind.as_str(),
+                e.mime.as_str()
+            ),
+            ("POST", 200, "XHR", "application/json")
+        );
+        assert_eq!((e.bytes, e.ms), (1234.0, 250.0));
+        assert!(!e.failed);
+        assert_eq!(e.to_json()["status"], 200);
+    }
+
+    #[test]
+    fn absorb_keeps_a_redirect_chain_as_one_row() {
+        let mut log = Vec::new();
+        for (url, redirect) in [("https://x/a", false), ("https://x/b", true)] {
+            let mut p = json!({
+                "requestId": "2.1", "type": "Document", "wallTime": 1.0, "timestamp": 5.0,
+                "request": {"url": url, "method": "GET"}
+            });
+            if redirect {
+                p["redirectResponse"] = json!({"status": 301});
+            }
+            absorb("Network.requestWillBeSent", &p, &mut log);
+        }
+        assert_eq!(
+            log.len(),
+            1,
+            "a redirect is the same request, not a new one"
+        );
+        assert_eq!(log[0].url, "https://x/b");
+        assert_eq!(log[0].status, 301);
+    }
+
+    #[test]
+    fn absorb_marks_failures_and_caps_the_buffer() {
+        let mut log = Vec::new();
+        absorb(
+            "Network.requestWillBeSent",
+            &json!({"requestId": "3.1", "request": {"url": "https://x/c"}}),
+            &mut log,
+        );
+        absorb(
+            "Network.loadingFailed",
+            &json!({"requestId": "3.1"}),
+            &mut log,
+        );
+        assert!(log[0].failed);
+        assert_eq!(log[0].bytes, 0.0);
+
+        let mut full = Vec::new();
+        for i in 0..NET_LOG_CAP + 10 {
+            absorb(
+                "Network.requestWillBeSent",
+                &json!({"requestId": format!("{i}"), "request": {"url": "https://x/n"}}),
+                &mut full,
+            );
+        }
+        assert_eq!(full.len(), NET_LOG_CAP);
+    }
+
+    #[test]
+    fn har_carries_the_measured_fields_and_marks_the_unknowns() {
+        let mut log = Vec::new();
+        absorb(
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "9.1", "type": "XHR", "wallTime": 1_709_164_800.0,
+                "timestamp": 10.0,
+                "request": {"url": "https://x/api/p?page=2&sort=a", "method": "GET"}
+            }),
+            &mut log,
+        );
+        absorb(
+            "Network.responseReceived",
+            &json!({"requestId": "9.1", "response": {"status": 200, "mimeType": "application/json"}}),
+            &mut log,
+        );
+        absorb(
+            "Network.loadingFinished",
+            &json!({"requestId": "9.1", "encodedDataLength": 512.0, "timestamp": 10.25}),
+            &mut log,
+        );
+
+        let har = har_from_entries(&log);
+        assert_eq!(har["log"]["version"], "1.2");
+        assert_eq!(har["log"]["creator"]["name"], "webrain");
+        let e = &har["log"]["entries"][0];
+        assert_eq!(e["request"]["method"], "GET");
+        assert_eq!(e["request"]["url"], "https://x/api/p?page=2&sort=a");
+        assert_eq!(e["response"]["status"], 200);
+        assert_eq!(e["response"]["content"]["mimeType"], "application/json");
+        assert_eq!(e["response"]["content"]["size"], 512.0);
+        assert_eq!(e["time"], 250.0);
+        assert_eq!(e["timings"]["wait"], 250.0);
+        // Not measured is the HAR "unknown", never a plausible zero.
+        assert_eq!(e["request"]["headersSize"], -1);
+        assert_eq!(e["request"]["headers"], json!([]));
+        assert_eq!(e["_resourceType"], "XHR");
+        assert_eq!(e["_requestId"], "9.1");
+        // 2024-02-29T00:00:00Z — a leap day, the case a naive formatter breaks.
+        assert_eq!(e["startedDateTime"], "2024-02-29T00:00:00.000Z");
+        assert_eq!(e["request"]["queryString"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn iso8601_handles_the_epoch_and_a_leap_day() {
+        assert_eq!(iso8601_ms(0.0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso8601_ms(1_709_164_800_000.0), "2024-02-29T00:00:00.000Z");
+        // a negative (pre-epoch) clock must not panic or wrap
+        assert_eq!(iso8601_ms(-1.0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(query_pairs("https://x/a").len(), 0);
+        assert_eq!(query_pairs("https://x/a?q=1#frag")[0]["name"], "q");
+    }
 }
 
 impl CdpBackend {
@@ -749,13 +1103,8 @@ impl CdpBackend {
         };
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let net_capture = Arc::new(Mutex::new(None));
-        let net_urls = Arc::new(Mutex::new(Vec::new()));
-        spawn_cdp_reader(
-            in_rx,
-            pending.clone(),
-            net_capture.clone(),
-            net_urls.clone(),
-        );
+        let net_log = Arc::new(Mutex::new(Vec::new()));
+        spawn_cdp_reader(in_rx, pending.clone(), net_capture.clone(), net_log.clone());
 
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -766,7 +1115,7 @@ impl CdpBackend {
             fp: Arc::new(Mutex::new(None)),
             snap: Arc::new(Mutex::new(None)),
             net_capture,
-            net_urls,
+            net_log,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
             no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
@@ -864,13 +1213,8 @@ impl CdpBackend {
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let net_capture = Arc::new(Mutex::new(None));
-        let net_urls = Arc::new(Mutex::new(Vec::new()));
-        spawn_cdp_reader(
-            in_rx,
-            pending.clone(),
-            net_capture.clone(),
-            net_urls.clone(),
-        );
+        let net_log = Arc::new(Mutex::new(Vec::new()));
+        spawn_cdp_reader(in_rx, pending.clone(), net_capture.clone(), net_log.clone());
 
         Ok(Self {
             inner: Arc::new(Mutex::new(CdpConnection {
@@ -884,7 +1228,7 @@ impl CdpBackend {
             fp: Arc::new(Mutex::new(None)),
             snap: Arc::new(Mutex::new(None)),
             net_capture,
-            net_urls,
+            net_log,
             init_scripts: Arc::new(Mutex::new(Vec::new())),
             no_stealth: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(Mutex::new(())),
@@ -1985,31 +2329,15 @@ impl CdpBackend {
     /// ponytail: Network.requestWillBeSent buffered by the shared WS reader, so
     /// the dwell below is a plain sleep instead of faked eval traffic.
     pub async fn capture_media(&self, url: Option<&str>, wait_ms: u64) -> anyhow::Result<Value> {
-        self.ensure_page_attached().await?;
-        let sid = self.active_session().await;
-        self.send_cmd_with(sid.as_deref(), "Network.enable", json!({}))
-            .await?;
-        // Arm for THIS page session ("" would mean browser-level events only).
-        *self.net_capture.lock().await = Some(sid.clone().unwrap_or_default());
-        self.net_urls.lock().await.clear();
-
-        let start = std::time::Instant::now();
-        if let Some(u) = url.filter(|u| !u.is_empty()) {
-            let _ = self.navigate(u).await;
-        }
-        // Dwell so late XHR/fetch (player) URLs arrive; the reader buffers them.
-        let waited = start.elapsed().as_millis() as u64;
-        if wait_ms > waited {
-            tokio::time::sleep(std::time::Duration::from_millis(wait_ms - waited)).await;
-        }
-
+        let entries = self.capture_network(url, wait_ms).await?;
+        // Media discovery is a one-shot scan: release the arm so a long session
+        // does not keep appending to a buffer nobody will read.
         *self.net_capture.lock().await = None;
-        // take() instead of clone(): the buffer is consumed here and cleared on
-        // the next arm, so copying it only doubled peak memory.
-        let urls = std::mem::take(&mut *self.net_urls.lock().await);
+        let sid = self.active_session().await;
         let _ = self
             .send_cmd_with(sid.as_deref(), "Network.disable", json!({}))
             .await;
+        let urls: Vec<String> = entries.into_iter().map(|e| e.url).collect();
 
         let ext = |u: &str| {
             let low = u.to_lowercase();
@@ -2042,6 +2370,124 @@ impl CdpBackend {
             }
         }
         Ok(json!({"total": seen.len(), "media": media}))
+    }
+
+    /// Arm CDP Network capture for the active tab, optionally navigating first,
+    /// and return every request seen. Shared by `capture_media` (filters this for
+    /// playable URLs) and `webrain_network` (wants the log itself). Leaves
+    /// `Network` enabled so response bodies stay reachable afterwards.
+    async fn capture_network(
+        &self,
+        url: Option<&str>,
+        wait_ms: u64,
+    ) -> anyhow::Result<Vec<NetEntry>> {
+        self.ensure_page_attached().await?;
+        let sid = self.active_session().await;
+        self.send_cmd_with(sid.as_deref(), "Network.enable", json!({}))
+            .await?;
+        // Arm for THIS page session ("" would mean browser-level events only).
+        *self.net_capture.lock().await = Some(sid.clone().unwrap_or_default());
+        self.net_log.lock().await.clear();
+
+        let start = std::time::Instant::now();
+        if let Some(u) = url.filter(|u| !u.is_empty()) {
+            let _ = self.navigate(u).await;
+        }
+        // Dwell so late XHR/fetch (the SPA's real data) arrives; the reader
+        // buffers it.
+        let waited = start.elapsed().as_millis() as u64;
+        if wait_ms > waited {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms - waited)).await;
+        }
+
+        // The arm STAYS set: the interesting requests are often the ones a click
+        // causes after load, so `log` then interact then `requests` must all see
+        // the same buffer. Bounded by NET_LOG_CAP, cleared by the next log/clear.
+        // clone(), not take(): `op=requests` re-reads this buffer and
+        // `network_body` labels its reply from it.
+        Ok(self.net_log.lock().await.clone())
+    }
+
+    /// The page's own request log: what the app fetched, not what it painted.
+    pub async fn network_log(&self, url: Option<&str>, wait_ms: u64) -> anyhow::Result<Vec<Value>> {
+        let entries = self.capture_network(url, wait_ms).await?;
+        Ok(entries.iter().map(NetEntry::to_json).collect())
+    }
+
+    /// Entries from the last capture, without re-arming (no new traffic is
+    /// recorded while disarmed, so this is a read of what already happened).
+    pub async fn network_entries(&self) -> Vec<Value> {
+        self.net_log
+            .lock()
+            .await
+            .iter()
+            .map(NetEntry::to_json)
+            .collect()
+    }
+
+    pub async fn network_clear(&self) {
+        self.net_log.lock().await.clear();
+    }
+
+    /// HAR 1.2 of the last capture, for a tool that speaks HAR (DevTools import,
+    /// a proxy replay, a test fixture). Built from the same rows `op=requests`
+    /// returns, so the two can never tell different stories.
+    ///
+    /// What Chrome would need for a fuller log is not read here: request/response
+    /// **headers** and cookies are events we do not subscribe to, so they are the
+    /// HAR "unknown" value (`[]` with `headersSize: -1`) rather than invented, and
+    /// `timings` carries only what was measured (`wait` = the request's duration;
+    /// send/receive are 0 because the split is not in these events).
+    pub async fn network_har(&self) -> Value {
+        let entries = self.net_log.lock().await.clone();
+        har_from_entries(&entries)
+    }
+
+    /// One response body by requestId. `Network.getResponseBody` only answers
+    /// while the renderer still holds that body: measured, it returns "No data
+    /// found for resource with given identifier" for an entry whose `bytes` is 0
+    /// (served from cache, or the body already released). Every request that did
+    /// transfer data inside the capture window reads back fine.
+    pub async fn network_body(&self, id: &str) -> anyhow::Result<Value> {
+        let sid = self.active_session().await;
+        let r = self
+            .send_cmd_with(
+                sid.as_deref(),
+                "Network.getResponseBody",
+                json!({"requestId": id}),
+            )
+            .await?;
+        let b64 = r
+            .get("base64Encoded")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let raw = r.get("body").and_then(|x| x.as_str()).unwrap_or("");
+        let text = if b64 {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(raw)
+                .unwrap_or_default();
+            String::from_utf8_lossy(&bytes).to_string()
+        } else {
+            raw.to_string()
+        };
+        let truncated = text.chars().count() > NET_BODY_CAP;
+        let text: String = if truncated {
+            text.chars().take(NET_BODY_CAP).collect()
+        } else {
+            text
+        };
+        let entry = self
+            .net_log
+            .lock()
+            .await
+            .iter()
+            .find(|e| e.id == id)
+            .map(NetEntry::to_json);
+        Ok(json!({
+            "id": id, "base64": b64, "chars": text.chars().count(),
+            "truncated": truncated, "entry": entry, "text": text,
+        }))
     }
 }
 

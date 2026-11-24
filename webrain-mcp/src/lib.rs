@@ -1,6 +1,6 @@
 // webrain-mcp: Model Context Protocol server for AI model browser automation.
 //
-// 18 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
+// 19 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
 // is `tools::AGENT_GUIDE`. This header used to enumerate every tool and drifted two
 // rewrites behind both — one line pointing at the source of truth instead.
 //
@@ -26,6 +26,10 @@ pub fn tool_names() -> Vec<String> {
         .filter_map(|t| t.get("name")?.as_str().map(str::to_string))
         .collect()
 }
+
+/// The MCP dispatcher, for a caller that is not a transport: `webrain tool`
+/// reuses it so the CLI surface cannot drift from the MCP one.
+pub use tools::call_tool;
 
 /// `(name, hint)` per tool, for a menu that has to fit on one row. The hint is
 /// the first sentence of the description — `webrain_pdf` and `webrain_vision`
@@ -265,258 +269,270 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
             let tools = tools::list_tools();
             json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
         }
-        "tools/call" => {
-            let params = msg.get("params").cloned().unwrap_or_default();
-            // Kept separately: the guard below must see the umbrella the caller
-            // spelled (`webrain_session`), not only what it folded into.
-            let requested = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            // Fold the consolidated intent-based surface (webrain_observe{what},
-            // webrain_interact{action}, webrain_session{op}, …) into the legacy
-            // executor name up front, so the no-browser short-circuits below
-            // (keyed on legacy names) and call_tool dispatch see the executor.
-            let tool_name: String = tools::map_surface(requested, &arguments)
-                .map(|(n, a)| {
-                    arguments = a;
-                    n.to_string()
-                })
-                .unwrap_or_else(|| requested.to_string());
+        "tools/call" => handle_tools_call(&msg, backend, cdp_url).await,
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": format!("Unknown method: {method}")}
+        }),
+    }
+}
 
-            // Shared-instance guard. Checks the folded executor AND the umbrella the
-            // caller actually used, because folding is lossy in the direction that
-            // matters: `webrain_session(op=list)` becomes `webrain_list_sessions`,
-            // a name no list of stateful executors would contain.
-            if no_state() && (is_stateful(&tool_name) || is_stateful(requested)) {
-                return tool_error(
-                    id,
-                    &format!("{tool_name} is disabled on this instance: WEBRAIN_NO_STATE is set"),
-                );
-            }
+/// The `tools/call` path: the one method that connects a browser, folds the surface,
+/// applies the no-state guard and reports token cost. Split out of `handle_rpc` so the
+/// protocol methods above read as protocol and this reads as tool execution.
+async fn handle_tools_call(
+    msg: &Value,
+    backend: &mut Option<CdpBackend>,
+    cdp_url: Option<&str>,
+) -> Value {
+    let id = msg.get("id").cloned();
+    let params = msg.get("params").cloned().unwrap_or_default();
+    // Kept separately: the guard below must see the umbrella the caller
+    // spelled (`webrain_session`), not only what it folded into.
+    let requested = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+    // Fold the consolidated intent-based surface (webrain_observe{what},
+    // webrain_interact{action}, webrain_session{op}, …) into the legacy
+    // executor name up front, so the no-browser short-circuits below
+    // (keyed on legacy names) and call_tool dispatch see the executor.
+    let tool_name: String = tools::map_surface(requested, &arguments)
+        .map(|(n, a)| {
+            arguments = a;
+            n.to_string()
+        })
+        .unwrap_or_else(|| requested.to_string());
 
-            // No-browser tools: serve without a CDP backend, so they work
-            // on a fresh install before any browser is up (any-LLM portability).
-            if tool_name == "webrain_guide" {
-                // One implementation, both transports: the topic/skills logic lives
-                // in tools::guide_from_args, so stdio and HTTP can never diverge.
-                let out = tools::guide_from_args(&arguments);
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
-                        "isError": false
-                    }
-                });
+    // Shared-instance guard. Checks the folded executor AND the umbrella the
+    // caller actually used, because folding is lossy in the direction that
+    // matters: `webrain_session(op=list)` becomes `webrain_list_sessions`,
+    // a name no list of stateful executors would contain.
+    if no_state() && (is_stateful(&tool_name) || is_stateful(requested)) {
+        return tool_error(
+            id,
+            &format!("{tool_name} is disabled on this instance: WEBRAIN_NO_STATE is set"),
+        );
+    }
+
+    // No-browser tools: serve without a CDP backend, so they work
+    // on a fresh install before any browser is up (any-LLM portability).
+    if tool_name == "webrain_guide" {
+        // One implementation, both transports: the topic/skills logic lives
+        // in tools::guide_from_args, so stdio and HTTP can never diverge.
+        let out = tools::guide_from_args(&arguments);
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
+                "isError": false
             }
-            // No-browser, no-page tool: the machine's own /proc. Registered beside
-            // `webrain_guide` because both answer before a CDP backend exists — which
-            // is exactly when "why is this box unresponsive" gets asked.
-            if tool_name == "webrain_stats" {
-                // On a pooled worker these numbers describe a box other tenants run in,
-                // so the platform already refuses this tool there. The engine has to
-                // agree: a direct MCP client holding the pool token would otherwise read
-                // the host's /proc regardless of what TypeScript allows.
-                if no_state() {
-                    return tool_error(
-                        id,
-                        "webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set",
-                    );
+        });
+    }
+    // No-browser, no-page tool: the machine's own /proc. Registered beside
+    // `webrain_guide` because both answer before a CDP backend exists — which
+    // is exactly when "why is this box unresponsive" gets asked.
+    if tool_name == "webrain_stats" {
+        // On a pooled worker these numbers describe a box other tenants run in,
+        // so the platform already refuses this tool there. The engine has to
+        // agree: a direct MCP client holding the pool token would otherwise read
+        // the host's /proc regardless of what TypeScript allows.
+        if no_state() {
+            return tool_error(
+                id,
+                "webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set",
+            );
+        }
+        let mut out = tools::host_stats();
+        // Per-command CDP latency: the metric any change to the command
+        // path has to justify itself against. Empty until a browser
+        // command has run.
+        out["cdp_latency"] = webrain_core::backends::cdp::cdp_latency();
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
+                "isError": false
+            }
+        });
+    }
+    // ponytail: fetch_http uses ureq (no browser), so skip CDP connect too.
+    if tool_name == "webrain_fetch_http" {
+        // ureq is blocking — run off the executor so a slow fetch can't
+        // stall other sessions. The work itself lives in
+        // `tools::fetch_http_from_args` so this layer and the dispatcher
+        // cannot drift (this short-circuit used to drop `base_selector`).
+        let args = arguments.clone();
+        let result = tokio::task::spawn_blocking(move || crate::tools::fetch_http_from_args(&args))
+            .await
+            .unwrap_or_else(
+                |e| json!({"status": "error", "message": format!("fetch task failed: {e}")}),
+            );
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+            }
+        });
+    }
+    // ponytail: download_files uses ureq (no browser), so skip CDP connect too.
+    if tool_name == "webrain_download" {
+        let urls: Vec<String> = arguments
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if urls.is_empty() {
+            return json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": "urls required"})).unwrap_or_else(|_| "{}".into())}],
+                    "isError": true
                 }
-                let mut out = tools::host_stats();
-                // Per-command CDP latency: the metric any change to the command
-                // path has to justify itself against. Empty until a browser
-                // command has run.
-                out["cdp_latency"] = webrain_core::backends::cdp::cdp_latency();
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&out).unwrap_or_else(|_| "{}".into())}],
-                        "isError": false
-                    }
-                });
-            }
-            // ponytail: fetch_http uses ureq (no browser), so skip CDP connect too.
-            if tool_name == "webrain_fetch_http" {
-                // ureq is blocking — run off the executor so a slow fetch can't
-                // stall other sessions. The work itself lives in
-                // `tools::fetch_http_from_args` so this layer and the dispatcher
-                // cannot drift (this short-circuit used to drop `base_selector`).
-                let args = arguments.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::tools::fetch_http_from_args(&args)
+            });
+        }
+        let dir = arguments
+            .get("dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("downloads")
+            .to_string();
+        // ponytail: honor engine — ytdlp shells out to the installed binary.
+        // (This short-circuit used to ALWAYS force the HTTP path, silently
+        // ignoring engine:"ytdlp", so the advertised ytdlp engine was dead.)
+        // http keeps the no-browser streaming path.
+        let result = if arguments.get("engine").and_then(|v| v.as_str()) == Some("ytdlp") {
+            let audio_only = arguments
+                .get("audio_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let format = arguments
+                .get("format")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let extra: Vec<String> = arguments
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
                 })
-                .await
-                .unwrap_or_else(
-                    |e| json!({"status": "error", "message": format!("fetch task failed: {e}")}),
-                );
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
-                    }
+                .unwrap_or_default();
+            let proxy = arguments
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(webrain_core::proxy::next_proxy);
+            webrain_core::engines::download_ytdlp(
+                &urls,
+                &dir,
+                audio_only,
+                format.as_deref(),
+                &extra,
+                proxy.as_deref(),
+            )
+        } else {
+            // `filter_extension` narrows the list BEFORE any request. This
+            // short-circuit returns first, so without it here the caller's
+            // exclusion was silently ignored while the dispatcher honoured
+            // it -- the same "advertised but dead" shape as engine:ytdlp had.
+            let mut urls = urls;
+            if let Some(ext) = arguments
+                .get("filter_extension")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim_start_matches('.').to_lowercase())
+                .filter(|e| !e.is_empty())
+            {
+                urls.retain(|u| {
+                    let path = u.split('?').next().unwrap_or(u);
+                    path.to_lowercase().ends_with(&format!(".{ext}"))
                 });
-            }
-            // ponytail: download_files uses ureq (no browser), so skip CDP connect too.
-            if tool_name == "webrain_download" {
-                let urls: Vec<String> = arguments
-                    .get("urls")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 if urls.is_empty() {
                     return json!({
                         "jsonrpc": "2.0", "id": id,
                         "result": {
-                            "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": "urls required"})).unwrap_or_else(|_| "{}".into())}],
+                            "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": format!("no URLs match extension '.{ext}'")})).unwrap_or_else(|_| "{}".into())}],
                             "isError": true
                         }
                     });
                 }
-                let dir = arguments
-                    .get("dir")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("downloads")
-                    .to_string();
-                // ponytail: honor engine — ytdlp shells out to the installed binary.
-                // (This short-circuit used to ALWAYS force the HTTP path, silently
-                // ignoring engine:"ytdlp", so the advertised ytdlp engine was dead.)
-                // http keeps the no-browser streaming path.
-                let result = if arguments.get("engine").and_then(|v| v.as_str()) == Some("ytdlp") {
-                    let audio_only = arguments
-                        .get("audio_only")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let format = arguments
-                        .get("format")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    let extra: Vec<String> = arguments
-                        .get("args")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let proxy = arguments
-                        .get("proxy")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(webrain_core::proxy::next_proxy);
-                    webrain_core::engines::download_ytdlp(
-                        &urls,
-                        &dir,
-                        audio_only,
-                        format.as_deref(),
-                        &extra,
-                        proxy.as_deref(),
-                    )
-                } else {
-                    // `filter_extension` narrows the list BEFORE any request. This
-                    // short-circuit returns first, so without it here the caller's
-                    // exclusion was silently ignored while the dispatcher honoured
-                    // it -- the same "advertised but dead" shape as engine:ytdlp had.
-                    let mut urls = urls;
-                    if let Some(ext) = arguments
-                        .get("filter_extension")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.trim_start_matches('.').to_lowercase())
-                        .filter(|e| !e.is_empty())
-                    {
-                        urls.retain(|u| {
-                            let path = u.split('?').next().unwrap_or(u);
-                            path.to_lowercase().ends_with(&format!(".{ext}"))
-                        });
-                        if urls.is_empty() {
-                            return json!({
-                                "jsonrpc": "2.0", "id": id,
-                                "result": {
-                                    "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": format!("no URLs match extension '.{ext}'")})).unwrap_or_else(|_| "{}".into())}],
-                                    "isError": true
-                                }
-                            });
-                        }
-                    }
-                    let proxy = arguments
-                        .get("proxy")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(webrain_core::proxy::next_proxy);
-                    let results =
-                        webrain_core::engines::download_files(&urls, &dir, proxy.as_deref());
-                    json!({"status": "ok", "count": results.len(), "results": results})
-                };
-                let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": is_err
-                    }
-                });
             }
-            // ponytail: webrain_watch shells out to yt-dlp/ffmpeg/ffprobe (no
-            // browser), so skip CDP connect too — same shared helper as the tool
-            // dispatch (tools::watch_from_args), one implementation, two callers.
-            // It can run for minutes, so keep it OFF the executor.
-            if tool_name == "webrain_watch" {
-                let args = arguments.clone();
-                let result =
-                    match tokio::task::spawn_blocking(move || crate::tools::watch_from_args(&args))
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            json!({"status": "error", "message": format!("watch task failed: {e}")})
-                        }
-                    };
-                let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": is_err
-                    }
-                });
+            let proxy = arguments
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(webrain_core::proxy::next_proxy);
+            let results = webrain_core::engines::download_files(&urls, &dir, proxy.as_deref());
+            json!({"status": "ok", "count": results.len(), "results": results})
+        };
+        let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": is_err
             }
-            // ponytail: webrain_search uses ureq (no browser), so skip CDP connect too.
-            if tool_name == "webrain_search" {
-                let q = arguments.get("q").and_then(|v| v.as_str()).unwrap_or("");
-                if q.is_empty() {
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"q required"}"#}],"isError":true}});
+        });
+    }
+    // ponytail: webrain_watch shells out to yt-dlp/ffmpeg/ffprobe (no
+    // browser), so skip CDP connect too — same shared helper as the tool
+    // dispatch (tools::watch_from_args), one implementation, two callers.
+    // It can run for minutes, so keep it OFF the executor.
+    if tool_name == "webrain_watch" {
+        let args = arguments.clone();
+        let result =
+            match tokio::task::spawn_blocking(move || crate::tools::watch_from_args(&args)).await {
+                Ok(v) => v,
+                Err(e) => {
+                    json!({"status": "error", "message": format!("watch task failed: {e}")})
                 }
-                let engine = arguments
-                    .get("engine")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("duckduckgo");
-                // Percent-encode the query — space→+ lets &/#/% inject params or
-                // truncate the query ("C++" became ambiguous "C+++").
-                let encoded: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
-                let url = match engine {
-                    "bing" => format!("https://www.bing.com/search?q={encoded}"),
-                    "brave" => format!("https://search.brave.com/search?q={encoded}"),
-                    "google" => format!("https://www.google.com/search?q={encoded}"),
-                    _ => format!("https://html.duckduckgo.com/html/?q={encoded}"),
-                };
-                let engine = engine.to_string();
-                // Explicit `proxy` wins and never rotates; otherwise the
-                // WEBRAIN_PROXIES pool -- the same rule serp follows. A launched
-                // browser's exit is separate: that one is baked into
-                // `--proxy-server` at launch and covers every browser-path tool.
-                let proxy = arguments
-                    .get("proxy")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .or_else(webrain_core::proxy::next_proxy);
-                let result = tokio::task::spawn_blocking(move || {
+            };
+        let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": is_err
+            }
+        });
+    }
+    // ponytail: webrain_search uses ureq (no browser), so skip CDP connect too.
+    if tool_name == "webrain_search" {
+        let q = arguments.get("q").and_then(|v| v.as_str()).unwrap_or("");
+        if q.is_empty() {
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"q required"}"#}],"isError":true}});
+        }
+        let engine = arguments
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("duckduckgo");
+        // Percent-encode the query — space→+ lets &/#/% inject params or
+        // truncate the query ("C++" became ambiguous "C+++").
+        let encoded: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+        let url = match engine {
+            "bing" => format!("https://www.bing.com/search?q={encoded}"),
+            "brave" => format!("https://search.brave.com/search?q={encoded}"),
+            "google" => format!("https://www.google.com/search?q={encoded}"),
+            _ => format!("https://html.duckduckgo.com/html/?q={encoded}"),
+        };
+        let engine = engine.to_string();
+        // Explicit `proxy` wins and never rotates; otherwise the
+        // WEBRAIN_PROXIES pool -- the same rule serp follows. A launched
+        // browser's exit is separate: that one is baked into
+        // `--proxy-server` at launch and covers every browser-path tool.
+        let proxy = arguments
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(webrain_core::proxy::next_proxy);
+        let result = tokio::task::spawn_blocking(move || {
                     match webrain_core::engines::http_fetch_proxied(&url, proxy.as_deref()) {
                         Ok(v) => {
                             json!({"status":"ok","engine":engine,"url":url,"text":v.get("text").cloned().unwrap_or_default()})
@@ -528,829 +544,806 @@ async fn handle_rpc(msg: Value, backend: &mut Option<CdpBackend>, cdp_url: Optio
                 .unwrap_or_else(|e| {
                     json!({"status":"error","message":format!("search task failed: {e}")})
                 });
-                return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+        return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+    }
+    // ponytail: serp HTTP engines (duckduckgo/bing/auto) use ureq — no
+    // browser, so skip CDP connect too. `google`/`brave` are JS-gated →
+    // they need a connected CDP engine (Chrome/obscura/lightpanda) and
+    // fall through to the backend connect + call_tool dispatch below.
+    // `auto` is HTTP-only by default, but joins google/brave when a
+    // backend is already attached (passed through below).
+    let mut serp_no_stealth = false;
+    if tool_name == "webrain_serp" {
+        let engine = arguments
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("duckduckgo");
+        // Only google|brave REQUIRE a browser (JS-gated → they parse to
+        // zero without one). bing CAN drive one for deeper paging, but the
+        // browserless path is the DEFAULT: measured 2026-10-10, `limit=50`
+        // returned 11 results for duckduckgo and 10 for bing without a
+        // browser, so a caller who wants depth opts IN with
+        // `browser: true` rather than paying for a guest Chrome by default.
+        // Absent/unparseable `browser` means false — the cheap path.
+        let wants_browser = arguments
+            .get("browser")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // brave stops being browser-only once BRAVE_API_KEY is set (its
+        // keyed API needs no CDP engine).
+        let needs_browser = engine == "google"
+            || (engine == "brave" && !webrain_core::serp::brave_api_ready())
+            || (engine == "bing" && wants_browser);
+        if !needs_browser {
+            // `auto` also runs HTTP-only, but when a backend is already
+            // attached it joins google/brave into the merge (the core's
+            // browser-join path) — pass it through and mark it trusted
+            // (no stealth injection for the google render).
+            let backend_ref = if engine == "auto" {
+                backend.as_ref()
+            } else {
+                None
+            };
+            if let Some(b) = backend_ref {
+                b.set_no_stealth(true);
             }
-            // ponytail: serp HTTP engines (duckduckgo/bing/auto) use ureq — no
-            // browser, so skip CDP connect too. `google`/`brave` are JS-gated →
-            // they need a connected CDP engine (Chrome/obscura/lightpanda) and
-            // fall through to the backend connect + call_tool dispatch below.
-            // `auto` is HTTP-only by default, but joins google/brave when a
-            // backend is already attached (passed through below).
-            let mut serp_no_stealth = false;
-            if tool_name == "webrain_serp" {
-                let engine = arguments
-                    .get("engine")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("duckduckgo");
-                // Only google|brave REQUIRE a browser (JS-gated → they parse to
-                // zero without one). bing CAN drive one for deeper paging, but the
-                // browserless path is the DEFAULT: measured 2026-10-10, `limit=50`
-                // returned 11 results for duckduckgo and 10 for bing without a
-                // browser, so a caller who wants depth opts IN with
-                // `browser: true` rather than paying for a guest Chrome by default.
-                // Absent/unparseable `browser` means false — the cheap path.
-                let wants_browser = arguments
-                    .get("browser")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                // brave stops being browser-only once BRAVE_API_KEY is set (its
-                // keyed API needs no CDP engine).
-                let needs_browser = engine == "google"
-                    || (engine == "brave" && !webrain_core::serp::brave_api_ready())
-                    || (engine == "bing" && wants_browser);
-                if !needs_browser {
-                    // `auto` also runs HTTP-only, but when a backend is already
-                    // attached it joins google/brave into the merge (the core's
-                    // browser-join path) — pass it through and mark it trusted
-                    // (no stealth injection for the google render).
-                    let backend_ref = if engine == "auto" {
-                        backend.as_ref()
-                    } else {
-                        None
-                    };
-                    if let Some(b) = backend_ref {
-                        b.set_no_stealth(true);
-                    }
-                    let result = crate::tools::serp_from_args(&arguments, backend_ref).await;
-                    // Scoped no-stealth: clear the flag after the serp call so a
-                    // later navigate/batch/scrape in this session isn't silently
-                    // run without stealth_js (the google/auto serp arms set it).
-                    if let Some(b) = backend_ref {
-                        b.set_no_stealth(false);
-                    }
-                    let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
-                    return json!({
-                        "jsonrpc": "2.0", "id": id,
-                        "result": {
-                            "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                            "isError": is_err
-                        }
-                    });
+            let result = crate::tools::serp_from_args(&arguments, backend_ref).await;
+            // Scoped no-stealth: clear the flag after the serp call so a
+            // later navigate/batch/scrape in this session isn't silently
+            // run without stealth_js (the google/auto serp arms set it).
+            if let Some(b) = backend_ref {
+                b.set_no_stealth(false);
+            }
+            let is_err = result.get("status").and_then(|v| v.as_str()) == Some("error");
+            return json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                    "isError": is_err
                 }
-                // google|brave → guest-browser flow (mirrors the CLI). google
-                // disables the stealth_js injection on ITS backend
-                // (trusted-commands-only) — per-backend, not a process-global
-                // set_var (that's an edition-2024 data race from a concurrent
-                // handler and leaks to every session). Then ensure a backend:
-                // attach to CDP_URL/9222 if one is up, else guest-launch Chrome
-                // (warm session kept alive between calls).
-                if backend.is_none() {
-                    let res = if let Some(url) = cdp_url {
-                        CdpBackend::connect_with_url(url).await
-                    } else {
-                        CdpBackend::connect_default().await
+            });
+        }
+        // google|brave → guest-browser flow (mirrors the CLI). google
+        // disables the stealth_js injection on ITS backend
+        // (trusted-commands-only) — per-backend, not a process-global
+        // set_var (that's an edition-2024 data race from a concurrent
+        // handler and leaks to every session). Then ensure a backend:
+        // attach to CDP_URL/9222 if one is up, else guest-launch Chrome
+        // (warm session kept alive between calls).
+        if backend.is_none() {
+            let res = if let Some(url) = cdp_url {
+                CdpBackend::connect_with_url(url).await
+            } else {
+                CdpBackend::connect_default().await
+            };
+            match res {
+                Ok(b) => *backend = Some(b),
+                Err(_) => {
+                    // Guest-launch on the port the CALLER's endpoint is on.
+                    // Hardcoding 9222 made every routed session that points
+                    // anywhere else die with "port 9222 already has a CDP
+                    // endpoint" — a Chrome the caller never asked for,
+                    // squatting a port they never named.
+                    let port = match cdp_url.map(parse_loopback_port) {
+                        Some(Some(p)) => p,
+                        Some(None) => {
+                            return tool_error(
+                                id,
+                                &format!(
+                                    "cannot connect to {}; not guest-launching for a non-loopback endpoint",
+                                    cdp_url.unwrap_or_default()
+                                ),
+                            );
+                        }
+                        None => 9222,
                     };
-                    match res {
-                        Ok(b) => *backend = Some(b),
-                        Err(_) => {
-                            // Guest-launch on the port the CALLER's endpoint is on.
-                            // Hardcoding 9222 made every routed session that points
-                            // anywhere else die with "port 9222 already has a CDP
-                            // endpoint" — a Chrome the caller never asked for,
-                            // squatting a port they never named.
-                            let port = match cdp_url.map(parse_loopback_port) {
-                                Some(Some(p)) => p,
-                                Some(None) => {
-                                    return tool_error(
-                                        id,
-                                        &format!(
-                                            "cannot connect to {}; not guest-launching for a non-loopback endpoint",
-                                            cdp_url.unwrap_or_default()
-                                        ),
-                                    );
-                                }
-                                None => 9222,
-                            };
-                            let base = if engine == "google" {
-                                "google"
-                            } else if engine == "bing" {
-                                "bing"
-                            } else {
-                                "brave"
-                            };
-                            // Chrome hands a second launch off to whichever
-                            // instance already owns the user-data-dir and exits 0,
-                            // so a non-default endpoint reusing the default
-                            // profile would get a Chrome that never opens CDP on
-                            // `port`. One profile per endpoint; 9222 keeps the
-                            // existing dir so warm sessions stay warm.
-                            let prof = if port == 9222 {
-                                base.to_string()
-                            } else {
-                                format!("{base}-{port}")
-                            };
-                            let proxy = arguments
-                                .get("proxy")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            match webrain_core::launch::launch_chrome_guest(
-                                "serp",
-                                &prof,
-                                port,
-                                true,
-                                proxy.as_deref(),
-                            ) {
-                                Ok(l) => {
-                                    let url = l.cdp_url.clone();
-                                    match CdpBackend::connect_with_url(&url).await {
-                                        Ok(b) => {
-                                            // Attach succeeded — keep the guest alive
-                                            // between calls (warm session). Only forget
-                                            // AFTER attach, so a failed attach drops the
-                                            // guard and the guest Chrome is killed
-                                            // (no orphan process).
-                                            std::mem::forget(l);
-                                            *backend = Some(b);
-                                        }
-                                        Err(e) => {
-                                            return tool_error(
-                                                id,
-                                                &format!(
-                                                    "guest-launched browser at {url} but attach failed: {e}"
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                                // bing has a working pure-HTTP path — no Chrome →
-                                // run serp_from_args(None) HERE: the shared dispatch
-                                // below re-attempts the browser connect and would
-                                // hard-error (serp_from_args with None is never
-                                // reached from the needs_browser branch otherwise).
-                                // google/brave NEED a browser, so they error out.
-                                Err(e) if engine == "bing" => {
-                                    tracing::debug!(
-                                        "no Chrome for bing browser path ({e}); running pure HTTP"
-                                    );
-                                    let result =
-                                        crate::tools::serp_from_args(&arguments, None).await;
-                                    let is_err = result.get("status").and_then(|v| v.as_str())
-                                        == Some("error");
-                                    return json!({
-                                        "jsonrpc": "2.0", "id": id,
-                                        "result": {
-                                            "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                                            "isError": is_err
-                                        }
-                                    });
+                    let base = if engine == "google" {
+                        "google"
+                    } else if engine == "bing" {
+                        "bing"
+                    } else {
+                        "brave"
+                    };
+                    // Chrome hands a second launch off to whichever
+                    // instance already owns the user-data-dir and exits 0,
+                    // so a non-default endpoint reusing the default
+                    // profile would get a Chrome that never opens CDP on
+                    // `port`. One profile per endpoint; 9222 keeps the
+                    // existing dir so warm sessions stay warm.
+                    let prof = if port == 9222 {
+                        base.to_string()
+                    } else {
+                        format!("{base}-{port}")
+                    };
+                    let proxy = arguments
+                        .get("proxy")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    match webrain_core::launch::launch_chrome_guest(
+                        "serp",
+                        &prof,
+                        port,
+                        true,
+                        proxy.as_deref(),
+                    ) {
+                        Ok(l) => {
+                            let url = l.cdp_url.clone();
+                            match CdpBackend::connect_with_url(&url).await {
+                                Ok(b) => {
+                                    // Attach succeeded — keep the guest alive
+                                    // between calls (warm session). Only forget
+                                    // AFTER attach, so a failed attach drops the
+                                    // guard and the guest Chrome is killed
+                                    // (no orphan process).
+                                    std::mem::forget(l);
+                                    *backend = Some(b);
                                 }
                                 Err(e) => {
                                     return tool_error(
                                         id,
                                         &format!(
-                                            "cannot connect to a browser and guest-launch failed: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222."
+                                            "guest-launched browser at {url} but attach failed: {e}"
                                         ),
                                     );
                                 }
                             }
                         }
-                    }
-                }
-                // Stealth-off is per-backend: mark the resolved backend so
-                // attach_and_init skips the anti-bot injection for this session.
-                if engine == "google" {
-                    if let Some(b) = backend.as_ref() {
-                        b.set_no_stealth(true);
-                        serp_no_stealth = true;
-                    }
-                }
-                // google|brave → continue to the shared backend connect + call_tool
-                // (webrain_serp dispatches to serp_from_args with the backend).
-            }
-            // ponytail: pdf_render uses pdfium (no browser), so skip CDP connect too.
-            if tool_name == "webrain_pdf_render" {
-                let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
-                }
-                #[cfg(feature = "pdfium")]
-                {
-                    let pages: Option<Vec<u32>> =
-                        arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_u64().map(|n| n as u32))
-                                .collect()
-                        });
-                    let dpi = arguments
-                        .get("dpi")
-                        .and_then(|v| v.as_f64())
-                        .map(|f| f as f32);
-                    let tile_size = arguments
-                        .get("tile_size")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
-                    let dir = arguments.get("dir").and_then(|v| v.as_str());
-                    let result = match webrain_core::engines::pdf_render(
-                        path,
-                        pages.as_deref(),
-                        dpi,
-                        tile_size,
-                        dir,
-                    ) {
-                        Ok(v) => json!({"status":"ok","result":v}),
-                        Err(e) => json!({"status":"error","message":e.to_string()}),
-                    };
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
-                }
-                #[cfg(not(feature = "pdfium"))]
-                let result = json!({"status":"error","message":"pdf_render needs a build with --features pdfium and pdfium.dll/libpdfium.so in PATH (prebuilt: https://github.com/bblanchon/pdfium-binaries). Without that build use op=extract for text/tables, or open the PDF in Chrome and observe what=screenshot for a raster."});
-                #[cfg(not(feature = "pdfium"))]
-                return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
-            }
-            // ponytail: pdf_images uses lopdf (no browser), so skip CDP connect too.
-            if tool_name == "webrain_pdf_images" {
-                let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
-                }
-                let pages: Option<Vec<u32>> =
-                    arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_u64().map(|n| n as u32))
-                            .collect()
-                    });
-                let path = path.to_string();
-                let dir = arguments.get("dir").and_then(|v| v.as_str());
-                let dir = dir.map(|s| s.to_string());
-                let result = match tokio::task::spawn_blocking(move || {
-                    webrain_core::engines::pdf_images(&path, pages.as_deref(), dir.as_deref())
-                })
-                .await
-                {
-                    Ok(v) => match v {
-                        Ok(v) => json!({"status":"ok","result":v}),
-                        Err(e) => json!({"status":"error","message":e.to_string()}),
-                    },
-                    Err(e) => {
-                        json!({"status":"error","message":format!("pdf_images task failed: {e}")})
-                    }
-                };
-                return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
-            }
-            if tool_name == "webrain_pdf_extract" {
-                let results = if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array())
-                {
-                    let p: Vec<String> = paths
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                    // ponytail: PDF parsing is CPU-bound — run the parallel batch
-                    // on the blocking pool so a huge batch never stalls a tokio worker.
-                    tokio::task::spawn_blocking(move || {
-                        webrain_core::engines::pdf_extract_batch(&p)
-                    })
-                    .await
-                    .unwrap_or_default()
-                } else if let Some(path) = arguments.get("path").and_then(|v| v.as_str()) {
-                    let path = path.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        vec![
-                            webrain_core::engines::pdf_extract(&path)
-                                .unwrap_or_else(|e| json!({"error": e.to_string()})),
-                        ]
-                    })
-                    .await
-                    .unwrap_or_default()
-                } else {
-                    return json!({
-                        "jsonrpc": "2.0", "id": id,
-                        "result": {
-                            "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": "path or paths required"})).unwrap_or_else(|_| "{}".into())}],
-                            "isError": true
+                        // bing has a working pure-HTTP path — no Chrome →
+                        // run serp_from_args(None) HERE: the shared dispatch
+                        // below re-attempts the browser connect and would
+                        // hard-error (serp_from_args with None is never
+                        // reached from the needs_browser branch otherwise).
+                        // google/brave NEED a browser, so they error out.
+                        Err(e) if engine == "bing" => {
+                            tracing::debug!(
+                                "no Chrome for bing browser path ({e}); running pure HTTP"
+                            );
+                            let result = crate::tools::serp_from_args(&arguments, None).await;
+                            let is_err =
+                                result.get("status").and_then(|v| v.as_str()) == Some("error");
+                            return json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {
+                                    "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                                    "isError": is_err
+                                }
+                            });
                         }
-                    });
-                };
-                let result = json!({"status": "ok", "count": results.len(), "results": results});
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": false
+                        Err(e) => {
+                            return tool_error(
+                                id,
+                                &format!(
+                                    "cannot connect to a browser and guest-launch failed: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222."
+                                ),
+                            );
+                        }
                     }
-                });
-            }
-            // A PDF batch needs no browser. `op:"pdf"` is the same engine as
-            // webrain_pdf_extract (fetch → pure-Rust parse), so serve it BEFORE
-            // the CDP connect. Routing it through batch_map instead drives a tab
-            // that renders the PDF in Chrome's viewer plugin — no DOM, so the
-            // result was an empty page that read like a failed scrape.
-            if tool_name == "webrain_batch"
-                && arguments.get("op").and_then(|v| v.as_str()) == Some("pdf")
-            {
-                let targets: Vec<String> = arguments
-                    .get("urls")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if targets.is_empty() {
-                    return tool_error(id, "urls required (op=pdf)");
                 }
-                let results = tokio::task::spawn_blocking(move || {
-                    webrain_core::engines::pdf_extract_batch(&targets)
-                })
+            }
+        }
+        // Stealth-off is per-backend: mark the resolved backend so
+        // attach_and_init skips the anti-bot injection for this session.
+        if engine == "google" {
+            if let Some(b) = backend.as_ref() {
+                b.set_no_stealth(true);
+                serp_no_stealth = true;
+            }
+        }
+        // google|brave → continue to the shared backend connect + call_tool
+        // (webrain_serp dispatches to serp_from_args with the backend).
+    }
+    // ponytail: pdf_render uses pdfium (no browser), so skip CDP connect too.
+    if tool_name == "webrain_pdf_render" {
+        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        if path.is_empty() {
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
+        }
+        #[cfg(feature = "pdfium")]
+        {
+            let pages: Option<Vec<u32>> =
+                arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                });
+            let dpi = arguments
+                .get("dpi")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32);
+            let tile_size = arguments
+                .get("tile_size")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
+            let dir = arguments.get("dir").and_then(|v| v.as_str());
+            let result = match webrain_core::engines::pdf_render(
+                path,
+                pages.as_deref(),
+                dpi,
+                tile_size,
+                dir,
+            ) {
+                Ok(v) => json!({"status":"ok","result":v}),
+                Err(e) => json!({"status":"error","message":e.to_string()}),
+            };
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+        }
+        #[cfg(not(feature = "pdfium"))]
+        let result = json!({"status":"error","message":"pdf_render needs a build with --features pdfium and pdfium.dll/libpdfium.so in PATH (prebuilt: https://github.com/bblanchon/pdfium-binaries). Without that build use op=extract for text/tables, or open the PDF in Chrome and observe what=screenshot for a raster."});
+        #[cfg(not(feature = "pdfium"))]
+        return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+    }
+    // ponytail: pdf_images uses lopdf (no browser), so skip CDP connect too.
+    if tool_name == "webrain_pdf_images" {
+        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        if path.is_empty() {
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":r#"{"status":"error","message":"path required"}"#}],"isError":true}});
+        }
+        let pages: Option<Vec<u32>> = arguments.get("pages").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect()
+        });
+        let path = path.to_string();
+        let dir = arguments.get("dir").and_then(|v| v.as_str());
+        let dir = dir.map(|s| s.to_string());
+        let result = match tokio::task::spawn_blocking(move || {
+            webrain_core::engines::pdf_images(&path, pages.as_deref(), dir.as_deref())
+        })
+        .await
+        {
+            Ok(v) => match v {
+                Ok(v) => json!({"status":"ok","result":v}),
+                Err(e) => json!({"status":"error","message":e.to_string()}),
+            },
+            Err(e) => {
+                json!({"status":"error","message":format!("pdf_images task failed: {e}")})
+            }
+        };
+        return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":result.get("status").and_then(|v|v.as_str())==Some("error")}});
+    }
+    if tool_name == "webrain_pdf_extract" {
+        let results = if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array()) {
+            let p: Vec<String> = paths
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            // ponytail: PDF parsing is CPU-bound — run the parallel batch
+            // on the blocking pool so a huge batch never stalls a tokio worker.
+            tokio::task::spawn_blocking(move || webrain_core::engines::pdf_extract_batch(&p))
+                .await
+                .unwrap_or_default()
+        } else if let Some(path) = arguments.get("path").and_then(|v| v.as_str()) {
+            let path = path.to_string();
+            tokio::task::spawn_blocking(move || {
+                vec![
+                    webrain_core::engines::pdf_extract(&path)
+                        .unwrap_or_else(|e| json!({"error": e.to_string()})),
+                ]
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            return json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": serde_json::to_string(&json!({"status": "error", "message": "path or paths required"})).unwrap_or_else(|_| "{}".into())}],
+                    "isError": true
+                }
+            });
+        };
+        let result = json!({"status": "ok", "count": results.len(), "results": results});
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": false
+            }
+        });
+    }
+    // A PDF batch needs no browser. `op:"pdf"` is the same engine as
+    // webrain_pdf_extract (fetch → pure-Rust parse), so serve it BEFORE
+    // the CDP connect. Routing it through batch_map instead drives a tab
+    // that renders the PDF in Chrome's viewer plugin — no DOM, so the
+    // result was an empty page that read like a failed scrape.
+    if tool_name == "webrain_batch" && arguments.get("op").and_then(|v| v.as_str()) == Some("pdf") {
+        let targets: Vec<String> = arguments
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if targets.is_empty() {
+            return tool_error(id, "urls required (op=pdf)");
+        }
+        let results =
+            tokio::task::spawn_blocking(move || webrain_core::engines::pdf_extract_batch(&targets))
                 .await
                 .unwrap_or_default();
-                let result = json!({"status": "ok", "count": results.len(), "results": results});
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": false
-                    }
-                });
+        let result = json!({"status": "ok", "count": results.len(), "results": results});
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": false
             }
-            // ponytail: vault listing needs no browser — serve without a CDP backend.
-            if tool_name == "webrain_profiles" {
-                let result = match tokio::task::spawn_blocking(webrain_core::vault::list).await {
-                    Ok(Ok(profiles)) => {
-                        json!({"status": "ok", "count": profiles.len(), "profiles": profiles})
-                    }
-                    Ok(Err(e)) => json!({"status": "error", "message": e.to_string()}),
-                    Err(e) => {
-                        json!({"status": "error", "message": format!("vault list task failed: {e}")})
-                    }
-                };
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
-                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
-                    }
-                });
-            }
-
-            // ponytail: launch/login manage their own Chrome + backend — serve
-            // without the session backend (the launched Chrome lives in a registry).
-            if tool_name == "webrain_launch" {
-                let service = arguments
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let profile = arguments
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if service.is_empty() || profile.is_empty() {
-                    return tool_error(id, "service and profile required");
-                }
-                let url = arguments
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("https://accounts.google.com")
-                    .to_string();
-                let headless = arguments
-                    .get("headless")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let port: u16 = arguments
-                    .get("port")
-                    .and_then(|v| v.as_u64())
-                    // u16::try_from rejects >65535 instead of silently truncating
-                    // (e.g. 70000 → 4464) to an unintended local port.
-                    .and_then(|n| u16::try_from(n).ok())
-                    .unwrap_or(9222);
-                // A launch-time exit: baked into `--proxy-server`, so every
-                // browser tool on this CDP endpoint inherits it. This is the
-                // only place a browser-path proxy can take effect.
-                let proxy = arguments
-                    .get("proxy")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let result = match webrain_core::launch::launch_chrome(
-                    service,
-                    profile,
-                    port,
-                    !headless,
-                    proxy.as_deref(),
-                ) {
-                    Ok(l) => {
-                        let cdp_url = l.cdp_url.clone();
-                        let profile_dir = l.profile_dir.clone();
-                        tools::store_launched(&format!("{service}:{profile}"), l);
-                        // prime: attach applies stealth, navigate opens the login page
-                        let prime = async {
-                            let b = CdpBackend::connect_with_url(&cdp_url).await?;
-                            b.navigate(&url).await?;
-                            Ok::<_, anyhow::Error>(())
-                        }
-                        .await;
-                        match prime {
-                            Ok(_) => {
-                                json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "opened": url})
-                            }
-                            Err(e) => {
-                                json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "warning": format!("launched but attach failed: {e}")})
-                            }
-                        }
-                    }
-                    Err(e) => json!({"status": "error", "message": e.to_string()}),
-                };
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
-                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
-                    }
-                });
-            }
-            if tool_name == "webrain_login" {
-                let service = arguments
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let profile = arguments
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if service.is_empty() || profile.is_empty() {
-                    return tool_error(id, "service and profile required");
-                }
-                let url = arguments
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let port: u16 = arguments
-                    .get("port")
-                    .and_then(|v| v.as_u64())
-                    // u16::try_from rejects >65535 instead of silently truncating.
-                    .and_then(|n| u16::try_from(n).ok())
-                    .unwrap_or(9222);
-                // Creds: vault first (in-process decrypt), else env — never argv/logs.
-                let (user, pass, totp) = match webrain_core::vault::get(service, profile) {
-                    Ok(c) => (c.username, c.password, c.totp),
-                    Err(_) => (
-                        std::env::var("WEBRAIN_USER").unwrap_or_default(),
-                        std::env::var("WEBRAIN_PASS").unwrap_or_default(),
-                        None,
-                    ),
-                };
-                if user.is_empty() || pass.is_empty() {
-                    return tool_error(
-                        id,
-                        "no credentials for this profile — run `webrain vault set <service> <profile>`",
-                    );
-                }
-                // A caller-supplied `cdp_url` logs in in THEIR browser. See
-                // `vault_cdp_target` for the tenant caveat on the state file.
-                let cdp = vault_cdp_target(&arguments, port);
-                let result = match CdpBackend::connect_with_url(&cdp).await {
-                    Ok(b) => match webrain_core::login::run_login(
-                        &b,
-                        &user,
-                        &pass,
-                        totp.as_deref(),
-                        url.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(r) => json!({"status": "ok", "result": r}),
-                        Err(e) => json!({"status": "error", "message": e.to_string()}),
-                    },
-                    Err(e) => {
-                        json!({"status": "error", "message": format!("cannot connect to {cdp}: {e}")})
-                    }
-                };
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
-                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
-                    }
-                });
-            }
-
-            if tool_name == "webrain_close_launch" {
-                let service = arguments
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let profile = arguments
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if service.is_empty() || profile.is_empty() {
-                    return tool_error(id, "service and profile required");
-                }
-                let closed = tools::close_launched(&format!("{service}:{profile}"));
-                let result = json!({"status": "ok", "closed": closed});
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
-                        "isError": false
-                    }
-                });
-            }
-
-            // ── Portable auth state (agent-browser --state/--restore borrow) ──
-            // state.json per profile: cookies + localStorage, so a login follows
-            // you across machines. Restore assumes the page is already on the
-            // right origin (localStorage is origin-scoped).
-            if tool_name == "webrain_save_state" || tool_name == "webrain_restore_state" {
-                let service = arguments
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let profile = arguments
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if service.is_empty() || profile.is_empty() {
-                    return tool_error(id, "service and profile required");
-                }
-                let port: u16 = arguments
-                    .get("port")
-                    .and_then(|v| v.as_u64())
-                    // u16::try_from rejects >65535 instead of silently truncating.
-                    .and_then(|n| u16::try_from(n).ok())
-                    .unwrap_or(9222);
-                let dir = webrain_core::launch::profiles_dir()
-                    .join(service)
-                    .join(profile);
-                let path = dir.join("state.json");
-                // `cdp_url` when the caller brought a browser, else this host's
-                // Chrome on `port`. The state FILE still lands under
-                // `profiles_dir()` either way -- see `vault_cdp_target`.
-                let cdp = vault_cdp_target(&arguments, port);
-                let result = if tool_name == "webrain_save_state" {
-                    match CdpBackend::connect_with_url(&cdp).await {
-                        Ok(b) => {
-                            // A dead page still answers `connect`, so both reads can fail
-                            // after a successful attach. Swallowing that reported
-                            // `{status: ok, cookies: 0}`, and in file mode it overwrote a
-                            // good state.json with an empty one -- a silent logout that
-                            // the restore side alone could not detect.
-                            let cookies = match b.cookies().await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    return tool_error(id, &format!("cannot read cookies: {e}"));
-                                }
-                            };
-                            let ls = match b.evaluate(SAVE_LS_JS).await {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return tool_error(
-                                        id,
-                                        &format!("cannot read localStorage: {e}"),
-                                    );
-                                }
-                            };
-                            let cookie_count = cookies.len();
-                            let key_count = ls.as_object().map(|o| o.len()).unwrap_or(0);
-                            let payload = json!({"cookies": cookies, "localStorage": ls});
-                            // `inline` returns the state to the CALLER and writes no
-                            // file. The platform's vault is the durable copy, and a
-                            // file here would leave a credential on a worker the
-                            // caller does not necessarily own.
-                            if inline_state_requested(&arguments) {
-                                json!({
-                                    "status": "ok",
-                                    "cookies": cookie_count,
-                                    "localStorage_keys": key_count,
-                                    "payload": payload
-                                })
-                            } else {
-                                match (
-                                    std::fs::create_dir_all(&dir),
-                                    std::fs::write(
-                                        &path,
-                                        serde_json::to_vec(&payload).unwrap_or_default(),
-                                    ),
-                                ) {
-                                    (Ok(_), Ok(_)) => json!({
-                                        "status": "ok",
-                                        "state": path.display().to_string(),
-                                        "cookies": cookie_count,
-                                        "localStorage_keys": key_count
-                                    }),
-                                    (Err(e), _) | (_, Err(e)) => json!({
-                                        "status": "error",
-                                        "message": format!("write failed: {e}")
-                                    }),
-                                }
-                            }
-                        }
-                        Err(e) => json!({
-                            "status": "error",
-                            "message": format!("cannot connect to {cdp}: {e}")
-                        }),
-                    }
-                } else {
-                    // The platform's vault hands the state back inline; the file is
-                    // only the fallback for a worker that captured it itself. A
-                    // machine that never logged in has no `state.json` at all, so
-                    // requiring one would make a vault restore impossible there.
-                    let payload: Value = match inline_state(&arguments) {
-                        Some(state) => state,
-                        None => match std::fs::read(&path) {
-                            Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
-                            Err(e) => {
-                                return tool_error(
-                                    id,
-                                    &format!("no state.json at {} ({e})", path.display()),
-                                );
-                            }
-                        },
-                    };
-                    match CdpBackend::connect_with_url(&cdp).await {
-                        Ok(b) => {
-                            let cookies = payload
-                                .get("cookies")
-                                .and_then(|c| c.as_array())
-                                .cloned()
-                                .unwrap_or_default();
-                            // Discarding this error reported `cookies_restored: N`
-                            // for a restore that wrote nothing, so a caller relying
-                            // on the count would skip a re-login over a dead session.
-                            // Fail loudly instead; `save_state` already propagates.
-                            if let Err(e) = b.set_cookies(&cookies).await {
-                                return tool_error(
-                                    id,
-                                    &format!("cannot restore {} cookies: {e}", cookies.len()),
-                                );
-                            }
-                            let ls = payload.get("localStorage").cloned().unwrap_or_default();
-                            let keys = b.evaluate(&restore_ls_js(&ls)).await.unwrap_or_default();
-                            json!({
-                                "status": "ok",
-                                "cookies_restored": cookies.len(),
-                                "localStorage_keys": keys.as_i64().unwrap_or(0)
-                            })
-                        }
-                        Err(e) => json!({
-                            "status": "error",
-                            "message": format!("cannot connect to {cdp}: {e}")
-                        }),
-                    }
-                };
-                return json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
-                        "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
-                    }
-                });
-            }
-
-            // Session management on stdio. `handle_http_conn` answers these three
-            // from a per-session map it owns; stdio has one connection and no map,
-            // so the folded name fell through to `tools::call_tool`, which has no
-            // executor for it — every `webrain_session(op=open)` answered
-            // `Unknown tool: webrain_open_session`. Here "open" means "point this
-            // connection's backend at cdp_url", which is the whole of what a single
-            // connection can offer.
-            match tool_name.as_str() {
-                "webrain_open_session" => {
-                    let url = arguments.get("cdp_url").and_then(|v| v.as_str());
-                    return match connect_for(url, &arguments).await {
-                        Ok(b) => {
-                            *backend = Some(b);
-                            let target = url.map(String::from).or_else(|| {
-                                std::env::var("CDP_URL")
-                                    .ok()
-                                    .filter(|s| !s.trim().is_empty())
-                            });
-                            if let Ok(mut t) = STDIO_TARGET.lock() {
-                                *t = target.clone();
-                            }
-                            let sid = arguments
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("stdio");
-                            let text = serde_json::to_string(&json!({
-                                "session_id": sid,
-                                "cdp_url": target,
-                                "proxied": false,
-                                // A proxy is a browser context, which one raw stdio
-                                // connection cannot carry — so identity never switches.
-                                "identity": false,
-                                "created": true
-                            }))
-                            .unwrap_or_default();
-                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}})
-                        }
-                        Err(e) => tool_error(
-                            id,
-                            &format!("cannot open a session at {}: {e}", url.unwrap_or("CDP_URL")),
-                        ),
-                    };
-                }
-                "webrain_close_session" => {
-                    let had = backend.take().is_some();
-                    if let Ok(mut t) = STDIO_TARGET.lock() {
-                        *t = None;
-                    }
-                    let text = serde_json::to_string(&json!({
-                        "session_id": "stdio",
-                        "closed": had
-                    }))
-                    .unwrap_or_default();
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
-                }
-                "webrain_list_sessions" => {
-                    let target = STDIO_TARGET
-                        .lock()
-                        .ok()
-                        .and_then(|t| t.clone())
-                        .or_else(|| {
-                            std::env::var("CDP_URL")
-                                .ok()
-                                .filter(|s| !s.trim().is_empty())
-                        });
-                    let text = serde_json::to_string(&json!({
-                        "sessions": [{
-                            "session_id": "stdio",
-                            "cdp_url": target,
-                            "connected": backend.is_some()
-                        }]
-                    }))
-                    .unwrap_or_default();
-                    return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
-                }
-                _ => {}
-            }
-
-            if backend.is_none() {
-                match connect_for(cdp_url, &arguments).await {
-                    Ok(b) => *backend = Some(b),
-                    Err(e) => {
-                        return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": format!("Cannot connect to browser: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222.")}});
-                    }
-                }
-            }
-            let mut result =
-                tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
-            // Scoped no-stealth: the google serp arm armed set_no_stealth on the
-            // shared session backend — clear it now so later browse/batch/scrape
-            // calls in this session don't inherit the google-only no-stealth mode.
-            if serp_no_stealth {
-                if let Some(b) = backend.as_ref() {
-                    b.set_no_stealth(false);
-                }
-            }
-            // Reconnect: a browser kill/restart wedges the cached backend forever
-            // (a dead socket fails every later write). `CdpBackend` now LATCHES the
-            // death the moment the transport dies, so ask it directly — that answer
-            // cannot go stale the way a message-keyword list does. The substring
-            // heuristic stays only as a fallback for failures that never reach the
-            // backend at all (a refused dial, an OS-level reset mid-handshake).
-            // The rest of the error surface is tool-level and must NOT reset the
-            // session.
-            let dead =
-                backend.as_ref().is_some_and(|b| b.is_dead()) || is_connection_error(&result);
-            if dead {
-                *backend = None;
-                // The socket died between the call and its reply, so a read-only
-                // tool never saw it: reconnect and run it once instead of charging
-                // the caller a whole failed turn. A mutating tool returns as-is —
-                // a click that landed with its reply lost would run TWICE.
-                if retry_after_dead_socket(&tool_name) {
-                    if let Ok(b) = connect_for(cdp_url, &arguments).await {
-                        let retried = tools::call_tool(&b, &tool_name, &arguments).await;
-                        if b.is_dead() || is_connection_error(&retried) {
-                            // Still broken: leave `backend` dropped so the next
-                            // call pays a fresh dial instead of reusing a corpse.
-                        } else {
-                            result = retried;
-                            *backend = Some(b);
-                            RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-            // MCP spec: tools/call result must be {content: [{type:"text",text}], isError}.
-            // ponytail: JSON-encode the tool payload into one text block; mark isError
-            // when the tool returned status:"error". Without the content array the
-            // client JS throws "r.content is not iterable".
-            // `{"error": "Unknown tool: X"}` carries no `status`, so a bare
-            // status check reported it as success and the client never saw the
-            // failure. Both error shapes count.
-            let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error")
-                || result.get("error").is_some();
-            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if is_error {
-                CALL_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{"type": "text", "text": text}],
-                    "isError": is_error
-                }
-            })
-        }
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32601, "message": format!("Unknown method: {method}")}
-        }),
+        });
     }
+    // ponytail: vault listing needs no browser — serve without a CDP backend.
+    if tool_name == "webrain_profiles" {
+        let result = match tokio::task::spawn_blocking(webrain_core::vault::list).await {
+            Ok(Ok(profiles)) => {
+                json!({"status": "ok", "count": profiles.len(), "profiles": profiles})
+            }
+            Ok(Err(e)) => json!({"status": "error", "message": e.to_string()}),
+            Err(e) => {
+                json!({"status": "error", "message": format!("vault list task failed: {e}")})
+            }
+        };
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())}],
+                "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+            }
+        });
+    }
+
+    // ponytail: launch/login manage their own Chrome + backend — serve
+    // without the session backend (the launched Chrome lives in a registry).
+    if tool_name == "webrain_launch" {
+        let service = arguments
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let profile = arguments
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if service.is_empty() || profile.is_empty() {
+            return tool_error(id, "service and profile required");
+        }
+        let url = arguments
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://accounts.google.com")
+            .to_string();
+        let headless = arguments
+            .get("headless")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let port: u16 = arguments
+            .get("port")
+            .and_then(|v| v.as_u64())
+            // u16::try_from rejects >65535 instead of silently truncating
+            // (e.g. 70000 → 4464) to an unintended local port.
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(9222);
+        // A launch-time exit: baked into `--proxy-server`, so every
+        // browser tool on this CDP endpoint inherits it. This is the
+        // only place a browser-path proxy can take effect.
+        let proxy = arguments
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let result = match webrain_core::launch::launch_chrome(
+            service,
+            profile,
+            port,
+            !headless,
+            proxy.as_deref(),
+        ) {
+            Ok(l) => {
+                let cdp_url = l.cdp_url.clone();
+                let profile_dir = l.profile_dir.clone();
+                tools::store_launched(&format!("{service}:{profile}"), l);
+                // prime: attach applies stealth, navigate opens the login page
+                let prime = async {
+                    let b = CdpBackend::connect_with_url(&cdp_url).await?;
+                    b.navigate(&url).await?;
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                match prime {
+                    Ok(_) => {
+                        json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "opened": url})
+                    }
+                    Err(e) => {
+                        json!({"status": "ok", "cdp_url": cdp_url, "profile_dir": profile_dir.display().to_string(), "warning": format!("launched but attach failed: {e}")})
+                    }
+                }
+            }
+            Err(e) => json!({"status": "error", "message": e.to_string()}),
+        };
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+            }
+        });
+    }
+    if tool_name == "webrain_login" {
+        let service = arguments
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let profile = arguments
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if service.is_empty() || profile.is_empty() {
+            return tool_error(id, "service and profile required");
+        }
+        let url = arguments
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let port: u16 = arguments
+            .get("port")
+            .and_then(|v| v.as_u64())
+            // u16::try_from rejects >65535 instead of silently truncating.
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(9222);
+        // Creds: vault first (in-process decrypt), else env — never argv/logs.
+        let (user, pass, totp) = match webrain_core::vault::get(service, profile) {
+            Ok(c) => (c.username, c.password, c.totp),
+            Err(_) => (
+                std::env::var("WEBRAIN_USER").unwrap_or_default(),
+                std::env::var("WEBRAIN_PASS").unwrap_or_default(),
+                None,
+            ),
+        };
+        if user.is_empty() || pass.is_empty() {
+            return tool_error(
+                id,
+                "no credentials for this profile — run `webrain vault set <service> <profile>`",
+            );
+        }
+        // A caller-supplied `cdp_url` logs in in THEIR browser. See
+        // `vault_cdp_target` for the tenant caveat on the state file.
+        let cdp = vault_cdp_target(&arguments, port);
+        let result = match CdpBackend::connect_with_url(&cdp).await {
+            Ok(b) => match webrain_core::login::run_login(
+                &b,
+                &user,
+                &pass,
+                totp.as_deref(),
+                url.as_deref(),
+            )
+            .await
+            {
+                Ok(r) => json!({"status": "ok", "result": r}),
+                Err(e) => json!({"status": "error", "message": e.to_string()}),
+            },
+            Err(e) => {
+                json!({"status": "error", "message": format!("cannot connect to {cdp}: {e}")})
+            }
+        };
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+            }
+        });
+    }
+
+    if tool_name == "webrain_close_launch" {
+        let service = arguments
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let profile = arguments
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if service.is_empty() || profile.is_empty() {
+            return tool_error(id, "service and profile required");
+        }
+        let closed = tools::close_launched(&format!("{service}:{profile}"));
+        let result = json!({"status": "ok", "closed": closed});
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                "isError": false
+            }
+        });
+    }
+
+    // ── Portable auth state (agent-browser --state/--restore borrow) ──
+    // state.json per profile: cookies + localStorage, so a login follows
+    // you across machines. Restore assumes the page is already on the
+    // right origin (localStorage is origin-scoped).
+    if tool_name == "webrain_save_state" || tool_name == "webrain_restore_state" {
+        let service = arguments
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let profile = arguments
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if service.is_empty() || profile.is_empty() {
+            return tool_error(id, "service and profile required");
+        }
+        let port: u16 = arguments
+            .get("port")
+            .and_then(|v| v.as_u64())
+            // u16::try_from rejects >65535 instead of silently truncating.
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(9222);
+        let dir = webrain_core::launch::profiles_dir()
+            .join(service)
+            .join(profile);
+        let path = dir.join("state.json");
+        // `cdp_url` when the caller brought a browser, else this host's
+        // Chrome on `port`. The state FILE still lands under
+        // `profiles_dir()` either way -- see `vault_cdp_target`.
+        let cdp = vault_cdp_target(&arguments, port);
+        let result = if tool_name == "webrain_save_state" {
+            match CdpBackend::connect_with_url(&cdp).await {
+                Ok(b) => {
+                    // A dead page still answers `connect`, so both reads can fail
+                    // after a successful attach. Swallowing that reported
+                    // `{status: ok, cookies: 0}`, and in file mode it overwrote a
+                    // good state.json with an empty one -- a silent logout that
+                    // the restore side alone could not detect.
+                    let cookies = match b.cookies().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return tool_error(id, &format!("cannot read cookies: {e}"));
+                        }
+                    };
+                    let ls = match b.evaluate(SAVE_LS_JS).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return tool_error(id, &format!("cannot read localStorage: {e}"));
+                        }
+                    };
+                    let cookie_count = cookies.len();
+                    let key_count = ls.as_object().map(|o| o.len()).unwrap_or(0);
+                    let payload = json!({"cookies": cookies, "localStorage": ls});
+                    // `inline` returns the state to the CALLER and writes no
+                    // file. The platform's vault is the durable copy, and a
+                    // file here would leave a credential on a worker the
+                    // caller does not necessarily own.
+                    if inline_state_requested(&arguments) {
+                        json!({
+                            "status": "ok",
+                            "cookies": cookie_count,
+                            "localStorage_keys": key_count,
+                            "payload": payload
+                        })
+                    } else {
+                        match (
+                            std::fs::create_dir_all(&dir),
+                            std::fs::write(&path, serde_json::to_vec(&payload).unwrap_or_default()),
+                        ) {
+                            (Ok(_), Ok(_)) => json!({
+                                "status": "ok",
+                                "state": path.display().to_string(),
+                                "cookies": cookie_count,
+                                "localStorage_keys": key_count
+                            }),
+                            (Err(e), _) | (_, Err(e)) => json!({
+                                "status": "error",
+                                "message": format!("write failed: {e}")
+                            }),
+                        }
+                    }
+                }
+                Err(e) => json!({
+                    "status": "error",
+                    "message": format!("cannot connect to {cdp}: {e}")
+                }),
+            }
+        } else {
+            // The platform's vault hands the state back inline; the file is
+            // only the fallback for a worker that captured it itself. A
+            // machine that never logged in has no `state.json` at all, so
+            // requiring one would make a vault restore impossible there.
+            let payload: Value = match inline_state(&arguments) {
+                Some(state) => state,
+                None => match std::fs::read(&path) {
+                    Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+                    Err(e) => {
+                        return tool_error(
+                            id,
+                            &format!("no state.json at {} ({e})", path.display()),
+                        );
+                    }
+                },
+            };
+            match CdpBackend::connect_with_url(&cdp).await {
+                Ok(b) => {
+                    let cookies = payload
+                        .get("cookies")
+                        .and_then(|c| c.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    // Discarding this error reported `cookies_restored: N`
+                    // for a restore that wrote nothing, so a caller relying
+                    // on the count would skip a re-login over a dead session.
+                    // Fail loudly instead; `save_state` already propagates.
+                    if let Err(e) = b.set_cookies(&cookies).await {
+                        return tool_error(
+                            id,
+                            &format!("cannot restore {} cookies: {e}", cookies.len()),
+                        );
+                    }
+                    let ls = payload.get("localStorage").cloned().unwrap_or_default();
+                    let keys = b.evaluate(&restore_ls_js(&ls)).await.unwrap_or_default();
+                    json!({
+                        "status": "ok",
+                        "cookies_restored": cookies.len(),
+                        "localStorage_keys": keys.as_i64().unwrap_or(0)
+                    })
+                }
+                Err(e) => json!({
+                    "status": "error",
+                    "message": format!("cannot connect to {cdp}: {e}")
+                }),
+            }
+        };
+        return json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "content": [{"type": "text", "text": serde_json::to_string(&result).unwrap_or_default()}],
+                "isError": result.get("status").and_then(|v| v.as_str()) == Some("error")
+            }
+        });
+    }
+
+    // Session management on stdio. `handle_http_conn` answers these three
+    // from a per-session map it owns; stdio has one connection and no map,
+    // so the folded name fell through to `tools::call_tool`, which has no
+    // executor for it — every `webrain_session(op=open)` answered
+    // `Unknown tool: webrain_open_session`. Here "open" means "point this
+    // connection's backend at cdp_url", which is the whole of what a single
+    // connection can offer.
+    match tool_name.as_str() {
+        "webrain_open_session" => {
+            let url = arguments.get("cdp_url").and_then(|v| v.as_str());
+            return match connect_for(url, &arguments).await {
+                Ok(b) => {
+                    *backend = Some(b);
+                    let target = url.map(String::from).or_else(|| {
+                        std::env::var("CDP_URL")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    });
+                    if let Ok(mut t) = STDIO_TARGET.lock() {
+                        *t = target.clone();
+                    }
+                    let sid = arguments
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("stdio");
+                    let text = serde_json::to_string(&json!({
+                        "session_id": sid,
+                        "cdp_url": target,
+                        "proxied": false,
+                        // A proxy is a browser context, which one raw stdio
+                        // connection cannot carry — so identity never switches.
+                        "identity": false,
+                        "created": true
+                    }))
+                    .unwrap_or_default();
+                    json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}})
+                }
+                Err(e) => tool_error(
+                    id,
+                    &format!("cannot open a session at {}: {e}", url.unwrap_or("CDP_URL")),
+                ),
+            };
+        }
+        "webrain_close_session" => {
+            let had = backend.take().is_some();
+            if let Ok(mut t) = STDIO_TARGET.lock() {
+                *t = None;
+            }
+            let text = serde_json::to_string(&json!({
+                "session_id": "stdio",
+                "closed": had
+            }))
+            .unwrap_or_default();
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
+        }
+        "webrain_list_sessions" => {
+            let target = STDIO_TARGET
+                .lock()
+                .ok()
+                .and_then(|t| t.clone())
+                .or_else(|| {
+                    std::env::var("CDP_URL")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                });
+            let text = serde_json::to_string(&json!({
+                "sessions": [{
+                    "session_id": "stdio",
+                    "cdp_url": target,
+                    "connected": backend.is_some()
+                }]
+            }))
+            .unwrap_or_default();
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
+        }
+        _ => {}
+    }
+
+    if backend.is_none() {
+        match connect_for(cdp_url, &arguments).await {
+            Ok(b) => *backend = Some(b),
+            Err(e) => {
+                return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": format!("Cannot connect to browser: {e}. Set CDP_URL or start Chrome with --remote-debugging-port=9222.")}});
+            }
+        }
+    }
+    let mut result = tools::call_tool(backend.as_ref().unwrap(), &tool_name, &arguments).await;
+    // Scoped no-stealth: the google serp arm armed set_no_stealth on the
+    // shared session backend — clear it now so later browse/batch/scrape
+    // calls in this session don't inherit the google-only no-stealth mode.
+    if serp_no_stealth {
+        if let Some(b) = backend.as_ref() {
+            b.set_no_stealth(false);
+        }
+    }
+    // Reconnect: a browser kill/restart wedges the cached backend forever
+    // (a dead socket fails every later write). `CdpBackend` now LATCHES the
+    // death the moment the transport dies, so ask it directly — that answer
+    // cannot go stale the way a message-keyword list does. The substring
+    // heuristic stays only as a fallback for failures that never reach the
+    // backend at all (a refused dial, an OS-level reset mid-handshake).
+    // The rest of the error surface is tool-level and must NOT reset the
+    // session.
+    let dead = backend.as_ref().is_some_and(|b| b.is_dead()) || is_connection_error(&result);
+    if dead {
+        *backend = None;
+        // The socket died between the call and its reply, so a read-only
+        // tool never saw it: reconnect and run it once instead of charging
+        // the caller a whole failed turn. A mutating tool returns as-is —
+        // a click that landed with its reply lost would run TWICE.
+        if retry_after_dead_socket(&tool_name) {
+            if let Ok(b) = connect_for(cdp_url, &arguments).await {
+                let retried = tools::call_tool(&b, &tool_name, &arguments).await;
+                if b.is_dead() || is_connection_error(&retried) {
+                    // Still broken: leave `backend` dropped so the next
+                    // call pays a fresh dial instead of reusing a corpse.
+                } else {
+                    result = retried;
+                    *backend = Some(b);
+                    RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    // MCP spec: tools/call result must be {content: [{type:"text",text}], isError}.
+    // ponytail: JSON-encode the tool payload into one text block; mark isError
+    // when the tool returned status:"error". Without the content array the
+    // client JS throws "r.content is not iterable".
+    // `{"error": "Unknown tool: X"}` carries no `status`, so a bare
+    // status check reported it as success and the client never saw the
+    // failure. Both error shapes count.
+    let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error")
+        || result.get("error").is_some();
+    CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if is_error {
+        CALL_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{"type": "text", "text": text}],
+            "isError": is_error
+        }
+    })
 }
 
 /// Port of a LOOPBACK http CDP URL (`http://127.0.0.1:9226` -> Some(9226)).
@@ -1466,6 +1459,7 @@ fn retry_after_dead_socket(tool: &str) -> bool {
             | "webrain_extract_regex"
             | "webrain_table"
             | "webrain_observe"
+            | "webrain_network"
             | "webrain_snapshot"
             | "webrain_markdown"
             | "webrain_clean"
