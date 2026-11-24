@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
+  the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs
+  with `failed to run custom build command for copilot-sdk v2.0.1` →
+  *"Linux SDK target requires OS OpenSSL 3, not vendored OpenSSL"*
+  (`build/openssl_linkage.rs:68`). The same check also demands `OPENSSL_STATIC=0` and
+  `OPENSSL_NO_VENDOR=1`, so a `static-pie` binary can satisfy none of it — the vendored
+  `openssl` table written for the old `github-copilot-sdk` 1.x has no legal counterpart
+  under 2.0.1. The 0.19.0 musl rows were green only because they predate the migration.
+  The two musl matrix rows now build `pdfium` alone (`musl-tools`, no `perl`/`make`/
+  `libssl-dev`), the push-only CI job became `musl build (static)` with the same feature
+  set, and the vendored target table is deleted instead of left dead. Every other target
+  still ships `chat`; `cargo check -p webrain-cli --features pdfium,chat` stays green
+  (the direct `openssl` dependency only ever served the musl vendor). The chat guide's
+  target table, the installation notes and the README now say which binary has it.
+
 ## [0.20.0] - 2026-11-24
 
 ### Added
