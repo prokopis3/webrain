@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **help follows the command path: `webrain install watch --help` is a page, not the
+  install page again.** `HELP` was one row per top-level command and the resolver read
+  `args[1]` alone, so every subcommand's flags crowded into its parent's NOTES paragraph
+  (`install` had eleven of them in one blob) and `webrain install chat --help` was
+  byte-identical to `webrain install`. The resolver now joins the words before the first
+  flag — `install watch` — and takes the longest `HELP` key that path starts with, so
+  `webrain help vault rm` and `webrain vault rm --help` reach the same row, and a prefix
+  is not a match (`installx` is still an unknown command). `SUBCOMMANDS` on a parent page
+  is derived from the same table the overview is, filtered to direct children, so a page
+  cannot advertise a subcommand that has no page and a child cannot leak into the command
+  list. Nineteen pages are new: the eleven `install` targets (`chrome`, `obscura`,
+  `lightpanda`, `pdfium`, `copilot`, `chat-ui`, `whisper`, `watch`, `nemotron`, `vision`,
+  `skills`), `uninstall vision`, `skills list|add|rm`, and `vault set|list|user|rm`.
+  A path that names nothing now falls back to its nearest parent **and says so** —
+  `webrain install chat --help` ends with `No page for install chat — chat is not a
+  subcommand of install; see SUBCOMMANDS`, where the old code answered with the install
+  page and left the reader to guess whether `chat` existed.
 - `chat`: **`web_search` and `web_fetch` — the two names a model reaches for, wired to the
   session's own provider.** A DeepSeek session calls DeepSeek's Search and Fetch APIs
   (`POST /v1/tools/search`, `POST /v1/tools/fetch`, 0.75 USD per 1000 successful calls) with the
@@ -161,10 +178,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ghost-a` left the boot conversation at `turns: []`, and `/context?convo=ghost-a` answered
   `{"error":"this conversation has no session yet","session":false}`.
 
+### Changed
+- **`upgrade` refreshes the chat page and the Copilot runtime, so a version bump is one
+  command again.** The page and the runtime are checked against the binary that ships them
+  — the page by four digests `build.rs` compiles in, the runtime by `COPILOT_VERSION` — and
+  neither was updated by `upgrade`, so every release ended with a `chat --serve` that
+  refused the page it had just installed and a README paragraph telling people to run
+  `install copilot --force` and not to miss it. `upgrade` now spawns the **new** binary for
+  both `install` steps: the outgoing process is still the old build and cannot judge the
+  new digests, and `install` is already a no-op when the page and the pin match, so an
+  upgrade that changes neither costs two digest checks. Both are presence-gated — a user
+  who never ran `install copilot` does not get 166 MB fetched by a version bump — and
+  `--force` forwards, for re-downloading the same pin. Homebrew and Scoop append the same
+  two commands to the manager's own update, since that update has to finish (and on
+  Windows the exe has to be unlocked) before anything can call the new binary.
+- **`install copilot` keys on this build's pin instead of on "a runtime exists".** The
+  short-circuit asked `find_copilot()`, which answers with *any* version dir under
+  `copilot/`, so after a pin bump the new binary reported "already installed" and then
+  spoke a version-coupled JSON-RPC surface to a runtime it was never compiled against.
+  It now checks `copilot/<COPILOT_VERSION>/` only, replaces anything else, and deletes the
+  superseded dir once the new one verifies (~166 MB each, and only the pinned one can ever
+  be spawned). `find_copilot` puts the pinned dir first for the same reason: `find_named`
+  prefers the newest version dir, which is the wrong answer after a downgrade.
+
 ### Fixed
 - `chat`: **a custom tool that shares a built-in's name no longer kills every turn.** The runtime
-  refuses to initialize a session at all - `tool initialization before the turn failed: GenericFailure,
-  External tool "web_fetch" conflicts with a built-in tool of the same name` - and it does so *before*
+  refuses to initialize a session at all — `tool initialization before the turn failed: GenericFailure,
+  External tool "web_fetch" conflicts with a built-in tool of the same name` — and it does so *before*
   the first message, so adding `web_fetch`/`web_search` to this binary's tool set made every
   conversation fail, not just the call that clashed. They are exactly the names worth shadowing (both
   are in the runtime's registry and neither is in the allowlist this session is created with), so the

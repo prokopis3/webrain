@@ -45,13 +45,103 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "install",
         "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install nemotron\n    webrain install vision [--model ID] [--model-update]\n    webrain install copilot\n    webrain install chat-ui [--from <url|file>]\n    webrain install skills [--force]",
         "Download a browser engine, the local AI stack (ffmpeg, yt-dlp, whisper, Nemotron 3.5 ASR dictation, Qwen3-VL), the Copilot runtime `webrain chat` drives, the browser UI `chat --serve` serves, or the bundled operator skills.",
-        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  `install copilot` is what makes `webrain chat` work in a release binary — it\n  is not embedded there. `install chat-ui` does the same for the page: the four\n  files\n  are verified against digests compiled into the binary, so one from a\n  different version is refused. `install skills` is offline — the bundle is\n  compiled into the binary — and keeps any skill file you already edited unless\n  --force is passed.",
+        "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  The four `install chat-ui` files are verified against digests compiled into\n  this binary, so a page from a different version is refused, never served.\n  `install skills` is offline — the bundle is compiled into the binary — and\n  keeps any skill file you already edited unless --force is passed.\n  Every subcommand below has its own page, with its own flags.",
+    ),
+    (
+        "install chrome",
+        "webrain install chrome [--force]",
+        "Chrome for Testing into the engine cache — what a bare `webrain install` does.",
+        "The CfT build wins discovery over system Chrome, and every engine speaks CDP,\n  so anything attached by port keeps working.",
+    ),
+    (
+        "install obscura",
+        "webrain install obscura [--stealth] [--no-render] [--force]",
+        "Obscura, the fast engine for pages that are not challenged, in one of its four published packages.",
+        "Default is the render build — screenshots and PDF paint for real. --stealth picks\n  the BoringSSL build, --no-render drops the paint engine (screenshot/PDF then\n  unavailable). Material-style SPAs do not mount in it: use real Chrome there.\n  Start it with `webrain obscura`.",
+    ),
+    (
+        "install lightpanda",
+        "webrain install lightpanda [--force]",
+        "Lightpanda: a real accessibility tree, no paint engine.",
+        "No Windows build is published — on Windows put a lightpanda binary on PATH, or\n  use the Docker image. Its screenshot is a placeholder PNG, so pair it with a11y\n  work, not with images. Start it with `webrain lightpanda`.",
+    ),
+    (
+        "install pdfium",
+        "webrain install pdfium [--force]",
+        "The pdfium shared library `webrain_pdf op=render` binds at runtime.",
+        "A released binary without it has only the pdfium error path; the render op finds\n  the library through the engine cache, so no environment variable is involved.",
+    ),
+    (
+        "install copilot",
+        "webrain install copilot [--force]",
+        "The Copilot CLI runtime `webrain chat` drives — 166 MB, not embedded in the release binary.",
+        "One self-contained GitHub asset, SHA-256 verified against the digest the SDK pins\n  before it is ever spawned, unpacked to `copilot/<version>/`. Keyed on THIS build's\n  pin, so a runtime from another version is replaced instead of reused — that is why\n  `--force` is no longer needed after an upgrade, and `webrain upgrade` runs this for\n  you. A `COPILOT_CLI_PATH` runtime of your own is left alone.",
+    ),
+    (
+        "install chat-ui",
+        "webrain install chat-ui [--from <url|file>] [--force]",
+        "The four page files `webrain chat --serve` serves, verified against digests compiled into this binary.",
+        "The default archive is the release of THIS version, not `latest`: an archive from\n  another version fails the digest check, so a page is never served unless it is\n  byte-for-byte the one this build shipped. --from takes a local file or a URL (an\n  air-gapped or mirrored machine). `webrain upgrade` runs this for you.",
+    ),
+    (
+        "install whisper",
+        "webrain install whisper [--model NAME] [--force]",
+        "The GGUF speech model for the LOCAL `webrain watch` backend (default small.en).",
+        "The model only — whisper-cli comes from PATH, WEBRAIN_WHISPER_BIN, or\n  `webrain install watch`. `webrain watch` picks the model up automatically.",
+    ),
+    (
+        "install watch",
+        "webrain install watch [--model NAME] [--force]",
+        "Everything `webrain watch` needs offline: ffmpeg+ffprobe, yt-dlp, whisper-cli and a model.",
+        "One self-contained bundle in the engine cache — no PATH installs, no Python — so\n  a transcript works on a machine with nothing else on it. Prints its status as JSON.\n  --model picks the GGUF (default small.en).",
+    ),
+    (
+        "install nemotron",
+        "webrain install nemotron [--force]",
+        "Dictation for `webrain chat --serve`: nemo-speech, NVIDIA's Nemotron 3.5 ASR GGUF, ffmpeg.",
+        "Fully local — a dictated take never leaves the machine. The record button appears\n  beside Send in the page once this is installed. Prints its status as JSON.",
+    ),
+    (
+        "install vision",
+        "webrain install vision [--model ID] [--model-update] [--force]",
+        "The local vision backend `webrain watch --vision` uses: llama-server plus one catalog model.",
+        "Offline and keyless — the whisper analog. Only catalog ids are accepted; an\n  unknown one prints the choices instead of fetching an arbitrary repo. A bare id is\n  positional too (`webrain install vision qwen3-vl-2b-q6k`), and --model-update\n  re-checks the model files against Hugging Face. Remove one with\n  `webrain uninstall vision --model ID`.",
+    ),
+    (
+        "install skills",
+        "webrain install skills [--force]",
+        "Write the bundled operator skills — compiled into the binary — to disk.",
+        "Offline by design: the bundle cannot drift from the binary that serves it. Files\n  you edited are kept unless --force is passed. Read one with\n  `webrain_guide(topic=\"skill:<name>\")`; WEBRAIN_SKILLS_DIR pins the directory.",
+    ),
+    (
+        "uninstall vision",
+        "webrain uninstall vision [--model ID | --all]",
+        "Remove an installed local vision model.",
+        "Without --model or --all it prints the catalog instead of guessing. --model ID\n  removes that model's directory (and the legacy flat copy of the default); --all\n  removes the whole `vision/` cache, llama-server included.",
     ),
     (
         "skills",
         "webrain skills [list]\n    webrain skills add <https://…/SKILL.md | path/to/SKILL.md>\n    webrain skills rm <name>",
         "Operator skills `webrain_guide` serves as topic=\"skill:<name>\". Install one from any URL or file.",
         "A skill is an .md whose frontmatter carries `name:` — that is what the\n  reader looks up, so a file without one is refused instead of installing\n  invisibly. Files over 64 KiB are refused for the same reason.",
+    ),
+    (
+        "skills list",
+        "webrain skills [list]",
+        "What is installed, and where — the directory `webrain_guide` reads.",
+        "",
+    ),
+    (
+        "skills add",
+        "webrain skills add <https://…/SKILL.md | path/to/SKILL.md>",
+        "Install ONE skill from a URL or a file.",
+        "The frontmatter `name:` is the identity and the file is stored under its slug —\n  `House-Rules` lands as `house-rules` and is read back by that name. A file with\n  no name, or over 64 KiB, is refused. Names a `webrain_*` tool this build does not\n  expose are warned about on the spot.",
+    ),
+    (
+        "skills rm",
+        "webrain skills rm <name>",
+        "Remove every copy of one skill.",
+        "Every copy, not the first: a leftover second copy would silently become the skill\n  again. `remove` is the same action.",
     ),
     (
         "captcha",
@@ -85,9 +175,9 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "upgrade",
-        "webrain upgrade",
+        "webrain upgrade [--force]",
         "Update webrain, detected per install method (brew, scoop, or self-update).",
-        "",
+        "Also refreshes what lives outside the binary and is version-checked against it —\n  the chat page (`install chat-ui`) and the Copilot runtime (`install copilot`) — but\n  only the ones already on disk, and only when the new build wants a different one.\n  --force re-downloads both.",
     ),
     (
         "launch",
@@ -105,6 +195,30 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "vault",
         "webrain vault set|list|user|rm",
         "Encrypted credential vault (AES-256-GCM). Secrets are prompted, never echoed.",
+        "",
+    ),
+    (
+        "vault set",
+        "webrain vault set <service> <profile> [--username <user>]",
+        "Store the password (and an optional TOTP secret) for one profile.",
+        "Both secrets come from hidden prompts — never argv, never a chat message, never a\n  log. AES-256-GCM under a key file, so it works headless with no OS keyring daemon.\n  `webrain login <service> <profile>` replays it, TOTP included.",
+    ),
+    (
+        "vault list",
+        "webrain vault list",
+        "Every stored profile: service, profile, username, creation time.",
+        "Prints no password and no TOTP secret, by construction.",
+    ),
+    (
+        "vault user",
+        "webrain vault user <service> <profile> <username>",
+        "Change the username on a stored profile, leaving its password alone.",
+        "The username is not echoed back — it is half a credential.",
+    ),
+    (
+        "vault rm",
+        "webrain vault rm <service> <profile>",
+        "Delete one stored profile.",
         "",
     ),
     (
@@ -567,18 +681,51 @@ mod diff_tests {
     }
 }
 
-/// Render the overview (no command) or one command's page.
+/// `webrain install watch --help` → `"install watch"`: the words after the
+/// command up to the first flag. `webrain help install watch` reads them after
+/// `help` instead, so both spellings land on the same page, and `webrain --help`
+/// yields "" (the overview).
+fn help_path(args: &[String]) -> String {
+    let skip = if args.get(1).map(String::as_str) == Some("help") {
+        2
+    } else {
+        1
+    };
+    args.iter()
+        .skip(skip)
+        .take_while(|a| !a.starts_with('-'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `path` is under `key`, when it names `key` or something below it.
+/// Word-boundary exact, so `installx` is not `install`.
+fn under<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    if path == key {
+        return Some("");
+    }
+    path.strip_prefix(key)
+        .filter(|rest| rest.starts_with(' '))
+        .map(|rest| rest.trim_start())
+}
+
+/// Render the overview (no command), one command's page, or — when the path is
+/// deeper — the deepest page it names. `SUBCOMMANDS` is derived from the same
+/// table, so a page cannot advertise a subcommand that has no page.
 fn help_page(cmd: &str) -> String {
-    let cmd = cmd.trim_start_matches('-');
+    let cmd = cmd.trim_start_matches('-').trim();
     let cmd = if cmd == "h" { "help" } else { cmd };
     if cmd.is_empty() || cmd == "help" {
         let mut s = String::from(
-            "webrain — portable MCP browser-automation & scraping server\n\nUSAGE\n  webrain <command> [args]\n  webrain <command> --help\n\nCOMMANDS\n",
+            "webrain — portable MCP browser-automation & scraping server\n\nUSAGE\n  webrain <command> [args]\n  webrain <command> [<sub>] --help\n\nCOMMANDS\n",
         );
-        for (name, _, about, _) in HELP {
+        // Top level only — subcommands are listed on their parent's page.
+        for (name, _, about, _) in HELP.iter().filter(|(n, ..)| !n.contains(' ')) {
             s.push_str(&format!("  {name:<12} {about}\n"));
         }
-        s.push_str("\nRun `webrain <command> --help` for one command's flags.\n");
+        s.push_str("\nA command with subcommands lists them on its own page:\n");
+        s.push_str("  webrain install --help     webrain vault --help     webrain skills --help\n");
         s.push_str("\nENVIRONMENT — every variable the binary reads.\n");
         s.push_str("Read at process start, restart to apply; defaults per platform are\n");
         s.push_str("in docs/reference/environment.mdx (`webrain help env` shows this list).\n");
@@ -588,15 +735,119 @@ fn help_page(cmd: &str) -> String {
     if cmd == "env" {
         return env_section();
     }
-    match HELP.iter().find(|(name, _, _, _)| *name == cmd) {
+    // Longest key the path starts with: `install watch --help` finds that row, and
+    // a typo (`install nope`) falls back to the nearest parent, whose page lists
+    // what it does have — which is the answer a typo was asking for anyway.
+    match HELP
+        .iter()
+        .filter(|(name, ..)| under(cmd, name).is_some())
+        .max_by_key(|(name, ..)| name.len())
+    {
         Some((name, usage, about, notes)) => {
+            let (name, usage, about, notes) = (*name, *usage, *about, *notes);
+            let kids: Vec<(&str, &str)> = HELP
+                .iter()
+                .filter_map(|(child, _, about, _)| {
+                    // Direct children only: a grandchild belongs to its own page.
+                    let leaf = under(child, name)?;
+                    (!leaf.is_empty() && !leaf.contains(' ')).then_some((leaf, *about))
+                })
+                .collect();
+            // A path that went deeper than any page: say so rather than silently
+            // answering with the parent — that is what a typo needs to hear.
+            let miss = under(cmd, name).unwrap_or("");
             let mut s = format!("webrain {name} — {about}\n\nUSAGE\n  {usage}\n");
             if !notes.is_empty() {
                 s.push_str(&format!("\nNOTES\n  {notes}\n"));
             }
+            if !miss.is_empty() {
+                s.push_str(&format!("\nNo page for `{cmd}` — `{miss}` is not "));
+                if kids.is_empty() {
+                    s.push_str(&format!("part of `{name}`.\n"));
+                } else {
+                    s.push_str(&format!("a subcommand of `{name}`; see SUBCOMMANDS.\n"));
+                }
+            }
+            if !kids.is_empty() {
+                s.push_str(&format!("\nSUBCOMMANDS — `webrain {name} <sub> --help`\n"));
+                for (leaf, about) in kids {
+                    s.push_str(&format!("  {leaf:<14} {about}\n"));
+                }
+            }
             s
         }
         None => format!("unknown command: {cmd}\n\n{}", help_page("")),
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::{help_page, help_path};
+
+    fn path(words: &[&str]) -> String {
+        let mut argv = vec!["webrain".to_string()];
+        argv.extend(words.iter().map(|w| w.to_string()));
+        help_path(&argv)
+    }
+
+    #[test]
+    fn a_path_is_the_words_before_the_flag() {
+        assert_eq!(path(&["--help"]), "");
+        assert_eq!(path(&["install", "--help"]), "install");
+        assert_eq!(path(&["install", "watch", "--help"]), "install watch");
+        // `webrain help <cmd> [<sub>]` — the words after `help`.
+        assert_eq!(path(&["help", "vault", "rm"]), "vault rm");
+    }
+
+    /// Every row must answer its own path with its own usage line — the check
+    /// that a new subcommand is filed under a key its parent actually lists, and
+    /// that no key is shadowed by a shorter one.
+    #[test]
+    fn every_row_resolves_to_its_own_page() {
+        for (name, usage, _, _) in super::HELP {
+            let page = help_page(name);
+            assert!(
+                page.starts_with(&format!("webrain {name} —")),
+                "{name} answered with:\n{page}"
+            );
+            assert!(page.contains(usage), "{name}: its usage line is missing");
+        }
+    }
+
+    #[test]
+    fn a_deeper_path_reaches_its_own_page() {
+        let p = help_page("install watch");
+        assert!(p.starts_with("webrain install watch —"), "{p}");
+        assert!(p.contains("ffmpeg"), "the leaf carries its own facts: {p}");
+        assert!(!p.contains("SUBCOMMANDS"), "a leaf lists none: {p}");
+    }
+
+    #[test]
+    fn a_parent_lists_its_children_and_the_overview_does_not() {
+        let install = help_page("install");
+        assert!(install.contains("SUBCOMMANDS"), "{install}");
+        for leaf in ["chrome", "obscura", "watch", "copilot", "chat-ui"] {
+            assert!(install.contains(&format!("  {leaf}")), "{leaf} missing");
+        }
+        let top = help_page("");
+        assert!(top.contains("  install "), "install is still a command row");
+        assert!(
+            !top.contains("  install watch"),
+            "a child must not leak into the command list"
+        );
+    }
+
+    #[test]
+    fn a_typo_answers_with_the_parent_and_names_the_miss() {
+        let p = help_page("install chat");
+        assert!(p.starts_with("webrain install —"), "{p}");
+        assert!(p.contains("No page for `install chat`"), "{p}");
+        assert!(p.contains("`chat` is not a subcommand"), "{p}");
+        // A leaf has no list to point at, so it says only what it knows.
+        let q = help_page("install watch extra");
+        assert!(q.contains("`extra` is not part of `install watch`"), "{q}");
+        // Word boundary: a prefix is not a match.
+        assert!(help_page("installx").starts_with("unknown command: installx"));
     }
 }
 
@@ -648,17 +899,12 @@ fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = env::args().collect();
     // Help before anything else: `webrain --help`, `webrain <cmd> --help`,
-    // `webrain help <cmd>`. No side effects, so it works before engines exist.
+    // `webrain <cmd> <sub> --help`, `webrain help <cmd> [<sub>]`. No side
+    // effects, so it works before engines exist.
     if args.iter().skip(1).any(|a| a == "--help" || a == "-h")
         || args.get(1).map(|s| s.as_str()) == Some("help")
     {
-        let first = args.get(1).map(|s| s.as_str()).unwrap_or("");
-        let cmd = if first == "help" {
-            args.get(2).map(|s| s.as_str()).unwrap_or("")
-        } else {
-            first
-        };
-        print!("{}", help_page(cmd));
+        print!("{}", help_page(&help_path(&args)));
         return Ok(());
     }
     // google serp runs with no injected stealth JS. edition-2024 set_var is
@@ -2011,8 +2257,15 @@ fn upgrade() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     if cmd_exists("brew") {
         println!("webrain: installed via Homebrew \u{2014} running `brew upgrade webrain`");
-        std::process::Command::new("brew")
-            .args(["upgrade", "webrain"])
+        // The page and the Copilot runtime live outside the binary and are
+        // checked against it, so an update that skips them lands "working" and
+        // then refuses the page it shipped with. Chain both `install` steps onto
+        // the manager's own update: they run after it, as the NEW binary. The
+        // `webrain` on PATH is the right one here — brew replaces the Cellar dir
+        // `current_exe` points into, so that path is gone by then.
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(refresh_chain("brew upgrade webrain", upgrade_forced()))
             .spawn()?;
         return Ok(());
     }
@@ -2040,14 +2293,72 @@ fn upgrade() -> anyhow::Result<()> {
         // A cached scoop bucket silently reports the old version as "latest":
         // pull the hosting bucket so `scoop update webrain` sees the newest.
         refresh_scoop_bucket();
+        let line = refresh_chain("scoop update webrain", upgrade_forced());
         std::process::Command::new("cmd")
-            .args(["/c", "scoop", "update", "webrain"])
+            .args(["/c", &line])
             .spawn()?;
         return Ok(());
     }
+    // Read BEFORE the swap: on unix `/proc/self/exe` names the inode this process
+    // was started from, and `self_update` renames that inode away — so asking
+    // afterwards can answer with a path that no longer points at the new binary.
+    let exe = std::env::current_exe().ok();
     self_update()?;
+    refresh_sidecars(exe);
     warn_stale_running();
     Ok(())
+}
+
+/// `<manager update> && webrain install chat-ui && webrain install copilot` —
+/// the side-cars the user already has, appended to the package-manager update
+/// (which is spawned detached, so the chained commands must live in the same
+/// shell: this process exits before the update touches the binary).
+///
+/// Presence-gated, not digest-gated: the page on disk still matches the OLD
+/// build at this point, so only the new binary can judge it — and `install` is
+/// a no-op when it does match. Only the two package-manager paths use it.
+///
+/// `force` has to travel inside the line, not be inherited: the update runs
+/// detached in another shell, long after this process is gone.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn refresh_chain(update: &str, force: bool) -> String {
+    let force = if force { " --force" } else { "" };
+    let mut line = update.to_string();
+    if chat_ui::installed() {
+        line.push_str(&format!(" && webrain install chat-ui{force}"));
+    }
+    if webrain_core::install::copilot_present() {
+        line.push_str(&format!(" && webrain install copilot{force}"));
+    }
+    line
+}
+
+/// Refresh what `self_update` just orphaned — for a raw install, where the path
+/// of the running exe is stable across the swap.
+///
+/// This process is still the OLD build, so it cannot verify the new digests or
+/// know the new Copilot pin itself. The freshly written exe can, so it is
+/// spawned with a plain `install`, which is why no `--force` is needed any more:
+/// `install chat-ui` refuses (and so replaces) another version's page, and
+/// `install copilot` now keys on the pin instead of "a runtime exists".
+fn refresh_sidecars(exe: Option<std::path::PathBuf>) {
+    let Some(exe) = exe else {
+        return;
+    };
+    let force: &[&str] = if upgrade_forced() { &["--force"] } else { &[] };
+    for (present, sub) in [
+        (chat_ui::installed(), "chat-ui"),
+        (webrain_core::install::copilot_present(), "copilot"),
+    ] {
+        // Only what was already opted into: the runtime is 166 MB and the page
+        // is only reachable through `chat --serve`.
+        if present {
+            let _ = std::process::Command::new(&exe)
+                .args(["install", sub])
+                .args(force)
+                .status();
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
