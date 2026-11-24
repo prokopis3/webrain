@@ -329,7 +329,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /rewind`, `POST /rewind` | the turns the session can go back to, then a preview of the files a rewind would restore (`{"event","preview":true}`) and the rewind itself (`{"event","files":true\|false}`) |
 | `POST /ephemeral` | `{"question":"…"}` → a one-shot answer against the conversation with no tools and no history |
 | `POST /command` | `{"name":"compact","input":"…"}` → runs one of the **runtime's own** slash commands (`session.commands.invoke`). The answer is text, a message, or a prompt the page puts in the field rather than one it starts for you |
-| `GET /context` | the runtime's token breakdown and per-message attribution |
+| `GET /context` | the runtime's token breakdown and per-message attribution **for the conversation in `convo`**. A conversation with no session yet answers `session: false` and serves its own last snapshot (`stale`, `savedAt`) rather than another chat's numbers |
 | `GET /todos` | the agent's todo rows |
 | `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
 | `GET /jobs`, `POST /jobs` | the OS processes the agent's own `terminal` tool started and left running — id, command, pid, `running`, `exit`, byte count and a tail of the output — then `{"id":N}` to kill one. Reading it consumes nothing, so a poll here never costs the model its next `terminal read`. A job that ends on its own is pushed to `/events` as `{"type":"webrain.job","data":{"id","command","exit","running":false}}`, because nothing polls the registry on its own |

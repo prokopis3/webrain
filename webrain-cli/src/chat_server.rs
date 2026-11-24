@@ -2075,6 +2075,24 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         // instead of leaving it to a guess. Attribution is passed through
         // untouched: its shape is the CLI's, not ours.
         ("GET", "/context") => {
+            // A conversation with no session of its own has no live attribution to
+            // ask for. Serving what its last turn recorded is the honest answer;
+            // borrowing the boot chat's numbers would put another conversation's
+            // context window and cache in this one's panel.
+            let Some(state) = shared.find(&convo).await else {
+                let saved = shared.store.as_ref().and_then(|s| s.context(&convo));
+                let mut body = match saved {
+                    Some((snapshot, ts)) => {
+                        let mut b = snapshot.clone();
+                        b["stale"] = json!(true);
+                        b["savedAt"] = json!(ts);
+                        b
+                    }
+                    None => json!({ "error": "this conversation has no session yet" }),
+                };
+                body["session"] = json!(false);
+                return respond(&mut stream, 200, "application/json", &body.to_string()).await;
+            };
             let live = state.live.read().await.clone();
             // Both limits at 0 means "resolve from the session and its model".
             let info = live

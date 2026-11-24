@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session: false` and is left alone, because its first turn already carries the mode and
   applying it to another chat's session is the cross-chat bug this closed. Every route that
   CHANGES a session now resolves it with `Shared::find`, not the read-only `chat` fallback.
+- `chat`: **a conversation's numbers are its own — turn ledger, context window and the cache
+  share in the header.** Three places still wrote or read the server's current conversation
+  instead of the one on screen: `POST /ledger` sent no `convo`, so a background turn's
+  instruments landed in whichever thread was open; `GET /context` served the boot chat's
+  window to a stored conversation that had no session yet; and the header printed an em-dash
+  where the cache share should be, because a reopened thread's `hit` was hardcoded. The
+  ledger now names its conversation (`{"n":1,"convo":"c…","turn":{…}}`), `/context?convo=`
+  answers `session: false` with that conversation's own last snapshot (`stale`, `savedAt`)
+  when it has no session, and `hit` comes back as `cached / input` off the stored turn — so a
+  thread reopened from history shows `84% cached`, not `—`. Measured: a ledger row posted to
+  `ghost-a` left the boot conversation at `turns: []`, and `/context?convo=ghost-a` answered
+  `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids

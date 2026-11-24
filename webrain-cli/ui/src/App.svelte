@@ -477,7 +477,9 @@
     if (!ctxOpen) return;
     ctxInfo = null;
     try {
-      ctxInfo = await (await fetch("/context")).json();
+      // The conversation's own window and cache: each one runs its own session, so
+      // asking without naming it reported whichever thread was opened last.
+      ctxInfo = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
     } catch {
       ctxInfo = { error: "the server is not reachable" };
     }
@@ -557,7 +559,7 @@
         })
       ).json();
       push({ kind: j.error ? "err" : "note", text: `compact: ${j.text || j.error || "done"}` });
-      ctxInfo = await (await fetch("/context")).json();
+      ctxInfo = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
     } catch {
       push({ kind: "err", text: "compact: the server is not reachable" });
     } finally {
@@ -856,8 +858,12 @@
       };
     }
     const t = ledger[0];
+    // The cache share is the one header number a reopened conversation used to
+    // lose: the stored row has `cached` and `input`, so the same ratio comes back
+    // instead of an em-dash where a percentage was.
+    const hit = t && t.input > 0 ? `${Math.round(((t.cached ?? 0) / t.input) * 100)}%` : "—";
     return t
-      ? { model: t.model, tok: `${t.input} / ${t.output}`, speed: t.speed, hit: "—", cost: t.cost }
+      ? { model: t.model, tok: `${t.input} / ${t.output}`, speed: t.speed, hit, cost: t.cost }
       : { model: "—", tok: "— / —", speed: "—", hit: "—", cost: "—" };
   });
   // Nothing measured yet: the header and the panel say so once, instead of
@@ -1772,9 +1778,13 @@
       sources: sources.length,
     };
     turns = [turn, ...turns];
-    // Same numbers, on disk: reopening this conversation from history replays
-    // them instead of showing a column of blanks.
-    fetch("/ledger", { method: "POST", body: JSON.stringify({ n: turn.n, turn }) }).catch(() => {});
+    // Same numbers, on disk, under the conversation that earned them: reopening
+    // this conversation from history replays them instead of showing a column of
+    // blanks, and a background turn's row does not land in the thread on screen.
+    fetch("/ledger", {
+      method: "POST",
+      body: JSON.stringify({ n: turn.n, turn, convo: current }),
+    }).catch(() => {});
     const steps = turnSteps();
     // What the turn cost in time and in motion, on the same line as the bill: the
     // prompt row's timestamp is the turn's start, so a reload-safe clock is one
@@ -2871,7 +2881,9 @@
       } else if (o.name === "context") {
         // What the window costs right now, in the runtime's own accounting.
         try {
-          const j = await (await fetch("/context")).json();
+          const j = await (
+            await fetch(`/context?convo=${encodeURIComponent(current)}`)
+          ).json();
           push({
             kind: "note",
             text: j.error
