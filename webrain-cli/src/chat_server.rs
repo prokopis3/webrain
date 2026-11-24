@@ -53,12 +53,12 @@ use github_copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
 use github_copilot_sdk::rpc::{
-    FleetStartRequest, HistoryPreviewRewindRequest, HistoryRewindMode, HistoryRewindRequest,
-    McpDisableRequest, McpEnableRequest, McpListToolsRequest,
-    MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest, ModeSetRequest,
-    PermissionsSetModeRequest, PlanUpdateRequest, QueueRemoveAtRequest, QueueSendNowRequest,
-    QueueUpdateTextRequest, SkillsDisableRequest, SkillsEnableRequest, TasksSendMessageRequest,
-    ToolsExecuteRequest, UIEphemeralQueryRequest,
+    FleetStartRequest, HandlePendingToolCallRequest, HistoryPreviewRewindRequest,
+    HistoryRewindMode, HistoryRewindRequest, McpDisableRequest, McpEnableRequest,
+    McpListToolsRequest, MetadataContextHeaviestMessagesRequest, MetadataContextInfoRequest,
+    ModeSetRequest, NameSetRequest, PermissionsSetModeRequest, PlanUpdateRequest,
+    QueueRemoveAtRequest, QueueSendNowRequest, QueueUpdateTextRequest, SkillsDisableRequest,
+    SkillsEnableRequest, TasksSendMessageRequest, ToolsExecuteRequest, UIEphemeralQueryRequest,
 };
 use github_copilot_sdk::session_events::{PermissionMode, SessionMode};
 use github_copilot_sdk::types::{
@@ -94,6 +94,15 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     // two seconds of session setup reads like a hang.
     let ui = super::chat_ui::load().map_err(|e| anyhow::anyhow!(e))?;
     let (bus, _) = broadcast::channel::<String>(256);
+    // A job that ends while the page is idle has to say so: nothing polls the
+    // terminal registry on its own, and "did my build finish" is the question a
+    // background job exists to answer.
+    chat_tools::watch_exit({
+        let bus = bus.clone();
+        move |frame| {
+            let _ = bus.send(frame);
+        }
+    });
     let permission = Arc::new(WebPermission {
         bus: bus.clone(),
         pending: Mutex::new(HashMap::new()),
@@ -225,6 +234,9 @@ async fn spawn_live(
         provider,
         Some(permission as Arc<dyn PermissionHandler>),
         Some(input as Arc<dyn UserInputHandler>),
+        // The conversation id names the runtime's copy of this session, so the
+        // runtime can list it from creation and a later resume has a handle.
+        Some(format!("webrain-{convo}")),
     )
     .await?;
     let session = Arc::new(session);
@@ -254,7 +266,7 @@ async fn spawn_live(
         }
     });
     Ok(Live {
-        _client: client,
+        client,
         session,
         reader,
         model: std::sync::Mutex::new(provider.model.clone()),
@@ -689,7 +701,9 @@ fn provider_target(state: &State, id: &str) -> Option<(String, Option<String>, &
 /// A session plus everything that must die with it.
 struct Live {
     /// Dropping the client stops its runtime, so it is held here, not in a local.
-    _client: Client,
+    /// Also the handle for client-level reads: `sessions.list` is the runtime's
+    /// answer, where our own store can only answer for this machine.
+    client: Client,
     session: Arc<Session>,
     reader: tokio::task::JoinHandle<()>,
     /// The model this session runs. `set_model` changes it on a live session,
@@ -1717,6 +1731,29 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
+        // The other kind of long-running work: OS processes this session started
+        // through its own `terminal` tool and left running. `/tasks` is the
+        // runtime's sub-agents; these are ours, and they are what a dev server or
+        // a build looks like from here. Reading the list consumes nothing, so the
+        // model's own `terminal read` still gets its unread output after a poll.
+        ("GET", "/jobs") => {
+            let body = json!({ "jobs": chat_tools::jobs() }).to_string();
+            respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Killing a process waits on the OS, so it goes off the async task — the
+        // same reason the `terminal` tool wraps every op in `spawn_blocking`.
+        ("POST", "/jobs") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let Some(id) = v["id"].as_u64() else {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"id"}"#).await;
+            };
+            let reply = match tokio::task::spawn_blocking(move || chat_tools::job_stop(id)).await {
+                Ok(Ok(message)) => json!({ "stopped": true, "id": id, "message": message }),
+                Ok(Err(e)) => json!({ "stopped": false, "id": id, "error": e }),
+                Err(e) => json!({ "stopped": false, "id": id, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &reply.to_string()).await
+        }
         // Agent-to-agent: a word to one of them mid-flight. Same gate as fleet,
         // because a message to a worker is delegation by another name.
         ("POST", "/agents") => {
@@ -1784,6 +1821,14 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // The approvals still waiting for an answer. A reload used to lose them:
         // the runtime kept waiting, the page had no card, and the turn sat there
         // until the five-minute timeout rejected it.
+        //
+        // `asks` is OUR store, so it only knows prompts this process asked. Two
+        // more sets can exist in the runtime and were never asked about:
+        // external tool calls it holds for a host to answer, and permission
+        // prompts reconstructed from event history (the ones a suspended or
+        // resumed session carries). They are reported under `runtime`, apart
+        // from `asks`, so a card renderer that does not know them yet cannot
+        // break on them.
         ("GET", "/pending") => {
             let asks: Vec<Value> = state
                 .permission
@@ -1793,8 +1838,145 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .values()
                 .map(|(_, card)| card.clone())
                 .collect();
-            let body = json!({ "asks": asks }).to_string();
-            respond(&mut stream, 200, "application/json", &body).await
+            let live = state.live.read().await.clone();
+            let mut runtime = json!({ "external": [], "permissions": [] });
+            let mut runtime_errors: Vec<String> = Vec::new();
+            match live.session.rpc().tools().list_pending_requests().await {
+                Ok(l) => {
+                    runtime["external"] = json!(
+                        l.items
+                            .iter()
+                            .map(|i| json!({
+                                "request_id": i.request_id,
+                                "tool_call_id": i.tool_call_id,
+                                "tool": i.tool_name,
+                                "arguments": i.arguments,
+                                "agent_id": i.agent_id,
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Err(e) => runtime_errors.push(format!("tools.listPendingRequests: {e}")),
+            }
+            match live.session.rpc().permissions().pending_requests().await {
+                Ok(l) => {
+                    runtime["permissions"] = json!(
+                        l.items
+                            .iter()
+                            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Err(e) => runtime_errors.push(format!("permissions.pendingRequests: {e}")),
+            }
+            let mut out = json!({ "asks": asks, "runtime": runtime });
+            if !runtime_errors.is_empty() {
+                out["runtime"]["errors"] = json!(runtime_errors);
+            }
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // Answer an external tool call the runtime is holding. Our own prompts go
+        // through `/permission` (a channel into `WebPermission`); this is the
+        // other path, where the runtime wants a result rather than a yes/no.
+        ("POST", "/pending") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let request_id = v["request_id"].as_str().unwrap_or_default();
+            if request_id.is_empty() {
+                return respond(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    r#"{"error":"request_id"}"#,
+                )
+                .await;
+            }
+            let reply = HandlePendingToolCallRequest {
+                request_id: RequestId::new(request_id),
+                result: v.get("result").cloned(),
+                error: v.get("error").and_then(|e| e.as_str()).map(String::from),
+            };
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .tools()
+                .handle_pending_tool_call(reply)
+                .await
+            {
+                Ok(r) => json!({ "handled": r.success }),
+                Err(e) => json!({ "handled": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // Host-driven composer completions: ask the runtime which characters open
+        // them. An empty answer is the whole answer — it is how the SDK says the
+        // host (a local session, in our case) does not advertise completions, and
+        // building ghost text on top of that would be UI over nothing.
+        ("GET", "/completions") => {
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .completions()
+                .get_trigger_characters()
+                .await
+            {
+                Ok(r) => json!({
+                    "trigger_characters": r.trigger_characters,
+                    "supported": !r.trigger_characters.is_empty(),
+                }),
+                Err(e) => json!({
+                    "trigger_characters": [],
+                    "supported": false,
+                    "error": e.to_string(),
+                }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // The runtime's name for this session, and a way to set it. The page's
+        // title comes from `session.title_changed`, which the model writes; the
+        // runtime's name is what `sessions.list` keys on and what a resume will
+        // look up, so the two are worth being able to compare.
+        ("GET", "/name") => {
+            let live = state.live.read().await.clone();
+            let out = match live.session.rpc().name().get().await {
+                Ok(r) => json!({ "name": r.name }),
+                Err(e) => json!({ "name": null, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        ("POST", "/name") => {
+            let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let name = v["name"].as_str().unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                return respond(&mut stream, 400, "application/json", r#"{"error":"name"}"#).await;
+            }
+            let live = state.live.read().await.clone();
+            let out = match live
+                .session
+                .rpc()
+                .name()
+                .set(NameSetRequest { name: name.clone() })
+                .await
+            {
+                Ok(()) => json!({ "saved": true, "name": name }),
+                Err(e) => json!({ "saved": false, "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
+        }
+        // What the runtime itself holds. `GET /sessions` is our database, so a
+        // thread the runtime still has — one this machine's store lost, or one
+        // another client made — is invisible there. This is also the list a
+        // resume works from, which is why it comes before resume, not after.
+        ("GET", "/runtime/sessions") => {
+            let live = state.live.read().await.clone();
+            let out = match live.client.rpc().sessions().list().await {
+                Ok(l) => json!({
+                    "sessions": serde_json::to_value(&l).unwrap_or(Value::Null),
+                }),
+                Err(e) => json!({ "sessions": [], "error": e.to_string() }),
+            };
+            respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
         // The answer to an `ask_user` question. Same shape as `/permission`, but
         // the payload is free text plus whether it was typed or picked.
@@ -2577,6 +2759,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 json!({"name": "instructions", "kind": "cmd", "hint": "the instruction files the model was given, in merge order"}),
                 json!({"name": "quota", "kind": "cmd", "hint": "account credits, when the provider has a plan"}),
                 json!({"name": "todos", "kind": "cmd", "hint": "read the agent's todo list"}),
+                json!({"name": "jobs", "kind": "cmd", "hint": "processes it started and left running — output and exit codes"}),
                 json!({"name": "agents", "kind": "cmd", "hint": "list the agents this session is running"}),
                 json!({"name": "fleet", "kind": "cmd", "hint": "run the last thing you asked as a fleet"}),
                 json!({"name": "context", "kind": "cmd", "hint": "how full the context window is, and where it goes"}),

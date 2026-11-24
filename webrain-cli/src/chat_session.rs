@@ -332,6 +332,10 @@ pub(crate) async fn connect(
     // `ask_user`: without a handler the runtime puts `requestUserInput: false`
     // on the wire and a turn that asks a question just blocks until its timeout.
     user_input: Option<Arc<dyn UserInputHandler>>,
+    // A name is what makes the runtime persist the session from creation, so it
+    // can be listed and resumed before its first turn. `None` for the one-shot
+    // command, which must leave no state behind.
+    name: Option<String>,
 ) -> anyhow::Result<(Client, Session)> {
     let exe = std::env::current_exe()?;
 
@@ -384,6 +388,12 @@ pub(crate) async fn connect(
         // mid-answer is the failure this switch exists to prevent. Compaction is
         // reported as `session.compaction_*` and already lands in the page.
         .with_infinite_sessions(infinite_sessions(args));
+    // `config.name` is the field that makes `session.list` able to see this
+    // session at all; without it a thread exists only in our own store until its
+    // first turn, which is why resume had nothing to resume.
+    if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+        config.name = Some(n);
+    }
     if let Some(handler) = permission {
         config = config.with_permission_handler(handler);
     } else if args.yes {
@@ -559,7 +569,7 @@ pub(crate) async fn connect(
 }
 
 pub async fn run(args: &Args, provider: &ChatProvider, prompt: &str) -> anyhow::Result<()> {
-    let (client, session) = connect(args, provider, None, None).await?;
+    let (client, session) = connect(args, provider, None, None, None).await?;
 
     // Subscribe before sending: a create-time turn can emit deltas before a
     // late subscriber exists.
