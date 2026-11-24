@@ -417,7 +417,7 @@ pages whose text layer came back empty or short.
 | static page fetch, no browser | 427 KB in **266 ms** | changelog |
 | 27 URLs at concurrency 6 | **10 s**, down from **159 s** | `AGENTS.md` |
 | MCP tool schemas sent per request | 9 820 tokens → deferred behind `tool_search` | `chat_session.rs` |
-| `builtin:*` wildcard | 6 972 tokens of runtime schemas → four named built-ins | `chat_session.rs` |
+| `builtin:*` wildcard | 6 972 tokens of runtime schemas → the six built-ins the page draws (+94 tokens) | `chat_session.rs` |
 
 The 159 s → 10 s row is a fixed wait strategy, not a faster network — nobody
 optimised the site. Vendor figures for the small engines (Obscura's 30 MB / 85 ms)

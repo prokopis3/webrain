@@ -34,6 +34,14 @@ All notable changes, in reverse chronological order. The full version lives in
   `webrain skills install` now answers with the real spelling instead of a list of the
   three actions that do exist.
 
+- **docs**: the chat guide caught up with the Unreleased work it described. It said
+  `--serve` keeps *one* runtime session (it keeps one per conversation, eight live) and
+  that the session's allowlist lets the model call only `webrain-*` (it also hands over
+  ten host tools, every attached MCP server and the runtime builtins). The Session Info
+  panel was documented as having no Tool Results row — the runtime's `entries` list lets
+  it have one — and the ten host tools had no page at all, so `web_search`, `web_fetch`
+  and `view_image` were only discoverable from `#` in the composer.
+
 ### Fixed
 
 - **build**: the two static musl binaries ship without `chat`. `copilot-sdk` 2.0.1's

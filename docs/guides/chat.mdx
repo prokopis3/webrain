@@ -522,14 +522,17 @@ still overrides the lookup for a model nobody publishes a window for.
 
 The dock carries the same number as a gauge: a ring with `used / limit` and a
 percentage, which is also the button for the runtime's own accounting. Open it and
-the panel reads the way the Copilot chat's session-info does:
+the **Session Info** panel reads the way the Copilot chat's does:
 `Reserved for response` as a count (it overlaps the allowance rather than occupying
 it), then **System** (System Instructions, Tool Definitions) and **User Context**
-(Messages) as percentages of the prompt allowance, and an `Uncategorized → Other`
-row only when the runtime counted tokens its own categories do not name. Every
-figure is `metadata.getContextAttribution`; the page invents no category, and there
-is no *Tool Results* row because this runtime reports user, assistant and tool
-messages as one `messages` figure. A **compact history** button runs the runtime's
+(Messages, Tool Results) as percentages of the prompt allowance, and an
+`Uncategorized → Other` row only when the runtime counted tokens its own categories
+do not name. Every figure is `metadata.getContextAttribution`; the page invents no
+category. The runtime rolls user, assistant *and* tool messages into one `messages`
+figure, but its `entries` list still names each source, so **Tool Results** is a row
+of its own — the sum of the `kind: "tool"` entries, subtracted from `messages` so
+the two add up to the runtime's number instead of counting the same tokens twice.
+A **compact history** button runs the runtime's
 `/compact` through `POST /command` — it asks first, and it is disabled while a turn
 is running, because compaction rewrites the history that turn is reading.
 
@@ -895,6 +898,30 @@ command must not be reachable from the LAN. Put a reverse proxy in front of it
 and add authentication if you need it elsewhere — the binary will not do that
 for you.
 
+## Tools the session hands the model
+
+The tool list is fixed when the session is created, not discovered by the model:
+this build's nineteen MCP tools, ten host tools compiled into the binary, every
+MCP server you attach, and the runtime builtins whose output the page draws (the
+todo list, the inbox, the schedule). `#` and the tools dialog both read
+`GET /catalog`, which marks which of those names this session actually carries —
+unticking a builtin is a switch on the *call*, because the allowlist itself cannot
+change after creation.
+
+| Tool | What it is for |
+|---|---|
+| `read_file`, `write_file`, `edit_file` | text in and out. `edit_file` replaces one exact string and refuses a string that matches nothing or more than one place |
+| `list_dir`, `search_files` | one directory, or a regex over the tree — `.git`, `target` and `node_modules` are skipped |
+| `run_shell`, `terminal` | one command with its output, or a shell that stays alive between calls (`start` / `send` / `read` / `list` / `stop` — the jobs `/jobs` lists) |
+| `view_image` | the agent looks at a png, jpg, gif, webp, bmp or svg instead of reading its bytes. The runtime has no image tool of its own, so this answers with a binary result — and the session declares `capabilities.supports.vision` from the model's catalogue, declaring nothing when the vendor publishes no modalities |
+| `web_search` | a ranked `title` / `url` / `summary` list. On a DeepSeek session (its base url is `deepseek.com`) it calls DeepSeek's Search API with the session's own key; every other provider gets webrain's engines |
+| `web_fetch` | one URL as Markdown — DeepSeek's Fetch API on a DeepSeek session, `text/markdown`-first HTTP elsewhere, with the markup stripped when the host answers HTML |
+
+Every path resolves under the working directory, and a path that escapes it is
+refused by name, so a call cannot reach outside the directory the chat was started
+in. All ten raise a permission request unless `--yes`; `web_search` and `web_fetch`
+touch no local file but ask the same way.
+
 ## Permissions
 
 Without `--yes` the session approves reads, navigation and MCP tool calls, and
@@ -970,17 +997,21 @@ Point the state directory elsewhere with `WEBRAIN_CHAT_HOME` (default:
 `webrain-copilot-home` under the system temp directory).
 
 What is *not* removable: the runtime's built-in `github-mcp-server` (5 tools)
-still loads, and the tool list is filtered separately with the SDK's `ToolSet`
-so the model can only call `webrain-*`. Measured, `toolDefinitionsTokens` stays
-**8080** either way — the 18 `webrain_*` schemas are the floor, not the
-stragglers.
+still loads. The rest is an allowlist handed to the SDK's `ToolSet` when the
+session is created — `webrain-<n>` for this build's MCP server, `custom:` for the
+ten host tools in [Tools the session hands the model](#tools-the-session-hands-the-model),
+`mcp:*` for any server you attach, and `builtin:` for the runtime tools that ask
+before they act. A name outside those does not reach the model. Measured, the
+nineteen `webrain_*` schemas alone put `toolDefinitionsTokens` at **8080**: the
+MCP surface is the floor, not the stragglers.
 
 ## What chat does not do
 
-No interactive REPL and no session resume in this version. `--serve` keeps one
-runtime session alive for as long as the process does, but a **new** process
-replays the stored transcript instead of resuming the runtime's own context, and
-one-shot `webrain chat` is one prompt, one turn, one exit code. Everything here is
+No interactive REPL in this version. `--serve` keeps one runtime session per
+conversation — up to eight live at once, and only an idle one is ever evicted, its
+next turn rebuilding it from the store — but a **new** process replays the stored
+transcript instead of resuming the runtime's own context, and one-shot
+`webrain chat` is one prompt, one turn, one exit code. Everything here is
 additive to `webrain mcp`, which keeps its stdout contract — chat's own logs go to
 stderr for that reason.
 
