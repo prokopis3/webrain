@@ -3328,7 +3328,7 @@
     if (switching) return false;
     switching = model || "…";
     try {
-      const r = await fetch("/switch", {
+      const r = await fetch(`/switch?convo=${encodeURIComponent(current)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ provider, model, effort }),
@@ -3344,7 +3344,9 @@
         kind: "note",
         text: j.restarted
           ? `${j.provider} · ${j.model} — a new session, so the model starts without this transcript's context`
-          : `${j.model} · effort ${j.effort || "the model's default"}`,
+          : j.pending
+            ? `${j.model} · saved for this chat — it applies to the first turn`
+            : `${j.model} · effort ${j.effort || "the model's default"}`,
       });
       return true;
     } catch (e) {
@@ -3784,12 +3786,23 @@
   // say so instead of letting a site's odd behaviour look like ours.
   let stealthOff = $state(false);
 
+  // True when this chat carries its own saved switches rather than inheriting
+  // the defaults. A chat that never saved one answers the defaults, which is
+  // what makes a brand-new chat behave like the last one you configured.
+  let rtOwn = $state(false);
+  // Opt-in on save: the same switches become what every NEW chat starts from.
+  let rtDefault = $state(false);
+
   async function loadSettings() {
     try {
-      const r = await fetch("/settings");
+      // Scoped to the open conversation: two chats can hold different switches,
+      // and a closed one still answers what it was held with.
+      const r = await fetch(`/settings?convo=${encodeURIComponent(current)}`);
       if (!r.ok) return;
       const j = await r.json();
       stealthOff = j.stealth?.noise === false;
+      rtOwn = j.own === true;
+      rtDefault = false;
       // The page appended the standing hints to what is stored; the field shows
       // the operator's own words only, so they come back out here.
       if (j.settings) rt = { ...rt, ...j.settings, instructions: stripHints(j.settings.instructions) };
@@ -3808,19 +3821,28 @@
     try {
       // The standing hints ride along, or saving the Runtime tab would wipe the
       // one thing keeping `html` mode and the suggestion tail in force.
-      const body = { ...rt, instructions: withHints(rt.instructions, rawHtml) };
-      const r = await fetch("/settings", {
+      const body = {
+        ...rt,
+        instructions: withHints(rt.instructions, rawHtml),
+        default: rtDefault,
+      };
+      // The conversation rides the query, the way every other route names it: one
+      // resolution point on the server, so a save can never land on another chat.
+      const r = await fetch(`/settings?convo=${encodeURIComponent(current)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
       const j = await r.json();
       if (!j.restart && !j.patched?.error) hintsPushed = body.instructions;
+      rtOwn = true;
       rtSaved = j.restart
-        ? "saved — the next turn restarts the session, and its prompt cache starts over"
+        ? "saved for this chat — the next turn restarts the session, and its prompt cache starts over"
         : j.patched?.error
           ? `saved, but the live session refused it: ${j.patched.error}`
-          : "saved — patched into the live session, nothing restarted";
+          : j.default
+            ? "saved for this chat, and as the default every new chat starts from"
+            : "saved for this chat — patched into the live session, nothing restarted";
     } catch {
       rtSaved = "could not save: the server is not reachable";
     }
@@ -5470,6 +5492,9 @@
         onclick={() => {
           modelOpen = false;
           settingsOpen = true;
+          // The drawer is per conversation, so opening it re-reads that chat's
+          // switches — the page cannot carry them over from the last chat.
+          loadSettings();
         }}
         title="settings — provider, model, tools, runtime switches"
       >
@@ -6815,11 +6840,21 @@
                 approves tools, paths and URLs without asking anyone.
               </small>
             </div>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rtDefault} />
+              <span class="box" aria-hidden="true"></span>
+              <span>also make this the default every new chat starts from</span>
+            </label>
             <div class="sfld">
               <button class="linky" onclick={saveSettings}>save runtime settings</button>
               {#if rtSaved}<small>{rtSaved}</small>{/if}
             </div>
-            <small>Stored in settings.json beside the chat database, not in this browser.</small>
+            <small>
+              {rtOwn
+                ? "These belong to this conversation. A chat that never saved its own takes settings.json."
+                : "This chat saved nothing yet — it is running the defaults in settings.json."}
+              Stored in the chat database, not in this browser.
+            </small>
           </div>
         {:else if setTab === "storage"}
           <dl class="facts">

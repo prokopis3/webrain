@@ -102,6 +102,16 @@ impl Store {
                  convo TEXT PRIMARY KEY,
                  body  TEXT NOT NULL,
                  ts    TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             -- What the page switched on for ONE conversation: the runtime
+             -- switches, the tool picks and the model it runs. Kept here rather
+             -- than in `settings.json` so two chats cannot overwrite each other;
+             -- that file stays the default a conversation with no row takes, which
+             -- is also what a new chat starts from.
+             CREATE TABLE IF NOT EXISTS settings (
+                 convo TEXT PRIMARY KEY,
+                 body  TEXT NOT NULL,
+                 ts    TEXT NOT NULL DEFAULT (datetime('now'))
              );",
         )
         .ok()?;
@@ -244,6 +254,11 @@ impl Store {
                 && db
                     .execute("DELETE FROM context WHERE convo = ?1", [convo])
                     .is_ok()
+                // Its switches go too: a re-used id would otherwise open with a
+                // model nobody chose for it.
+                && db
+                    .execute("DELETE FROM settings WHERE convo = ?1", [convo])
+                    .is_ok()
         })
     }
 
@@ -305,6 +320,33 @@ impl Store {
             )
             .ok()?;
         Some((serde_json::from_str::<Value>(&body).ok()?, ts))
+    }
+
+    /// Remember the switches, tool picks and model one conversation was held with.
+    pub fn save_settings(&self, convo: &str, body: &str) -> bool {
+        if convo.is_empty() || serde_json::from_str::<Value>(body).is_err() {
+            return false;
+        }
+        self.lock().is_some_and(|db| {
+            db.execute(
+                "INSERT INTO settings (convo, body) VALUES (?1, ?2)
+                 ON CONFLICT(convo) DO UPDATE SET body = excluded.body, ts = datetime('now')",
+                params![convo, body],
+            )
+            .is_ok()
+        })
+    }
+
+    /// What that conversation was held with, or `None` for one that never saved —
+    /// which is the signal to take the defaults instead.
+    pub fn settings(&self, convo: &str) -> Option<Value> {
+        let db = self.lock()?;
+        let body: String = db
+            .query_row("SELECT body FROM settings WHERE convo = ?1", [convo], |r| {
+                r.get(0)
+            })
+            .ok()?;
+        serde_json::from_str::<Value>(&body).ok()
     }
 
     /// Copy the first `upto` messages of `convo` into `into`. A fork is a
@@ -497,6 +539,41 @@ mod tests {
         s.forget("c1");
         assert!(s.context("c1").is_none(), "deleting the thread clears it");
         assert!(s.context("other").is_some(), "and only that thread");
+        drop(s);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Two chats can hold different models and tool picks, so the row is keyed by
+    /// conversation: one row each, newest wins, and a deleted thread takes its
+    /// switches with it.
+    #[test]
+    fn settings_are_one_row_per_conversation() {
+        let (s, path) = temp();
+        assert!(s.settings("c1").is_none(), "nothing saved yet");
+        assert!(s.save_settings("c1", r#"{"model":"gpt-5.2","provider":"openai"}"#));
+        assert!(
+            s.save_settings("c1", r#"{"model":"claude-sonnet-4.5"}"#),
+            "upsert"
+        );
+        assert!(
+            s.save_settings("other", r#"{"model":"gpt-5-mini"}"#),
+            "per convo"
+        );
+        assert!(
+            !s.save_settings("c1", "not json"),
+            "a broken row is refused"
+        );
+        assert!(
+            !s.save_settings("", r#"{"model":"x"}"#),
+            "no conversation, no row"
+        );
+
+        assert_eq!(s.settings("c1").expect("row")["model"], "claude-sonnet-4.5");
+        assert_eq!(s.settings("other").expect("row")["model"], "gpt-5-mini");
+
+        s.forget("c1");
+        assert!(s.settings("c1").is_none(), "deleting the thread clears it");
+        assert!(s.settings("other").is_some(), "and only that thread");
         drop(s);
         let _ = std::fs::remove_file(path);
     }

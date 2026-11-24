@@ -840,6 +840,11 @@ struct RuntimeSettings {
     /// The page's reasoning effort. Empty means "let the runtime decide", which
     /// is what the first turn used before this existed.
     effort: String,
+    /// The model this conversation runs, as `provider` + `model`. Empty means
+    /// "whatever the CLI booted with". Stored per conversation so a pick survives
+    /// a restart, and in `settings.json` as the default a new chat starts from.
+    provider: String,
+    model: String,
     /// Standing instructions for every turn, applied by the runtime. Empty means
     /// none.
     instructions: String,
@@ -864,6 +869,8 @@ impl Default for RuntimeSettings {
             timeout_secs: 300,
             compact_at: 80,
             effort: String::new(),
+            provider: String::new(),
+            model: String::new(),
             instructions: String::new(),
             parallel_tools: true,
             citations: false,
@@ -900,6 +907,8 @@ impl RuntimeSettings {
                 .unwrap_or(d.compact_at)
                 .clamp(COMPACT_PCT.0, COMPACT_PCT.1),
             effort: v["effort"].as_str().unwrap_or_default().to_string(),
+            provider: v["provider"].as_str().unwrap_or_default().to_string(),
+            model: v["model"].as_str().unwrap_or_default().to_string(),
             instructions: v["instructions"].as_str().unwrap_or_default().to_string(),
             parallel_tools: v["parallel_tools"].as_bool().unwrap_or(d.parallel_tools),
             citations: v["citations"].as_bool().unwrap_or(d.citations),
@@ -916,6 +925,8 @@ impl RuntimeSettings {
             "timeout_secs": self.timeout_secs,
             "compact_at": self.compact_at,
             "effort": self.effort,
+            "provider": self.provider,
+            "model": self.model,
             "instructions": self.instructions,
             "parallel_tools": self.parallel_tools,
             "citations": self.citations,
@@ -929,7 +940,8 @@ impl RuntimeSettings {
         // Only the fields a live session cannot absorb. `session_store`, `effort`
         // and `instructions` are all reachable through `session.options.update`,
         // and rebuilding the session for them threw away the prompt cache for a
-        // save that is usually just a wording change.
+        // save that is usually just a wording change. A different provider or
+        // model is the exception: that *is* a new session.
         let session = |s: &Self| {
             (
                 s.memory,
@@ -939,6 +951,8 @@ impl RuntimeSettings {
                 s.parallel_tools,
                 s.citations,
                 s.allowed_models.clone(),
+                s.provider.clone(),
+                s.model.clone(),
             )
         };
         let before = session(self);
@@ -967,6 +981,14 @@ impl RuntimeSettings {
         if let Some(e) = v["effort"].as_str() {
             self.effort = e.to_string();
         }
+        if let Some(p) = v["provider"].as_str() {
+            self.provider = p.to_string();
+        }
+        // A model with no provider named is the common case ("run gpt-5.2"), and
+        // the boot provider is the one that makes it real.
+        if let Some(m) = v["model"].as_str() {
+            self.model = m.to_string();
+        }
         if let Some(t) = v["instructions"].as_str() {
             self.instructions = t.to_string();
         }
@@ -988,6 +1010,24 @@ impl RuntimeSettings {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(path, self.to_json().to_string());
+    }
+
+    /// The switches one conversation runs with: its own saved row when it has
+    /// one, else the defaults file. This is the whole of the per-chat setup — a
+    /// conversation that never touched Settings answers what `settings.json`
+    /// says, and one that did gets its own answer back across a restart.
+    fn for_convo(store: Option<&chat_store::Store>, convo: &str) -> Self {
+        match store.and_then(|s| s.settings(convo)) {
+            Some(v) => Self::default().with(&v),
+            None => Self::load(),
+        }
+    }
+
+    /// A copy with a partial body folded in, for the read-modify-write a save does.
+    fn with(&self, v: &Value) -> Self {
+        let mut s = self.clone();
+        s.merge(v);
+        s
     }
 
     /// Stamp onto the flags `connect` reads, so the three places that rebuild a
@@ -1133,8 +1173,39 @@ impl Shared {
         let Some(primary) = self.primary.get().cloned() else {
             anyhow::bail!("no session");
         };
-        let settings = primary.settings.lock().await.clone();
-        let provider = primary.provider.lock().await.clone();
+        // What this conversation runs with: its own saved switches when it has
+        // them, else the defaults `settings.json` holds. A chat that never
+        // picked a model takes the default one instead of inheriting whatever
+        // the last chat switched to.
+        let settings = RuntimeSettings::for_convo(self.store.as_deref(), convo);
+        let provider = {
+            let boot = primary.provider.lock().await.clone();
+            if !settings.provider.is_empty() {
+                // A named provider brings its own base url and key.
+                match provider_target(&primary, &settings.provider) {
+                    Some((base, key, typ)) => {
+                        let model = if settings.model.is_empty() {
+                            boot.model.clone()
+                        } else {
+                            settings.model.clone()
+                        };
+                        ChatProvider::new(typ, base, model, None, key)
+                    }
+                    None => boot,
+                }
+            } else if !settings.model.is_empty() && settings.model != boot.model {
+                // A model with no provider named runs where the CLI booted.
+                ChatProvider::new(
+                    boot.provider_type,
+                    boot.base_url.clone(),
+                    settings.model.clone(),
+                    boot.key_env.clone(),
+                    boot.bearer_token().map(str::to_string),
+                )
+            } else {
+                boot
+            }
+        };
         let history = self
             .store
             .as_ref()
@@ -1199,6 +1270,30 @@ fn evictable(seen: &[(String, bool)], keep: &str) -> Option<String> {
     seen.iter()
         .find(|(id, busy)| id != keep && !busy)
         .map(|(id, _)| id.clone())
+}
+
+/// Remember the model a conversation runs, so reopening it — or restarting the
+/// server — starts where the user left it instead of where the process booted.
+/// Only that conversation's row moves; every other chat keeps its own pick, and
+/// a chat that never picked still takes `settings.json`.
+async fn remember_pick(chat: &Arc<State>, provider: &str, model: &str, effort: &str) {
+    let body = {
+        let mut s = chat.settings.lock().await;
+        s.provider = provider.to_string();
+        s.model = model.to_string();
+        // `off` is the runtime's name for "send nothing", so it stores as unset.
+        if !effort.is_empty() {
+            s.effort = if effort == "off" {
+                String::new()
+            } else {
+                effort.to_string()
+            };
+        }
+        s.to_json().to_string()
+    };
+    if let Some(store) = chat.store.as_deref() {
+        store.save_settings(&chat.convo().await, &body);
+    }
 }
 
 /// What every conversation's prompts share: the bus, the standing approvals and
@@ -1990,24 +2085,46 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             };
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
-        // The switches a page cannot express as prompt text. Saved next to the
-        // chat database so they outlive the process.
+        // The switches a page cannot express as prompt text. Scoped to the
+        // conversation, and readable with no session at all — a chat that never
+        // touched Settings answers the defaults, one that did answers its own
+        // row, which is what makes a closed chat show what it was held with.
         ("GET", "/settings") => {
-            let s = state.settings.lock().await.clone().to_json();
+            let store = shared.store.as_deref();
+            let s = RuntimeSettings::for_convo(store, &convo);
+            let own = store.and_then(|st| st.settings(&convo)).is_some();
             // The page says out loud which fingerprint the browser will present:
             // `chat --serve` defaults the noise shim off, and a user who wonders
             // why a site behaves differently here than in their own tab needs to
             // read the switch, not guess it.
             let noise = webrain_core::backends::cdp::stealth_noise_on();
-            let body = json!({ "settings": s, "stealth": { "noise": noise } }).to_string();
+            let body = json!({
+                "settings": s.to_json(),
+                "convo": convo,
+                "own": own,
+                "stealth": { "noise": noise },
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
         ("POST", "/settings") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-            let mut s = state.settings.lock().await;
+            // Read the conversation's own switches (or the defaults), fold the
+            // body in, then write it back under this conversation only. Saving
+            // straight to `settings.json` here is what let two chats overwrite
+            // each other's model and tool picks.
+            let store = shared.store.clone();
+            let mut s = RuntimeSettings::for_convo(store.as_deref(), &convo);
             let restart = s.merge(&v);
-            s.save();
-            state.timeout.store(s.timeout_secs, Ordering::SeqCst);
+            // Opt-in: the same switches become what every *new* chat starts from.
+            let make_default = v["default"].as_bool().unwrap_or(false);
+            if make_default {
+                s.save();
+            }
+            if let Some(st) = store.as_deref() {
+                st.save_settings(&convo, &s.to_json().to_string());
+            }
+            shared.timeout.store(s.timeout_secs, Ordering::SeqCst);
             // The three that do not need a rebuild go into the live session now;
             // `None` means "leave it", so an empty effort sends nothing.
             // 2.0.1 groups the flat patch: instructions / state / inference.
@@ -2030,20 +2147,25 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                 },
                 ..Default::default()
             };
-            let out = json!({ "saved": true, "restart": restart });
-            drop(s);
-            let live = state.live.read().await.clone();
-            let patched = match live.session.rpc().options().update(patch).await {
-                Ok(_) => json!({ "ok": true }),
-                Err(e) => json!({ "error": e.to_string() }),
-            };
-            let mut out = out;
-            out["patched"] = patched;
-            // A session field cannot reach a session that already exists, so the
-            // next turn rebuilds one — the same lever opening a past conversation
-            // uses, and the page's transcript is what carries over.
-            if restart && !state.busy.load(Ordering::SeqCst) {
-                state.seed.store(true, Ordering::SeqCst);
+            let mut out = json!({ "saved": true, "restart": restart, "default": make_default });
+            // No session yet is not an error: the row above is the whole save,
+            // and the next turn builds its session from it.
+            match shared.find(&convo).await {
+                None => out["patched"] = json!({ "session": false }),
+                Some(chat) => {
+                    *chat.settings.lock().await = s.clone();
+                    let live = chat.live.read().await.clone();
+                    out["patched"] = match live.session.rpc().options().update(patch).await {
+                        Ok(_) => json!({ "ok": true }),
+                        Err(e) => json!({ "error": e.to_string() }),
+                    };
+                    // A session field cannot reach a session that already exists,
+                    // so the next turn rebuilds one — the same lever opening a
+                    // past conversation uses, and the transcript carries over.
+                    if restart && !chat.busy.load(Ordering::SeqCst) {
+                        chat.seed.store(true, Ordering::SeqCst);
+                    }
+                }
             }
             respond(&mut stream, 200, "application/json", &out.to_string()).await
         }
@@ -3788,6 +3910,22 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         ("GET", "/providers") => {
             let live = state.live.read().await.clone();
             let env_key = std::env::var("WEBRAIN_CHAT_API_KEY").is_ok();
+            // A conversation with no session yet still has a pick: its saved row,
+            // or the default when it never set one. Reported as the active row so
+            // the picker opens on what THIS chat will run instead of on whatever
+            // the process booted with.
+            let saved = RuntimeSettings::for_convo(shared.store.as_deref(), &convo);
+            let no_session = shared.find(&convo).await.is_none();
+            let want_id = if saved.provider.is_empty() {
+                row_name_for_base(&live.base_url)
+            } else {
+                saved.provider.clone()
+            };
+            let want_model = if saved.model.is_empty() {
+                live.model()
+            } else {
+                saved.model.clone()
+            };
             let mut list: Vec<Value> = Vec::new();
             // The session's own endpoint is a row of its own only when the table
             // does not claim it — a custom base url. Otherwise the table row is
@@ -3796,12 +3934,12 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                 list.push(json!({
                     "id": "env",
                     "base_url": live.base_url,
-                    "model": live.model(),
+                    "model": want_model,
                     "key_env": "WEBRAIN_CHAT_API_KEY",
                     "type": "openai",
                     "key_present": env_key,
                     "key_vault": false,
-                    "active": true,
+                    "active": !no_session || want_id.is_empty(),
                     "saved": false,
                     "description": "the endpoint this session was started against",
                     "context": Value::Null,
@@ -3813,12 +3951,16 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                 // One entry per row: `row.0` is the alias list, so the first
                 // alias is the row's name and the rest are alternatives.
                 let id = row.0[0].trim_end_matches("_API_KEY").to_ascii_lowercase();
-                let active = row.1 == live.base_url;
+                let active = if no_session {
+                    id == want_id
+                } else {
+                    row.1 == live.base_url
+                };
                 let (description, context, docs) = provider_info(&id);
                 list.push(json!({
                     "id": id,
                     "base_url": row.1,
-                    "model": if active { live.model() } else { row.2.to_string() },
+                    "model": if active { want_model.clone() } else { row.2.to_string() },
                     "key_env": row.0[0],
                     "type": if id == "anthropic" { "anthropic" } else { "openai" },
                     "key_present": env_key || row.0.iter().any(|n| std::env::var(n).is_ok()),
@@ -3857,7 +3999,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                     "type": "openai",
                     "key_present": env_key || (!env.is_empty() && std::env::var(env).is_ok()),
                     "key_vault": vault_key(id).is_some(),
-                    "active": base == live.base_url,
+                    "active": if no_session { id == want_id } else { base == live.base_url },
                     "saved": true,
                     "description": "saved on this machine — any OpenAI-compatible endpoint",
                     "context": Value::Null,
@@ -4024,6 +4166,37 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                 let out = json!({ "error": "busy" }).to_string();
                 return respond(&mut stream, 409, "application/json", &out).await;
             }
+            // A conversation with no session yet has nothing to switch: the pick
+            // is remembered for it, and the first turn builds its session from it.
+            // Reporting it now is what lets the picker name a model on a chat that
+            // has not run anything.
+            if shared.find(&convo).await.is_none() {
+                if provider_target(&state, &want).is_none() {
+                    let out = json!({ "error": "unknown provider" }).to_string();
+                    return respond(&mut stream, 400, "application/json", &out).await;
+                }
+                let mut s = RuntimeSettings::for_convo(shared.store.as_deref(), &convo);
+                s.provider = want.clone();
+                if !model.is_empty() {
+                    s.model = model.clone();
+                }
+                if !effort.is_empty() {
+                    s.effort = if effort == "off" {
+                        String::new()
+                    } else {
+                        effort.clone()
+                    };
+                }
+                if let Some(st) = shared.store.as_deref() {
+                    st.save_settings(&convo, &s.to_json().to_string());
+                }
+                let out = json!({
+                    "switched": true, "restarted": false, "pending": true,
+                    "provider": want, "model": s.model, "effort": effort,
+                })
+                .to_string();
+                return respond(&mut stream, 200, "application/json", &out).await;
+            }
             let Some((base, key, typ)) = provider_target(&state, &want) else {
                 let out = json!({ "error": "unknown provider" }).to_string();
                 return respond(&mut stream, 400, "application/json", &out).await;
@@ -4049,6 +4222,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                         if let Ok(mut e) = live.effort.lock() {
                             *e = effort.clone();
                         }
+                        // The pick follows the conversation, not the process.
+                        remember_pick(&state, &want, &model, &effort).await;
                         json!({
                             "switched": true, "restarted": false,
                             "provider": want, "model": model, "effort": effort,
@@ -4098,6 +4273,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                     // A later conversation switch restarts from the provider in
                     // use now, not the one this process booted with.
                     *state.provider.lock().await = provider.clone();
+                    remember_pick(&state, &want, &model, &effort).await;
                     let reply = json!({
                         "switched": true, "restarted": true,
                         "provider": row_name_for_base(&provider.base_url),
@@ -5487,6 +5663,40 @@ mod tests {
             serde_json::from_str(&card_frame("cB", "webrain.ask", json!({"id":"u1"}))).unwrap();
         assert_eq!(q["convo"], "cB");
         assert_eq!(q["type"], "webrain.ask");
+    }
+
+    /// Each chat keeps its own setup, and a chat that never picked one takes the
+    /// default. That is two rules and both are pinned here: a saved row is merged
+    /// over the defaults rather than replacing them, and a row that names no model
+    /// leaves the default model standing instead of blanking it.
+    #[test]
+    fn a_chats_own_settings_win_and_the_rest_keeps_the_default() {
+        // Stands in for settings.json: the default every new chat starts from.
+        let defaults = RuntimeSettings {
+            provider: "openai".to_string(),
+            model: "gpt-5-mini".to_string(),
+            ..Default::default()
+        };
+        // This chat picked a different model on a different provider.
+        let own = defaults.with(&json!({"provider": "anthropic", "model": "claude-sonnet-4.5"}));
+        assert_eq!(own.provider, "anthropic");
+        assert_eq!(own.model, "claude-sonnet-4.5");
+        // A row that only moved a switch keeps the default model: a chat does not
+        // lose the default just because it turned something else off.
+        let half = defaults.with(&json!({"parallel_tools": false}));
+        assert!(!half.parallel_tools, "its own switch applied");
+        assert_eq!(half.model, "gpt-5-mini", "the default model stands");
+        // A different model is a new session, a tool switch is not — that is what
+        // the page's "did this apply?" sentence is built from.
+        let mut s = defaults.clone();
+        assert!(
+            s.merge(&json!({"model": "claude-sonnet-4.5"})),
+            "a pick restarts"
+        );
+        let mut s = defaults.clone();
+        assert!(!s.merge(&json!({"timeout_secs": 90})), "a timeout does not");
+        // What is stored round-trips, so reopening the chat reads back the pick.
+        assert_eq!(own.to_json()["model"], "claude-sonnet-4.5");
     }
 
     /// A field this page cannot draw must not become an empty string in the

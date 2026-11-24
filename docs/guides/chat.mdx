@@ -359,11 +359,12 @@ Approvals and `ask_user` cards follow the same rule: each conversation has its o
 | `GET /providers` | provider *targets*: base url, model, where the key lives, a one-line description, and the context size its docs publish |
 | `POST /providers` | `{"id","base_url","model","key_env"}` → a target row in the local database (`key_env` may be empty) |
 | `POST /keys` | `{"provider":"deepseek","key":"…"}` → the key is written to the encrypted vault; nothing is echoed back |
-| `POST /switch` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes |
+| `POST /switch?convo=…` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes. The pick is stored for that conversation, so reopening the chat starts where you left it; a chat with no session yet records the pick and applies it to its first turn |
 | `GET /models?provider=…` | that provider's live catalogue, cached five minutes |
 | `GET /price` | the vendor's published price for the running model |
 | `GET /quota` | account credits (`session.quota.get` + `limitPrediction`) — null on a key of your own |
-| `GET /settings`, `POST /settings` | the switches only this server can honour |
+| `GET /settings?convo=…` | the switches only this server can honour, **for that conversation**: its own saved row when it has one, else the defaults in `settings.json`. `own` says which of the two answered, and it works with no live session — a closed chat still reports what it was held with |
+| `POST /settings?convo=…` | the switches, merged over that conversation's row and stored under it, so two chats cannot overwrite each other's model or tool picks. `"default": true` also writes `settings.json`, which is what every *new* chat starts from |
 
 **Tools, skills and the model's instructions**
 

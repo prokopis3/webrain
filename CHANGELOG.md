@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **each conversation keeps its own setup, and a chat that never picked one takes the
+  default.** `POST /settings` wrote straight to `settings.json`, which is one file for the whole
+  machine, so switching a model or a tool switch in chat B silently changed chat A — and a
+  restart forgot which model a thread had been using. The switches now live in a `settings` row
+  keyed by conversation (`WEBRAIN_CHAT_DB`), merged over `settings.json` rather than replacing
+  it, and that file stays what every *new* chat starts from — the `default` checkbox in
+  Settings → Runtime also writes it, so a fresh chat inherits a default model even if it never
+  picks one. `GET /settings?convo=` answers that conversation's row, or the defaults with
+  `own: false`, and works with no live session, which is what lets a closed chat report what it
+  was held with. `/switch` records the pick for the conversation it was asked about (and a chat
+  with no session yet records it for its first turn instead of switching someone else's), and
+  `GET /providers` marks that saved row as active, so the model picker opens on the model this
+  chat will actually run
+  (`a_chats_own_settings_win_and_the_rest_keeps_the_default`, `settings_are_one_row_per_conversation`).
 - `chat`: **a mention stays marked once it is sent, and `@name` reads both skill roots.**
   The Settings → Skills panel lists two trees — the bundle and `~/.agents/skills`, where the
   `npx`-style installers write — but `expand_mentions` asked `webrain_mcp::skill_text`, which
