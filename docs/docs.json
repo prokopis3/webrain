@@ -35,7 +35,8 @@
               "mcp/server",
               "mcp/claude",
               "mcp/cursor",
-              "mcp/copilot"
+              "mcp/copilot",
+              "mcp/deepseek-harness"
             ]
           },
           {

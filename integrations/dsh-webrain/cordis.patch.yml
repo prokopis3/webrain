@@ -1,0 +1,32 @@
+# webrain for DeepSeek Harness.
+#
+# One MCP client row over stdio: the client spawns `webrain mcp`, discovers its
+# tools, and re-registers them on ctx.tools as `mcp__webrain__<tool>`.
+#
+# The row id is webrain-mcp, not mcp-webrain, so a hand-written `mcp-webrain`
+# entry in a profile patch keeps its own identity instead of being overwritten:
+# both would still collide on `serverName`, which the harness rejects loudly, so
+# remove the hand-written entry once this bundle is installed.
+- insert:
+    - id: webrain-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: webrain
+        transport: stdio
+        # `webrain` resolves through PATH. Point `command` at an absolute path
+        # when a GUI-launched harness cannot see the install location (macOS
+        # Finder launches see a minimal PATH).
+        command: webrain
+        args: ['mcp']
+        # Browser work is not a REST call: one navigate + extract pair can
+        # spend minutes on a challenge page. The bridge default is 60 s.
+        toolCallTimeoutMs: 300000
+        startupTimeoutMs: 60000
+        # A missing binary fails this row visibly in Plugins (a labelled
+        # warning) instead of silently reporting no tools. The harness itself
+        # keeps running: app-boot permits an optional MCP entry to fail.
+        failOnStartupError: true
+        reconnect:
+          enabled: true
+          maxDelayMs: 30000
+          maxAttempts: 5

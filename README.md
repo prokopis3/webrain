@@ -464,6 +464,20 @@ Add to your user `settings.json` under `"mcp"`:
 }
 ```
 
+**DeepSeek Harness** — `dsh` owns its MCP rows, so webrain ships an installable
+bundle instead of a JSON snippet. The `dsh-webrain` package
+([`integrations/dsh-webrain`](integrations/dsh-webrain)) inserts a stdio
+`@deepseek-ai/dsh-mcp-client` row and the tools appear as
+`mcp__webrain__*`:
+
+```bash
+dsh plugin --profile <profile> install dsh-webrain
+# or, pinned to a commit of this repository:
+dsh plugin --profile <profile> install 'github:prokopis3/webrain#<sha>&path:integrations/dsh-webrain'
+```
+
+Full guide: [DeepSeek Harness](/mcp/deepseek-harness).
+
 ## Skills
 
 A **skill** is a Markdown file the agent loads on demand: domain knowledge, a

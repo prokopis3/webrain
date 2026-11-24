@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300">
+  <rect width="640" height="300" rx="20" fill="#f3f5f9"/>
+
+  <!-- Agent side: one tool-call transcript -->
+  <rect x="48" y="62" width="196" height="176" rx="20" fill="#ffffff" stroke="#b7c3d2" stroke-width="2"/>
+  <rect x="70" y="84" width="120" height="14" rx="7" fill="#0b63ce"/>
+  <rect x="70" y="112" width="152" height="26" rx="8" fill="#e4edf8"/>
+  <rect x="81" y="121" width="9" height="8" rx="2" fill="#0b63ce"/>
+  <rect x="98" y="122" width="86" height="6" rx="3" fill="#9cacc0"/>
+  <rect x="70" y="146" width="152" height="26" rx="8" fill="#e4edf8"/>
+  <rect x="81" y="155" width="9" height="8" rx="2" fill="#0b63ce"/>
+  <rect x="98" y="156" width="102" height="6" rx="3" fill="#9cacc0"/>
+  <rect x="70" y="180" width="152" height="26" rx="8" fill="#e4edf8"/>
+  <rect x="81" y="189" width="9" height="8" rx="2" fill="#0b63ce"/>
+  <rect x="98" y="190" width="72" height="6" rx="3" fill="#9cacc0"/>
+
+  <!-- Round trip: call out, result back -->
+  <path d="M262 128h108m-10-10 10 10-10 10" fill="none" stroke="#0b63ce" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M370 176H262m10-10-10 10 10 10" fill="none" stroke="#7b8b9f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Browser side: a rendered page -->
+  <rect x="392" y="62" width="200" height="176" rx="20" fill="#ffffff" stroke="#b7c3d2" stroke-width="2"/>
+  <path d="M392 90h200" fill="none" stroke="#b7c3d2" stroke-width="2"/>
+  <g fill="#9cacc0">
+    <circle cx="410" cy="76" r="3"/>
+    <circle cx="422" cy="76" r="3"/>
+    <circle cx="434" cy="76" r="3"/>
+  </g>
+  <rect x="456" y="72" width="118" height="9" rx="4.5" fill="#e4edf8"/>
+  <rect x="412" y="106" width="160" height="44" rx="10" fill="#e4edf8"/>
+  <g fill="#0b63ce">
+    <rect x="412" y="164" width="48" height="24" rx="7"/>
+    <rect x="468" y="164" width="48" height="24" rx="7" opacity="0.72"/>
+    <rect x="524" y="164" width="48" height="24" rx="7" opacity="0.44"/>
+  </g>
+  <rect x="412" y="198" width="100" height="8" rx="4" fill="#9cacc0"/>
+  <rect x="412" y="214" width="72" height="8" rx="4" fill="#c9d4e2"/>
+
+  <!-- The fetched rain: a drop landing beside the page -->
+  <path d="M562 196c8 10.6 13 17.4 13 24.2a13 13 0 0 1-26 0c0-6.8 5-13.6 13-24.2Z" fill="#38a0ff"/>
+  <circle cx="562" cy="222" r="6.4" fill="#ffffff" opacity="0.86"/>
+  <path d="M552 222h20M562 212v20" fill="none" stroke="#0b63ce" stroke-width="1.6" opacity="0.7"/>
+  <ellipse cx="562" cy="222" rx="10" ry="6.4" fill="none" stroke="#0b63ce" stroke-width="1.6" opacity="0.7"/>
+</svg>

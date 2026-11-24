@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Outils de navigateur webrain",
+    "description": "Ajoute à l'agent les outils d'automatisation de navigateur et de scraping de webrain, exposés en outils mcp__webrain__* par un processus local `webrain mcp`. Commence par webrain_guide, puis pilote un vrai Chrome pour les SPA interactives, les pages authentifiées et les pages protégées par CAPTCHA ou Cloudflare ; l'état du navigateur, les profils et les captures restent sur cette machine. Le binaire webrain doit être dans le PATH (scoop, Homebrew ou une release GitHub), et `webrain install` doit avoir été lancé une fois pour le moteur de navigateur ; si l'un des deux manque, cette ligne de client MCP échoue visiblement dans Plugins et aucun outil webrain n'apparaît. Désactiver le bundle retire les outils ; la configuration de la ligne accepte un Chrome déjà ouvert (CDP) ou des variables WEBRAIN_*.",
+    "detail": "docs/DETAIL.md"
+  }
+}

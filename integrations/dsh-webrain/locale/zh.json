@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "webrain 浏览器工具",
+    "description": "把 webrain 的浏览器自动化与抓取工具作为 mcp__webrain__* 工具交给智能体，由本地 `webrain mcp` 进程提供。先用 webrain_guide，再用真实 Chrome 处理交互式 SPA、需要登录的页面，以及带 CAPTCHA 或 Cloudflare 验证的页面；浏览器状态、配置文件和截图都留在本机。需要 PATH 上有 webrain 可执行文件（scoop、Homebrew 或 GitHub 发布版），并执行一次 `webrain install` 安装浏览器引擎；缺少任一项时，这个 MCP 客户端行会在「插件」页明确报错，也不会出现任何 webrain 工具。关闭该插件包即移除这些工具；该行的配置可指定已打开的 Chrome（CDP）或 WEBRAIN_* 变量。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}
