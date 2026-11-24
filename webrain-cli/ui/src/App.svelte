@@ -4212,7 +4212,12 @@
     }
   }
 
-  $effect(() => {
+  // Boot, once. The body reaches `pushHints` through `loadSettings`, which reads
+  // the instructions, the html switch and the value it last pushed — and the POST
+  // that follows then writes that last one, so a tracked block ran the whole boot
+  // twice. Measured on an empty chat: 23 requests, two `/sessions`, two `/catalog`,
+  // three `/settings`. Nothing here has to re-run, so it is untracked.
+  $effect(() => untrack(() => {
     loadSettings();
     loadPmode();
     loadPending();
@@ -4312,7 +4317,7 @@
       document.removeEventListener("click", ripple);
       if (raf) cancelAnimationFrame(raf);
     };
-  });
+  }));
 
   // A live chip asks for its own summary as it appears — a row that just ran is
   // open, and its sources are the evidence. A row from disk waits for its

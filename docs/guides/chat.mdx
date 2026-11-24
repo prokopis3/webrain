@@ -547,12 +547,14 @@ the token keeps its tint once sent so a thread shows what was handed to the turn
 
 `@name` is resolved **server-side, against both skill roots** — the bundle and
 `~/.agents/skills`, the tree the `npx`-style installers write — and the skill's text
-rides along with that turn (`<skill name="…">`). Settings → Skills lists exactly those
-two roots, so a name on that list is a name a mention can read. `#name` and `/name` are
-the session's own tools and commands: `#` offers only what `GET /catalog` reports, so a
-tool from an MCP server this session does not run is *not* in the menu. To let the chat
-call one (the codebase-memory server, for instance), add it in **Settings → MCP**
-(`POST /mcp/new`) — the tools arrive on the next session.
+rides along with that turn (`<skill name="…">`). Both roots are in the menu as well, so a
+skill you can see is a skill a mention can read; Settings → Skills lists them with their
+descriptions. `#name` and `/name` are the session's own tools and commands: `#` offers
+only what `GET /catalog` reports, so a tool from an MCP server this session does not run
+is *not* in the menu. To let the chat call one (the codebase-memory server, for instance),
+add it in **Settings → MCP** (`POST /mcp/new`) — the session's allowlist grants `mcp:*`,
+so every attached server's tools are callable as soon as it connects, and their schemas
+cost nothing until the model asks for one.
 
 ### The deck: rail, transcript, instruments
 

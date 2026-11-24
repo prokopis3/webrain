@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **a connected MCP server is now a server whose tools a model can call.** The
+  allowlist `tool_filter` names was built from `webrain`'s own tools plus four runtime
+  builtins, so a server the page had attached (`POST /mcp/new`) and `/mcp` listed as
+  `connected` reached the model as `Disabled tools: filesystem-read_file, filesystem-directory_tree,
+  …` — every one of its tools disabled before a schema was ever sent. `#directory_tree` was
+  therefore unanswerable by any provider, which is what a user hit. The allowlist now carries
+  `mcp:*`, so every attached server — including one added after the session started — is
+  callable, and the schemas stay deferred by `tool_search`, so the cost is per call rather than
+  per request. Every call still raises a permission request the page answers.
+- `chat`: **the `@` menu lists the cross-tool skill tree.** `mention_skill` has read
+  `~/.agents/skills` since `@2d-games` arrived as prose, but `skill_names()` — the source of the
+  menu rows — read only the bundle and the webrain tree: 8 names against 883 installed here, so
+  a skill that resolved was one nobody could discover. `skill_names()` unions the tree and
+  `skill_hint` names the root instead of reading 883 files to fill a menu.
 - `chat`: **each conversation keeps its own setup, and a chat that never picked one takes the
   default.** `POST /settings` wrote straight to `settings.json`, which is one file for the whole
   machine, so switching a model or a tool switch in chat B silently changed chat A — and a
@@ -86,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
+- `chat`: **the page boots once, not twice.** The boot `$effect` reaches `pushHints` through
+  `loadSettings`, which reads the instructions, the html switch and the value it last pushed —
+  and the `POST /settings` that follows writes that last one, so the tracked block re-ran in
+  full. Measured on an empty chat: 23 requests, two `/sessions`, two `/catalog` (30 KB each),
+  three `/settings`. The body is untracked now, which is what a boot block should always have
+  been: nothing in it has to re-run.
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
   the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs
   with `failed to run custom build command for copilot-sdk v2.0.1` →

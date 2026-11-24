@@ -4446,7 +4446,9 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
                 }
             }
             let body = json!({ "items": items }).to_string();
-            respond(&mut stream, 200, "application/json", &body).await
+            // Gzipped: the menu now carries the cross-tool skill tree too, and
+            // 900 rows of repetitive JSON is what this encoder is for.
+            respond_gz(&mut stream, &head, 200, "application/json", &body).await
         }
         // Run one of the runtime's slash commands. `commands.execute` refused all
         // 29 of them ("No client found for command") — that path is for a host
@@ -5362,9 +5364,29 @@ fn skill_names() -> Vec<String> {
             .into_iter()
             .map(|(name, _)| name),
     );
+    // The cross-tool tree too. `mention_skill` has read `~/.agents/skills` since
+    // `@2d-games` reached the model as prose, but the menu did not list it — so a
+    // skill that resolved was one nobody could discover: measured here, 883 names
+    // in that tree against 8 in this binary's own.
+    skills.extend(agents_skills().keys().cloned());
     skills.sort();
     skills.dedup();
     skills
+}
+
+/// The cross-tool skill tree, read once per process. Both the menu and the hint
+/// need it and `/catalog` asks per name, so listing 883 directories for each row
+/// would be quadratic for a list that changes once a month.
+///
+/// shortcut: a skill installed while the server runs needs a restart to appear.
+fn agents_skills() -> &'static std::collections::HashMap<String, std::path::PathBuf> {
+    static ONCE: std::sync::OnceLock<std::collections::HashMap<String, std::path::PathBuf>> =
+        std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        webrain_core::skills::agents_dir()
+            .map(|d| webrain_core::skills::list(&d).into_iter().collect())
+            .unwrap_or_default()
+    })
 }
 
 /// A skill's menu hint. `None` when `name` is not a skill at all — a reference
@@ -5378,16 +5400,24 @@ fn skill_hint(name: &str) -> Option<String> {
             .iter()
             .find(|(p, _)| p.split('/').rev().nth(1) == Some(name))
             .map(|(_, t)| t.to_string())
-    })?;
-    webrain_core::skills::frontmatter_name(&text)?;
-    Some(
-        webrain_core::skills::frontmatter(&text, "description")
-            .unwrap_or_default()
-            // A description is a paragraph; a menu row is one line of it.
-            .chars()
-            .take(96)
-            .collect(),
-    )
+    });
+    if let Some(text) = text {
+        webrain_core::skills::frontmatter_name(&text)?;
+        return Some(shorten(
+            &webrain_core::skills::frontmatter(&text, "description").unwrap_or_default(),
+        ));
+    }
+    // A skill from the cross-tool tree. Its description is on disk and there are
+    // 883 of them: the root says where it came from, which is the question a
+    // reader has in front of `@name`.
+    agents_skills()
+        .contains_key(name)
+        .then(|| "~/.agents/skills".to_string())
+}
+
+/// A description is a paragraph; a menu row is one line of it.
+fn shorten(description: &str) -> String {
+    description.chars().take(96).collect()
 }
 
 /// The text of one skill a mention named: the webrain tree first (bundled or

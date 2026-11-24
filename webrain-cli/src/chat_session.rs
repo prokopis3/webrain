@@ -420,6 +420,17 @@ fn tool_filter(allow_agents: bool) -> Vec<String> {
             .add_custom(name)
             .expect("chat_tools::NAMES are runtime-valid names");
     }
+    // Every other server the runtime has attached — `filesystem`, whatever the
+    // user added from the MCP tab. Naming `webrain` alone made "connected" a lie:
+    // the runtime listed the server, then reported every one of its tools as
+    // `Disabled tools: filesystem-…`, so no model could ever call one. The
+    // wildcard is the only form that survives a server the user adds later, and
+    // the schemas stay deferred by `with_search` below, so the cost is per call
+    // rather than per request. Write-capable tools are still gated: every call
+    // raises a permission request the page answers.
+    allowed = allowed
+        .add_mcp("*")
+        .expect("the runtime accepts a wildcard server name");
     // The four built-ins we actually use, not `builtin:*`.
     //
     // Measured 2026-11-07 against the same one-word prompt: the wildcard costs
@@ -1167,6 +1178,13 @@ mod tests {
         assert!(
             served.iter().any(|f| f.starts_with("mcp:webrain-")),
             "{served:?}"
+        );
+        // And every *other* attached server too. `webrain` alone was the bug: the
+        // runtime connected `filesystem` and then reported all its tools disabled,
+        // so `#directory_tree` could never be called by any model.
+        assert!(
+            served.iter().any(|f| f == "mcp:*"),
+            "no wildcard server in {served:?}"
         );
     }
 
