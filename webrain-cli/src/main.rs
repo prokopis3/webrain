@@ -2026,7 +2026,8 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(other) => anyhow::bail!(
-                    "unknown skills action `{other}` — try list, add <url|file>, or rm <name>"
+                    "unknown skills action `{other}` — try list, add <url|file>, or rm <name>\n\
+                     the bundled set is `webrain install skills` (note the word order)"
                 ),
             }
         }

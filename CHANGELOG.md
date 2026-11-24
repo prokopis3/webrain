@@ -200,6 +200,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   superseded dir once the new one verifies (~166 MB each, and only the pinned one can ever
   be spawned). `find_copilot` puts the pinned dir first for the same reason: `find_named`
   prefers the newest version dir, which is the wrong answer after a downgrade.
+- **`webrain skills install` now says where it actually lives.** The bundled set is
+  `install skills` — word order — and the unknown-action error listed only `list`, `add`
+  and `rm`, which is exactly the mistake that sends someone hunting for a command that
+  does not exist. The error names the real spelling, and the CLI reference has the
+  `skills` rows and a section it never had (it listed the `install` row's engines only,
+  so `copilot`, `chat-ui`, `pdfium`, `nemotron` and `skills` were undiscoverable).
 
 ### Fixed
 - `chat`: **a custom tool that shares a built-in's name no longer kills every turn.** The runtime
