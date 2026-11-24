@@ -609,6 +609,12 @@ It is sized to be read across a desk, not to fit the most controls in a row — 
 composer's dock wraps rather than compressing, and the field carries
 `min-width: 0` so a long model name cannot widen the column past the viewport.
 
+The field also **resizes**: drag the 9 px handle on its top edge (or focus it and
+use ↑/↓) and it grows to whatever a long prompt needs, clamped to one row and
+`min(420px, 55vh)` and remembered per browser. The corner button toggles one row
+↔ 30% of the viewport, and reads `maximise` / `minimise` according to what it
+will do.
+
 #### Reading history is one request, once
 
 A saved row carries the tool arguments and the result that backs them, so a
@@ -795,17 +801,24 @@ Attachments are deliberately narrow: **8 MB**, and only images (`png`, `jpg`,
 `jpeg`, `gif`, `webp`) or plain text (`txt`, `md`, `json`, `csv`, `log`, `yml`,
 `yaml`, `toml`, `rs`, `js`, `ts`, `py`, `css`, `xml`). The server renames what it
 receives — one basename, `[A-Za-z0-9._-]`, 48 characters — and writes it under
-`%TEMP%\webrain-chat\<conversation>\`, so the name in a request never decides
-where bytes land and `../../etc/passwd` is refused rather than resolved. The
-prompt gets a line naming that path; the file is never inlined. A paste longer
-than 600 characters or 8 lines takes the same route, leaving one
+`.webrain\attachments\<conversation>\` in the directory the chat was started in,
+the same `.webrain` tree as the tool-output spill, so the agent's own file tools
+can open it (a file in the temp directory was readable by the page and never by
+the model). `WEBRAIN_CHAT_FILES` names another directory, and a read-only
+checkout falls back to `%TEMP%\webrain-chat\`. The name in a request never
+decides where bytes land, and `../../etc/passwd` is refused rather than
+resolved. The prompt gets a line naming that path; the file is never inlined. A
+paste longer than 600 characters or 8 lines takes the same route, leaving one
 `[pasted text #n · N lines · X KB → path]` line instead of the whole dump.
 
 `Ctrl-K` (or the ⌕ in the header) searches the stored history — every message
-body, ranking a hit in a conversation's opening message first and then newest —
-and opens the conversation a hit belongs to. It is a `LIKE` scan over one table,
-not embeddings: instant for a personal history, and the place to move to FTS5 or
-a vector index is when that scan becomes measurable.
+body, **word by word**: each word of the query is matched on its own and the
+rows are ranked by how much of it they answer (most words hit first, then a hit
+in a conversation's opening message, then the phrase intact, then newest) — and
+opens the conversation a hit belongs to, with `↑`/`↓` walking the results. It is
+a `LIKE` scan over one table, not embeddings: instant for a personal history,
+and the place to move to FTS5 or a vector index is when that scan becomes
+measurable.
 
 Permission requests **queue**. The runtime can ask more than once before you have
 answered, and `--serve` shows them one at a time, with the rest counted rather

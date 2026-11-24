@@ -8,6 +8,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `chat`: **an attachment is readable by the agent that was told about it.** Uploads
+  landed in `%TEMP%\webrain-chat\<conversation>\` while every file tool — the seven in
+  `chat_tools` and the `preToolUse` fence in front of the runtime's built-ins — resolves
+  against the directory the chat was started in. So the prompt carried
+  `[attached: … → C:\…\Temp\webrain-chat\…]` and the model answered exactly what the fence
+  says: *"outside the directory this session is allowed to read"*. A spec sheet could be
+  attached, named, and never opened. The directory is now
+  `.webrain/attachments/<conversation>/` inside the working directory — the same `.webrain`
+  tree the tool-output spill already uses, and already in `.gitignore` — so the path in the
+  receipt resolves inside the fence. `WEBRAIN_CHAT_FILES` still names another directory, and
+  a read-only checkout still falls back to temp. `GET /attach/<convo>/<file>` also still
+  serves a file uploaded before the move, so an old transcript keeps its picture. Verified
+  against a running server: an upload answered
+  `path: ".webrain\\attachments\\c1795…\\1795…-probe.txt"` (under the working directory),
+  `GET` returned its bytes, a file seeded at the old temp path still answered `200`, and a
+  missing name still `404`. Test: `an_attachment_lands_inside_the_fence`.
+- `chat`: **history search opens in the middle of the page, not in the rail.** The field
+  filtered the rail in place, so with a long history the match list landed below the fold
+  and typing looked like nothing happened. It is now a dialog — the model picker's shell,
+  `.mfilter` input, `.mlist` rows — opened by **Ctrl/⌘+K** or by the first keystroke in the
+  rail field, with `↵` opening the selected row (the first, until an arrow moves it) and
+  `esc` closing. The matched words in each title and snippet are wrapped in
+  `<b class="hl">` and painted with the theme's accent
+  (`--primary`), escaped before matching so `&`/`<` cannot split an entity in the `{@html}`
+  path. Verified in the page: Ctrl+K opened and focused `#findq`, `install` gave 4 rows and
+  8 highlighted spans at `rgb(78,222,163)` / weight 700, Esc cleared the query, typing
+  `sentry` in the rail promoted to the dialog with the query carried over, and `↵` opened
+  the first match (`/c222`). Budget raised 80 → 81 KB gz for the dialog, with the reason in
+  `check-budget.mjs`.
+- `chat`: **history search matches the words of a query, not the query as one string.** The
+  store ran one `LIKE '%whole query%'`, so `fpv sale` found only a message that said those
+  two words in that order — the phrasing nobody types. Each word is now a condition of its
+  own, and the rows are ranked by how much of the query they answer: words hit (candidates
+  with more of them first), then a hit in the thread's opening message (what the menu shows
+  as its title), then the phrase surviving in one piece, then recency. Verified on a seeded
+  history: `fpv sale` put the thread titled *find fpv drones for sale…* first, its own
+  follow-up second (title hits carry four points), a *dji drone for sale* thread third, an
+  `fpv build` thread last, and `groceries` matched nothing. `↑`/`↓` walk the rows (wrapping,
+  scrolled into view, pointer hover moves the same selection), `↵` opens the selected row,
+  and Ctrl+K takes focus on a **timer** as well as a frame callback: a background tab never
+  paints, so the rAF-only path could leave the field unfocused — which is what "Ctrl+K does
+  nothing while a turn is streaming" was. Highlights are per word and skip one-letter
+  words, so a query of `a` searches without bolding every `a` on the page.
+  Covered by `a_multi_word_query_matches_the_words_apart_and_ranks_by_coverage`.
+- `chat`: **the model's context survives a restart, because it no longer lives in the
+  temp directory.** The runtime's session store — session state, rewind points, plan file,
+  tool history, i.e. the context itself — defaulted to
+  `<temp>/webrain-copilot-home`, while the transcript and settings sat in
+  `<app-data>/webrain`. Any temp cleanup or reboot therefore deleted the context behind a
+  history that stayed on screen, and `POST /resume` had nothing to resume: it answers
+  `resumed: false`, the page swallows the reply, and the next turn starts from scratch.
+  The home now defaults to `copilot-home` beside `chat.db`, and an existing temp home is
+  moved there once so current threads keep their resume key. Verified on an isolated
+  instance: the dir moved (12 entries under `session-state/`, temp copy gone) and
+  `POST /resume` answers `{"resumed":true,"name":"webrain-<convo>"}`.
+- `chat`: **renaming a thread no longer breaks its resume key.** `PATCH /sessions/{id}`
+  copied the user's title into the runtime's session *name* — the same name `POST /resume`
+  looks up as `webrain-{convo}` — so every manually renamed conversation became
+  unresumable, silently. The store owns the title; the runtime keeps its name.
+- `chat`: **the context panel keeps the last snapshot.** `GET /context` reads the live
+  attribution, which only exists while a session is up, so a reload (or a fresh session)
+  answered zeros or `no snapshot yet` with the history still on screen. The route now
+  stores the last snapshot per conversation and serves it back as `stale: true` with
+  `savedAt` when the live answer is null; deleting a thread deletes its snapshot. The
+  save half is verified live (a `context` row written on the first `/context` call), the
+  read-back half is covered by
+  `context_snapshot_is_one_row_per_conversation_and_dies_with_it`.
+- `proxy`: **`WEBRAIN_PROXIES` now reaches every HTTP fetch, not just the tools that
+  resolved it themselves.** The pool was consulted in `http_search` and in nine
+  MCP handlers that called `.or_else(next_proxy)`; `http_agent(None)` still fell back to a
+  direct connection, so `webrain read`, `webrain_batch op=scrape|read` and every
+  engine-level fetch went out from the host IP even with the pool configured — and four
+  tool descriptions promised the pool for exactly those paths. The fallback now lives in
+  `http_agent` (per **request**, so a batch spreads across exits), and an explicit `proxy`
+  still wins and never rotates. Verified with a dead exit in the pool: `read` fails
+  `connection refused` instead of reaching the page, `op=read` fails one row per URL, and
+  both succeed again with the pool unset.
+- `mcp`: **`webrain_batch op=pdf` is gone instead of lying.** It sat in the op enum and
+  the description ("PDF urls[] → markdown + tables + layout, browserless") but `run_batch`
+  had no `pdf` arm, so the op fell through to `fetch` — a real PDF URL answered
+  `status: ok`, `title: ""`, `text: 0 chars`, `data: null`. Removed from the enum and both
+  descriptions, which now point at `webrain_pdf`. PDFs per URL are a real feature (download,
+  temp file, extract), not a fall-through.
+- `batch`: **every row says which document it read.** Only `op=fetch` filled `title`;
+  markdown, extract, eval and interact hardcoded `""`, so a batch that landed on a
+  challenge, consent or 404 page answered `status: ok` with `data: []` —
+  indistinguishable from "the page had no matches", and impossible to satisfy AGENTS.md
+  rule 4 (read the challenge signal) without a second call. One evaluate in
+  `run_on_tab` now fills an empty title for all four ops, and the tool description
+  spells out the row shape (`data` for extract/eval/interact, `text` for
+  fetch/markdown). Measured: a 60-row extract now reports the page's own title at
+  1,2 s (1,1–1,9 s before), and costs one extra round trip only on rows whose op did
+  not supply a title.
+- `read`: **a 403 stops the `.md` retries.** `webrain read` asked for the page, then the
+  `.md` route, then `/index.md` even when the site had already refused the first
+  request, so a hard-blocked URL spent three blocked requests to say so. The first
+  401/403 now ends the loop, so such a URL reports `tried 1 form(s)` instead of 2–3, and
+  a normal page still reads (`example.com` → `html, 172 chars`).
 - `chat`: **the tab has an icon.** `/favicon.ico` was a 404 on every load. The
   server now answers it — and `/favicon.png` — with the docs site's own logo
   (`docs/images/webrain-logo-rounded.png`), downscaled to 64×64 and stripped to
@@ -80,6 +178,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not a broken renderer.
 
 ### Added
+- `chat`: **the composer's field is resizable, and has a one-click expand/shrink.** A prompt
+  needing three screens of pasted text was stuck in a two-row box. The field now drags
+  taller from a 9 px handle on its own top edge — `role="separator"`, so the arrow keys
+  step the same number the pointer drags — clamped to one row and to
+  `min(420px, 55vh)`, with the height remembered per browser like the two rail widths. A
+  button at the field's top-right corner toggles one row ↔ 30% of the viewport, and its
+  glyph and label follow the state (`ICON.up` / `ICON.down`, `maximise` / `minimise`).
+  Verified in the page: a 120 px drag up took the field 70 → 190 px, a 900 px drag down
+  clamped it at 41 px, a drag past the top clamped at 305 px (exactly `min(420, 55vh)`),
+  ↑/↓ on the focused handle stepped 167 → 191 → 167, the button read `minimise the input`
+  while tall and `maximise the input` once shrunk, and a reload came back at the same
+  height. Budget 81 → 82 KB gz, reason in `check-budget.mjs`.
+- `mcp`: **`webrain_batch` takes a `proxy` for its browserless ops.** The HTTP ops
+  (`scrape`, `read`) had no way to name an exit at all — they always went out from
+  whatever the engine chose. Now `proxy` pins one for those two ops (browser ops ignore
+  it: their exit is the browser's, set at launch or by `cdp_urls`), and omitting it
+  rotates the `WEBRAIN_PROXIES` pool per request. Verified: a bad `proxy` fails every
+  row, the same call with `op=fetch` still returns the page, and with no pool the ops
+  read normally.
+- `mcp`: **`webrain_batch op=read` — `webrain read` for N URLs, no tab.** The reader
+  itself was single-URL, so a docs crawl was N `read` invocations; `op=markdown` was the
+  batch option but it renders in a tab and skips the negotiation. `op=read` runs the whole
+  `read` path per URL on a bounded pool of blocking fetches — markdown negotiation, `.md`
+  retry, nearest `llms.txt` — and puts the payload in `data` (`source` says `markdown` /
+  `text` / `html`, never duplicated into `text`). `read`'s payload gained a `title`, so a
+  batch row can name the document it read. Measured: 3 URLs in 1 333 ms, no tabs — a docs
+  page answered `source: markdown`, 19 410 chars with its `llms.txt`; a static page
+  `source: html`, 172 chars; a host that refuses HTTP failed as its own row.
+  The verb's own selection works per row as well — `filter`, `outline`, `max_chars` — and
+  `query`+`top_k` bm25-prune the markdown that row produced, through the one `prune_md`
+  `op=markdown` now shares instead of its inline copy. Measured on two docs pages:
+  19 410 → **247** and 14 096 → **292** chars for `install the SDK`, `outline` answered
+  19 and 15 headings, and `filter: Initialize` returned that section in both rows.
+- `mcp`: **`webrain_batch op=scrape` — the CSS schema as a batch, over plain HTTP.** The
+  schema path existed twice and only one of them scaled: `webrain_extract` / `op=extract`
+  ran it in a browser tab (56 MB each), while `webrain_scrape` ran it browserless for
+  **one** URL. So N static pages meant N calls, or N tabs. `op=scrape` takes the same
+  `base_selector`+`fields` and runs them on a bounded pool of blocking HTTP fetches —
+  no tab, no render, chunked by `concurrency`. Each row is
+  `{url, title, status, data, error, ms}`, and a host that refuses an HTTP client fails
+  **that row** (`403`) instead of looking empty. Measured: 4 URLs in 736 ms total
+  (82–168 ms per row), the blocked host reported as its own 403 row.
+  `http_fetch_extract` also reports the document `title` now, which is what makes a
+  challenge/consent page visible on the HTTP path.
+- `cli`: **`webrain read --browser` — one URL as markdown, even when the host refuses
+  an HTTP client.** `read` is plain HTTP by design (markdown negotiation, `.md` retry,
+  `llms.txt`), so a shop host that answers 403 to every non-browser client had no answer
+  in that verb, only "use `webrain_batch op=markdown` instead". `--browser` navigates the
+  attached Chrome and runs the **same tail** — convert, `--outline`, `--filter`, `--max`
+  — reporting `source: browser`, so the flag changes the transport and nothing else.
+  `read_url`'s tail moved into one `finish()` both transports call, so the two cannot
+  drift. The plain-HTTP failure now names the flag instead of leaving the caller to guess.
+  Verified on three URLs: a static page still reads over HTTP (`html, 172 chars`); a
+  store host that 403s HTTP returns 50 KB of markdown with `--browser`, its `--outline`
+  tree and a `--filter` section holding the real spec table (FC, MCU, geometry, gyro,
+  ESC, motors); a second bot-blocked host renders too.
+- `mcp`: **a JS argument can be a file, so it never has to be escaped twice.** `js`
+  (`webrain_eval`, `webrain_eval_in_frame`, `webrain_add_init_script`, `webrain_batch`
+  `op=eval`) and `interaction` (`op=interact`) now accept `@path/to/file.js` and run the
+  file's text verbatim. Inlining a script meant escaping every quote, backslash and
+  `\s+` into JSON — a first attempt at a real scrape died on exactly that
+  (`args must be JSON … key must be a string`), and only a retry through `@args.json`
+  recovered. A leading `@` that names no file is still JS, so a typo fails loudly
+  instead of running an empty script. Verified: `{"js":"@probe.js"}` answered the page
+  title plus `anchors: 254`, and `js_arg_reads_a_file_only_when_it_exists` pins
+  literal, missing-file and real-file.
 - `chat`: **Settings → Skills lists the cross-tool tree, `~/.agents/skills`.** That is
   where the `npx`-style skill installers put their work, and the runtime reads only its
   own directory — so a skill installed for every other agent on the machine was in no

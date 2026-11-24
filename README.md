@@ -6,7 +6,7 @@
 
 **A portable, LLM-driven browser-automation & web-scraping MCP server — one binary, three engines, any OS.**
 
-WebRain exposes 17 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
+WebRain exposes 19 intent-based tools over the **Model Context Protocol**. Install it on any system, point any LLM client (GitHub Copilot, Claude, Codex, Cursor, …) at it, and the model decides everything — search, crawl, scrape, navigate, interact — from a plain-language prompt. No hardcoded intent detection, no daemon, no Node.js.
 
 [![Latest Release](https://badgen.net/github/release/prokopis3/webrain?icon=github)](https://github.com/prokopis3/webrain/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -184,7 +184,7 @@ webrain screenshot <url>                           # full-page screenshot (alway
 webrain spider <url> [--depth N --pages N --respect-robots]  # crawl
 webrain click <i> / type <i> <text> / eval <js>    # drive the CDP_URL backend
 webrain tool <name> '<json>' [--url U]             # ANY of the 19 MCP tools, no model needed
-webrain read <url> [--outline|--filter T]          # a page as markdown over HTTP (no browser)
+webrain read <url> [--browser|--outline|--filter T]  # a page as markdown (HTTP; --browser for a host that refuses it)
 webrain pdf <file-or-url> [--json]                 # PDF text as markdown (no browser)
 webrain obscura / lightpanda [--port N]            # spawn a CDP server
 webrain watch <video-url-or-file> [--vision]       # transcript + frames (no browser)
@@ -274,7 +274,7 @@ line and the three follow-up chips the model wrote.*
   instead of a URL: capped at 22 rem, lazy while the thread is reopened, and a path that
   does not exist falls back to the text it was written as.
 - **A tool call is a card you can re-run.** Arguments and result are shown verbatim,
-  the row reads as a sentence (`Searched the web for "…"`, `Read el.aegeanair.com`),
+  the row reads as a sentence (`Searched the web for "…"`, `Read docs.example.com`),
   and **edit & re-run** sends the corrected arguments through the session's own
   invocation pipeline — no model turn, no tokens, and the original call stays visible.
 - **The turn is steerable**: queue a prompt behind the running one or steer it, stop
@@ -318,7 +318,7 @@ The surface is **intent-based** (firecrawl-style) — each tool has a `what` / `
 | `webrain_interact` | Drive the page: `action` = click · click_coords · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script |
 | `webrain_extract` | Structured data: `mode` = schema (CSS) · regex · jsonld · table · autoschema · bm25 |
 | `webrain_scrape` | No-browser HTTP fetch of one URL (static only, no render) |
-| `webrain_batch` | Same op across many URLs in parallel tabs: `op` = fetch · markdown · extract · interact · eval · screenshot (+ `cdp_urls` per-proxy fan-out) |
+| `webrain_batch` | One op across many URLs: `op` = fetch · markdown · extract · **scrape** (CSS schema, no browser) · **read** (markdown negotiation per URL) · interact · eval · screenshot · autoschema · assets, in parallel tabs or over the HTTP path (`proxy`, `cdp_urls` fan-out) |
 | `webrain_crawl` | Site traversal: `mode` = spider (BFS/DFS/best-first + autothrottle + checkpoint) · sitemap · scan · validate |
 | `webrain_search` | Web search (duckduckgo · google · bing · brave) |
 | `webrain_serp` | Structured JSON search: `position`/`title`/`url`/`domain`/`snippet` across duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto (dedupe · paginate · region-pin · proxy · Brave API key · serpapi) |
@@ -411,7 +411,7 @@ The complete list, with defaults and the allow/deny rules, is in
 | `WEBRAIN_PROFILES_DIR` | Persistent browser-profile root. Profiles are what keeps a login or a solved challenge across calls; pointing this somewhere new looks exactly like being logged out | `%APPDATA%\webrain\profiles` / `~/.local/share/webrain/profiles` |
 | `WEBRAIN_PROXIES` | Proxy rotation pool (comma/newline list) for the HTTP engines and the google/brave guest Chrome; a per-call `proxy` overrides it | unset |
 | `WEBRAIN_SKILLS_DIR` | Directory of operator `*.md` skills the agent reads through `webrain_guide(topic="skill:<name>")` | `<engine cache>/skills` (filled by `webrain install skills`) |
-| `WEBRAIN_MCP_TOOLS` | Advertise only the named MCP tools (`serp,scrape`). The 18 schemas are ~8,080 tokens before your prompt — over Groq's free 7,000 tokens/minute cap, so trimming is what makes that tier run | all tools |
+| `WEBRAIN_MCP_TOOLS` | Advertise only the named MCP tools (`serp,scrape`). The full schema set is ~8k tokens before your prompt — over Groq's free 7,000 tokens/minute cap, so trimming is what makes that tier run | all tools |
 | `BRAVE_API_KEY` | Enables the keyed Brave SERP provider — `--engine brave` then needs no browser | unset |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `FIREWORKS_API_KEY` | Optional cloud STT and vision; the bundled local stack needs no keys | unset |
 | `RUST_LOG` | Log verbosity, e.g. `webrain=info,tungstenite=warn` | — |
@@ -525,7 +525,7 @@ webrain (single binary)
 │   ├── launch.rs           spawn Chrome/lightpanda/obscura, wait for CDP
 │   ├── login.rs / vault.rs encrypted credential vault + CDP login injection (TOTP)
 │   └── vision.rs           screenshot-tile embedding + vector store
-├── webrain-mcp             MCP server: list_tools / call_tool, 17 intent-based tools (63 legacy via map_surface)
+├── webrain-mcp             MCP server: list_tools / call_tool, 19 intent-based tools (63 legacy via map_surface)
 └── webrain-cli             subcommand dispatch (mcp | install | launch | login | …)
 ```
 
@@ -562,7 +562,7 @@ LLM prompt → tool call (webrain_navigate/extract/batch/…) → CdpBackend →
 | [Quickstart](docs/quickstart.mdx) | Engine → MCP server → a live scrape in minutes |
 | [Installation](docs/installation.mdx) | Every install path, Linux libraries, updating |
 | [Agent Decision Guide](docs/AGENT_DECISION_GUIDE.md) | Which engine, which tool, how to handle a challenge |
-| [Tools reference](docs/reference/tools.mdx) | The 18-tool surface, per tool and per selector |
+| [Tools reference](docs/reference/tools.mdx) | The 19-tool surface, per tool and per selector |
 | [CLI reference](docs/reference/cli.mdx) | Every subcommand and flag |
 | [Environment variables](docs/reference/environment.mdx) | Every knob, with defaults |
 | [Architecture](docs/ARCHITECTURE.md) · [ADRs](docs/adr/) | How the layers fit, and why |
