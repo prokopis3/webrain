@@ -23,6 +23,17 @@ All notable changes, in reverse chronological order. The full version lives in
   subcommand pages are new: the eleven `install` targets, `uninstall vision`,
   `skills list|add|rm`, and `vault set|list|user|rm`.
 
+- **docs**: the CLI reference covers skills, which it never did. The Commands table has
+  no `webrain skills` row at all, so the README's `skills add` / `install skills` had no
+  counterpart on this site, and the install row named only engines — `copilot`,
+  `chat-ui`, `pdfium`, `nemotron` and `skills` were undiscoverable. There is now a row
+  per command plus a **Skills** section, because the two commands look interchangeable
+  and are not: `install skills` writes the bundled set offline (and keeps files you
+  edited), `skills add` takes one file from any URL or path. The bundled list in the
+  `webrain_guide` accordion is also corrected — it named five of the eight. Typing
+  `webrain skills install` now answers with the real spelling instead of a list of the
+  three actions that do exist.
+
 ### Fixed
 
 - **build**: the two static musl binaries ship without `chat`. `copilot-sdk` 2.0.1's
