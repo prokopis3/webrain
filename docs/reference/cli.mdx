@@ -15,7 +15,24 @@ binary reads**, grouped (attach/engines, stealth, network, MCP transport, vault,
 SERP tiers, agent, local AI, logging). The defaults and the long explanations
 live in [Environment Variables](/reference/environment); `webrain help env`
 prints just that section and `webrain <command> --help` prints one command's
-flags.
+page.
+
+Help follows the command path, so the deeper commands have their own page
+rather than a paragraph on their parent's:
+
+```bash
+webrain install --help         # the install page + SUBCOMMANDS
+webrain install watch --help   # ffmpeg/yt-dlp/whisper bundle, its own flags
+webrain vault rm --help        # one vault action
+webrain help install copilot   # `webrain help <cmd> [<sub>]` works too
+```
+
+`SUBCOMMANDS` is derived from the same table the overview is, so a parent page
+cannot advertise a subcommand that has no page. A path that names nothing is
+answered by its nearest parent and says what missed: `webrain install chat
+--help` prints the install page with `No page for install chat` under it, which
+is the honest answer — `chat` is not an `install` subcommand (`copilot` and
+`chat-ui` are).
 
 ## Commands
 
