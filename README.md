@@ -172,11 +172,12 @@ webrain eval 'document.querySelector("#email").value'
 ## Commands
 
 ```bash
+webrain <cmd> [<sub>] --help                       # any command, any depth (install watch, vault rm)
 webrain mcp [--http <port>]                        # MCP server (stdio, or HTTP on a port)
 webrain doctor                                     # diagnose the install (engines, MCP, CDP, vault)
 webrain install [--engine chrome|obscura] [--stealth]  # download a browser engine
-webrain upgrade                                    # update the binary — then the two
-                                                   # `install` steps under "After an upgrade"
+webrain upgrade                                    # update the binary + the chat page /
+                                                   # Copilot runtime already installed
 webrain launch <service> <profile> [url]           # stealth Chrome, persistent profile
 webrain login <service> <profile> [url]            # interactive login into a profile
 webrain vault set|list|user|rm                     # encrypted credential vault (AES-256-GCM + TOTP)
@@ -236,19 +237,35 @@ webrain chat --serve          # browser UI on http://127.0.0.1:8787/
 
 ### After an upgrade
 
-The runtime and the page live **outside** the binary, so a new version will not run the
-old ones — and they are not refreshed for you:
+The runtime and the page live **outside** the binary, so a new version will not
+run the old ones. `webrain upgrade` refreshes both in the same run, and only the
+ones already on disk:
+
+```
+webrain: 0.20.0 -> v0.21.0
+chat UI already installed: …/browsers/chat-ui     # no-op: this build's page
+Downloading Copilot runtime 1.0.120 (copilot-win32-x64.zip)...   # pin moved
+```
+
+Each `install` runs as the **new** binary — it is the only one that knows the
+page digests and the Copilot pin — so an unchanged page or runtime costs a
+digest check and nothing else. Homebrew and Scoop installs chain the same two
+commands onto their own update. `--force` re-downloads both.
+
+Skip `upgrade` (a `cargo install … --force`, or switching between a release
+binary and a checkout) and the two steps are still separate:
 
 ```bash
 webrain install chat-ui            # the new page; an old one fails its digest check
-webrain install copilot --force    # without --force it sees the old runtime and stops
+webrain install copilot            # keyed on this build's pin, so no --force
 ```
 
 `install chat-ui` replaces a page from another version on its own — it verifies the
 unpacked files against this build's digests, so an old page is refused, never served.
-`install copilot` has no such check: it sees *a* runtime and reports "already installed",
-which is why `--force` is the part people miss. Same after `cargo install … --force`, and
-after switching between a release binary and a checkout.
+`install copilot` now keys on the pin compiled into this build: a runtime from another
+version is replaced instead of reported as "already installed", and the old one is
+deleted once the new one verifies. `--force` is only for re-downloading the *same*
+pin (a truncated archive, say).
 
 ### What the page does that a terminal does not
 
