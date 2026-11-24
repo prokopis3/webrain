@@ -505,9 +505,26 @@
   let ctxOpen = $state(false);
   let ctxBusy = $state(false);
   const ctxPct = $derived(ctx?.limit ? Math.min(100, (ctx.used / ctx.limit) * 100) : 0);
+  // The panel's own total: the attribution is the same measurement and is there
+  // before the first turn, when the system prompt and the tool definitions are
+  // already in the window and `usage_info` has not spoken yet. Reading `ctx.used`
+  // alone said "0 / 128k" above a list of rows adding up to 16k.
+  const ctxUsed = $derived(Math.max(ctx?.used || 0, ctxInfo?.totalTokens || 0));
+  const ctxUsedPct = $derived(ctx?.limit ? Math.min(100, (ctxUsed / ctx.limit) * 100) : 0);
   // 230.5K / 1M, the way a window is spoken about.
   const toks = (n) =>
     n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+
+  async function seedCtx() {
+    try {
+      const j = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
+      if (!ctx && j.promptTokenLimit) {
+        ctx = { used: j.totalTokens || 0, limit: j.promptTokenLimit };
+      }
+    } catch {
+      /* no ring until the first turn reports one */
+    }
+  }
 
   async function openCtx() {
     ctxOpen = !ctxOpen;
@@ -531,7 +548,12 @@
     const a = ctxInfo?.attribution?.contextAttribution;
     const c = a?.categories;
     if (!c) return [];
-    const lim = a.limit || ctxInfo.promptTokenLimit || 0;
+    // The session's budget, not the model's advertised window: the header above
+    // these rows is `used / promptTokenLimit`, and this page's ring and the
+    // runtime's compaction both speak that number. Measured on a 1M-context
+    // model the two differ — rows read 1.5% against the header's 12% for the
+    // same tokens, which is two bases in one panel.
+    const lim = ctxInfo.promptTokenLimit || a.limit || 0;
     const row = (label, n) => {
       const p = lim ? (n / lim) * 100 : 0;
       // A share under a tenth of a percent is not zero, and "0.0%" reads as zero.
@@ -1891,6 +1913,10 @@
       convos = j.sessions || [];
       moreSessions = j.more === true;
       railNext = j.next ?? convos.length;
+      // Nothing reports the window before a turn, so the ring did not exist while
+      // 16k of system prompt and tool definitions were already in it. One read of
+      // the runtime's own accounting is enough to draw it.
+      if (!ctx) seedCtx();
       // A turn keeps running on the server across a reload; without this a
       // refreshed page looks idle while the agent is still working. Only ever
       // raised here — `assistant.idle` is what lowers it, so a turn this page
@@ -6106,8 +6132,8 @@
               <p class="none">{ctxInfo.error}</p>
             {:else}
               <p class="ctxpop-h">
-                <b>{toks(ctx.used)} / {toks(ctx.limit)} tokens</b>
-                <span>{ctxPct.toFixed(0)}%</span>
+                <b>{toks(ctxUsed)} / {toks(ctx.limit)} tokens</b>
+                <span>{ctxUsedPct.toFixed(0)}%</span>
               </p>
               <!-- One line, the window split the way the rows below read: each
                    segment is a share of the allowance, and the darker one on the

@@ -134,6 +134,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
+- `chat`: **the Session Info panel reads one basis, and opens before the first turn.** Two
+  numbers disagreed inside one panel: the header printed `used / promptTokenLimit` (12% of a
+  128k session budget) while the rows below took their percentages from the attribution's
+  `limit`, which is the *model's* advertised window — measured on a 1M-context model, the
+  same 15k of tool definitions read `1.5%` under a header saying `12%`. Rows now divide by
+  the session budget the header shows and the runtime compacts against. The ring also
+  existed only once `session.usage_info` arrived, i.e. only after a turn, so a fresh chat
+  had no Session Info at all while 16k of system prompt and tool definitions were already
+  spent; one read of `/context` at boot draws it (verified on screen: `15k / 1.0M tokens`,
+  System / User Context groups with Messages and Tool Results).
 - `chat`: **the page boots once, not twice.** The boot `$effect` reaches `pushHints` through
   `loadSettings`, which reads the instructions, the html switch and the value it last pushed —
   and the `POST /settings` that follows writes that last one, so the tracked block re-ran in
