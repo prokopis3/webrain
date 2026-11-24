@@ -14,7 +14,10 @@ import { strict as assert } from "node:assert";
 // Ceilings are the measured size at the time of writing plus ~5%: enough room for
 // a feature, not enough for a second framework.
 const BUDGET = [
-  ["../assets/chat.js", 80, "the app bundle"],
+  // 82 since the composer field became draggable from its top edge (vertical
+  // handle, clamped height, a corner expand/shrink button); it was 81 with the
+  // history-search dialog and 80 before that with the results in the rail.
+  ["../assets/chat.js", 82, "the app bundle"],
   ["../assets/chat.css", 15, "the stylesheet"],
   ["../assets/chunk-markdown.js", 29, "marked + DOMPurify, deferred"],
 ];

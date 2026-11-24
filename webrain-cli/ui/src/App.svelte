@@ -262,8 +262,61 @@
     if (which === "rail") railW = w;
     else instW = w;
   }
+  // The field drags taller from its top edge, the same way the rails drag wider
+  // from theirs — one number, clamped, remembered. `0` is "the one row the CSS
+  // asks for", which is what an untouched page shows.
+  let composeH = $state(readJson("compose-h", 0));
+  const H_MIN = 41; // shortcut: one row at the default size, refined when the drag starts
+  const hMax = () => Math.min(420, Math.round(innerHeight * 0.55));
+  const clampH = (h) => Math.round(Math.min(hMax(), Math.max(H_MIN, h)));
+  $effect(() => {
+    document.documentElement.style.setProperty(
+      "--compose-h",
+      composeH ? `${composeH}px` : "auto",
+    );
+  });
+  let compDrag = null;
+  function compDown(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const field = e.currentTarget.parentElement?.querySelector("textarea");
+    compDrag = { y: e.clientY, start: composeH || field?.offsetHeight || H_MIN };
+    addEventListener("pointermove", compMove);
+    addEventListener("pointerup", compUp, { once: true });
+    addEventListener("pointercancel", compUp, { once: true });
+  }
+  // Up is taller: the handle sits under the field, so dragging the seam towards
+  // the top of the page is what grows it.
+  function compMove(e) {
+    if (compDrag) composeH = clampH(compDrag.start + (compDrag.y - e.clientY));
+  }
+  function compUp() {
+    removeEventListener("pointermove", compMove);
+    removeEventListener("pointercancel", compUp);
+    compDrag = null;
+  }
+  // The arrow keys step what the drag sets, which is what the slider role says.
+  function compKey(e) {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const cur = composeH || H_MIN;
+    composeH = clampH(cur + (e.key === "ArrowUp" ? 24 : -24));
+  }
+  // The corner button, labelled with what pressing it does: a control that
+  // always reads "maximize" is one you press to shrink.
+  const tall = $derived(composeH > H_MIN + 8);
+  function toggleCompose() {
+    composeH = tall ? H_MIN : clampH(Math.round(innerHeight * 0.3));
+  }
   let q = $state("");
   let hits = $state([]);
+  // The row ↵ would open. Arrow keys move it; a new answer resets it, so the
+  // first match is always what a hurried Enter takes.
+  let sel = $state(0);
+  // History search lives in a modal, not in the rail: the rail is a scrolling
+  // list, and with a long history the match list sat below the fold, so typing
+  // looked like it did nothing. One field, one place — in the middle.
+  let findOpen = $state(false);
   let searchSeq = 0;
   let searchTimer = 0;
   let attachSeq = 0;
@@ -2113,6 +2166,7 @@
     back: stroke('<path d="M14.5 5.5L8 12l6.5 6.5"/>'),
     forward: stroke('<path d="M9.5 5.5L16 12l-6.5 6.5"/>'),
     down: stroke('<path d="M5.5 9.5L12 16l6.5-6.5"/>'),
+    up: stroke('<path d="M5.5 14.5L12 8l6.5 6.5"/>'),
     right: stroke('<path d="M9.5 5.5L16 12l-6.5 6.5"/>'),
     arrowDown: stroke('<path d="M12 4.8v14.4"/><path d="M6.4 13.6L12 19.2l5.6-5.6"/>'),
     gear: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m9.25 22-.4-3.2q-.32-.13-.61-.3t-.56-.37L4.7 19.38l-2.75-4.75 2.58-1.95q-.03-.18-.03-.34t0-.34 0-.34.03-.34L1.95 9.38 4.7 4.63l2.98 1.25q.27-.2.57-.38t.6-.3l.4-3.2h5.5l.4 3.2q.33.13.61.3t.56.38l2.98-1.25 2.75 4.75-2.57 1.95q.02.18.02.34t0 .34 0 .34-.05.34l2.57 1.95-2.75 4.75-2.95-1.25q-.27.2-.57.38t-.6.3l-.4 3.28h-5.5ZM11 20h1.98l.35-2.65q.78-.2 1.44-.59t1.21-.94l2.47 1.03.98-1.7-2.15-1.63q.13-.35.17-.74t.05-.78-.05-.79q-.05-.39-.17-.74l2.15-1.63-.98-1.7-2.47 1.06q-.55-.57-1.21-.96t-1.44-.59L13 4h-1.97l-.35 2.65q-.78.2-1.44.59t-1.21.93L5.55 7.15l-.97 1.7 2.15 1.6q-.13.38-.18.75t-.05.8q0 .4.05.77t.17.75l-2.14 1.63.98 1.7 2.47-1.05q.55.58 1.21.96t1.44.59zm1.05-4.5q1.45 0 2.47-1.03T15.55 12t-1.02-2.48-2.48-1.02q-1.47 0-2.49 1.02T8.55 12t1.01 2.47 2.49 1.03"/></svg>',
@@ -2967,41 +3021,108 @@
       const mine = ++searchSeq;
       if (!term) {
         hits = [];
+        sel = 0;
         return;
       }
       try {
         const r = await fetch(`/search?q=${encodeURIComponent(term)}`);
         if (!r.ok || mine !== searchSeq) return;
         const j = await r.json();
-        if (mine === searchSeq) hits = j.hits || [];
+        if (mine === searchSeq) {
+          hits = j.hits || [];
+          sel = 0;
+        }
       } catch {
         /* history search is a convenience: a failed read just shows nothing */
       }
     }, 60);
   }
 
-  // Search is a field at the top of the rail, not a modal on top of the page:
-  // Ctrl-K opens the rail and puts the cursor in it, so there is exactly one
-  // place a query can go.
+  // Ctrl-K and the rail's field both land here: the modal owns the query, so the
+  // results are always on screen whatever the thread list is doing.
   function openSearch() {
-    panelOpen = true;
-    requestAnimationFrame(() => document.getElementById("railq")?.focus());
+    findOpen = true;
+    focusFind();
+  }
+
+  // Focus, three ways. The frame callback is the fast path; the timer is the one
+  // that always runs — a background tab never paints, so `requestAnimationFrame`
+  // never fires there, and a streaming turn can hand focus back to the composer
+  // after the field was focused. The late try only reclaims focus that fell to
+  // the page or the composer; a click on a result is a decision, not a slip.
+  function focusFind() {
+    const grab = () => document.getElementById("findq")?.focus();
+    grab();
+    requestAnimationFrame(grab);
+    setTimeout(() => {
+      const el = document.getElementById("findq");
+      if (!el) return;
+      const at = document.activeElement;
+      // Already inside the dialog (this field, or a row the reader tabbed to):
+      // leave it alone. Anything else — the composer, the rail's own field, the
+      // page — lost the focus this keystroke meant to place.
+      if (at === el || (at instanceof HTMLElement && at.closest("#modal"))) return;
+      el.focus();
+    }, 120);
+  }
+
+  // ↑/↓ walk the results and wrap, so a long list never traps the keyboard on the
+  // field. The selected row is scrolled into view as it moves.
+  function moveSel(step) {
+    if (!hits.length) return;
+    sel = (sel + step + hits.length) % hits.length;
+    requestAnimationFrame(() =>
+      document.querySelector(".mlist .rhit.sel")?.scrollIntoView({ block: "nearest" }),
+    );
+  }
+
+  // The words a query is made of. One-letter words are dropped from the
+  // highlight (not from the search): bolding every "a" is noise, and the server
+  // already ranked the rows.
+  function needles(term) {
+    return [...new Set((term || "").toLowerCase().split(/\s+/).filter((w) => w.length > 1))].sort(
+      (a, b) => b.length - a.length,
+    );
+  }
+
+  // The matched words, with each match wrapped in <b class="hl">. Escaped BEFORE
+  // matching — and every needle is escaped too — so a query containing & or <
+  // cannot split an entity or inject anything into {@html}.
+  function hi(text, term) {
+    const t = esc(text ?? "");
+    const words = needles(term);
+    if (!words.length) return t;
+    const rx = new RegExp(
+      words.map((w) => esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+      "gi",
+    );
+    return t.replace(rx, (m) => `<b class="hl">${m}</b>`);
   }
 
   // Picking a match opens that conversation and clears the field, so the rail
   // returns to being a list.
   function pickHit(h) {
+    if (!h) return;
     q = "";
     hits = [];
+    sel = 0;
+    findOpen = false;
     openConvo(h.convo);
   }
 
-  // The matched words, not the first 80 characters of the message.
+  // The matched words, not the first 80 characters of the message — and the
+  // earliest of them, so a row is snipped where the reader is looking.
   function snippet(body, term) {
-    const at = body.toLowerCase().indexOf(term.trim().toLowerCase());
+    const low = body.toLowerCase();
+    const words = needles(term);
+    const at = words.reduce((best, w) => {
+      const i = low.indexOf(w);
+      return i >= 0 && (best < 0 || i < best) ? i : best;
+    }, -1);
     if (at < 0) return body.slice(0, 120);
+    const len = words.find((w) => low.startsWith(w, at))?.length || 1;
     const from = Math.max(0, at - 50);
-    const to = Math.min(body.length, at + term.trim().length + 90);
+    const to = Math.min(body.length, at + len + 90);
     return `${from > 0 ? "…" : ""}${body.slice(from, to)}${to < body.length ? "…" : ""}`;
   }
 
@@ -3583,6 +3704,7 @@
       localStorage.setItem("webrain-chat-tools-builtin-off", JSON.stringify(builtinOff));
       localStorage.setItem("webrain-chat-rail-w", JSON.stringify(railW));
       localStorage.setItem("webrain-chat-inst-w", JSON.stringify(instW));
+      localStorage.setItem("webrain-chat-compose-h", JSON.stringify(composeH));
       localStorage.setItem("webrain-chat-instructions", instructions);
       localStorage.setItem("webrain-chat-language", language);
       localStorage.setItem("webrain-chat-suggest", JSON.stringify(suggest));
@@ -4100,7 +4222,28 @@
         e.preventDefault();
         return openSearch();
       }
+      // The modal owns the keyboard while it is open. Handling arrows and Enter
+      // here, not only on the field, is what keeps it usable mid-turn: a
+      // streaming render can hand focus back to the composer, and the keys must
+      // still walk the list.
+      if (findOpen) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          return moveSel(e.key === "ArrowDown" ? 1 : -1);
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          return pickHit(hits[sel] ?? hits[0]);
+        }
+      }
       if (e.key === "Escape") {
+        if (findOpen) {
+          findOpen = false;
+          q = "";
+          hits = [];
+          sel = 0;
+          return;
+        }
         if (modelOpen) return (modelOpen = false);
         if (effortOpen) return (effortOpen = false);
         if (settingsOpen) return (settingsOpen = false);
@@ -5197,14 +5340,17 @@
       <input
         id="railq"
         bind:value={q}
-        oninput={onSearchInput}
-        placeholder="search history"
+        oninput={() => {
+          onSearchInput();
+          if (!findOpen && q.trim()) openSearch();
+        }}
+        placeholder="search history · ⌘K"
         aria-label="search threads and messages"
         spellcheck="false"
         autocomplete="off"
       />
       {#if q}
-        <button class="clearq" onclick={() => { q = ""; hits = []; }} aria-label="clear search">
+        <button class="clearq" onclick={() => { q = ""; hits = []; sel = 0; }} aria-label="clear search">
           <span class="gi" aria-hidden="true">{@html ICON.x}</span>
         </button>
       {/if}
@@ -5214,23 +5360,11 @@
       <span class="gi" aria-hidden="true">{@html ICON.plus}</span> new chat
     </button>
 
-    {#if q.trim()}
-      <div class="side-h">matches <span class="count">{hits.length}</span></div>
-      {#if hits.length === 0}
-        <p class="none">nothing matches “{q.trim()}”</p>
-      {/if}
-      {#each hits as h, i (i)}
-        <button class="rhit" onclick={() => pickHit(h)}>
-          <span class="rtitle">{h.title || h.convo}</span>
-          <span class="rsnip">{snippet(h.body, q)}</span>
-        </button>
-      {/each}
-    {:else}
-      <div class="side-h">threads</div>
-      {#if convos.length === 0}
-        <p class="none">no history yet</p>
-      {/if}
-      {#each convos as c (c.id)}
+    <div class="side-h">threads</div>
+    {#if convos.length === 0}
+      <p class="none">no history yet</p>
+    {/if}
+    {#each convos as c (c.id)}
         {#if editing === c.id}
           <div class="convo editing">
             <input
@@ -5293,7 +5427,6 @@
           </div>
         {/if}
       {/each}
-    {/if}
 
     <div class="side-foot">
       <!-- One line each: a rail this narrow turned a second line into a letter.
@@ -5415,6 +5548,20 @@
 </div>
 
 <div id="composer" use:measureComposer>
+  <!-- The field's top edge is its handle, the way the rails' seam is theirs. A
+       role of its own so a keyboard can step the same number the pointer drags. -->
+  <div
+    class="cgrab"
+    role="separator"
+    aria-orientation="horizontal"
+    aria-label="resize the input field"
+    aria-valuemin={H_MIN}
+    aria-valuemax={hMax()}
+    aria-valuenow={composeH || H_MIN}
+    tabindex="0"
+    onpointerdown={compDown}
+    onkeydown={compKey}
+  ></div>
   <Palette
     {palette}
     selected={palette?.index ?? 0}
@@ -5559,6 +5706,16 @@
       }}
     ></textarea>
     </div>
+    <!-- The field's own corner control: one row, or a panel tall enough to read a
+         long prompt in. Glyph and label both follow the state. -->
+    <button
+      class="size"
+      onclick={toggleCompose}
+      title={tall ? "minimise the input" : "maximise the input"}
+      aria-label={tall ? "minimise the input" : "maximise the input"}
+    >
+      {@html tall ? ICON.down : ICON.up}
+    </button>
     <!-- Dictation sits beside Send, where the thumb is: record, transcribe
          locally, and the text lands in the field above. -->
     <button
@@ -5876,6 +6033,50 @@
   onoff={(next) => (builtinOff = next)}
   onallow={(key) => toggleAllow(key)}
 />
+
+{#if findOpen}
+  <div
+    id="modal"
+    onclick={(e) => e.target === e.currentTarget && (findOpen = false)}
+    role="presentation"
+  >
+    <div class="card">
+      <div class="mhead">
+        <span>search history</span>
+        <span class="dim">{q.trim() ? `${hits.length} matches` : "threads and messages"}</span>
+      </div>
+      <input
+        id="findq"
+        class="mfilter"
+        bind:value={q}
+        oninput={onSearchInput}
+        placeholder="type words — any of them may match"
+        aria-label="search threads and messages"
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <div class="mlist">
+        {#if !q.trim()}
+          <p class="none">type a word or two — titles and message bodies are searched</p>
+        {:else if hits.length === 0}
+          <p class="none">nothing matches “{q.trim()}”</p>
+        {/if}
+        {#each hits as h, i (i)}
+          <button
+            class="rhit"
+            class:sel={i === sel}
+            onmouseenter={() => (sel = i)}
+            onclick={() => pickHit(h)}
+          >
+            <span class="rtitle">{@html hi(h.title || h.convo, q)}</span>
+            <span class="rsnip">{@html hi(snippet(h.body, q), q)}</span>
+          </button>
+        {/each}
+      </div>
+      <p class="hint">↑↓ move · ↵ opens · esc closes · every word matches on its own</p>
+    </div>
+  </div>
+{/if}
 
 {#if modelOpen}
   <div
@@ -6608,7 +6809,7 @@
             <dt>Enter</dt><dd>send · Shift+Enter a new line · Alt+Enter queue behind a running turn · Ctrl+Enter stop it and send</dd>
             <dt>Esc</dt><dd>close a menu or dialog · discard a recording</dd>
             <dt>/ @ #</dt><dd>commands, skills, tools — the menus above the composer; <kbd>Tab</kbd> fills the name, <kbd>Enter</kbd> runs it</dd>
-            <dt>Ctrl K</dt><dd>search every stored message</dd>
+            <dt>Ctrl K</dt><dd>search every stored message — each word matches on its own, ↑↓ move · ↵ opens</dd>
           </dl>
           <button class="linky danger" onclick={resetSettings}>reset every setting</button>
         {/if}
@@ -7577,6 +7778,24 @@
   :global(#app:not(:has(.deck.open)) #composer) { left: 0; }
   @media (max-width: 1100px) { #composer { right: 0; } }
   @media (max-width: 860px) { #composer { left: 0; } }
+  /* The drag band on the field's top edge. Thin, because it sits over the
+     transcript's last line, and it only shows itself on hover or focus. */
+  .cgrab { position: absolute; inset: 0 0 auto; height: 9px; z-index: 14; cursor: ns-resize;
+    border: 0; padding: 0; background: none; }
+  .cgrab::after { content: ""; position: absolute; left: 50%; top: 4px; width: 2.6rem;
+    height: 2px; margin-left: -1.3rem; border-radius: 1px; background: var(--outline-variant);
+    transition: background var(--motion-short) var(--ease); }
+  .cgrab:hover::after, .cgrab:focus-visible::after, .cgrab:active::after {
+    background: var(--primary); }
+  .cgrab:focus-visible { outline: none; }
+  /* The corner button shares the field's top edge, so it never sits in the
+     middle of a tall box with nothing to do. */
+  #composer .size { flex: 0 0 auto; align-self: flex-start; width: 2rem; min-height: 2rem;
+    padding: 0; display: grid; place-items: center; background: none; border: 0;
+    border-radius: var(--shape-full); color: var(--faint); cursor: pointer;
+    transition: background var(--motion-short) var(--ease), color var(--motion-short) var(--ease); }
+  #composer .size:hover { background: var(--state-hover); color: var(--primary); }
+  #composer .size:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
   .attached { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1);    padding: var(--s2) clamp(1rem, 4vw, 3rem) 0; }
   .attached .chip { cursor: default; border-left: 3px solid var(--hue, var(--outline));
     display: inline-flex; align-items: center; gap: var(--s1); }
@@ -7608,7 +7827,8 @@
   .k-doc { --hue: var(--on-surface-variant); }
   footer { display: flex; gap: var(--s2); align-items: center;
     padding: var(--s3) clamp(1rem, 4vw, 3rem) 0; }
-  textarea { flex: 1; min-width: 0; resize: none; min-height: 2.6rem; max-height: 200px; background: none;
+  textarea { flex: 1; min-width: 0; resize: none; min-height: 2.6rem;
+    height: var(--compose-h, auto); max-height: var(--compose-h, none); background: none;
     color: var(--on-surface); border: 0; border-radius: 0; padding: var(--s2) 0; font: inherit;
     caret-color: var(--primary);
     /* Above the tint layer: an absolutely positioned sibling paints over in-flow
@@ -8031,10 +8251,17 @@
     cursor: pointer; min-height: 0; margin-bottom: 2px;
     transition: background var(--motion-short) var(--ease), border-color var(--motion-short) var(--ease); }
   .rhit:hover, .rhit:focus-visible { background: var(--state-hover); border-left-color: var(--primary); }
+  /* The row ↵ would open. One state with hover, so moving with the keyboard and
+     pointing at a row look like the same act — the accent edge is the tell. */
+  .rhit.sel { background: var(--state-hover); border-left-color: var(--primary); }
   .rhit .rtitle { color: var(--primary); font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   .rhit .rsnip { color: var(--on-surface-variant); font-size: 11px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  /* The matched words: the theme's own accent, bold. `{@html}` builds these <b>
+     nodes at run time, so they carry no svelte hash — the rule must be global
+     or it matches nothing (same trap as the ripple's ::after). */
+  .rhit :global(b.hl) { color: var(--primary); font-weight: 700; }
   /* Scoped to the dialog: `.row` is also the rail's list row, and an unscoped
      `button` rule here painted every thread with the primary fill. */
   .card .row { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s3); }
