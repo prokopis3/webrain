@@ -2117,6 +2117,15 @@
     // the tool calls, not just the prose that mentioned them. A conversation
     // saved before transcripts were kept still opens from its words.
     past = rowsOf(j);
+    // A row the rail did not have — a Ctrl+K hit several pages down — was inserted
+    // with no title, so it read as a blank line until the next list read. The first
+    // thing the user said is what the server titles a thread by; take it from here.
+    const mine = convos.find((c) => c.id === id);
+    const first = mine && !mine.title ? past.find((r) => r.kind === "user" && r.text) : null;
+    if (first) {
+      const title = first.text.slice(0, 90);
+      convos = convos.map((c) => (c.id === id ? { ...c, title } : c));
+    }
     pastTurns = j.turns || [];
     viewing = id;
     route(id);
