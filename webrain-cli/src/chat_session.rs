@@ -737,7 +737,20 @@ pub(crate) async fn connect(
     // false` alone did not stop it.
     let home = std::env::var_os("WEBRAIN_CHAT_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("webrain-copilot-home"));
+        .unwrap_or_else(|| {
+            // Durable, beside the chat database: this directory IS the model's
+            // context (session state, rewind points, plan, tool history). It used to
+            // be `temp_dir()`, which any cleanup or reboot wipes — the transcript on
+            // screen then outlived the context behind it, and `/resume` had nothing
+            // to resume. A legacy temp home is moved once so existing threads keep
+            // their resume key.
+            let durable = webrain_core::vault::vault_dir().join("copilot-home");
+            let legacy = std::env::temp_dir().join("webrain-copilot-home");
+            if !durable.exists() && legacy.exists() {
+                let _ = std::fs::rename(&legacy, &durable);
+            }
+            durable
+        });
     let mut options = ClientOptions::new(ClientMode::Empty);
     let owned = copilot_sdk::OwnedRuntimeOptions::new().with_base_directory(home);
     // One-shot: the process is about to exit, so a runtime left holding a session

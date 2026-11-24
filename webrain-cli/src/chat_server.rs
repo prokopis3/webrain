@@ -1929,6 +1929,42 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             if let Some(e) = heaviest_error {
                 body["heaviestError"] = json!(e);
             }
+            // The attribution only exists during a turn, so after a reload or a
+            // restart this answered "no snapshot" while the history was still on
+            // screen. Remember the last real one per conversation and serve it as
+            // `stale: true` — an honest "as of the last turn", not zeros.
+            if let Some(store) = state.store.as_ref() {
+                let convo = state.convo().await;
+                if body["attribution"].is_null() {
+                    if let Some((saved, ts)) = store.context(&convo) {
+                        for k in [
+                            "totalTokens",
+                            "promptTokenLimit",
+                            "systemTokens",
+                            "conversationTokens",
+                            "attribution",
+                        ] {
+                            if let Some(v) = saved.get(k) {
+                                body[k] = v.clone();
+                            }
+                        }
+                        body["stale"] = json!(true);
+                        body["savedAt"] = json!(ts);
+                    }
+                } else {
+                    store.save_context(
+                        &convo,
+                        &json!({
+                            "totalTokens": body["totalTokens"],
+                            "promptTokenLimit": body["promptTokenLimit"],
+                            "systemTokens": body["systemTokens"],
+                            "conversationTokens": body["conversationTokens"],
+                            "attribution": body["attribution"],
+                        })
+                        .to_string(),
+                    );
+                }
+            }
             respond(&mut stream, 200, "application/json", &body.to_string()).await
         }
         // Whether the server this session attached to itself is actually up:
@@ -3382,25 +3418,11 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .unwrap_or_default()
                 .to_string();
             let renamed = state.store.as_ref().is_some_and(|s| s.rename(id, &title));
-            // The rail reads the store; the runtime keeps its own session name. A
-            // rename used to move only the first, so `session.list()` and a resume
-            // by name still carried the old one. Only the live conversation has a
-            // session to rename — every other row is just stored text.
-            let mut runtime = Value::Null;
-            if renamed && state.convo().await == id {
-                let live = state.live.read().await.clone();
-                runtime = match live
-                    .session
-                    .rpc()
-                    .name()
-                    .set(NameSetRequest { name: title.clone() })
-                    .await
-                {
-                    Ok(()) => json!({ "saved": true, "name": title }),
-                    Err(e) => json!({ "saved": false, "error": e.to_string() }),
-                };
-            }
-            let out = json!({ "renamed": renamed, "runtime": runtime }).to_string();
+            // The runtime's session NAME is this server's resume key (`POST /resume`
+            // looks up `webrain-{convo}`), so it is not ours to overwrite with a
+            // title: renaming it here made every renamed thread unresumable, and the
+            // failure was silent. The rail reads our store; the runtime keeps its name.
+            let out = json!({ "renamed": renamed }).to_string();
             let code = if renamed { 200 } else { 400 };
             respond(&mut stream, code, "application/json", &out).await
         }
@@ -4036,7 +4058,17 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             match (stored_segment(convo, false), stored_segment(file, true)) {
                 (Some(convo), Some(file)) => {
                     let path = attach_dir().join(&convo).join(&file);
-                    let Ok(bytes) = tokio::fs::read(&path).await else {
+                    // An upload from before this moved into the workspace is
+                    // still in the temp directory: serve it from there rather
+                    // than break a transcript that already shows it.
+                    let legacy = std::env::temp_dir()
+                        .join("webrain-chat")
+                        .join(&convo)
+                        .join(&file);
+                    let Ok(bytes) = (match tokio::fs::read(&path).await {
+                        Ok(bytes) => Ok(bytes),
+                        Err(_) => tokio::fs::read(&legacy).await,
+                    }) else {
                         return respond(
                             &mut stream,
                             404,
@@ -4994,10 +5026,22 @@ fn valid_provider(id: &str, base_url: &str, model: &str, key_env: &str) -> bool 
         && (base_url.starts_with("http://") || base_url.starts_with("https://"))
 }
 
+/// Where an upload lands. Inside the working directory, beside the tool-output
+/// spill, so the agent's own file tools can open what the user attached — the
+/// path fence stops at the directory, and a file in the temp folder was readable
+/// by the page but never by the model, which answered "outside the directory
+/// this session is allowed to read". `WEBRAIN_CHAT_FILES` still names a
+/// directory outright; a read-only checkout falls back to temp, where at least
+/// the page can show the file.
 fn attach_dir() -> PathBuf {
-    std::env::var_os("WEBRAIN_CHAT_FILES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("webrain-chat"))
+    if let Some(dir) = std::env::var_os("WEBRAIN_CHAT_FILES") {
+        return PathBuf::from(dir);
+    }
+    let inside = PathBuf::from(".webrain").join("attachments");
+    if std::fs::create_dir_all(&inside).is_ok() {
+        return inside;
+    }
+    std::env::temp_dir().join("webrain-chat")
 }
 
 /// The client's filename is data, never a path. One basename, a small alphabet,
@@ -5071,6 +5115,22 @@ mod tests {
             assert_eq!(prop_kind(&json!({ "type": t })), "", "{t}");
         }
         assert_eq!(prop_kind(&json!({ "enum": ["a", "b"] })), "");
+    }
+
+    /// An upload has to sit inside the fence the agent's own file tools enforce,
+    /// or the model can name the attachment and still not open it — the exact
+    /// answer it gave: "the file sits in Temp, outside the directory this session
+    /// is allowed to read".
+    #[test]
+    fn an_attachment_lands_inside_the_fence() {
+        let cwd = std::fs::canonicalize(".").expect("cwd");
+        let stored = attach_dir().join("c1").join("1-shot.png");
+        assert!(
+            crate::chat_tools::within(&cwd, &stored.display().to_string()),
+            "{} is outside {}",
+            stored.display(),
+            cwd.display()
+        );
     }
 
     #[test]
