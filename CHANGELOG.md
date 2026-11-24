@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **`web_search` and `web_fetch` — the two names a model reaches for, wired to the
+  session's own provider.** A DeepSeek session calls DeepSeek's Search and Fetch APIs
+  (`POST /v1/tools/search`, `POST /v1/tools/fetch`, 0.75 USD per 1000 successful calls) with the
+  key it already holds; every other provider gets webrain's engines — `serp_search` over pooled
+  HTTP, and `http_get_accept` asking for `text/markdown` first. Their *server-side* web tools are
+  not reachable from here: the runtime builds the request, so a vendor-native tool declaration
+  cannot be injected — a host tool calling the JSON endpoints is the only way in.
+  `web_fetch` returns the page as words: measured on a Next.js article, 40 KB of markup became
+  3,821 chars of readable text (`[200 text/html]` + the article), where the first cut of this
+  handed the model raw `<script>` tags. Both appear under `#web…` in the palette and in the tools
+  dialog (`chat_tools::NAMES` is 10 now), and both are path-free but permission-gated.
 - `chat`: **`view_image` — the agent can look at a picture, because the runtime cannot hand one
   over.** `#viewImage` in VS Code is the *extension's* tool (`ViewImageTool`, gated by
   `chat.tools.viewImage.enabled`), not something the Copilot CLI runtime provides: it reads the

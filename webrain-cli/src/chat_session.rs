@@ -72,6 +72,9 @@ fn system_prompt() -> String {
          which exposes: {}.\n\n\
          How to work:\n\
          - Static HTML: `webrain_http` (no browser). Rendered/JS pages: `webrain_navigate`.\n\
+         - Current facts: `web_search` then `web_fetch` on the urls it returns — on a\n\
+         DeepSeek session both call DeepSeek's own Search and Fetch APIs, elsewhere they\n\
+         use webrain's engines. Cite the url you read anything from.\n\
          - After every navigate, read the `challenge` field. A non-null challenge means \
          the page is gated, not loaded: say so instead of extracting it as content.\n\
          - Discover selectors with `webrain_observe`/`webrain_autoschema`; never guess them.\n\
@@ -821,8 +824,14 @@ pub(crate) async fn connect(
     };
     // The disk and a shell, for the one mode that should have them. Installed on
     // the session rather than only configured, so a resumed one gets them too.
+    // The provider comes along so `web_search`/`web_fetch` can use its own API
+    // (DeepSeek sells both) instead of a generic engine.
+    let web = provider.bearer_token().map(|k| chat_tools::Web {
+        base: provider.base_url.clone(),
+        key: k.to_string(),
+    });
     session
-        .set_tools(chat_tools::workspace_tools())
+        .set_tools(chat_tools::workspace_tools(web))
         .await
         .map_err(|e| anyhow::anyhow!("could not install the local tools: {e}"))?;
     Ok((client, session))
