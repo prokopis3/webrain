@@ -253,6 +253,13 @@ fn tool(name: &str, description: &str, schema: Value, handler: impl ToolHandler)
     // tool publishes — no second shape to keep in sync.
     t.parameters = serde_json::from_value(schema).unwrap_or_default();
     t.skip_permission = false;
+    // The runtime refuses to initialize a session at all when a custom tool
+    // shares a name with a built-in — `External tool "web_fetch" conflicts with
+    // a built-in tool of the same name` — and that failure lands before the
+    // first message, so every turn dies rather than the one call. It is exactly
+    // the names we want (`web_fetch`, `web_search` are in its registry but not
+    // in our allowlist), so the override is the intent, not a workaround.
+    t.overrides_built_in_tool = true;
     t.with_handler(std::sync::Arc::new(handler))
 }
 
@@ -1382,6 +1389,13 @@ mod tests {
             assert!(!t.skip_permission, "{name} must ask");
             assert!(t.handler().is_some(), "{name} has no handler");
             assert!(!t.parameters.is_empty(), "{name} has no schema");
+            // A custom tool that shadows a built-in without this flag makes the
+            // runtime refuse the session — before the first message, so every
+            // turn fails. Measured: `web_fetch` is in its registry.
+            assert!(
+                t.overrides_built_in_tool,
+                "{name} must override the built-in"
+            );
         }
     }
 

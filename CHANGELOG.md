@@ -162,6 +162,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Fixed
+- `chat`: **a custom tool that shares a built-in's name no longer kills every turn.** The runtime
+  refuses to initialize a session at all - `tool initialization before the turn failed: GenericFailure,
+  External tool "web_fetch" conflicts with a built-in tool of the same name` - and it does so *before*
+  the first message, so adding `web_fetch`/`web_search` to this binary's tool set made every
+  conversation fail, not just the call that clashed. They are exactly the names worth shadowing (both
+  are in the runtime's registry and neither is in the allowlist this session is created with), so the
+  declarations now carry `overrides_built_in_tool`, and the shape test asserts it on all ten. Measured
+  after the fix: a turn reaches the provider instead of dying at initialization.
 - `chat`: **whether a model can see is taken from its own catalogue, not guessed.** `view_image`
   hands the runtime an image part, but the session never declared
   `capabilities.supports.vision` — so a model was being sent images it had never been described as
