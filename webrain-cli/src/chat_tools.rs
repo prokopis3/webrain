@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use copilot_sdk::Error;
 use copilot_sdk::ToolResult;
 use copilot_sdk::tool::ToolHandler;
-use copilot_sdk::types::{Tool, ToolInvocation};
+use copilot_sdk::types::{Tool, ToolBinaryResult, ToolInvocation, ToolResultExpanded};
 use serde_json::{Value, json};
 
 /// A shell command that has not answered by now is a command the user did not
@@ -42,12 +42,13 @@ const KEEP_DEAD: usize = 20;
 
 /// The names the session's tool allowlist has to carry, in the order the prompt
 /// lists them. A box in the page's tools dialog is checked for each of these.
-pub(crate) const NAMES: [&str; 7] = [
+pub(crate) const NAMES: [&str; 8] = [
     "read_file",
     "write_file",
     "list_dir",
     "edit_file",
     "search_files",
+    "view_image",
     "run_shell",
     "terminal",
 ];
@@ -128,6 +129,25 @@ pub(crate) fn workspace_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
             SearchFiles,
+        ),
+        // VS Code's chat gets this from the extension (`ViewImageTool`, gated by
+        // `chat.tools.viewImage.enabled`), not from the CLI runtime: the model
+        // cannot open a picture with a text tool, and no runtime built-in
+        // carries bytes back. `ToolResult::Expanded` is the only shape in this
+        // SDK that can, so this one tool answers with an image content part.
+        tool(
+            "view_image",
+            "Look at an image file and see it: png, jpg, gif, webp, bmp or svg. \
+             This is the only way to read a screenshot, chart or diagram — \
+             read_file gives you its bytes, not its content.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "path relative to the working directory"}
+                },
+                "required": ["path"]
+            }),
+            ViewImage,
         ),
         tool(
             "run_shell",
@@ -266,6 +286,82 @@ impl ToolHandler for ListDir {
         let path = inv.arguments["path"].as_str().unwrap_or(".");
         Ok(ToolResult::Text(shown(list(path))))
     }
+}
+
+struct ViewImage;
+
+#[async_trait::async_trait]
+impl ToolHandler for ViewImage {
+    async fn call(&self, inv: ToolInvocation) -> Result<ToolResult, Error> {
+        let path = inv.arguments["path"].as_str().unwrap_or_default();
+        Ok(view(path))
+    }
+}
+
+/// The bytes, as an image the model can look at. A refusal is text, because a
+/// failed call has nothing to show.
+fn view(path: &str) -> ToolResult {
+    let p = match inside(path) {
+        Ok(p) => p,
+        Err(e) => return ToolResult::Text(e),
+    };
+    let Some(mime) = image_mime(&p) else {
+        return ToolResult::Text(format!(
+            "{path} is not an image (png, jpg, gif, webp, bmp, svg) — use read_file for text"
+        ));
+    };
+    // The provider bills and buffers these: a 40 MB TIFF is a turn's whole budget
+    // and some APIs reject the request outright.
+    const CAP: u64 = 8 * 1024 * 1024;
+    match std::fs::metadata(&p) {
+        Ok(m) if m.len() > CAP => {
+            return ToolResult::Text(format!(
+                "{path} is {} KB — too large to view (limit {} MB)",
+                m.len() / 1024,
+                CAP / (1024 * 1024)
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return ToolResult::Text(format!("{path}: {e}")),
+    }
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) => return ToolResult::Text(format!("{path}: {e}")),
+    };
+    image_result(path, bytes, mime)
+}
+
+/// The bytes as an image content part. Split out because the fence correctly
+/// refuses the OS temp dir, so a test cannot reach this through `view`.
+fn image_result(path: &str, bytes: Vec<u8>, mime: &str) -> ToolResult {
+    let kb = bytes.len() / 1024;
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    ToolResult::Expanded(
+        ToolResultExpanded::new(format!("viewed {path} ({kb} KB, {mime})"), "success")
+            .with_binary_results(vec![ToolBinaryResult {
+                data,
+                mime_type: mime.to_string(),
+                r#type: "image".to_string(),
+                description: Some(path.to_string()),
+            }])
+            .with_session_log(format!("viewed {path}")),
+    )
+}
+
+/// An image by extension. The content is not sniffed: a file whose name says
+/// `.png` is handed over as one, which is what the model is told it is.
+fn image_mime(p: &Path) -> Option<&'static str> {
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => return None,
+    })
 }
 
 struct RunShell;
@@ -1040,6 +1136,42 @@ mod tests {
             assert!(!t.skip_permission, "{name} must ask");
             assert!(t.handler().is_some(), "{name} has no handler");
             assert!(!t.parameters.is_empty(), "{name} has no schema");
+        }
+    }
+
+    /// The one tool whose answer is not text: the bytes have to arrive as a
+    /// binary result or the model cannot see the picture at all.
+    #[test]
+    fn view_image_hands_the_bytes_over_instead_of_describing_them() {
+        let png = vec![0x89, b'P', b'N', b'G', 0, 1, 2, 3];
+        match image_result("shot.png", png.clone(), "image/png") {
+            ToolResult::Expanded(e) => {
+                let bins = e.binary_results_for_llm.expect("an image result");
+                assert_eq!(bins.len(), 1);
+                assert_eq!(bins[0].mime_type, "image/png");
+                use base64::Engine as _;
+                let back = base64::engine::general_purpose::STANDARD
+                    .decode(&bins[0].data)
+                    .expect("valid base64");
+                assert_eq!(back, png);
+                assert!(
+                    e.text_result_for_llm.contains("shot.png"),
+                    "{}",
+                    e.text_result_for_llm
+                );
+            }
+            ToolResult::Text(t) => panic!("an image came back as text: {t}"),
+            _ => panic!("unexpected tool result shape"),
+        }
+        // A text file is refused by name rather than shipped as bytes.
+        match view("Cargo.toml") {
+            ToolResult::Text(t) => assert!(t.contains("not an image"), "{t}"),
+            _ => panic!("a .toml was treated as an image"),
+        }
+        // And the fence still refuses a path outside the working directory.
+        match view("../shot.png") {
+            ToolResult::Text(t) => assert!(t.contains("outside"), "{t}"),
+            _ => panic!("a path above the root was accepted"),
         }
     }
 

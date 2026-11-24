@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **`view_image` — the agent can look at a picture, because the runtime cannot hand one
+  over.** `#viewImage` in VS Code is the *extension's* tool (`ViewImageTool`, gated by
+  `chat.tools.viewImage.enabled`), not something the Copilot CLI runtime provides: it reads the
+  file, resizes it and returns a `LanguageModelDataPart`. A standalone `webrain chat` had no way
+  to show the model a screenshot at all — `read_file` gives it the bytes. It is a host tool here
+  (`chat_tools::NAMES`, 8 now), path-fenced like the rest, capped at 8 MB, and answers with
+  `ToolResult::Expanded { binary_results }` — the only shape in this SDK that carries binary.
+  Verified by executing it through the running runtime: `POST /tool view_image` came back with
+  `binaryResultsForLlm[0].mimeType = image/png` and the PNG base64. A non-image path is refused
+  by name (use `read_file`), and a path above the working directory is refused by the fence.
+- `chat`: **six more built-ins the runtime serves itself are now allowed, so the features the page
+  already draws can actually be written to.** `update_todo` (the todo rail above the composer),
+  `context_board`, `read_inbox`, `send_inbox`, `manage_schedule`,
+  `fetch_copilot_cli_documentation` were withheld by the allowlist while the page rendered their
+  output. Measured on a fresh session: the prompt went from 15,962 to 16,056 input tokens — **+94
+  for all six**, against the 6,972 that `builtin:*` costs (the expensive schemas are the file and
+  shell built-ins, which `chat_tools` already covers behind the fence).
 - `chat`: **the session rail reads twenty rows and grows as it is scrolled, and a chat you
   open jumps to the top of it.** `GET /sessions` returned every conversation this machine
   ever had, and `GET /search` was the only way back to one from three months ago. It now

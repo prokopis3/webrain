@@ -33,6 +33,7 @@ chat = [
     "dep:ureq",
     "dep:regex",
     "dep:flate2",
+    "dep:base64",
 ]
 # Opt-in: bake the ~166 MB Copilot runtime into the binary (the SDK's
 # `bundled-cli` default) so `webrain chat` needs no separate install. Off by
@@ -76,6 +77,9 @@ regex = { version = "1", optional = true }
 # links flate2 for its own compressed assets, so the resolved version is in the
 # lockfile and this entry costs no extra compile.
 flate2 = { version = "1", optional = true }
+# `view_image` hands the model bytes, and the SDK carries them base64. Already in
+# the tree through webrain-core, so this entry costs no extra compile.
+base64 = { workspace = true, optional = true }
 
 # No `openssl` entry on purpose. `chat` reaches `native-tls` through the SDK's
 # `network-forwarding`, and since `copilot-sdk` 2.0.1 the SDK's own build script

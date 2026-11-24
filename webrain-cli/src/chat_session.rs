@@ -440,6 +440,20 @@ pub(crate) fn tool_filter(allow_agents: bool) -> Vec<String> {
     // `chat_hooks::Fence`. `add_builtin` validates the name's shape, so a typo
     // here is an error rather than a silently missing tool.
     let mut builtins = vec!["task", "task_complete", "ask_user", "skill"];
+    // The runtime serves these itself — the page already renders their output
+    // (the todo rail, the inbox, the plan board) and none of them has an
+    // equivalent among the `chat_tools` set. Withholding them was the reason the
+    // todo list the assistant is told to keep never appeared: `task_complete`
+    // reports a step, `update_todo` is what writes the table it reads.
+    builtins.extend([
+        "update_todo",
+        "context_board",
+        "read_inbox",
+        "send_inbox",
+        "manage_schedule",
+        "session_store_sql",
+        "fetch_copilot_cli_documentation",
+    ]);
     // Delegation is only half a feature without these: `task` spawns a worker,
     // and nothing could list the definitions it picks from, read one, or write
     // one. The hide list in `connect` already names them for the off case.
@@ -1148,6 +1162,22 @@ mod tests {
         // covers the file and shell ones behind the fence. Measured 2026-11-07.
         assert!(!served.contains(&"builtin:*".to_string()), "{served:?}");
         for name in ["task", "task_complete", "ask_user", "skill"] {
+            assert!(
+                served.contains(&format!("builtin:{name}")),
+                "{name} missing from {served:?}"
+            );
+        }
+        // The runtime side of the features the page already renders: the todo
+        // rail, the plan board, the inbox, the schedule. None of them has a
+        // `chat_tools` equivalent, and together they cost 94 input tokens.
+        for name in [
+            "update_todo",
+            "context_board",
+            "read_inbox",
+            "send_inbox",
+            "manage_schedule",
+            "fetch_copilot_cli_documentation",
+        ] {
             assert!(
                 served.contains(&format!("builtin:{name}")),
                 "{name} missing from {served:?}"
