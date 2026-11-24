@@ -1997,6 +1997,41 @@ mod extract_fields_tests {
     }
 }
 
+#[cfg(test)]
+mod batch_scrape_tests {
+    use super::*;
+
+    /// One row per URL, an error on each, never a panic. A browserless batch has no
+    /// tab budget to blame, so a bad URL can only be that row's problem — and a
+    /// silent empty row is the failure mode this op exists to avoid.
+    #[tokio::test]
+    async fn every_bad_url_is_its_own_error_row() {
+        let urls = vec![
+            "http://127.0.0.1:1/nothing".to_string(),
+            "http://127.0.0.1:1/other".to_string(),
+        ];
+        let rows = batch_scrape(&urls, "div", &[], 2, None).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].url, urls[0]);
+        assert_eq!(rows[1].url, urls[1]);
+        assert!(rows.iter().all(|r| r.error.is_some()), "{rows:?}");
+        assert!(rows.iter().all(|r| r.data.is_none()), "{rows:?}");
+    }
+
+    /// `op=read` is the same promise in markdown form: one row per URL, the failure
+    /// attached to the row it belongs to, and the payload in `data` (not duplicated
+    /// into `text`).
+    #[tokio::test]
+    async fn read_reports_a_dead_host_as_its_own_row() {
+        let urls = vec!["http://127.0.0.1:1/nothing".to_string()];
+        let rows = batch_read(&urls, 1, None, "", 0, &crate::read::ReadOpts::default()).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].url, urls[0]);
+        assert!(rows[0].error.is_some(), "{rows:?}");
+        assert!(rows[0].text.is_empty(), "{rows:?}");
+    }
+}
+
 /// Adaptive extraction (Scrapling-style `adaptive=True`): try the exact base selector, and if it
 /// matches nothing (site redesigned/class renamed), relocate to elements that still contain >= 2 of
 /// the field selectors, keeping only the deepest (row-level) candidates.
@@ -2202,7 +2237,19 @@ where
     let res = async {
         let sid = browser.tab_session(&id).await?;
         browser.navigate_session_opts(&sid, &url, &opts).await?;
-        let (title, text, data) = per_url(browser.clone(), sid, url.clone()).await?;
+        let (mut title, text, data) = per_url(browser.clone(), sid.clone(), url.clone()).await?;
+        if title.is_empty() {
+            // Only fetch fills `title` itself; extract/eval/markdown/interact left it
+            // empty, so a row could not say WHICH document it read — and a challenge or
+            // consent title is the cheapest "you are not on the page you asked for"
+            // signal a batch row can carry (AGENTS.md rule 4).
+            title = browser
+                .eval_session(&sid, "document.title")
+                .await
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+        }
         Ok::<_, anyhow::Error>(BatchResult {
             url: url.clone(),
             title,
@@ -2513,6 +2560,145 @@ pub async fn batch_fetch(
     .await
 }
 
+/// Batch scrape: the SAME CSS schema as `batch_extract`, but over plain HTTP — no
+/// tab, no render, no per-URL 56 MB. `webrain_scrape` was one URL at a time, so N
+/// static pages meant N calls; this is its batch twin.
+///
+/// A host that refuses an HTTP client fails per row (`http status: 403`), which is
+/// the honest answer — `batch_extract` is the browser fallback for exactly those.
+pub async fn batch_scrape(
+    urls: &[String],
+    base_selector: &str,
+    fields: &[Value],
+    concurrency: usize,
+    proxy: Option<&str>,
+) -> Vec<BatchResult> {
+    let proxy = proxy.map(str::to_string);
+    let mut out = Vec::with_capacity(urls.len());
+    // Chunked, not spawned all at once: `concurrency` is a burst bound, and the
+    // blocking client has no pool of its own to respect.
+    for chunk in urls.chunks(concurrency.max(1)) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|u| {
+                let (u, base, fields) = (u.clone(), base_selector.to_string(), fields.to_vec());
+                let proxy = proxy.clone();
+                tokio::task::spawn_blocking(move || {
+                    let t0 = std::time::Instant::now();
+                    let mut r = match http_fetch_extract(&u, &base, &fields, proxy.as_deref()) {
+                        Ok(v) => BatchResult {
+                            url: u,
+                            title: v
+                                .get("title")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            text: String::new(),
+                            data: Some(v),
+                            error: None,
+                            ms: 0,
+                        },
+                        Err(e) => batch_err(&u, e),
+                    };
+                    r.ms = t0.elapsed().as_millis() as u64;
+                    r
+                })
+            })
+            .collect();
+        for (u, h) in chunk.iter().zip(handles) {
+            out.push(match h.await {
+                Ok(r) => r,
+                Err(e) => batch_err(u, anyhow::anyhow!("scrape task failed: {e}")),
+            });
+        }
+    }
+    out
+}
+
+/// Batch read: the batch twin of `webrain read`, over plain HTTP — markdown
+/// negotiation, `.md` retry, nearest `llms.txt`, no tab. N docs pages as markdown
+/// were N `read` invocations before this.
+///
+/// The whole `read` payload goes in `data` (never duplicated into `text`), so a row
+/// carries `source` (markdown / text / html) and `llms_txt` — the numbers that
+/// explain the token count.
+pub async fn batch_read(
+    urls: &[String],
+    concurrency: usize,
+    proxy: Option<&str>,
+    query: &str,
+    top_k: usize,
+    read: &crate::read::ReadOpts,
+) -> Vec<BatchResult> {
+    let proxy = proxy.map(str::to_string);
+    let query = query.to_string();
+    let base = read.clone();
+    let mut out = Vec::with_capacity(urls.len());
+    for chunk in urls.chunks(concurrency.max(1)) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|u| {
+                let (u, proxy) = (u.clone(), proxy.clone());
+                let (query, base) = (query.clone(), base.clone());
+                tokio::task::spawn_blocking(move || {
+                    let t0 = std::time::Instant::now();
+                    let opts = crate::read::ReadOpts { proxy, ..base };
+                    let mut r = match crate::read::read_url(&u, &opts) {
+                        Ok(mut v) => {
+                            // `query` is the cheap way to read N pages for ONE
+                            // question: the same fence-aware bm25 prune `op=markdown`
+                            // runs, applied to the markdown this row produced.
+                            if !query.trim().is_empty() && top_k > 0 {
+                                if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
+                                    let kept = prune_md(t, &query, top_k);
+                                    v["chars"] = json!(kept.chars().count());
+                                    v["text"] = json!(kept);
+                                    v["pruned"] = json!(true);
+                                }
+                            }
+                            BatchResult {
+                                url: u,
+                                title: v
+                                    .get("title")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                text: String::new(),
+                                data: Some(v),
+                                error: None,
+                                ms: 0,
+                            }
+                        }
+                        Err(e) => batch_err(&u, e),
+                    };
+                    r.ms = t0.elapsed().as_millis() as u64;
+                    r
+                })
+            })
+            .collect();
+        for (u, h) in chunk.iter().zip(handles) {
+            out.push(match h.await {
+                Ok(r) => r,
+                Err(e) => batch_err(u, anyhow::anyhow!("read task failed: {e}")),
+            });
+        }
+    }
+    out
+}
+
+/// Keep the `top_k` fence-aware chunks that answer `query`, in their original
+/// order. One implementation for `op=markdown` and `op=read`: the prune is the
+/// same job whether the markdown came from a rendered page or from HTTP.
+fn prune_md(md: &str, query: &str, top_k: usize) -> String {
+    let chunks = markdown_chunks(md);
+    let mut kept = bm25_filter(&chunks, query, top_k);
+    kept.sort_by_key(|v| v.get("index").and_then(|i| i.as_u64()).unwrap_or(u64::MAX));
+    kept.into_iter()
+        .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Split Markdown into chunks on blank lines, but NOT inside fenced code
 /// blocks (``` … ```) — a blank line inside a fence is code, not a boundary,
 /// so pruning can't orphan an opener. ponytail: minimal fence-state scanner.
@@ -2576,16 +2762,8 @@ pub async fn batch_markdown(
                 .map_err(|e| anyhow::anyhow!("htmd markdown conversion failed: {e}"))?;
             if !query.trim().is_empty() && top_k > 0 {
                 // ponytail: fence-aware chunk + existing bm25_filter (the same
-                // prune crawl4ai's fit_markdown does, zero LLM). Restore original
-                // order (sort by index) and never split inside ``` fences.
-                let chunks = markdown_chunks(&md);
-                let mut kept = bm25_filter(&chunks, &query, top_k);
-                kept.sort_by_key(|v| v.get("index").and_then(|i| i.as_u64()).unwrap_or(u64::MAX));
-                md = kept
-                    .into_iter()
-                    .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+                // prune crawl4ai's fit_markdown does, zero LLM).
+                md = prune_md(&md, &query, top_k);
             }
             Ok((String::new(), md, None))
         }
@@ -2985,6 +3163,19 @@ fn proxy_agents() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 /// Shared ureq agent for the serp helpers: one pooled agent per proxy URL when
 /// a proxy is set, otherwise the shared unproxied pool.
 fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
+    // An explicit exit wins and never rotates; otherwise the pool applies. Without
+    // this fallback only the callers that resolved `next_proxy()` themselves honoured
+    // `WEBRAIN_PROXIES`, so `read`, `batch op=scrape|read` and every engine-level fetch
+    // silently went out from the host IP. Per request, not per batch: rotation is the
+    // point of the pool.
+    let pooled;
+    let proxy = match proxy {
+        Some(p) => Some(p),
+        None => {
+            pooled = crate::proxy::next_proxy();
+            pooled.as_deref()
+        }
+    };
     let Some(p) = proxy else {
         return Ok(browser_agent());
     };
@@ -3138,12 +3329,26 @@ pub fn http_fetch_extract(
     let rows = extract_fields(&html, base_selector, fields);
     Ok(json!({
         "url": url,
+        "title": title_of(&html),
         "status": status,
         "content_type": content_type,
         "rows": rows.len(),
         "data": rows,
         "bytes": html.len(),
     }))
+}
+
+/// The document's `<title>`, or "" — the cheapest "which page did I read" signal,
+/// and the only challenge/consent hint an HTTP reply can carry.
+pub(crate) fn title_of(html: &str) -> String {
+    scraper::Html::parse_document(html)
+        .select(&match scraper::Selector::parse("title") {
+            Ok(s) => s,
+            Err(_) => return String::new(),
+        })
+        .next()
+        .map(|e| e.text().collect::<String>().trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Propose CSS schemas for a page, browserlessly.
