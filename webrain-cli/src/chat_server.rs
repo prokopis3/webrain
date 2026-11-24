@@ -113,15 +113,9 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
             let _ = bus.send(frame);
         }
     });
-    let permission = Arc::new(WebPermission {
+    let gate = Arc::new(Gate {
         bus: bus.clone(),
-        pending: Mutex::new(HashMap::new()),
         approved: Mutex::new(load_approvals()),
-        seq: AtomicU64::new(1),
-    });
-    let input = Arc::new(WebInput {
-        bus: bus.clone(),
-        pending: Mutex::new(HashMap::new()),
         seq: AtomicU64::new(1),
     });
 
@@ -143,6 +137,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     // something on last time boots with it.
     let settings = RuntimeSettings::load();
 
+    let (permission, input) = prompts(gate.clone(), &convo);
     let live = spawn_live(
         args,
         provider,
@@ -182,8 +177,7 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
     }
     let shared = Arc::new(Shared {
         bus,
-        permission,
-        input,
+        gate,
         args: args.clone(),
         timeout: AtomicU64::new(settings.timeout_secs),
         store,
@@ -200,6 +194,8 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
         convo: Mutex::new(convo.clone()),
         provider: Mutex::new(provider.clone()),
         seed: AtomicBool::new(false),
+        permission,
+        input,
         shared: shared.clone(),
     });
     let _ = shared.primary.set(first.clone());
@@ -1042,6 +1038,11 @@ struct State {
     /// Set when a setting a live session cannot absorb changed: the next turn
     /// restarts the runtime instead of continuing the current context.
     seed: AtomicBool,
+    /// This conversation's prompt handlers: an approval or an `ask_user` raised
+    /// here is announced with this conversation's id, so the page can draw the
+    /// card in the transcript that asked.
+    permission: Arc<WebPermission>,
+    input: Arc<WebInput>,
     shared: Arc<Shared>,
 }
 
@@ -1062,8 +1063,9 @@ impl State {
 /// conversation shares with every other conversation lives here.
 struct Shared {
     bus: Bus,
-    permission: Arc<WebPermission>,
-    input: Arc<WebInput>,
+    /// The bus, the standing approvals and the card id counter — the only parts
+    /// of prompting that belong to the process rather than to a conversation.
+    gate: Arc<Gate>,
     /// The first session's flags, so a new conversation is configured the same.
     args: Args,
     /// Seconds per turn. Atomic because the page can change it mid-conversation
@@ -1131,11 +1133,12 @@ impl Shared {
             .as_ref()
             .map(|s| transcript(&s.messages(convo), HISTORY_CAP))
             .unwrap_or_default();
+        let (permission, input) = prompts(self.gate.clone(), convo);
         let live = spawn_live(
             &self.args,
             &provider,
-            self.permission.clone(),
-            self.input.clone(),
+            permission.clone(),
+            input.clone(),
             self.bus.clone(),
             self.store.clone(),
             convo.to_string(),
@@ -1151,6 +1154,8 @@ impl Shared {
             convo: Mutex::new(convo.to_string()),
             provider: Mutex::new(provider),
             seed: AtomicBool::new(false),
+            permission,
+            input,
             shared: self.clone(),
         });
         // Evict one idle conversation when the cap is reached. Its next turn
@@ -1189,14 +1194,12 @@ fn evictable(seen: &[(String, bool)], keep: &str) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
-/// Answers a permission prompt from the page instead of the CLI's policy.
-struct WebPermission {
+/// What every conversation's prompts share: the bus, the standing approvals and
+/// the id counter. A grant is about the TOOL, not the thread — "always allow
+/// `webrain:navigate`" has to hold in every chat — and an id must never name two
+/// cards, or answering one would answer the other.
+struct Gate {
     bus: Bus,
-    // The card's payload is kept beside its sender so a page reload can ask for
-    // the open requests back. Without it a refresh stranded the turn: the
-    // runtime waited for an answer the page could no longer give, and nothing
-    // was on screen to answer.
-    pending: Mutex<HashMap<String, (oneshot::Sender<bool>, Value)>>,
     // `server:tool` keys the reader approved with "always allow", loaded once and
     // written back on every change. On the server rather than in the page's
     // localStorage: the approval is a statement about this session's tools, so a
@@ -1204,6 +1207,58 @@ struct WebPermission {
     // must not be able to slip past a grant the page already gave.
     approved: Mutex<Vec<String>>,
     seq: AtomicU64,
+}
+
+impl Gate {
+    /// Add or drop one key and persist. A store that cannot be written is
+    /// reported rather than swallowed: the answer still applies to this prompt,
+    /// but the promise "you will not be asked again" would be a lie.
+    async fn set_approved(&self, key: &str, on: bool) -> bool {
+        let mut keys = self.approved.lock().await;
+        keys.retain(|k| k != key);
+        if on {
+            keys.push(key.to_string());
+        }
+        save_approvals(&keys)
+    }
+}
+
+/// One conversation's prompt handlers. `pending` is per conversation so a card is
+/// only answerable from the chat that raised it, and every frame below carries
+/// `convo` so the page draws the card in the transcript that asked rather than
+/// over whichever thread happened to be on screen.
+fn prompts(gate: Arc<Gate>, convo: &str) -> (Arc<WebPermission>, Arc<WebInput>) {
+    (
+        Arc::new(WebPermission {
+            convo: convo.to_string(),
+            gate: gate.clone(),
+            pending: Mutex::new(HashMap::new()),
+        }),
+        Arc::new(WebInput {
+            convo: convo.to_string(),
+            gate,
+            pending: Mutex::new(HashMap::new()),
+        }),
+    )
+}
+
+/// One frame for the page, stamped with the conversation that raised it. The
+/// stamp is the whole reason the prompt handlers are per conversation: the page
+/// routes a frame by `convo`, so an unstamped card from chat B used to be drawn
+/// over chat A — the one place two concurrent chats could still collide.
+fn card_frame(convo: &str, kind: &str, data: Value) -> String {
+    json!({ "convo": convo, "type": kind, "data": data }).to_string()
+}
+
+/// Answers a permission prompt from the page instead of the CLI's policy.
+struct WebPermission {
+    convo: String,
+    gate: Arc<Gate>,
+    // The card's payload is kept beside its sender so a page reload can ask for
+    // the open requests back. Without it a refresh stranded the turn: the
+    // runtime waited for an answer the page could no longer give, and nothing
+    // was on screen to answer.
+    pending: Mutex<HashMap<String, (oneshot::Sender<bool>, Value)>>,
 }
 
 /// The key an approval is remembered under, and the same key the page uses:
@@ -1252,16 +1307,11 @@ fn save_approvals_to(path: &std::path::Path, keys: &[String]) -> bool {
 }
 
 impl WebPermission {
-    /// Add or drop one key and persist. A store that cannot be written is
-    /// reported rather than swallowed: the answer still applies to this prompt,
-    /// but the promise "you will not be asked again" would be a lie.
+    /// The grant belongs to the tool, not to this chat, so it is written through
+    /// the shared gate — an approval given here silences the prompt in every
+    /// conversation, which is what "always allow" means.
     async fn set_approved(&self, key: &str, on: bool) -> bool {
-        let mut keys = self.approved.lock().await;
-        keys.retain(|k| k != key);
-        if on {
-            keys.push(key.to_string());
-        }
-        save_approvals(&keys)
+        self.gate.set_approved(key, on).await
     }
 }
 
@@ -1273,7 +1323,7 @@ impl PermissionHandler for WebPermission {
         _request: RequestId,
         data: PermissionRequestData,
     ) -> PermissionResult {
-        let id = format!("p{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        let id = format!("p{}", self.gate.seq.fetch_add(1, Ordering::Relaxed));
         let managed = data.managed_approval_required.unwrap_or(false);
         // The runtime packs a structured request inside `extra` — server, tool,
         // arguments, whether it only reads. `format!("{data:?}")` was what turned
@@ -1284,13 +1334,14 @@ impl PermissionHandler for WebPermission {
         // managed one, where the runtime is saying a policy requires a human. The
         // note keeps the grant visible: silence would hide a standing permission.
         let key = approval_key(&card);
-        if !managed && self.approved.lock().await.iter().any(|k| *k == key) {
-            let _ = self.bus.send(
-                json!({ "type": "webrain.note", "data": { "text": format!(
-                    "{key} approved without asking — you saved this approval; remove it in settings to be asked again"
-                ) } })
-                .to_string(),
-            );
+        if !managed && self.gate.approved.lock().await.iter().any(|k| *k == key) {
+            let note = json!({ "text": format!(
+                "{key} approved without asking — you saved this approval; remove it in settings to be asked again"
+            ) });
+            let _ = self
+                .gate
+                .bus
+                .send(card_frame(&self.convo, "webrain.note", note));
             return PermissionResult::approve_once();
         }
         let (tx, rx) = oneshot::channel();
@@ -1298,8 +1349,8 @@ impl PermissionHandler for WebPermission {
             .lock()
             .await
             .insert(id.clone(), (tx, card.clone()));
-        let ask = json!({ "type": "webrain.permission", "data": card });
-        let _ = self.bus.send(ask.to_string());
+        let ask = card_frame(&self.convo, "webrain.permission", card);
+        let _ = self.gate.bus.send(ask);
 
         let answer = tokio::time::timeout(PERMISSION_WAIT, rx).await;
         self.pending.lock().await.remove(&id);
@@ -1370,9 +1421,9 @@ fn permission_card(id: &str, req: &Value, managed: bool) -> Value {
 }
 
 pub(crate) struct WebInput {
-    bus: Bus,
+    convo: String,
+    gate: Arc<Gate>,
     pending: Mutex<HashMap<String, oneshot::Sender<(String, bool)>>>,
-    seq: AtomicU64,
 }
 
 impl WebInput {
@@ -1383,19 +1434,20 @@ impl WebInput {
         question: String,
         choices: Option<Vec<String>>,
     ) -> Option<(String, bool)> {
-        let id = format!("u{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        let id = format!("u{}", self.gate.seq.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), tx);
-        let ask = json!({
-            "type": "webrain.ask",
-            "data": {
+        let ask = card_frame(
+            &self.convo,
+            "webrain.ask",
+            json!({
                 "id": id,
                 "question": question,
                 "choices": choices.unwrap_or_default(),
                 "allow_freeform": true,
-            },
-        });
-        let _ = self.bus.send(ask.to_string());
+            }),
+        );
+        let _ = self.gate.bus.send(ask);
 
         // Longer than a permission: a person has to read and type an answer.
         let answer = tokio::time::timeout(INPUT_WAIT, rx).await;
@@ -2974,7 +3026,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         // The approvals that outlive a card: listed so a reader can undo one, and
         // written only by an explicit "always allow".
         ("GET", "/approvals") => {
-            let keys = state.permission.approved.lock().await.clone();
+            let keys = state.permission.gate.approved.lock().await.clone();
             let body = json!({ "approved": keys }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
@@ -2986,7 +3038,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             }
             let on = v["on"].as_bool().unwrap_or(false);
             let ok = state.permission.set_approved(&key, on).await;
-            let keys = state.permission.approved.lock().await.clone();
+            let keys = state.permission.gate.approved.lock().await.clone();
             let out = json!({ "key": key, "on": on, "saved": ok, "approved": keys });
             let code = if ok { 200 } else { 500 };
             respond(&mut stream, code, "application/json", &out.to_string()).await
@@ -5328,8 +5380,14 @@ mod tests {
     /// is the one place a second conversation can still cost a first one its
     /// context, so it is pinned: a busy chat is never a candidate, and the
     /// conversation being opened is never its own victim.
+    ///
+    /// The other half — that two `POST /turn` calls on two conversations are both
+    /// `202` — needs a live runtime and a model key, so it was measured against a
+    /// running server instead: two turns 400 ms apart, both `202`, both
+    /// `busy: true`, each row stored under its own id and nothing written to the
+    /// other.
     #[test]
-    fn the_cap_never_evicts_a_conversation_that_is_working() {
+    fn two_conversations_do_not_share_a_cap_or_a_card() {
         // Full, and every chat is mid-turn: nothing to drop, so the cap bends.
         let busy: Vec<(String, bool)> = (0..MAX_CHATS).map(|i| (format!("c{i}"), true)).collect();
         assert_eq!(evictable(&busy, "new"), None);
@@ -5341,6 +5399,25 @@ mod tests {
         assert_eq!(evictable(&mixed, "c3"), None);
         // Under the cap nothing is dropped at all.
         assert_eq!(evictable(&mixed[..MAX_CHATS - 1], "new"), None);
+
+        // And a card carries the conversation that raised it: the page drops every
+        // frame whose `convo` is not the thread on screen, which is what keeps two
+        // chats' approvals and questions apart.
+        let a: Value =
+            serde_json::from_str(&card_frame("cA", "webrain.permission", json!({"id":"p1"})))
+                .unwrap();
+        let b: Value =
+            serde_json::from_str(&card_frame("cB", "webrain.permission", json!({"id":"p2"})))
+                .unwrap();
+        assert_eq!(a["convo"], "cA");
+        assert_eq!(b["convo"], "cB");
+        assert_eq!(a["type"], "webrain.permission");
+        assert_eq!(a["data"]["id"], "p1");
+        // An `ask` is stamped by the same helper, so neither kind can forget.
+        let q: Value =
+            serde_json::from_str(&card_frame("cB", "webrain.ask", json!({"id":"u1"}))).unwrap();
+        assert_eq!(q["convo"], "cB");
+        assert_eq!(q["type"], "webrain.ask");
     }
 
     /// A field this page cannot draw must not become an empty string in the
