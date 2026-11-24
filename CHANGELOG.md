@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `chat`: **every conversation runs on its own runtime session, so two chats can work
+  at the same time.** `State` was one session for the whole server — one `live`, one
+  `busy`, one `convo` — so a second conversation's turn answered `409 busy`, and opening
+  a thread ran `reseed`, which aborted the reader and replaced the only session there
+  was. The per-conversation fields moved onto a `State` that is now one per conversation,
+  held in a map on a new `Shared` and reached through `Deref`, so the ninety routes below
+  read unchanged; `POST /turn` names the conversation it belongs to and every other route
+  takes `?convo=`, falling back to the one the page last opened. A chat you are not
+  looking at keeps streaming into its own transcript, keeps its context window and its
+  prompt cache, and is a resume rather than a replay when you come back. Measured: two
+  `POST /turn` calls on two conversations 400 ms apart, both `202`, both `busy: true`,
+  each row stored under its own id and nothing written to the other. Cap: eight live
+  sessions, and only an idle one is ever evicted — its next turn rebuilds it from the
+  store (`the_cap_never_evicts_a_conversation_that_is_working`).
+- `chat`: **the rail says which conversation is working, and the composer no longer waits
+  for one it is not in.** `GET /sessions` puts `busy` on every row, the rail draws its
+  running dot from that, and the page's `runningConvo` prefers this tab's own turn over a
+  foreign frame — otherwise reading a busy thread handed its stop button to the other one.
+  The banner that explained *"a turn is running in X — this conversation waits for it"* is
+  gone, because nothing waits any more; what is left says the other chat *is still working
+  and you can reply here*. `POST /ledger` also takes the `convo` the page measured, the way
+  `/transcript` already did, so a background turn's instruments land on the thread that
+  earned them.
+
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
   the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs

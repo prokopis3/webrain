@@ -316,7 +316,7 @@ everything else is the runtime's own event, forwarded unchanged.
 
 | Route | What it does |
 |---|---|
-| `POST /turn` | `{"prompt":"…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while busy and `delivery` is `turn` |
+| `POST /turn` | `{"prompt":"…","convo":"c…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while **that conversation** is busy and `delivery` is `turn` |
 | `POST /stop` | abort the turn that is running |
 | `GET /pending` | the approvals still waiting for an answer, so a reloaded page can redraw the cards |
 | `POST /permission` | `{"id":"…","allow":true}` — answers a pending approval |
@@ -339,10 +339,12 @@ everything else is the runtime's own event, forwarded unchanged.
 
 | Route | What it does |
 |---|---|
-| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu, plus `busy` and the runtime's own `processing` state |
+| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu. Each row carries **its own** `busy`, and the top level carries the request's conversation's `busy` plus the runtime's own `processing` state |
 | `POST /sessions` | a new conversation — or the current one, when nobody has written to it yet |
 | `GET /sessions/<id>` | that conversation's messages, oldest first, with its turns and its saved rows. A read: it does not change which conversation is live. Gzipped when the client accepts it |
 | `POST /sessions/<id>` | claim it — from here on a new turn belongs to it — and answer with the same payload as the read, so opening a thread is one request. `POST /sessions/<id>?light=1` skips the payload for a caller that already holds the rows |
+
+`POST /turn` names its conversation because **each conversation owns its own runtime session**. Two chats can therefore be mid-turn at the same time: a turn in one is never refused, killed or reseeded because of another, and a conversation you switch away from keeps streaming into its own transcript. Its context window and prompt cache belong to it too, so coming back is a resume rather than a replay. A conversation that has never been turned in this process gets its session on its first turn, carrying its stored tail. On every other route, `?convo=<id>` names the conversation the request is about and falls back to the one the page last opened — which is what the tab calling it is showing.
 | `PATCH /sessions/<id>` | `{"title":"…"}` → rename it in the menu |
 | `DELETE /sessions/<id>` | forget the conversation and everything in it |
 | `GET /search?q=…` | substring hits across every stored message, newest first |
