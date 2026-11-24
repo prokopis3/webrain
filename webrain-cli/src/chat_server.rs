@@ -180,28 +180,36 @@ pub async fn run(args: &Args, provider: &ChatProvider) -> anyhow::Result<()> {
              then pass, but some SPAs stop mounting)."
         );
     }
-    let state = Arc::new(State {
+    let shared = Arc::new(Shared {
         bus,
         permission,
         input,
-        live: RwLock::new(Arc::new(live)),
         args: args.clone(),
         timeout: AtomicU64::new(settings.timeout_secs),
+        store,
+        ui,
+        current: Mutex::new(convo.clone()),
+        chats: Mutex::new(HashMap::new()),
+        primary: std::sync::OnceLock::new(),
+    });
+    let first = Arc::new(State {
+        live: RwLock::new(Arc::new(live)),
         settings: Mutex::new(settings),
         busy: AtomicBool::new(false),
         usage_at: Mutex::new(None),
-        store,
-        convo: Mutex::new(convo),
+        convo: Mutex::new(convo.clone()),
         provider: Mutex::new(provider.clone()),
         seed: AtomicBool::new(false),
-        ui,
+        shared: shared.clone(),
     });
+    let _ = shared.primary.set(first.clone());
+    shared.chats.lock().await.insert(convo, first);
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let state = state.clone();
+        let shared = shared.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(stream, state).await {
+            if let Err(e) = serve_conn(stream, shared).await {
                 // A browser closes sockets all the time: a reload drops the SSE
                 // stream, a tab switch aborts an in-flight read, a prefetch is
                 // cancelled. Printing those as server errors buried the real ones
@@ -1004,20 +1012,20 @@ impl RuntimeSettings {
     }
 }
 
+/// One conversation and everything it owns: its own runtime session, its own
+/// turn flag, its own token baseline, its own provider and its own switches.
+///
+/// This used to be one struct for the whole server — which is why a second
+/// conversation's turn answered `409 busy`, and why switching threads killed the
+/// turn that was running (`reseed` replaced the only session there was). The
+/// process-wide half now lives on `Shared` and is reached through `Deref`, so
+/// every `state.bus` / `state.store` / `state.ui` below reads unchanged.
 struct State {
-    bus: Bus,
-    permission: Arc<WebPermission>,
-    input: Arc<WebInput>,
     /// Swappable: a provider change makes a new session, and the turn handler
     /// reads whichever one is current.
     live: RwLock<Arc<Live>>,
-    /// The first session's flags, so a replacement is configured identically.
-    args: Args,
-    /// Seconds per turn. Atomic because the page can change it mid-conversation
-    /// and no session has to be rebuilt for it.
-    timeout: AtomicU64,
-    /// What the page switched on. Read when a session is built, written by
-    /// `POST /settings`.
+    /// What the page switched on for THIS conversation. Read when a session is
+    /// built, written by `POST /settings`.
     settings: Mutex<RuntimeSettings>,
     busy: AtomicBool,
     /// The runtime's usage counters as they stood when the running turn began.
@@ -1025,26 +1033,160 @@ struct State {
     /// subtract this to describe the turn — otherwise the page showed a session
     /// total next to a per-turn panel and both said "this turn".
     usage_at: Mutex<Option<(i64, i64, i64, i64, f64, i64)>>,
-    store: Option<Arc<chat_store::Store>>,
-    /// The conversation new turns are stored in. Mutable: opening a past
-    /// conversation moves it, so a continued chat lands where the page shows it.
+    /// This conversation's id, and the key the store is written under.
     convo: Mutex<String>,
-    /// The provider the live session runs, kept here because restarting the
-    /// session (a conversation switch) has to rebuild one and `/switch` owns the
-    /// key, which `Live` deliberately does not hold.
+    /// The provider this conversation's session runs, kept here because
+    /// restarting it (`reseed`, `/switch`) has to rebuild one and `/switch` owns
+    /// the key, which `Live` deliberately does not hold.
     provider: Mutex<ChatProvider>,
-    /// Set when the page opens a stored conversation: the next turn restarts the
-    /// runtime on it instead of continuing the previous one's context.
+    /// Set when a setting a live session cannot absorb changed: the next turn
+    /// restarts the runtime instead of continuing the current context.
     seed: AtomicBool,
-    /// The page, read from disk and verified once at startup — not carried in
-    /// the binary (`super::chat_ui`).
-    ui: super::chat_ui::Ui,
+    shared: Arc<Shared>,
+}
+
+impl std::ops::Deref for State {
+    type Target = Shared;
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
 }
 
 impl State {
     async fn convo(&self) -> String {
         self.convo.lock().await.clone()
     }
+}
+
+/// The process-wide half: the one event bus, one store, one page. Everything a
+/// conversation shares with every other conversation lives here.
+struct Shared {
+    bus: Bus,
+    permission: Arc<WebPermission>,
+    input: Arc<WebInput>,
+    /// The first session's flags, so a new conversation is configured the same.
+    args: Args,
+    /// Seconds per turn. Atomic because the page can change it mid-conversation
+    /// and no session has to be rebuilt for it.
+    timeout: AtomicU64,
+    store: Option<Arc<chat_store::Store>>,
+    /// The page, read from disk and verified once at startup — not carried in
+    /// the binary (`super::chat_ui`).
+    ui: super::chat_ui::Ui,
+    /// The conversation the page last opened. A fallback only: a turn and a
+    /// claim each name their own, so this never decides which session answers.
+    current: Mutex<String>,
+    /// One entry per conversation that has a live runtime session. An id with no
+    /// entry has never run a turn here, so its next turn builds a session with
+    /// its stored tail in front of it.
+    chats: Mutex<HashMap<String, Arc<State>>>,
+    /// The conversation `run` booted with — the session the routes that name no
+    /// conversation answer from.
+    primary: std::sync::OnceLock<Arc<State>>,
+}
+
+/// How many conversations may hold a live runtime session at once. Each is a
+/// Chat client plus a Session, so this is a memory bound rather than a policy.
+const MAX_CHATS: usize = 8;
+
+impl Shared {
+    async fn current(&self) -> String {
+        self.current.lock().await.clone()
+    }
+
+    /// The chat a read-only route answers from. A conversation that has never
+    /// been turned has no session of its own, so these routes fall back to the
+    /// one `run` booted with — which is what they answered from when there was
+    /// only one.
+    async fn chat(&self, convo: &str) -> Arc<State> {
+        if let Some(s) = self.chats.lock().await.get(convo) {
+            return s.clone();
+        }
+        self.primary.get().cloned().expect("run sets primary")
+    }
+
+    async fn busy_of(&self, convo: &str) -> bool {
+        self.chats
+            .lock()
+            .await
+            .get(convo)
+            .is_some_and(|c| c.busy.load(Ordering::SeqCst))
+    }
+
+    /// The chat a turn runs on: the one already open on this conversation, or a
+    /// new session carrying its stored tail. The tail is empty for a
+    /// conversation that was already running, because its session remembers what
+    /// the store can only replay.
+    async fn turn_chat(self: &Arc<Self>, convo: &str) -> anyhow::Result<(Arc<State>, String)> {
+        if let Some(s) = self.chats.lock().await.get(convo) {
+            return Ok((s.clone(), String::new()));
+        }
+        let Some(primary) = self.primary.get().cloned() else {
+            anyhow::bail!("no session");
+        };
+        let settings = primary.settings.lock().await.clone();
+        let provider = primary.provider.lock().await.clone();
+        let history = self
+            .store
+            .as_ref()
+            .map(|s| transcript(&s.messages(convo), HISTORY_CAP))
+            .unwrap_or_default();
+        let live = spawn_live(
+            &self.args,
+            &provider,
+            self.permission.clone(),
+            self.input.clone(),
+            self.bus.clone(),
+            self.store.clone(),
+            convo.to_string(),
+            &settings,
+            None,
+        )
+        .await?;
+        let chat = Arc::new(State {
+            live: RwLock::new(Arc::new(live)),
+            settings: Mutex::new(settings),
+            busy: AtomicBool::new(false),
+            usage_at: Mutex::new(None),
+            convo: Mutex::new(convo.to_string()),
+            provider: Mutex::new(provider),
+            seed: AtomicBool::new(false),
+            shared: self.clone(),
+        });
+        // Evict one idle conversation when the cap is reached. Its next turn
+        // rebuilds the same session from the store, so what is dropped is a warm
+        // context, not a conversation.
+        let victim = {
+            let mut chats = self.chats.lock().await;
+            let seen: Vec<(String, bool)> = chats
+                .iter()
+                .map(|(id, c)| (id.clone(), c.busy.load(Ordering::SeqCst)))
+                .collect();
+            evictable(&seen, convo).and_then(|id| chats.remove(&id))
+        };
+        if let Some(old) = victim {
+            old.live.read().await.clone().reader.abort();
+        }
+        self.chats
+            .lock()
+            .await
+            .insert(convo.to_string(), chat.clone());
+        *self.current.lock().await = convo.to_string();
+        Ok((chat, history))
+    }
+}
+
+/// Which conversation to drop once `MAX_CHATS` are open: the first idle one that
+/// is not the conversation being opened. A busy chat is never a candidate, so the
+/// cap bends rather than killing a running turn; under the cap nothing is
+/// dropped at all.
+fn evictable(seen: &[(String, bool)], keep: &str) -> Option<String> {
+    if seen.len() < MAX_CHATS {
+        return None;
+    }
+    seen.iter()
+        .find(|(id, busy)| id != keep && !busy)
+        .map(|(id, _)| id.clone())
 }
 
 /// Answers a permission prompt from the page instead of the CLI's policy.
@@ -1446,7 +1588,7 @@ async fn refuse_sampling(session: &Arc<Session>, data: Value, out: &Bus) {
     let _ = session.rpc().ui().handle_pending_sampling(params).await;
 }
 
-async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<()> {
+async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Result<()> {
     let (head, body) = read_request(&mut stream).await?;
     let mut lines = head.lines();
     let request_line = lines.next().unwrap_or_default();
@@ -1454,6 +1596,16 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+    // Which conversation this request is about. A turn and a claim name it; every
+    // other route means "the one the page last opened", which is the conversation
+    // the tab that calls them is showing. One name for the chat here is what keeps
+    // the ninety routes below reading exactly as they did with a single session.
+    let convo = match param(query, "convo") {
+        Some(c) if !c.is_empty() => c,
+        _ => shared.current().await,
+    };
+    let state = shared.chat(&convo).await;
 
     match (method, path) {
         ("GET", "/") => respond(&mut stream, 200, "text/html; charset=utf-8", &state.ui.html).await,
@@ -1509,15 +1661,30 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             // Modes and the composer's own picks are instructions, not a hard
             // tool switch: the runtime's tool set is fixed at session creation.
             let effort = payload["effort"].as_str().unwrap_or("medium");
-            // A conversation opened from history gets its own runtime session:
-            // the live one still holds whatever was said before the switch, and
-            // two histories in one context is worse than a fresh session with
-            // the stored transcript on the front of the turn.
-            let history = if state.seed.swap(false, Ordering::SeqCst) {
-                reseed(&state).await
-            } else {
-                String::new()
+            // The turn runs on ITS conversation's own session. A conversation that
+            // has never been turned here gets one now, carrying its stored tail;
+            // every other turn reuses the session already open on it, which is what
+            // lets two chats answer at once instead of the second one getting a
+            // `409 busy` about the first.
+            let convo = match payload["convo"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) => c.to_string(),
+                None => state.convo().await,
             };
+            let (state, fresh) = match shared.turn_chat(&convo).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let out = json!({ "error": format!(
+                        "could not start a session for this conversation: {e}"
+                    ) });
+                    return respond(&mut stream, 500, "application/json", &out.to_string()).await;
+                }
+            };
+            // `fresh` is the tail of a conversation whose session was just built;
+            // a restart `/settings` asked for reseeds and hands back its own.
+            let mut history = fresh;
+            if state.seed.swap(false, Ordering::SeqCst) {
+                history = reseed(&state).await;
+            }
             // Before the busy check: a queued or steering message must not
             // change the model mid-turn, so one that is already running keeps
             // the effort it started with and the next turn picks the new one.
@@ -3291,7 +3458,9 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // without it the page looks idle while the agent keeps working.
         ("GET", "/sessions") => {
             let mut list = state.store.as_ref().map(|s| s.convos()).unwrap_or_default();
-            let current = state.convo().await;
+            // The page's own conversation, not the request's: `/sessions` is the
+            // menu, and it is read for the tab that asked.
+            let current = shared.current().await;
             // A conversation with no messages yet is not in the store, so it had
             // no row — and the rail marks rows by id, which meant nothing was
             // marked while the page sat in exactly that conversation. Pressing
@@ -3305,6 +3474,24 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     0,
                     json!({ "id": current, "title": "(new conversation)", "ts": "", "n": 0 }),
                 );
+            }
+            // Every row says whether ITS conversation is mid-turn. That is what
+            // makes a chat you are not looking at visible in the rail, and why the
+            // composer is live on the thread you are reading while another thread
+            // is still working: the flag belongs to a chat, not to the server.
+            {
+                let chats = shared.chats.lock().await;
+                for row in list.iter_mut() {
+                    let Some(id) = row["id"].as_str().map(str::to_string) else {
+                        continue;
+                    };
+                    let b = chats
+                        .get(&id)
+                        .is_some_and(|c| c.busy.load(Ordering::SeqCst));
+                    if let Some(o) = row.as_object_mut() {
+                        o.insert("busy".to_string(), json!(b));
+                    }
+                }
             }
             // The runtime's own answer beats our `AtomicBool`: a background
             // continuation runs with nothing of ours flagging it, and a turn
@@ -3321,7 +3508,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                 .map(|r| r.processing)
                 .unwrap_or_else(|_| state.busy.load(Ordering::SeqCst));
             let body = json!({
-                "current": state.convo().await,
+                "current": current,
                 "sessions": list,
                 "busy": state.busy.load(Ordering::SeqCst),
                 "processing": processing,
@@ -3330,20 +3517,21 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
             respond(&mut stream, 200, "application/json", &body).await
         }
         // A new conversation, minted here so the id exists before the first word
-        // is said and the page can put it in the address bar. The next turn
-        // reseeds, which is what drops the previous conversation's context.
+        // is said and the page can put it in the address bar. The next turn opens
+        // its own session, which is what makes this one a blank context instead of
+        // a continuation of the last.
         //
         // A conversation nobody has written to is not worth an id: pressing "new
         // chat" twice used to mint a second one, leave the first as an empty row
         // in the menu and make the browser store a per-conversation setup key for
         // it. Reuse the empty one and mint only when there is something to leave.
         ("POST", "/sessions") => {
-            let current = state.convo().await;
+            let current = shared.current().await;
             let unused = state
                 .store
                 .as_ref()
                 .is_some_and(|s| s.messages(&current).is_empty());
-            if unused && !state.busy.load(Ordering::SeqCst) {
+            if unused && !shared.busy_of(&current).await {
                 let body = json!({ "current": current, "reused": true }).to_string();
                 return respond(&mut stream, 200, "application/json", &body).await;
             }
@@ -3354,8 +3542,7 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
                     .map(|d| d.as_millis())
                     .unwrap_or(0)
             );
-            *state.convo.lock().await = id.clone();
-            state.seed.store(true, Ordering::SeqCst);
+            *shared.current.lock().await = id.clone();
             let body = json!({ "current": id }).to_string();
             respond(&mut stream, 200, "application/json", &body).await
         }
@@ -3408,7 +3595,13 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         ("POST", "/ledger") => {
             let v = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let n = v["n"].as_u64().unwrap_or(0) as u32;
-            let convo = state.convo().await;
+            // Same rule as `/transcript`: the tab says which conversation it
+            // measured, because a background turn finishing while another thread is
+            // on screen belongs to the first one.
+            let convo = match v["convo"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) => c.to_string(),
+                None => state.convo().await,
+            };
             let saved = n > 0
                 && state
                     .store
@@ -3422,8 +3615,10 @@ async fn serve_conn(mut stream: TcpStream, state: Arc<State>) -> anyhow::Result<
         // this when you pick a thread, and it is deliberately not a GET.
         ("POST", p) if p.starts_with("/sessions/") => {
             let id = p.trim_start_matches("/sessions/").to_string();
-            *state.convo.lock().await = id.clone();
-            state.seed.store(true, Ordering::SeqCst);
+            // The claim moves the page, not a session: a conversation's own session
+            // is built by its first turn and carries its stored tail, so a thread
+            // you switch away from and back to keeps the context it built.
+            *shared.current.lock().await = id.clone();
             // The claim answers with the transcript as well. Picking a thread used
             // to be two round trips — GET for the rows, POST to claim — and the GET
             // is the expensive one (measured 354–663 KB of JSON for a scrape), so
@@ -5126,6 +5321,26 @@ mod tests {
         assert_eq!(coerce("boolean", "maybe"), None);
         assert_eq!(coerce("integer", "3.5"), None);
         assert_eq!(coerce("", "anything"), None);
+    }
+
+    /// The whole point of one session per conversation is that a turn in one
+    /// cannot be refused, killed or evicted because of another. The eviction rule
+    /// is the one place a second conversation can still cost a first one its
+    /// context, so it is pinned: a busy chat is never a candidate, and the
+    /// conversation being opened is never its own victim.
+    #[test]
+    fn the_cap_never_evicts_a_conversation_that_is_working() {
+        // Full, and every chat is mid-turn: nothing to drop, so the cap bends.
+        let busy: Vec<(String, bool)> = (0..MAX_CHATS).map(|i| (format!("c{i}"), true)).collect();
+        assert_eq!(evictable(&busy, "new"), None);
+        // Full with one idle chat: that one goes, and only that one.
+        let mut mixed = busy.clone();
+        mixed[3].1 = false;
+        assert_eq!(evictable(&mixed, "new").as_deref(), Some("c3"));
+        // The conversation being opened is never its own victim.
+        assert_eq!(evictable(&mixed, "c3"), None);
+        // Under the cap nothing is dropped at all.
+        assert_eq!(evictable(&mixed[..MAX_CHATS - 1], "new"), None);
     }
 
     /// A field this page cannot draw must not become an empty string in the

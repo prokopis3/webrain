@@ -820,10 +820,10 @@
   // "open history" painted all of them at once.
   const list = $derived(past ?? items);
   const hiddenCount = $derived(Math.max(0, list.length - tail));
-  // The conversation the running turn belongs to: the one a foreign frame named,
-  // or this one when the turn is ours. `busy` alone is a fact about the server,
-  // not about where the work is.
-  const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));
+  // The conversation the running turn belongs to. This tab's own turn wins over a
+  // foreign one: two conversations can now be mid-turn at the same time, and the
+  // Stop button and the "working" state belong to the thread on screen.
+  const runningConvo = $derived(busy ? busyConvo || current : runningIn);
   const shown = $derived(list.length > tail ? list.slice(-tail) : list);
   // Which ledger the panel is reading: a saved conversation shows its own, so
   // the numbers stop changing to the live one's the moment you open history.
@@ -2053,6 +2053,14 @@
     // the transcript save lands on the wrong id.
     swapDraft(id);
     current = id;
+    // Coming back to a thread that never stopped: the rail's row says whether the
+    // server is still working on it, and a tab that showed an idle composer over a
+    // live turn was how "my answer vanished" looked.
+    const running = convos.find((c) => c.id === id);
+    if (running) {
+      busy = !!running.busy;
+      busyConvo = busy ? id : "";
+    }
     seededFor = id;
     turns = pastTurns;
     // The live pane is this conversation now, so the rows it was holding belong
@@ -2531,6 +2539,10 @@
         tools: toolsSel,
         tools_off: builtinOff,
         delivery,
+        // The conversation this turn belongs to. The server keeps one session per
+        // conversation, so without this a turn started from a thread you are not
+        // looking at would land on whichever one the page opened last.
+        convo: current,
         // Only what the operator typed: the render hint and the suggestion
         // contract are standing instructions now, held by the session.
         instructions,
@@ -5382,12 +5394,12 @@
               class="convo"
               class:on={c.id === (viewing || current)}
               class:reading={!!past && c.id === (viewing || current)}
-              class:run={c.id === runningConvo}
+              class:run={c.id === runningConvo || !!c.busy}
               onclick={() => openConvo(c.id)}
               title={c.id}
             >
               <span class="title">
-                {#if c.id === runningConvo}<i class="rundot" aria-hidden="true"></i>{/if}
+                {#if c.id === runningConvo || c.busy}<i class="rundot" aria-hidden="true"></i>{/if}
                 {c.id === current ? "live · " : ""}{c.title || "(no prompt)"}
               </span>
               <span class="meta">{c.n ? `${c.ts} · ${c.n} msg` : "empty"}</span>
@@ -5628,15 +5640,13 @@
       {/each}
     </div>
   {/if}
-  {#if busy && runningConvo && runningConvo !== current}
-    <!-- There is one live session, and it is busy in another conversation. Saying
-         which one is the difference between "this page is stuck" and "it is
-         waiting for another chat to finish". The owner is `runningConvo`, not
-         `runningIn`: a turn this tab started belongs to a conversation too, and
-         opening a second thread used to hand it this one's stop button. -->
+  {#if runningIn && runningIn !== current}
+    <!-- A conversation you are not reading is still working. It keeps streaming
+         into its own session, so this is news, not a limit: the thread will be
+         exactly where you left it. The rail row carries the same dot. -->
     <p class="runhint">
-      a turn is running in <b>{convos.find((c) => c.id === runningConvo)?.title || runningConvo}</b> — this
-      conversation waits for it
+      <b>{convos.find((c) => c.id === runningIn)?.title || runningIn}</b> is still working — you can
+      reply here
     </p>
   {/if}
   <footer>
