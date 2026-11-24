@@ -14,10 +14,11 @@ import { strict as assert } from "node:assert";
 // Ceilings are the measured size at the time of writing plus ~5%: enough room for
 // a feature, not enough for a second framework.
 const BUDGET = [
-  // 82 since the composer field became draggable from its top edge (vertical
-  // handle, clamped height, a corner expand/shrink button); it was 81 with the
-  // history-search dialog and 80 before that with the results in the rail.
-  ["../assets/chat.js", 82, "the app bundle"],
+  // 84 since the rail pages itself (20 rows, a scroll listener, a spinner at the
+  // end, and a thread lifted to the top when it is opened) on top of the foldable
+  // todo list, the Session Info panel and the `@` skill tree; it was 82 with the
+  // draggable composer, 81 with the history-search dialog and 80 before that.
+  ["../assets/chat.js", 84, "the app bundle"],
   ["../assets/chat.css", 15, "the stylesheet"],
   ["../assets/chunk-markdown.js", 29, "marked + DOMPurify, deferred"],
 ];

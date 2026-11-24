@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `chat`: **the session rail reads twenty rows and grows as it is scrolled, and a chat you
+  open jumps to the top of it.** `GET /sessions` returned every conversation this machine
+  ever had, and `GET /search` was the only way back to one from three months ago. It now
+  takes `limit` (default 20) and `offset`, reads one row past the page so `more` is an
+  answer rather than a guess, and returns `next` — the offset the next page starts at.
+  `next` is the server's count and not the rail's row count, because row 0 can be the
+  "(new conversation)" placeholder, which is not in the store: counting rows asked one row
+  too far and a conversation fell through the gap between pages (measured: 22 threads, two
+  pages, 23 distinct rows, none repeated). The rail fetches the next page when the list is
+  within 240 px of its end — a spinner circle, no button — and Ctrl+K still searches the
+  whole history server-side, so a thread the rail has not paged in is still reachable.
+  Opening one puts it at index 0 immediately, before its transcript arrives, and the order
+  survives a reload: `POST /sessions/<id>` records the open in a `seen` table, and the list
+  orders by `COALESCE(seen.ts, last message)` — with the "has a seen row" bit as the
+  tiebreak, since whole-second timestamps tie when a thread is written and opened in the
+  same second (`opening_a_conversation_puts_it_first_and_the_list_pages`).
+- `chat`: **Settings shows a spinner while it reads the registry.** The Skills/MCP tab and
+  the Agents tab draw a spinner row until `GET /catalog` and the agent list come back —
+  904 skill rows are not instant, and the panel used to look empty rather than busy.
 - `chat`: **the agent's todo list above the composer folds and opens, the shape the Copilot
   chat list has.** It was one strip showing four rows and a `+N`; a run with eight steps hid
   half of them behind a number. It is a `<details>` now — folded to the single line that says

@@ -3679,7 +3679,29 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
         // has no other way to learn that a turn is still running on the server —
         // without it the page looks idle while the agent keeps working.
         ("GET", "/sessions") => {
-            let mut list = state.store.as_ref().map(|s| s.convos()).unwrap_or_default();
+            // A page at a time: the rail asks for 20 and fetches the next 20 when
+            // the list is scrolled to its end. One row past the page is what says
+            // whether there is another, without a COUNT over every conversation.
+            let limit = param(query, "limit")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(20)
+                .clamp(1, 100);
+            let offset = param(query, "offset")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+                .max(0);
+            let mut list = state
+                .store
+                .as_ref()
+                .map(|s| s.convos(limit + 1, offset))
+                .unwrap_or_default();
+            let more = list.len() as i64 > limit;
+            list.truncate(limit as usize);
+            // How far into the store this page reached. The rail cannot count its
+            // own rows to ask for the next page: row 0 may be the placeholder
+            // below, which is not in the store, so counting rows asked one row too
+            // far and a conversation fell between the pages.
+            let next = offset + list.len() as i64;
             // The page's own conversation, not the request's: `/sessions` is the
             // menu, and it is read for the tab that asked.
             let current = shared.current().await;
@@ -3688,9 +3710,10 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             // marked while the page sat in exactly that conversation. Pressing
             // "new chat" and finding no active tab is this, not a click that
             // failed to register.
-            if !list
-                .iter()
-                .any(|c| c["id"].as_str() == Some(current.as_str()))
+            if offset == 0
+                && !list
+                    .iter()
+                    .any(|c| c["id"].as_str() == Some(current.as_str()))
             {
                 list.insert(
                     0,
@@ -3732,6 +3755,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             let body = json!({
                 "current": current,
                 "sessions": list,
+                "more": more,
+                "next": next,
                 "busy": state.busy.load(Ordering::SeqCst),
                 "processing": processing,
             })
@@ -3841,6 +3866,11 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> anyhow::Resul
             // is built by its first turn and carries its stored tail, so a thread
             // you switch away from and back to keeps the context it built.
             *shared.current.lock().await = id.clone();
+            // Opening is also what puts a thread at the top of the menu, and it has
+            // to survive a reload — hence a row, not a page-side sort.
+            if let Some(s) = state.store.as_deref() {
+                s.touch(&id);
+            }
             // The claim answers with the transcript as well. Picking a thread used
             // to be two round trips — GET for the rows, POST to claim — and the GET
             // is the expensive one (measured 354–663 KB of JSON for a scrape), so

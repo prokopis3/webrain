@@ -112,6 +112,15 @@ impl Store {
                  convo TEXT PRIMARY KEY,
                  body  TEXT NOT NULL,
                  ts    TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             -- When a conversation was last OPENED. The menu is ordered by the
+             -- later of this and its newest message, so picking a thread lifts it
+             -- to the top and it stays there across a reload — the order ChatGPT
+             -- and Claude keep. Same `datetime('now')` format as `messages.ts`, so
+             -- the two compare as strings.
+             CREATE TABLE IF NOT EXISTS seen (
+                 convo TEXT PRIMARY KEY,
+                 ts    TEXT NOT NULL DEFAULT (datetime('now'))
              );",
         )
         .ok()?;
@@ -137,22 +146,34 @@ impl Store {
     }
 
     /// Newest conversation first, titled by its opening user message.
-    pub fn convos(&self) -> Vec<Value> {
+    /// The last page of a conversation, newest first: the one the reader opened
+    /// most recently, else the one whose last message is newest. Opening a thread
+    /// therefore lifts it to the top on the next read, which is what every chat app
+    /// does and what a menu ordered by message time alone cannot do.
+    ///
+    /// `limit + 1` is the caller's trick for `more`; nothing here knows about it.
+    pub fn convos(&self, limit: i64, offset: i64) -> Vec<Value> {
         let Some(db) = self.lock() else {
             return Vec::new();
         };
         let mut stmt = match db.prepare(
-            "SELECT convo,
+            "SELECT t.convo,
                     COALESCE((SELECT title FROM titles WHERE convo = t.convo),
                              (SELECT body FROM messages m WHERE m.convo = t.convo AND role = 'user'
                               ORDER BY id LIMIT 1)),
-                    MAX(ts), COUNT(*)
-             FROM messages t GROUP BY convo ORDER BY MAX(id) DESC LIMIT 50",
+                    MAX(ts), COUNT(*),
+                    COALESCE((SELECT ts FROM seen s WHERE s.convo = t.convo), MAX(t.ts)),
+                    (SELECT ts FROM seen s WHERE s.convo = t.convo) IS NOT NULL
+             FROM messages t GROUP BY convo
+             -- Both timestamps are whole seconds, so a thread written and opened in
+             -- the same second ties: the one actually opened is the tiebreak, and
+             -- the newest message decides the rest.
+             ORDER BY 5 DESC, 6 DESC, MAX(t.id) DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([limit.max(1), offset.max(0)], |r| {
             Ok(json!({
                 "id": r.get::<_, String>(0)?,
                 "title": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -162,6 +183,22 @@ impl Store {
         });
         rows.map(|r| r.filter_map(Result::ok).collect())
             .unwrap_or_default()
+    }
+
+    /// Mark a conversation as the one the reader just opened. Its own row, so two
+    /// tabs opening two threads do not overwrite one "last opened" value.
+    pub fn touch(&self, convo: &str) -> bool {
+        if convo.is_empty() {
+            return false;
+        }
+        self.lock().is_some_and(|db| {
+            db.execute(
+                "INSERT INTO seen (convo) VALUES (?1)
+                 ON CONFLICT(convo) DO UPDATE SET ts = datetime('now')",
+                [convo],
+            )
+            .is_ok()
+        })
     }
 
     pub fn messages(&self, convo: &str) -> Vec<Value> {
@@ -258,6 +295,9 @@ impl Store {
                 // model nobody chose for it.
                 && db
                     .execute("DELETE FROM settings WHERE convo = ?1", [convo])
+                    .is_ok()
+                && db
+                    .execute("DELETE FROM seen WHERE convo = ?1", [convo])
                     .is_ok()
         })
     }
@@ -637,7 +677,7 @@ mod tests {
         s.append("", "user", "ignored empty convo id is still stored");
         s.append("c2", "user", ""); // dropped: empty body
 
-        let convos = s.convos();
+        let convos = s.convos(20, 0);
         assert_eq!(convos.len(), 2);
         let c1 = convos.iter().find(|c| c["id"] == "c1").expect("c1");
         assert_eq!(c1["title"], "hello there");
@@ -646,6 +686,30 @@ mod tests {
         let msgs = s.messages("c1");
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1]["role"], "assistant");
+        drop(s);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Reading a conversation keeps it — one ordered row per conversation, cut into
+    /// pages — and *opening* it is what lifts it, even when a newer one exists. That
+    /// is the order the rail promises, and it has to survive a reload, so it is a
+    /// row and not a page-side sort.
+    #[test]
+    fn opening_a_conversation_puts_it_first_and_the_list_pages() {
+        let (s, path) = temp();
+        s.append("old", "user", "oldest");
+        s.append("new", "user", "newest");
+        assert_eq!(s.convos(20, 0)[0]["id"], "new", "newest message first");
+        assert!(s.touch("old"), "opening is recorded");
+        assert_eq!(s.convos(20, 0)[0]["id"], "old", "opened one is first now");
+        // A page is a window, not a filter: two rows in one-rows pages, no overlap.
+        assert_eq!(s.convos(1, 0).len(), 1);
+        assert_eq!(s.convos(1, 0)[0]["id"], "old");
+        assert_eq!(s.convos(1, 1)[0]["id"], "new");
+        assert!(s.convos(1, 2).is_empty(), "past the end");
+        // Deleting the thread forgets when it was opened too.
+        s.forget("old");
+        assert_eq!(s.convos(20, 0)[0]["id"], "new");
         drop(s);
         let _ = std::fs::remove_file(path);
     }

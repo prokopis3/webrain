@@ -105,6 +105,43 @@
   let past = $state(null); // history being read, or null for live
   let viewing = $state(""); // which conversation `past` belongs to
   let convos = $state([]);
+  // The rail grows as it is scrolled: 20 rows to start, the next 20 when the end
+  // comes into view, and no button to press. `more` is the server's own answer to
+  // "is there another page" — one row past the page is what it costs to know.
+  const PAGE = 20;
+  let moreSessions = $state(false);
+  let loadingMore = $state(false);
+  // Where the next page starts in the server's list. The rail's own row count is
+  // the wrong number: row 0 can be the "(new conversation)" placeholder, which is
+  // not in the store, so counting rows asked one row past the page and a
+  // conversation fell through the gap.
+  let railNext = $state(0);
+  async function loadMore() {
+    if (loadingMore || !moreSessions) return;
+    loadingMore = true;
+    try {
+      const r = await fetch(`/sessions?limit=${PAGE}&offset=${railNext}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      const have = new Set(convos.map((c) => c.id));
+      convos = [...convos, ...(j.sessions || []).filter((c) => !have.has(c.id))];
+      moreSessions = j.more === true;
+      railNext = j.next ?? railNext + PAGE;
+    } catch {
+      /* the rail keeps what it has */
+    } finally {
+      loadingMore = false;
+    }
+  }
+  // Reading a thread lifts it to the top, immediately — the row moves under the
+  // click that opened it, before the transcript has arrived. A thread the rail was
+  // not showing (found by search, several pages down) gets a bare row that the
+  // next list read fills in.
+  function toTop(id) {
+    if (!id) return;
+    const row = convos.find((c) => c.id === id);
+    convos = row ? [row, ...convos.filter((c) => c.id !== id)] : [{ id, title: "", ts: "", n: 0 }, ...convos];
+  }
   let current = $state("");
   let turns = $state([]); // per-turn ledger of the live conversation, newest first
   let pastTurns = $state([]); // the ledger of the conversation being read
@@ -1844,12 +1881,16 @@
 
   async function loadSessions() {
     try {
-      const r = await fetch("/sessions");
+      // One page: the rail grows as it is scrolled, so the boot reads 20 rows
+      // instead of every conversation this machine ever had. Once the reader has
+      // scrolled, re-reading keeps that depth instead of collapsing the list.
+      const r = await fetch(`/sessions?limit=${Math.max(PAGE, convos.length)}&offset=0`);
       if (!r.ok) return;
       const j = await r.json();
       current = j.current || "";
       convos = j.sessions || [];
-      pruneSetups(convos, current);
+      moreSessions = j.more === true;
+      railNext = j.next ?? convos.length;
       // A turn keeps running on the server across a reload; without this a
       // refreshed page looks idle while the agent is still working. Only ever
       // raised here — `assistant.idle` is what lowers it, so a turn this page
@@ -2053,6 +2094,10 @@
       backToLive();
       return follow();
     }
+    // The thread you just picked belongs at the top of the rail, the way every
+    // chat app orders it. The server records the same fact in `seen`, so this is
+    // only the immediate half — a reload comes back in the same order.
+    toTop(id);
     // Claim either way — it is what makes the next turn land in this thread —
     // but only pay for the transcript when this tab does not already hold it.
     // One request on a first open, a header-sized one on a revisit.
@@ -3572,6 +3617,16 @@
   async function deleteConvo(id) {
     await fetch(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
     cache.delete(id);
+    // Its per-conversation setup goes with it — the one place a key is dropped,
+    // because it is the one place the page *knows* the conversation is gone. (The
+    // menu used to sweep every key not on the list it had read; once the list
+    // became a page, that sweep deleted the setups of every conversation further
+    // down. A stale key is a few dozen bytes, which is cheaper than losing one.)
+    try {
+      localStorage.removeItem(setupId(id));
+    } catch {
+      /* private mode */
+    }
     if (past) past = null;
     loadSessions();
   }
@@ -3710,23 +3765,6 @@
     if (s.effort) effort = s.effort;
     if (Array.isArray(s.tools)) toolsSel = s.tools;
     if (Array.isArray(s.off)) builtinOff = s.off;
-  }
-
-  // One setup key per conversation is fine; one per conversation that ever
-  // existed is a leak, because the server keeps a bounded history and the rest
-  // are gone. Dropped whenever the menu is reloaded — the thread list is the
-  // only authority on which conversations still exist.
-  function pruneSetups(list, keep) {
-    try {
-      const live = new Set([keep, ...list.map((c) => c.id)]);
-      for (const k of Object.keys(localStorage)) {
-        if (k.startsWith(SETUP_PREFIX) && !live.has(k.slice(SETUP_PREFIX.length))) {
-          localStorage.removeItem(k);
-        }
-      }
-    } catch {
-      /* private mode, or a full quota — nothing to prune */
-    }
   }
 
   // What the conversation on screen was held with, and whether that is still what
@@ -3999,10 +4037,14 @@
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
   let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [], agentCurrent: null });
+  // Which of the three registry tabs is still reading. The lists used to appear
+  // empty until four routes answered, which reads as "nothing installed".
+  let mngBusy = $state(false);
   // The settings lists are the model picker's list, so they get its filter too —
   // the cross-tool skill tree alone can be hundreds of rows.
   let skillFilter = $state("");
   async function loadManage() {
+    mngBusy = true;
     try {
       const [s, m, items, ag] = await Promise.all([
         fetch("/skills").then((r) => r.json()),
@@ -4050,6 +4092,8 @@
       if (ag.current && ag.current.error) toast(`agents: ${ag.current.error}`, "err");
     } catch {
       /* a panel with no rows beats one that lies about what is installed */
+    } finally {
+      mngBusy = false;
     }
   }
 
@@ -5399,7 +5443,16 @@
     >
   {/if}
 
-  <aside class="rail" inert={!panelOpen}>
+  <aside
+    class="rail"
+    inert={!panelOpen}
+    onscroll={(e) => {
+      // 240 px of runway: the next page is asked for before the end is visible, so
+      // the list reads as continuous rather than "stopped, then jumped".
+      const el = e.currentTarget;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) loadMore();
+    }}
+  >
     <!-- Search is the first thing in the rail, because the rail is where history
          lives. Typing replaces the thread list with matches; clearing restores
          it. One field, one place. -->
@@ -5508,6 +5561,12 @@
           </div>
         {/if}
       {/each}
+
+    <!-- The next page is on its way. A circle, not a bar: the list keeps its
+         rows while this turns, and a bar would read as progress nobody measured. -->
+    {#if loadingMore}
+      <p class="none rspin"><span class="spin" aria-hidden="true"></span> loading…</p>
+    {/if}
 
     <div class="side-foot">
       <!-- One line each: a rail this narrow turned a second line into a letter.
@@ -6546,7 +6605,9 @@
               placeholder="filter {rows.length} {isSkills ? "skills" : "servers"}"
               bind:value={skillFilter}
             />
-            {#if !shown.length}
+            {#if mngBusy}
+              <p class="mngempty"><span class="spin" aria-hidden="true"></span> reading the registry…</p>
+            {:else if !shown.length}
               <p class="mngempty">
                 {needle
                   ? `nothing matches “${skillFilter.trim()}”`
@@ -6645,7 +6706,9 @@
                 moves it live, so nothing restarts.
               </small>
             </div>
-            {#if !manage.agents.length}
+            {#if mngBusy}
+              <p class="mngempty"><span class="spin" aria-hidden="true"></span> reading the registry…</p>
+            {:else if !manage.agents.length}
               <p class="mngempty">
                 none found — a definition added to the workspace or the user
                 configuration appears here, and the model can write one with
@@ -8298,6 +8361,14 @@
   .mngname b { font-weight: 600; font-size: 13.5px; letter-spacing: 0.1px; }
   .mngname small { color: var(--dim); font-size: 11.5px; }
   .mngempty { margin: var(--s3) var(--s2); color: var(--dim); font-size: 13px; }
+  /* One spinner for every "this is still arriving": the rail's next page and the
+     three registry tabs. A ring, because it says "working" without claiming how
+     far along anything is. */
+  .spin { display: inline-block; width: 11px; height: 11px; margin-right: var(--s2);
+    vertical-align: -1px; border-radius: 50%; border: 2px solid var(--outline-variant);
+    border-top-color: var(--primary); animation: turn 700ms linear infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+  .rspin { display: flex; align-items: center; padding: var(--s2); }
   .mswitch { flex: none; width: 44px; height: 44px; display: grid; place-items: center;
     border: 0; background: none; cursor: pointer; border-radius: var(--shape-full); }
   .mswitch i { width: 34px; height: 20px; border-radius: var(--shape-full);
