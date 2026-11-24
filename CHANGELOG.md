@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-24
+
 ### Added
 
 - **chat (html replies)**: the vocabulary a reply may build with grew the shapes a
