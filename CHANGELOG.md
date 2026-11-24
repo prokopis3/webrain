@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **chat (html replies)**: the vocabulary a reply may build with grew the shapes a
+  dashboard actually needs, and the standing instruction now hands the model a
+  copyable skeleton instead of a list of adjectives. `span.pill` gained `.ok` /
+  `.warn` / `.bad` tones (`--primary` / `--tertiary` / `--error` — no new palette),
+  `div.grid.wide` splits a main column from a rail, `th.num` / `td.num` right-align
+  monospaced figures, and a proportion inside a table row is a native `<progress>`
+  (nothing needs an inline width, which the sanitiser strips). `check-html-vocab.mjs`
+  asserts prompt and stylesheet name the same classes in **both** directions — a
+  class the CSS lost renders as bare text, so that drift is silent without it.
+- **chat (routes)**: `GET /pending` also reports what the *runtime* is holding —
+  `runtime.external` (external tool calls awaiting a result) and
+  `runtime.permissions` (prompts reconstructed from event history) — beside our
+  own `asks`, in a separate key so an unaware renderer cannot break on them, and
+  `POST /pending {request_id, result|error}` answers one. `GET /completions`
+  answers the host-driven completion probe (`get_trigger_characters`). Both lists
+  and the trigger list come back empty on a local session, so these three routes
+  are instrumentation rather than new surface: they turn "does this capability
+  exist here" from a reading of the SDK into one call. Verified live:
+  `{"asks":[],"runtime":{"external":[],"permissions":[]}}`,
+  `{"trigger_characters":[],"supported":false}`, `400 {"error":"request_id"}`,
+  `{"handled":false}` for an unknown id.
+- **chat (session identity)**: `--serve` names its session at creation
+  (`SessionConfig.name = webrain-<convo>`), which is what makes the runtime persist
+  it from the start instead of only after the first turn. `GET /name` and
+  `POST /name` expose the runtime's own name (`session.name.get` / `.set`), and
+  `GET /runtime/sessions` returns `ClientRpc.sessions.list` — the runtime's view,
+  including threads this machine's store never wrote. Together they are the two
+  halves a resume needs that are not the callback set. Verified live:
+  `{"name":"webrain-c1795274324668"}`, a rename round-trip, and the runtime's list
+  reporting the same name with `clientName sdk` and the cwd.
+- **chat (long-running jobs)**: a process the agent starts with its own `terminal`
+  tool outlived the turn but nothing could see it, and `read` *drained* the buffer,
+  so only one of the two interested readers could ever have the output. The log is
+  now a buffer plus a cursor: `terminal read` still returns only what is new, and
+  the page reads the same bytes from the other end. `GET /jobs` lists id, command,
+  pid, `running`, `exit`, byte count and a 1.5 KB tail; `POST /jobs {id}` kills
+  one without eating the model's unread output. Finished jobs stay readable (the
+  newest 20) and `terminal read` on one now ends with `exited with code N` instead
+  of leaving the model polling a process that will never print. A new
+  `terminal op=list` names every job the session still knows, which is what keeps
+  one started many turns ago usable once the context that named it is gone, and
+  `/jobs` in the composer shows those rows to the user. A job also *announces*
+  its end: one thread per job watches it and publishes
+  `{"type":"webrain.job","data":{"id","command","exit","running":false}}` on
+  `/events`, because nothing polls the registry on its own and "did my build
+  finish" is the question a background job exists to answer. Verified live: a
+  `cmd.exe` job at `running:true, bytes:151`
+  stayed readable after the model's `read` answered `(no new output)`, `where.exe`
+  reported `running:false, exit:2`, and `POST /jobs` answered
+  `{"stopped":true,"id":1,…}`.
+
 ### Fixed
 - `chat`: **an attachment is readable by the agent that was told about it.** Uploads
   landed in `%TEMP%\webrain-chat\<conversation>\` while every file tool — the seven in
