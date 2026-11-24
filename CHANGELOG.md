@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and you can reply here*. `POST /ledger` also takes the `convo` the page measured, the way
   `/transcript` already did, so a background turn's instruments land on the thread that
   earned them.
+- `chat`: **an approval or a question is drawn in the conversation that asked it.** The
+  prompt handlers were one instance for the whole server, so a card raised in chat B was
+  broadcast unstamped and appeared over chat A — the one place two concurrent chats could
+  still collide. They are now one pair per conversation (`prompts(gate, convo)`), every
+  `webrain.permission` / `webrain.ask` / `webrain.note` frame is stamped by `card_frame`
+  with its `convo` (which the page's existing guard already routes on), and `pending` is
+  per conversation so a card is only answerable from the chat that raised it. What stays
+  shared is what belongs to the process: the bus, the card id counter, and the standing
+  `server:tool` approvals — a grant is about the tool, not the thread
+  (`two_conversations_do_not_share_a_cap_or_a_card`).
 
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
