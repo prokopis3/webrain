@@ -96,9 +96,10 @@ cargo build --release --bin webrain --features pdfium   # what the release build
 `--features pdfium` enables `pdf_render` (it binds the system pdfium at runtime, so
 `webrain install pdfium` still supplies the library). Add `,chat` for
 [`webrain chat`](docs/guides/chat.mdx) — that pulls a ~135 MB Copilot runtime and
-needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+. On a **static musl**
-target the build vendors OpenSSL 3 and compiles it with `musl-gcc` (`musl-tools`,
-`perl`, `make`, `pkg-config`, `libssl-dev`), so the result stays static.
+needs OS OpenSSL 3 on Linux, so it is opt-in; needs Rust 1.94+. **Not available on
+a static musl target**: `copilot-sdk` 2.0.1 refuses a vendored OpenSSL and requires
+`OPENSSL_STATIC=0`, so a static-pie binary cannot carry it — the musl builds ship
+every tool except chat.
 
 ### Updating
 
@@ -230,8 +231,9 @@ webrain chat --serve          # browser UI on http://127.0.0.1:8787/
 - `webrain install chat-ui` from a *different* version is refused, not served — upgrade
   the binary and the page together.
 - From source it is opt-in: `cargo build --release --features chat` (Rust 1.94+; Linux
-  needs OpenSSL 3, a musl target vendors it; `chat-bundled` embeds the runtime). The
-  release binaries ship it on every target.
+  needs OS OpenSSL 3, which is why the static musl builds leave chat out;
+  `chat-bundled` embeds the runtime). Every release binary carries it except the two
+  `*-linux-*-musl` ones.
 
 ### What the page does that a terminal does not
 

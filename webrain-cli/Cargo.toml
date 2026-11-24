@@ -28,7 +28,6 @@ pdfium = ["webrain-mcp/pdfium"]
 # anyone who wants a single-file binary.
 chat = [
     "dep:copilot-sdk",
-    "dep:openssl",
     "dep:async-trait",
     "dep:rusqlite",
     "dep:ureq",
@@ -78,13 +77,12 @@ regex = { version = "1", optional = true }
 # lockfile and this entry costs no extra compile.
 flate2 = { version = "1", optional = true }
 
-# `chat` reaches `native-tls` through the SDK's `network-forwarding`, which is
-# `openssl-sys` on Linux. A static musl target has no system OpenSSL to link, so
-# it builds one: `vendored` compiles OpenSSL 3 with musl-gcc and links it static.
-# The `dep:openssl` in `chat` is inert on every other target — this table is the
-# only place the crate is declared, so nothing else ever builds it.
-[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
-openssl = { version = "0.10", optional = true, features = ["vendored"] }
+# No `openssl` entry on purpose. `chat` reaches `native-tls` through the SDK's
+# `network-forwarding`, and since `copilot-sdk` 2.0.1 the SDK's own build script
+# refuses a vendored OpenSSL on Linux ("Linux SDK target requires OS OpenSSL 3,
+# not vendored OpenSSL"), while a static musl binary can only ever have a vendored
+# one. So the two musl release targets are built without `chat` — the vendored
+# table that used to live here is gone rather than silently dead.
 
 # `build.rs` hashes the chat UI in `assets/` so the digests can never drift from
 # the files this build actually used — the binary serves those files from disk,

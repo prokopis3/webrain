@@ -19,9 +19,8 @@ engine cache, so it drives whatever browser the CLI would.
 
 - A release binary from this repository (`webrain-linux-x86_64`,
   `webrain-macos-aarch64`, `webrain-windows-x86_64.exe`, …). The `chat` feature
-  is built into every published target, the two static **musl** builds included —
-  those vendor OpenSSL 3 and compile it with `musl-gcc`, so the result stays a
-  static binary.
+  is built into every published target **except the two static musl ones** — see
+  [What each build target carries](#what-each-build-target-carries).
 - Building from source needs **Rust 1.94+** and `--features chat`:
 
 ```bash
@@ -55,27 +54,28 @@ downloaded and SHA-256 verified at build time.
 | --- | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | yes | yes | links the distro's OpenSSL 3 |
 | `aarch64-unknown-linux-gnu` | yes | yes | same, cross-linked |
-| `x86_64-unknown-linux-musl` | yes | yes | static: **vendors** OpenSSL 3 (`openssl` `vendored`, built by `musl-gcc`) |
-| `aarch64-unknown-linux-musl` | yes | yes | same, cross-linked |
+| `x86_64-unknown-linux-musl` | yes | **no** | static: no OpenSSL to link, and the SDK refuses a vendored one |
+| `aarch64-unknown-linux-musl` | yes | **no** | same, cross-linked |
 | `aarch64-apple-darwin` | yes | yes | TLS via Security.framework |
 | `x86_64-apple-darwin` | yes | yes | same |
 | `x86_64-pc-windows-msvc` | yes | yes | TLS via schannel |
 | `aarch64-pc-windows-msvc` | yes | yes | same |
 
-CI compiles `pdfium,chat` on Linux for every PR, and on Linux, macOS, Windows
-**and static musl** for every push to `main` — the four shapes a release tag would
-otherwise be the first to try.
+CI compiles `pdfium,chat` on Linux for every PR, and on Linux, macOS and Windows
+for every push to `main`, plus a static musl build of the same tree without `chat`
+— the shapes a release tag would otherwise be the first to try.
 
-The musl rows are the reason this table exists at all. `chat` reaches
-`native-tls` through the SDK's `network-forwarding`, which is `openssl-sys` on
-Linux; a static target has no OpenSSL to link, so `webrain-cli` declares
-`openssl` with the `vendored` feature for `target_env = "musl"` only and the
-build compiles OpenSSL 3 from source with `musl-gcc`. The SDK itself supports the
-platform: its build script fetches `copilot-linuxmusl-x64`, not a glibc
-package. Building it needs `musl-tools`, `perl`, `make`, `pkg-config` and
-`libssl-dev` (the last one for the build-host copy of `openssl-sys`), and about
-8 GB of RAM to compile the SDK crate — build with `-j 1` if your machine is
-tighter than that.
+The two musl rows are the one place `chat` is **missing**, and it is the SDK's
+rule rather than a choice here. `chat` reaches `native-tls` through the SDK's
+`network-forwarding`, which is `openssl-sys` on Linux; `copilot-sdk` 2.0.1's build
+script then requires OS OpenSSL 3, `OPENSSL_STATIC=0` and no vendored copy. A
+static-pie binary can satisfy none of those, and its attempt to vendor OpenSSL 3
+with `musl-gcc` made the release fail with *"Linux SDK target requires OS OpenSSL
+3, not vendored OpenSSL"*. So the musl binaries ship every tool except chat;
+`webrain install` there still gives you Chrome, PDF, SERP, batch and the rest.
+Building the feature anywhere else needs OS OpenSSL 3 on Linux, and about 8 GB of
+RAM to compile the SDK crate — build with `-j 1` if your machine is tighter than
+that.
 
 The container image is glibc (Debian) and takes features as a build arg:
 

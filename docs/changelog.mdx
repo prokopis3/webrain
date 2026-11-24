@@ -12,6 +12,14 @@ All notable changes, in reverse chronological order. The full version lives in
 
 <p className="text-[#888] text-sm">Unreleased — in main, not yet tagged</p>
 
+### Fixed
+
+- **build**: the two static musl binaries ship without `chat`. `copilot-sdk` 2.0.1's
+  build script requires OS OpenSSL 3, `OPENSSL_STATIC=0` and no vendored copy, so a
+  `static-pie` binary cannot carry the feature — the vendored OpenSSL 3 the musl rows
+  used to compile with `musl-gcc` is now refused at build time. The musl rows build
+  `pdfium` alone; every other target keeps `chat`.
+
 ## v0.20.0
 
 <p className="text-[#888] text-sm">2026-11-24 — batch over HTTP, a context that survives a restart, and a composer you can resize</p>
