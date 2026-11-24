@@ -200,6 +200,20 @@ webrain install
 webrain install --engine obscura
 ```
 
+If you use `webrain chat`, two more steps belong to every upgrade. The Copilot
+runtime and the browser page are installed outside the binary, so a new version
+does not run the old ones:
+
+```bash
+webrain install chat-ui            # the new page; an old one fails its digest check
+webrain install copilot --force    # without --force it sees the old runtime and stops
+```
+
+`install chat-ui` swaps an out-of-date page by itself (it verifies the unpacked
+files against this build's digests). `install copilot` has no version check —
+it finds *a* runtime and reports "already installed" — so `--force` is the step
+that gets missed.
+
 ## OS compatibility
 
 | Engine | Windows | macOS | Linux |

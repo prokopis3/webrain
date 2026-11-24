@@ -37,7 +37,16 @@ webrain install copilot
 That downloads the official runtime for this platform from `github/copilot-cli`
 (SHA-256 verified) into the engine cache, and `webrain chat` picks it up — no
 environment variable needed. `COPILOT_CLI_PATH` still wins if you already have a
-bundle of your own. To bake the runtime into the binary instead:
+bundle of your own. **After `webrain upgrade` both of these need installing again** —
+the upgrade replaces the binary only, and a new binary will not run the runtime or the
+page the old one installed:
+
+```bash
+webrain install chat-ui            # the new page; an old one fails its digest check
+webrain install copilot --force    # without --force it sees the old runtime and stops
+```
+
+To bake the runtime into the binary instead:
 
 ```bash
 cargo build --release --features chat,pdfium          # ~45 MB, runtime installed separately

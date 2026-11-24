@@ -175,7 +175,8 @@ webrain eval 'document.querySelector("#email").value'
 webrain mcp [--http <port>]                        # MCP server (stdio, or HTTP on a port)
 webrain doctor                                     # diagnose the install (engines, MCP, CDP, vault)
 webrain install [--engine chrome|obscura] [--stealth]  # download a browser engine
-webrain upgrade                                    # update to the latest release
+webrain upgrade                                    # update the binary — then the two
+                                                   # `install` steps under "After an upgrade"
 webrain launch <service> <profile> [url]           # stealth Chrome, persistent profile
 webrain login <service> <profile> [url]            # interactive login into a profile
 webrain vault set|list|user|rm                     # encrypted credential vault (AES-256-GCM + TOTP)
@@ -228,12 +229,26 @@ webrain chat --serve          # browser UI on http://127.0.0.1:8787/
   (the `--serve` page asks instead).
 - `COPILOT_CLI_PATH` points chat at a Copilot CLI you already have. Chat keeps its own
   `COPILOT_HOME` and never reads `~/.copilot`.
-- `webrain install chat-ui` from a *different* version is refused, not served — upgrade
-  the binary and the page together.
 - From source it is opt-in: `cargo build --release --features chat` (Rust 1.94+; Linux
   needs OS OpenSSL 3, which is why the static musl builds leave chat out;
   `chat-bundled` embeds the runtime). Every release binary carries it except the two
   `*-linux-*-musl` ones.
+
+### After an upgrade
+
+The runtime and the page live **outside** the binary, so a new version will not run the
+old ones — and they are not refreshed for you:
+
+```bash
+webrain install chat-ui            # the new page; an old one fails its digest check
+webrain install copilot --force    # without --force it sees the old runtime and stops
+```
+
+`install chat-ui` replaces a page from another version on its own — it verifies the
+unpacked files against this build's digests, so an old page is refused, never served.
+`install copilot` has no such check: it sees *a* runtime and reports "already installed",
+which is why `--force` is the part people miss. Same after `cargo install … --force`, and
+after switching between a release binary and a checkout.
 
 ### What the page does that a terminal does not
 
