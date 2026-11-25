@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP row. `scripts/check-bundle.mjs` validates the packaged bundle, and
   `.github/workflows/publish-dsh-plugin.yml` publishes it at each release tag once an
   `NPM_TOKEN` secret exists.
+- **`dsh-webrain` starts webrain with `WEBRAIN_STEALTH_NOISE=0`.** The MCP row carries
+  the same fingerprint-noise choice `webrain chat --serve` makes for itself — the
+  documented fix when a page renders but never mounts — and `'1'` in a row override
+  restores the shim. The bundle is now `0.1.2`.
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
   the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs

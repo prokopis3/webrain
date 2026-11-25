@@ -18,6 +18,12 @@
         # Finder launches see a minimal PATH).
         command: webrain
         args: ['mcp']
+        # Fingerprint noise off, the setting `webrain chat --serve` also picks
+        # for itself. It drops the canvas/audio noise block; when a page renders
+        # but never mounts (a Next.js/Angular grid stays empty while a
+        # hand-opened tab of the same URL works), this is the documented fix.
+        env:
+          WEBRAIN_STEALTH_NOISE: '0'
         # Browser work is not a REST call: one navigate + extract pair can
         # spend minutes on a challenge page. The bridge default is 60 s.
         toolCallTimeoutMs: 300000
