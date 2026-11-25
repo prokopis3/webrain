@@ -36,10 +36,15 @@ function readJson(file) {
 /** English is the fallback every other language chains to, so it must exist. */
 const REQUIRED_LOCALES = ['en'];
 
+/** The registry scope this repository publishes under; a rename must be deliberate. */
+const EXPECTED_NAME = '@ixnk/dsh-webrain';
+
 const pkg = readJson('package.json');
 if (pkg) {
   if (typeof pkg.name !== 'string' || !/^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/.test(pkg.name)) {
     fail(`package.json: name "${pkg.name}" is not a name the plugin registry accepts`);
+  } else if (pkg.name !== EXPECTED_NAME) {
+    fail(`package.json: name "${pkg.name}" must be ${EXPECTED_NAME}`);
   }
   if (typeof pkg.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)) {
     fail(`package.json: version "${pkg.version}" is not semver`);

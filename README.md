@@ -471,9 +471,9 @@ bundle instead of a JSON snippet. The `dsh-webrain` package
 `mcp__webrain__*`:
 
 ```bash
-dsh plugin --profile <profile> install dsh-webrain
-# or, pinned to a commit of this repository:
-dsh plugin --profile <profile> install 'github:prokopis3/webrain#<sha>&path:integrations/dsh-webrain'
+dsh plugin --profile <profile> add @ixnk/dsh-webrain      # npm registry, once published
+# or, pinned to a commit of this repository (pnpm 11+):
+dsh plugin --profile <profile> add 'github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain'
 ```
 
 Full guide: [DeepSeek Harness](/mcp/deepseek-harness).

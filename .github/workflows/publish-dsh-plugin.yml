@@ -1,20 +1,23 @@
 # ============================================================================
-# Publish the dsh-webrain DeepSeek Harness bundle.
+# Publish the dsh-webrain DeepSeek Harness bundle to the npm registry.
 # ============================================================================
 # The bundle lives in integrations/dsh-webrain and is plain data: a manifest,
 # a Loader patch, locales, a detail document and artwork. Nothing is built, so
 # publishing is validate → version → npm publish.
 #
+# The package is scoped to the `ixnk` npm organization: `@ixnk/dsh-webrain`,
+# published with public access (also declared in the manifest's publishConfig).
+#
 # Triggers:
 #   - a version tag (`v*`): the bundle is published at the tag's version, so
-#     `dsh-webrain@<webrain version>` matches the release it shipped with. The
-#     bump happens in the workspace only: the repository keeps the bundle's own
-#     version, so a tag publish is a release artifact, not a commit.
+#     `@ixnk/dsh-webrain@<webrain version>` matches the release it shipped with.
+#     The bump happens in the workspace only: the repository keeps the bundle's
+#     own version, so a tag publish is a release artifact, not a commit.
 #   - workflow_dispatch: the bundle's own package.json version is published.
 # An already-published version is skipped instead of failing.
 #
 # Required repository secret: NPM_TOKEN — an npm automation token allowed to
-# publish the `dsh-webrain` package. Without it the job still validates and
+# publish packages in the `@ixnk` scope. Without it the job still validates and
 # reports how to install the bundle from this repository:
 #   dsh plugin --profile <profile> add \
 #     'github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain'
@@ -37,7 +40,7 @@ permissions:
 
 jobs:
   publish:
-    name: Validate and publish dsh-webrain
+    name: Validate and publish @ixnk/dsh-webrain
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -54,10 +57,13 @@ jobs:
       - name: Validate the bundle
         run: node scripts/check-bundle.mjs
 
-      - name: Check the packed file list
+      - name: Read the package name and check the packed file list
+        id: package
         shell: bash
         run: |
           set -euo pipefail
+          NAME="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json","utf8")).name)')"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
           node -e '
             const { execFileSync } = require("node:child_process");
             const raw = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8", shell: true }));
@@ -113,17 +119,18 @@ jobs:
             VERSION="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version)')"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing dsh-webrain@$VERSION"
+          echo "Publishing ${{ steps.package.outputs.name }}@$VERSION"
 
       - name: Check the registry
         id: registry
         shell: bash
         env:
+          NAME: ${{ steps.package.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          if npm view "dsh-webrain@$VERSION" version >/dev/null 2>&1; then
-            echo "::notice::dsh-webrain@$VERSION is already published; nothing to do."
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$NAME@$VERSION is already published; nothing to do."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -151,23 +158,24 @@ jobs:
       - name: Summary
         shell: bash
         env:
+          NAME: ${{ steps.package.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
           PUBLISHED: ${{ steps.registry.outputs.publish }}
           READY: ${{ steps.token.outputs.ready }}
         run: |
           {
-            echo "### dsh-webrain $VERSION"
+            echo "### $NAME $VERSION"
             echo ""
             if [[ "$PUBLISHED" == "true" && "$READY" == "true" ]]; then
-              echo "Published \`dsh-webrain@$VERSION\` to npm."
+              echo "Published \`$NAME@$VERSION\` to npm."
               echo ""
               echo '```bash'
-              echo "dsh plugin --profile <profile> add dsh-webrain"
+              echo "dsh plugin --profile <profile> add $NAME"
               echo '```'
             elif [[ "$PUBLISHED" == "true" ]]; then
               echo "Validated, but not published: set the \`NPM_TOKEN\` repository secret, then re-run this workflow."
             else
-              echo "\`dsh-webrain@$VERSION\` is already on npm."
+              echo "\`$NAME@$VERSION\` is already on npm."
             fi
             echo ""
             echo "Install from this repository without npm (pnpm 11+):"

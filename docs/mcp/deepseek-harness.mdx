@@ -1,6 +1,6 @@
 ---
 title: DeepSeek Harness
-description: Add webrain to DeepSeek Harness as an installable plugin bundle — install dsh-webrain, verify the mcp__webrain__* tools, and tune the MCP row.
+description: Add webrain to DeepSeek Harness as an installable plugin bundle — install @ixnk/dsh-webrain, verify the mcp__webrain__* tools, and tune the MCP row.
 ---
 
 # DeepSeek Harness
@@ -35,11 +35,11 @@ The bundle lives in
 In the Web UI: **Plugins** → **Add plugin**, paste a spec from below or choose
 the bundle directory.
 
-From the npm registry (the `Publish dsh-webrain` workflow publishes the package
-at each release tag):
+From the `@ixnk` scope on the npm registry (the `Publish dsh-webrain`
+workflow publishes the package at each release tag):
 
 ```bash
-dsh plugin --profile <profile> add dsh-webrain
+dsh plugin --profile <profile> add @ixnk/dsh-webrain
 ```
 
 From this repository, pinned to a commit. The parameters are separated with
