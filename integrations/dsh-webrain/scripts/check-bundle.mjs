@@ -77,6 +77,7 @@ if (patch) {
     ['stdio transport', /^\s*transport:\s*stdio\s*$/m],
     ['command', /^\s*command:\s*webrain\s*$/m],
     ['args', /^\s*args:\s*\['mcp'\]\s*$/m],
+    ['fingerprint noise off', /^\s*WEBRAIN_STEALTH_NOISE:\s*'0'\s*$/m],
     ['visible startup failure', /^\s*failOnStartupError:\s*true\s*$/m],
   ];
   for (const [label, pattern] of required) {

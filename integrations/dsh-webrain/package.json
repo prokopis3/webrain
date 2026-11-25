@@ -1,6 +1,6 @@
 {
   "name": "@ixnk/dsh-webrain",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "webrain's browser-automation and scraping tools, connected to DeepSeek Harness over MCP.",
   "type": "module",
   "license": "MIT",

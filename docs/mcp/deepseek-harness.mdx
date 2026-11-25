@@ -99,6 +99,7 @@ wholly, so restate every field the row needs:
     command: '/opt/homebrew/bin/webrain'   # absolute path for GUI launches
     args: ['mcp']
     env:
+      WEBRAIN_STEALTH_NOISE: '0'           # the bundle default; '1' restores noise
       CDP_URL: 'http://127.0.0.1:9222'     # reuse an already-open Chrome
       WEBRAIN_PROFILES_DIR: '/Users/me/Library/Application Support/webrain/profiles'
     toolCallTimeoutMs: 600000              # default from the bundle: 300000
@@ -109,6 +110,12 @@ wholly, so restate every field the row needs:
 An absolute `command` matters on macOS when the harness is launched from
 Finder: a GUI process sees a minimal `PATH`, so a Homebrew `webrain` is
 invisible.
+
+The bundle starts webrain with `WEBRAIN_STEALTH_NOISE=0`: the fingerprint-noise
+block is off, the same choice `webrain chat --serve` makes for itself. It is the
+documented fix for a page that renders but never mounts (an SPA grid stays empty
+while a hand-opened tab of the same URL works). Set it to `'1'` to restore the
+noise shim, for example to reproduce a stealth-related report.
 
 One `serverName` can be registered once per scope. If you also kept a
 hand-written `webrain` MCP entry (for example the HTTP form,
