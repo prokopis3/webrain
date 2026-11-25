@@ -1,10 +1,13 @@
 {
-  "name": "dsh-webrain",
+  "name": "@ixnk/dsh-webrain",
   "version": "0.1.0",
   "description": "webrain's browser-automation and scraping tools, connected to DeepSeek Harness over MCP.",
   "type": "module",
   "license": "MIT",
   "author": "webrain contributors",
+  "publishConfig": {
+    "access": "public"
+  },
   "homepage": "https://github.com/prokopis3/webrain",
   "repository": {
     "type": "git",

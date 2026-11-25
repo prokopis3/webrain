@@ -33,9 +33,8 @@ In the Web UI: **Plugins** → **Add plugin**, paste a spec from below or choose
 the bundle directory. From a shell:
 
 ```bash
-# The npm registry, once the package is published
-# (the Publish dsh-webrain workflow does that at each release tag):
-dsh plugin --profile <profile> add dsh-webrain
+# The @ixnk scope on the npm registry, once the release workflow published it:
+dsh plugin --profile <profile> add @ixnk/dsh-webrain
 
 # A pinned commit of this repository. pnpm 11 or newer is required for a Git
 # subdirectory install; the parameters are separated with npm's "::" form
