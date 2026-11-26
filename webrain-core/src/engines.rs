@@ -4982,6 +4982,33 @@ mod crawl_url_tests {
             vec![format!("http://{addr}/a"), "https://x.test/b".to_string()]
         );
     }
+
+    #[test]
+    fn fetch_http_page_extracts_title_text_and_links() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "<html><head><title>Docs page</title></head>\
+            <body><h1>Rust crawler</h1><p>fast domain indexing</p>\
+            <a href=\"/next\">Next</a></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let page = super::fetch_http_page(&format!("http://{addr}/")).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.title, "Docs page");
+        assert!(page.text.contains("Rust crawler"));
+        assert_eq!(page.links, vec![format!("http://{addr}/next")]);
+    }
 }
 
 #[cfg(test)]
