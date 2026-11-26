@@ -860,9 +860,10 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace"], "description": "search | coverage | architecture | status | page | subdomains | trace"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
+                "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
                 "depth": {"type": "integer", "description": "trace: max link hops (default 2, max 5)"},
                 "limit": {"type": "integer", "description": "trace: max edges (default 100, max 1000)"},
                 "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
@@ -2138,6 +2139,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                     None => json!({"status": "error", "message": "url required for op=trace"}),
                 },
+                "changes" => {
+                    let since = args.get("since").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 1000) as usize)
+                        .unwrap_or(100);
+                    match mem.changes(since, limit) {
+                        Ok(v) => json!({"status": "ok", "op": "changes", "changes": v}),
+                        Err(e) => err(e),
+                    }
+                }
                 other => {
                     json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
                 }
@@ -2213,9 +2226,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     // Discovery is evidence, not a gate: a CT outage still gets
                     // the seed crawled, with the failure reported.
                     Ok(Err(e)) => discovery = json!({"error": e.to_string()}),
-                    Err(e) => {
-                        discovery = json!({"error": format!("discovery task failed: {e}")})
-                    }
+                    Err(e) => discovery = json!({"error": format!("discovery task failed: {e}")}),
                 }
             }
 
@@ -2229,8 +2240,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 if remaining == 0 {
                     break;
                 }
-                let budget =
-                    webrain_core::webmemory::host_budget(remaining, hosts.len() - i);
+                let budget = webrain_core::webmemory::host_budget(remaining, hosts.len() - i);
                 let target = if i == 0 {
                     seed.clone()
                 } else {

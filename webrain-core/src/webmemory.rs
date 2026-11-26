@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS pages (
 );
 CREATE INDEX IF NOT EXISTS pages_host ON pages(host);
 
+CREATE TABLE IF NOT EXISTS changes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    url         TEXT NOT NULL,
+    old_hash    TEXT,
+    new_hash    TEXT NOT NULL,
+    changed_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS changes_at ON changes(changed_at);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
     url UNINDEXED,
     host UNINDEXED,
@@ -248,6 +257,19 @@ impl WebMemory {
     pub fn upsert_page(&self, page: &WebPage) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
+            "INSERT INTO urls(url, host, discovered_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(url) DO NOTHING",
+            params![page.url, page.host, now()],
+        )?;
+        let old_hash: Option<String> = tx
+            .query_row(
+                "SELECT content_hash FROM urls WHERE url=?1",
+                params![page.url],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
             "INSERT INTO pages(url, host, title, lang, text, fetched_at)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(url) DO UPDATE SET
@@ -278,6 +300,12 @@ impl WebMemory {
                 page.content_hash
             ],
         )?;
+        if old_hash.as_deref() != Some(page.content_hash.as_str()) {
+            tx.execute(
+                "INSERT INTO changes(url, old_hash, new_hash, changed_at) VALUES(?1, ?2, ?3, ?4)",
+                params![page.url, old_hash, page.content_hash, page.fetched_at],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -480,6 +508,30 @@ impl WebMemory {
     }
 
     /// Start a crawl run; returns its id.
+    /// Page content changes recorded by re-indexing, newest first. `since` is a
+    /// unix timestamp (0 = all); `limit` caps rows.
+    pub fn changes(&self, since: i64, limit: usize) -> Result<serde_json::Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, old_hash, new_hash, changed_at FROM changes
+             WHERE changed_at>=?1 ORDER BY changed_at DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |r| {
+            Ok(serde_json::json!({
+                "url": r.get::<_, String>(0)?,
+                "old_hash": r.get::<_, Option<String>>(1)?,
+                "new_hash": r.get::<_, String>(2)?,
+                "changed_at": r.get::<_, i64>(3)?,
+            }))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(serde_json::json!({
+            "since": since, "limit": limit, "count": out.len(), "changes": out
+        }))
+    }
+
     /// BFS over stored `LINKS_TO` edges from one URL, up to `depth` hops and
     /// `limit` edges. Read-only: the backing web graph, not a live fetch.
     pub fn trace(&self, start: &str, depth: usize, limit: usize) -> Result<serde_json::Value> {
@@ -995,6 +1047,22 @@ mod tests {
         assert_eq!(got["title"], "Title");
         assert_eq!(got["text"], "body text");
         assert!(mem.page("https://e.test/missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn changes_records_content_hash_transitions() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        let mut v1 = page("https://e.test/x", "e.test", "V1", "one");
+        v1.content_hash = "v1".into();
+        mem.upsert_page(&v1).unwrap();
+        let mut v2 = page("https://e.test/x", "e.test", "V2", "two");
+        v2.content_hash = "v2".into();
+        mem.upsert_page(&v2).unwrap();
+        let c = mem.changes(0, 10).unwrap();
+        assert_eq!(c["count"], 2);
+        assert_eq!(c["changes"][0]["new_hash"], "v2");
+        mem.upsert_page(&v2).unwrap();
+        assert_eq!(mem.changes(0, 10).unwrap()["count"], 2);
     }
 
     #[test]
