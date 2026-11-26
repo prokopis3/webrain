@@ -227,6 +227,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ghost-a` left the boot conversation at `turns: []`, and `/context?convo=ghost-a` answered
   `{"error":"this conversation has no session yet","session":false}`.
 
+- **`dsh-webrain`: webrain as an installable DeepSeek Harness bundle.** `dsh` composes
+  MCP servers through Loader patches rather than a client-side JSON file, so webrain now
+  ships as a bundle under `integrations/dsh-webrain`: one `@deepseek-ai/dsh-mcp-client`
+  row over stdio (`webrain mcp`) that registers all 19 tools as `mcp__webrain__*`, with
+  display metadata, an icon, a detail document, and eight locales. It installs from the
+  `@ixnk` scope on npm (`dsh plugin --profile <p> add @ixnk/dsh-webrain`, once the
+  release workflow has published it), from a pinned commit
+  (`github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain`,
+  pnpm 11+), from a local directory, or from **Plugins → Add plugin** in the Web UI; the
+  row is configurable through an `id: webrain-mcp` patch (absolute `command` for GUI
+  launches, `CDP_URL`, timeouts) and fails visibly when the binary or its browser engine
+  is missing. New
+  `docs/mcp/deepseek-harness.mdx` owns the guide and the failure modes found while
+  dogfooding: a missing `pnpm` on the harness `PATH`, the profile-workspace
+  `ERR_PNPM_ADDING_TO_ROOT`, and the `serverName` collision with a hand-written webrain
+  MCP row. `scripts/check-bundle.mjs` validates the packaged bundle, and
+  `.github/workflows/publish-dsh-plugin.yml` publishes it at each release tag once an
+  `NPM_TOKEN` secret exists.
+- **`dsh-webrain` starts webrain with `WEBRAIN_STEALTH_NOISE=0`.** The MCP row carries
+  the same fingerprint-noise choice `webrain chat --serve` makes for itself — the
+  documented fix when a page renders but never mounts — and `'1'` in a row override
+  restores the shim. The bundle is now `0.1.2`.
+
 ### Changed
 - `install`: **larger model downloads are faster and resumable on slow links.**
   One keep-alive `ureq::Agent` now serves the probe and every chunk (the old

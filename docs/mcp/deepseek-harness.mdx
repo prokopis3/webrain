@@ -1,0 +1,144 @@
+---
+title: DeepSeek Harness
+description: Add webrain to DeepSeek Harness as an installable plugin bundle — install @ixnk/dsh-webrain, verify the mcp__webrain__* tools, and tune the MCP row.
+---
+
+# DeepSeek Harness
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) loads
+plugins as **bundles**: a package whose manifest declares a Loader patch that
+inserts plugin rows. The `dsh-webrain` bundle inserts one
+`@deepseek-ai/dsh-mcp-client` row that spawns `webrain mcp` over stdio, so every
+webrain tool reaches the agent as `mcp__webrain__<tool>` — the same tools, and
+the same 19-tool surface, that webrain exposes to any other MCP client.
+
+The bundle lives in
+[`integrations/dsh-webrain`](https://github.com/prokopis3/webrain/tree/main/integrations/dsh-webrain).
+
+## Requirements
+
+- A DeepSeek Harness profile. Every shipped profile already provides
+  `@deepseek-ai/dsh-mcp-client`.
+- The `webrain` binary on the `PATH` of the process that starts the harness —
+  `webrain --version` must work there. Install it with `scoop install webrain`
+  (Windows), `brew install prokopis3/webrain/webrain` (macOS), or a binary from
+  [Releases](https://github.com/prokopis3/webrain/releases).
+- A browser engine, once: `webrain install` downloads Chrome for Testing into
+  webrain's engine cache. Without it the tool list is complete but navigation
+  fails with an engine error. `webrain doctor` diagnoses the install.
+- `pnpm` available to the harness process, because **every** third-party dsh
+  plugin is installed with it. A Git subdirectory install additionally needs
+  pnpm 11 or newer.
+
+## Install
+
+In the Web UI: **Plugins** → **Add plugin**, paste a spec from below or choose
+the bundle directory.
+
+From the `@ixnk` scope on the npm registry (the `Publish dsh-webrain`
+workflow publishes the package at each release tag):
+
+```bash
+dsh plugin --profile <profile> add @ixnk/dsh-webrain
+```
+
+From this repository, pinned to a commit. The parameters are separated with
+npm's `::` form because pnpm 11 rejects the `&path:` spelling its own docs show;
+pnpm 11 or newer is required either way:
+
+```bash
+dsh plugin --profile <profile> add \
+  'github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain'
+```
+
+From a local checkout:
+
+```bash
+dsh plugin --profile <profile> add '/absolute/path/to/webrain/integrations/dsh-webrain'
+```
+
+`dsh plugin` forwards its arguments to pnpm, so the verb is `add`. A live
+profile (`patchReload: live`) picks the bundle up without a restart.
+
+## What appears
+
+- A bundle card named **webrain browser tools**, with its own icon and the
+  plugin name `webrain`.
+- One enabled row titled **MCP client** (row id `webrain-mcp`,
+  `serverName: webrain`). `@deepseek-ai/dsh-mcp-client` owns the row's title and
+  generic artwork; the webrain icon belongs to the bundle card.
+- The tools `mcp__webrain__webrain_navigate`, `mcp__webrain__webrain_extract`,
+  `mcp__webrain__webrain_batch`, `mcp__webrain__webrain_observe`,
+  `mcp__webrain__webrain_guide`, and the rest of webrain's 19-tool surface. The
+  decision rules live in the `webrain_guide` tool, not in the prompt.
+
+## Verify
+
+1. **Plugins** shows the *webrain browser tools* bundle and one enabled
+   **MCP client** row.
+2. Ask the agent to call `mcp__webrain__webrain_guide`. It returns the
+   browser/challenge/extraction decision guide.
+3. Then a real task:
+
+   > Call `mcp__webrain__webrain_guide`, then open `https://example.com` and
+   > extract the heading.
+
+## Configure
+
+The bundle inserts a row with id `webrain-mcp`. Override it with an
+`id`-targeted patch in the profile's `cordis.patch.yml`
+(`$DSH_HOME/profiles/<profile>/cordis.patch.yml`); a patch replaces `config`
+wholly, so restate every field the row needs:
+
+```yaml
+- id: webrain-mcp
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: webrain
+    transport: stdio
+    command: '/opt/homebrew/bin/webrain'   # absolute path for GUI launches
+    args: ['mcp']
+    env:
+      WEBRAIN_STEALTH_NOISE: '0'           # the bundle default; '1' restores noise
+      CDP_URL: 'http://127.0.0.1:9222'     # reuse an already-open Chrome
+      WEBRAIN_PROFILES_DIR: '/Users/me/Library/Application Support/webrain/profiles'
+    toolCallTimeoutMs: 600000              # default from the bundle: 300000
+    startupTimeoutMs: 60000
+    failOnStartupError: true
+```
+
+An absolute `command` matters on macOS when the harness is launched from
+Finder: a GUI process sees a minimal `PATH`, so a Homebrew `webrain` is
+invisible.
+
+The bundle starts webrain with `WEBRAIN_STEALTH_NOISE=0`: the fingerprint-noise
+block is off, the same choice `webrain chat --serve` makes for itself. It is the
+documented fix for a page that renders but never mounts (an SPA grid stays empty
+while a hand-opened tab of the same URL works). Set it to `'1'` to restore the
+noise shim, for example to reproduce a stealth-related report.
+
+One `serverName` can be registered once per scope. If you also kept a
+hand-written `webrain` MCP entry (for example the HTTP form,
+`webrain mcp --http 9223`), disable or remove it — otherwise the bundle's row
+fails with `mcp-client: serverName "webrain" is already in use by another
+mcp-client instance`.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The **MCP client** row fails, no `mcp__webrain__*` tools | `webrain` is not on the harness's `PATH` | set an absolute `command`, or start the harness from a shell where `webrain --version` works; the Host log names the spawn failure |
+| `mcp-client: serverName "webrain" is already in use by another mcp-client instance` | another MCP row uses `serverName: webrain` | disable or remove that row |
+| Install fails with `'pnpm' is not recognized` | the harness process has no `pnpm` | install pnpm for the user that runs the harness, then retry |
+| Install fails with `ERR_PNPM_ADDING_TO_ROOT` | the profile is a pnpm workspace root and pnpm refuses the add | add `ignore-workspace-root-check=true` to the profile's `.npmrc`, then retry |
+| Tool calls time out on heavy pages | the default call budget is below the page's cost | raise `toolCallTimeoutMs` on the `webrain-mcp` row |
+| Navigation fails with a missing browser/engine | `webrain install` never ran | run `webrain install`, then `webrain doctor` |
+| `webrain_navigate` returns a `challenge` | the page is gated | use real Chrome: `webrain launch <service> <profile> <url>` then `webrain login`, or point `CDP_URL` at that Chrome |
+
+## Related
+
+- [MCP Server](/mcp/server) — transports and the raw client config every other
+  editor uses
+- [Agent Decision Guide](/guides/agent-decision-guide) — which webrain tool for
+  which task
+- [Browser selection](/concepts/browsers) — real Chrome vs obscura vs lightpanda

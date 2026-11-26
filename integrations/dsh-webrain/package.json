@@ -1,0 +1,45 @@
+{
+  "name": "@ixnk/dsh-webrain",
+  "version": "0.1.2",
+  "description": "webrain's browser-automation and scraping tools, connected to DeepSeek Harness over MCP.",
+  "type": "module",
+  "license": "MIT",
+  "author": "webrain contributors",
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/prokopis3/webrain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prokopis3/webrain.git",
+    "directory": "integrations/dsh-webrain"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "deepseek-harness",
+    "webrain",
+    "mcp",
+    "browser-automation",
+    "scraping"
+  ],
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "scripts": {
+    "check": "node scripts/check-bundle.mjs"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

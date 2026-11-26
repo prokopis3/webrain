@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "webrain ブラウザツール",
+    "description": "webrain のブラウザ自動化とスクレイピングのツールを、ローカルの `webrain mcp` プロセスが提供する mcp__webrain__* ツールとしてエージェントに追加します。まず webrain_guide を呼び、実際の Chrome でインタラクティブな SPA、ログイン済みのページ、CAPTCHA や Cloudflare の確認があるページを操作します。ブラウザの状態、プロファイル、スクリーンショットはこのマシンに残ります。webrain のバイナリが PATH にあり（scoop、Homebrew、GitHub リリース）、ブラウザエンジン用に `webrain install` を一度実行している必要があります。どちらかが欠けると、この MCP クライアントの行がプラグイン画面で明確に失敗し、webrain のツールは表示されません。バンドルを無効にするとツールは削除されます。この行の設定では、既に開いている Chrome（CDP）や WEBRAIN_* 変数を指定できます。",
+    "detail": "docs/DETAIL.md"
+  }
+}

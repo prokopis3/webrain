@@ -1,0 +1,186 @@
+# ============================================================================
+# Publish the dsh-webrain DeepSeek Harness bundle to the npm registry.
+# ============================================================================
+# The bundle lives in integrations/dsh-webrain and is plain data: a manifest,
+# a Loader patch, locales, a detail document and artwork. Nothing is built, so
+# publishing is validate → version → npm publish.
+#
+# The package is scoped to the `ixnk` npm organization: `@ixnk/dsh-webrain`,
+# published with public access (also declared in the manifest's publishConfig).
+#
+# Triggers:
+#   - a version tag (`v*`): the bundle is published at the tag's version, so
+#     `@ixnk/dsh-webrain@<webrain version>` matches the release it shipped with.
+#     The bump happens in the workspace only: the repository keeps the bundle's
+#     own version, so a tag publish is a release artifact, not a commit.
+#   - workflow_dispatch: the bundle's own package.json version is published.
+# An already-published version is skipped instead of failing.
+#
+# Required repository secret: NPM_TOKEN — an npm automation token allowed to
+# publish packages in the `@ixnk` scope. Without it the job still validates and
+# reports how to install the bundle from this repository:
+#   dsh plugin --profile <profile> add \
+#     'github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain'
+# ============================================================================
+
+name: Publish dsh-webrain
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-dsh-webrain
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+jobs:
+  publish:
+    name: Validate and publish @ixnk/dsh-webrain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: integrations/dsh-webrain
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate the bundle
+        run: node scripts/check-bundle.mjs
+
+      - name: Read the package name and check the packed file list
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json","utf8")).name)')"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const raw = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8", shell: true }));
+            // npm publishes this as an array of results, or as an object keyed by name.
+            const packed = Array.isArray(raw) ? raw[0] : Object.values(raw)[0];
+            const names = new Set(packed.files.map((file) => file.path));
+            const required = [
+              "package.json",
+              "cordis.patch.yml",
+              "icon.svg",
+              "docs/DETAIL.md",
+              "docs/DETAIL.zh.md",
+              "docs/preview.svg",
+              "README.md",
+            ];
+            for (const name of required) {
+              if (!names.has(name)) {
+                console.error(`packed tarball is missing ${name}`);
+                process.exit(1);
+              }
+            }
+            const locales = [...names].filter((name) => name.startsWith("locale/") && name.endsWith(".json"));
+            if (locales.length < 2) {
+              console.error(`packed tarball holds ${locales.length} locales`);
+              process.exit(1);
+            }
+            console.log(`packed ${names.size} files, ${locales.length} locales, ${packed.size} bytes`);
+          '
+
+      - name: Resolve the version to publish
+        id: version
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            # v0.21.0 -> 0.21.0; a non-semver tag is refused instead of guessed.
+            VERSION="${REF_NAME#v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::expected a version tag (vX.Y.Z), got '$REF_NAME'"
+              exit 1
+            fi
+            VERSION="$VERSION" node -e '
+              const fs = require("node:fs");
+              const version = process.env.VERSION;
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              pkg.version = version;
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            '
+          else
+            VERSION="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version)')"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${{ steps.package.outputs.name }}@$VERSION"
+
+      - name: Check the registry
+        id: registry
+        shell: bash
+        env:
+          NAME: ${{ steps.package.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$NAME@$VERSION is already published; nothing to do."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the npm token
+        id: token
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::warning::NPM_TOKEN is not set; skipping the npm publish. Install the bundle from this repository with the git spec in integrations/dsh-webrain/README.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to the npm registry
+        if: steps.registry.outputs.publish == 'true' && steps.token.outputs.ready == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Summary
+        shell: bash
+        env:
+          NAME: ${{ steps.package.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLISHED: ${{ steps.registry.outputs.publish }}
+          READY: ${{ steps.token.outputs.ready }}
+        run: |
+          {
+            echo "### $NAME $VERSION"
+            echo ""
+            if [[ "$PUBLISHED" == "true" && "$READY" == "true" ]]; then
+              echo "Published \`$NAME@$VERSION\` to npm."
+              echo ""
+              echo '```bash'
+              echo "dsh plugin --profile <profile> add $NAME"
+              echo '```'
+            elif [[ "$PUBLISHED" == "true" ]]; then
+              echo "Validated, but not published: set the \`NPM_TOKEN\` repository secret, then re-run this workflow."
+            else
+              echo "\`$NAME@$VERSION\` is already on npm."
+            fi
+            echo ""
+            echo "Install from this repository without npm (pnpm 11+):"
+            echo ""
+            echo '```bash'
+            echo "dsh plugin --profile <profile> add 'github:prokopis3/webrain#<sha>::path:integrations/dsh-webrain'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

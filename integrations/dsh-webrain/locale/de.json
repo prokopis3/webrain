@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "webrain-Browserwerkzeuge",
+    "description": "Stellt dem Agenten webrains Browser-Automatisierungs- und Scraping-Werkzeuge als mcp__webrain__*-Werkzeuge bereit, geliefert von einem lokalen `webrain mcp`-Prozess. Beginne mit webrain_guide und steuere dann echtes Chrome für interaktive SPAs, angemeldete Seiten und Seiten mit CAPTCHA- oder Cloudflare-Prüfung; Browserzustand, Profile und Screenshots bleiben auf diesem Rechner. Erfordert die webrain-Binärdatei im PATH (scoop, Homebrew oder ein GitHub-Release) und einmal `webrain install` für eine Browser-Engine. Fehlt eines davon, schlägt diese MCP-Client-Zeile unter Plugins sichtbar fehl und es erscheinen keine webrain-Werkzeuge. Ausschalten des Bundles entfernt die Werkzeuge; die Konfiguration der Zeile nimmt ein bereits geöffnetes Chrome (CDP) oder WEBRAIN_*-Variablen entgegen.",
+    "detail": "docs/DETAIL.md"
+  }
+}
