@@ -762,6 +762,8 @@ mod tests {
         assert_eq!(cov["discovered"], 3);
         assert_eq!(cov["fetched"], 2);
         assert_eq!(cov["indexed"], 1);
+        assert_eq!(cov["fetched_pct"], 66.7);
+        assert_eq!(cov["indexed_pct"], 33.3);
 
         let arch = mem.architecture("example.com").unwrap();
         assert_eq!(arch["hosts"], 2);
