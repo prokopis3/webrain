@@ -2084,7 +2084,17 @@ async fn pdf_surface(name: &str, args: &Value) -> Option<Value> {
 }
 
 #[tracing::instrument(skip_all, fields(tool = %name))]
+/// Public entry point: run the tool, then flag page text that looks like
+/// instructions. The annotation lives here (not in each arm) so every browser
+/// tool and both transports get it from one place; the reply is only touched
+/// when the heuristic fires.
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let mut reply = call_tool_inner(backend, name, args).await;
+    webrain_core::injection::annotate(&mut reply);
+    reply
+}
+
+async fn call_tool_inner(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
 
     // Consolidated 17-tool surface → legacy executor. Legacy tool names pass
@@ -4294,7 +4304,16 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
 /// differently depending on which layer served it — and silently dropped
 /// `base_selector` / `autoschema`, returning 3 KB of truncated HTML instead of
 /// extracted rows.
+/// Public entry point for the browserless HTTP path — same annotation contract
+/// as `call_tool`, because a static page can carry instructions just as well as
+/// a rendered one.
 pub fn fetch_http_from_args(args: &Value) -> Value {
+    let mut reply = fetch_http_from_args_inner(args);
+    webrain_core::injection::annotate(&mut reply);
+    reply
+}
+
+fn fetch_http_from_args_inner(args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if url.is_empty() {
