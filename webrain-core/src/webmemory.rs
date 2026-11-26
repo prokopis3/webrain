@@ -14,6 +14,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
+use crate::engines::{browser_req, http_agent};
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -426,6 +428,159 @@ fn pct(n: i64, total: i64) -> f64 {
         0.0
     } else {
         ((n as f64 / total as f64) * 1000.0).round() / 10.0
+    }
+}
+
+/// Normalize/validate the registrable domain used for discovery. Kept
+/// deliberately strict: no scheme, path, wildcard or userinfo reaches crt.sh.
+pub fn normalize_domain(domain: &str) -> Result<String> {
+    let d = domain.trim().trim_matches('.').to_ascii_lowercase();
+    if d.is_empty() || !d.contains('.') {
+        anyhow::bail!("domain must contain a dot: {domain:?}");
+    }
+    if !d
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        || d.split('.').any(|label| label.is_empty())
+    {
+        anyhow::bail!("invalid domain: {domain:?}");
+    }
+    Ok(d)
+}
+
+/// Certificate Transparency discovery through crt.sh. Returns subdomains only
+/// (wildcards and the apex are excluded). Network failures are returned as an
+/// error; callers should still keep DNS results.
+pub fn ct_subdomains(domain: &str) -> Result<Vec<String>> {
+    let d = normalize_domain(domain)?;
+    let url = format!("https://crt.sh/?q=%25.{d}&output=json");
+    let resp = browser_req(http_agent(None)?.get(&url)).call()?;
+    let status = resp.status().as_u16();
+    let body = resp.into_body().read_to_string()?;
+    if !(200..300).contains(&status) {
+        anyhow::bail!("crt.sh GET -> {status}");
+    }
+    Ok(parse_ct_names(&body, &d))
+}
+
+/// Parse crt.sh's JSON without trusting ordering or duplicate entries. Each row
+/// carries newline-separated `name_value` (and often `common_name`).
+pub fn parse_ct_names(body: &str, domain: &str) -> Vec<String> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(rows) = root.as_array() else {
+        return Vec::new();
+    };
+    let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
+    let suffix = format!(".{domain}");
+    let mut names = std::collections::BTreeSet::new();
+    for row in rows {
+        for key in ["name_value", "common_name"] {
+            let Some(raw) = row.get(key).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            for line in raw.lines() {
+                let name = line.trim().trim_end_matches('.').to_ascii_lowercase();
+                if name.is_empty() || name.starts_with("*.") {
+                    continue;
+                }
+                if name.ends_with(&suffix) && name != domain {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// DNS brute-force probe over a small caller-supplied label list. This is not a
+/// resolver or zone-transfer tool: it only reports labels that resolve. Kept
+/// synchronous and bounded; callers choose the wordlist.
+pub fn dns_subdomains(domain: &str, labels: &[&str]) -> Vec<String> {
+    use std::net::ToSocketAddrs;
+    let Ok(domain) = normalize_domain(domain) else {
+        return Vec::new();
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for label in labels {
+        let label = label.trim().trim_matches('.');
+        if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            continue;
+        }
+        let host = format!("{label}.{domain}");
+        if (host.as_str(), 80u16).to_socket_addrs().is_ok() {
+            out.insert(host);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Phase 1 discovery entry point: CT + optional DNS labels, deduped and
+/// reported with per-source errors. An empty result is evidence, not a promise
+/// that no subdomain exists.
+pub fn discover_subdomains(domain: &str, use_ct: bool, dns_labels: &[&str]) -> serde_json::Value {
+    let mut names = std::collections::BTreeSet::new();
+    let mut errors = Vec::new();
+    let mut ct_ok = false;
+    if use_ct {
+        match ct_subdomains(domain) {
+            Ok(found) => {
+                ct_ok = true;
+                names.extend(found);
+            }
+            Err(e) => errors.push(format!("ct: {e}")),
+        }
+    }
+    let dns = dns_subdomains(domain, dns_labels);
+    names.extend(dns.iter().cloned());
+    serde_json::json!({
+        "domain": domain,
+        "subdomains": names,
+        "ct_ok": ct_ok,
+        "dns_probed": dns_labels.len(),
+        "errors": errors,
+    })
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn ct_parser_keeps_only_real_subdomains() {
+        let body = r#"[
+            {"name_value":"api.example.com\n*.example.com\nmail.example.com"},
+            {"common_name":"blog.example.com"},
+            {"name_value":"evil-example.com\nexample.com"}
+        ]"#;
+        assert_eq!(
+            parse_ct_names(body, "example.com"),
+            vec![
+                "api.example.com".to_string(),
+                "blog.example.com".to_string(),
+                "mail.example.com".to_string()
+            ]
+        );
+        assert!(parse_ct_names("not json", "example.com").is_empty());
+    }
+
+    #[test]
+    fn domain_normalization_rejects_urls_and_wildcards() {
+        assert_eq!(normalize_domain(" Example.COM. ").unwrap(), "example.com");
+        assert!(normalize_domain("https://example.com").is_err());
+        assert!(normalize_domain("*.example.com").is_err());
+        assert!(normalize_domain("localhost").is_err());
+    }
+
+    #[test]
+    fn discovery_without_network_sources_is_empty_but_reports() {
+        let v = discover_subdomains("example.com", false, &[]);
+        assert_eq!(v["domain"], "example.com");
+        assert_eq!(v["subdomains"].as_array().unwrap().len(), 0);
+        assert_eq!(v["ct_ok"], false);
+        assert_eq!(v["dns_probed"], 0);
+        assert_eq!(v["errors"].as_array().unwrap().len(), 0);
     }
 }
 

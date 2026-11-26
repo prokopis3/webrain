@@ -3197,7 +3197,7 @@ pub(crate) fn browser_agent() -> ureq::Agent {
 /// Attach the Chrome header set to a no-body request (GET/HEAD).
 /// Generic over the request body so we never name ureq's (re-)exported body
 /// types; `.header()` lives on `impl<Any> RequestBuilder<Any>`.
-fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+pub(crate) fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
     for (k, v) in browser_headers() {
         req = req.header(&k, &v);
     }
@@ -3370,7 +3370,7 @@ fn proxy_agents() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 
 /// Shared ureq agent for the serp helpers: one pooled agent per proxy URL when
 /// a proxy is set, otherwise the shared unproxied pool.
-fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
+pub(crate) fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
     // An explicit exit wins and never rotates; otherwise the pool applies. Without
     // this fallback only the callers that resolved `next_proxy()` themselves honoured
     // `WEBRAIN_PROXIES`, so `read`, `batch op=scrape|read` and every engine-level fetch
