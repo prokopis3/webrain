@@ -4879,6 +4879,37 @@ mod crawl_url_tests {
             "https://site/p"
         );
     }
+
+    #[test]
+    fn fetch_links_http_resolves_relative_links_and_skips_non_http() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "<html><body>\
+            <a href=\"/a\">A</a>\
+            <a href=\"https://x.test/b\">B</a>\
+            <a href=\"#fragment\">C</a>\
+            <a href=\"mailto:a@b.test\">D</a>\
+            </body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let links = super::fetch_links_http(&format!("http://{addr}/page")).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            links,
+            vec![format!("http://{addr}/a"), "https://x.test/b".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]
