@@ -821,67 +821,164 @@ impl WebMemory {
     }
 }
 
-/// Production embedding provider: Jina Embeddings v3. It is used when
-/// `JINA_API_KEY` is set; otherwise the generic EMBED_* client remains the
-/// fallback. Jina's retrieval task types (query vs passage) matter for ranking.
-pub fn jina_configured() -> bool {
-    std::env::var("JINA_API_KEY")
-        .map(|k| !k.trim().is_empty())
+/// Local llama.cpp embedding provider: Qwen3-Embedding-0.6B (1024-d, 32K
+/// context, instruction-aware, multilingual). This is the production default;
+/// the generic EMBED_* endpoint remains a fallback for other servers.
+pub fn local_embed_configured() -> bool {
+    local_embed_model_path().exists() && local_embed_server_path().is_some()
+}
+
+pub fn local_embed_model_path() -> std::path::PathBuf {
+    crate::install::embed_model_path()
+}
+
+fn local_embed_server_path() -> Option<std::path::PathBuf> {
+    let dir = crate::install::browsers_dir()
+        .join("tools")
+        .join("llama-server");
+    let exe = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
+    let path = dir.join(exe);
+    path.exists().then_some(path)
+}
+
+fn local_embed_port() -> u16 {
+    std::env::var("WEBRAIN_EMBED_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8099)
+}
+
+fn local_embed_health(port: u16) -> bool {
+    ureq::get(format!("http://127.0.0.1:{port}/health"))
+        .call()
+        .map(|r| r.status().is_success())
         .unwrap_or(false)
 }
 
-pub fn jina_model() -> String {
-    std::env::var("JINA_EMBED_MODEL").unwrap_or_else(|_| "jina-embeddings-v3".to_string())
+fn spawn_local_server(
+    server: &std::path::Path,
+    model: &std::path::Path,
+    port: u16,
+    gpu: bool,
+) -> Result<std::process::Child> {
+    let mut cmd = std::process::Command::new(server);
+    cmd.args([
+        "-m",
+        &model.to_string_lossy(),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+        "--embedding",
+        "--ctx-size",
+        "2048",
+        "--alias",
+        "embed",
+    ]);
+    if gpu {
+        // Offload as many layers as the build/GPU supports; llama.cpp silently
+        // keeps unsupported layers on CPU, so this is safe on CPU-only hosts too.
+        cmd.args(["--n-gpu-layers", "999"]);
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.spawn()
+        .with_context(|| format!("start local embedding server {}", server.display()))
 }
 
-fn jina_url() -> String {
-    std::env::var("JINA_EMBED_URL")
-        .unwrap_or_else(|_| "https://api.jina.ai/v1/embeddings".to_string())
+fn wait_for_health(port: u16, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if local_embed_health(port) {
+            return true;
+        }
+    }
+    false
 }
 
-/// Embed page chunks (`query=false` => retrieval.passage) or a search query
-/// (`query=true` => retrieval.query) through Jina v3. Batches are caller-sized.
-pub fn jina_embed(texts: &[String], query: bool) -> Result<Vec<Vec<f32>>> {
-    let key = std::env::var("JINA_API_KEY").context("JINA_API_KEY is not set")?;
-    jina_embed_at(&jina_url(), &key, &jina_model(), texts, query)
+fn ensure_local_server(server: &std::path::Path, model: &std::path::Path) -> Result<u16> {
+    let port = local_embed_port();
+    if local_embed_health(port) {
+        return Ok(port);
+    }
+    let want_gpu = std::env::var("WEBRAIN_EMBED_GPU")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    if want_gpu {
+        if let Ok(mut child) = spawn_local_server(server, model, port, true) {
+            if wait_for_health(port, 120) {
+                return Ok(port);
+            }
+            let _ = child.kill();
+        }
+    }
+    let _child = spawn_local_server(server, model, port, false)?;
+    if wait_for_health(port, 240) {
+        return Ok(port);
+    }
+    anyhow::bail!("local embedding server did not become healthy on port {port}")
 }
 
-/// Testable transport: same request/response contract as `jina_embed`.
-pub fn jina_embed_at(
-    url: &str,
-    key: &str,
-    model: &str,
-    texts: &[String],
-    query: bool,
-) -> Result<Vec<Vec<f32>>> {
+/// Embed with the local Qwen3-Embedding model. Queries carry the model's
+/// retrieval instruction; indexed passages do not (the asymmetric format the
+/// Qwen3-Embedding model card specifies).
+pub fn local_embed(texts: &[String], query: bool) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let body = serde_json::json!({
-        "model": model,
-        "input": texts,
-        "task": if query { "retrieval.query" } else { "retrieval.passage" },
-        "dimensions": 1024,
-        "normalized": true,
-    });
+    let model = local_embed_model_path();
+    let server = local_embed_server_path()
+        .ok_or_else(|| anyhow::anyhow!("llama-server missing — run `webrain install embed`"))?;
+    if !model.exists() {
+        anyhow::bail!("embedding model missing — run `webrain install embed`");
+    }
+    let port = ensure_local_server(&server, &model)?;
+    local_embed_at(
+        &format!("http://127.0.0.1:{port}/v1/embeddings"),
+        texts,
+        query,
+    )
+}
+
+/// Testable transport for the local llama.cpp `/v1/embeddings` endpoint.
+pub fn local_embed_at(url: &str, texts: &[String], query: bool) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    const INSTRUCT: &str =
+        "Given a web search query, retrieve relevant passages that answer the query";
+    let inputs: Vec<String> = texts
+        .iter()
+        .map(|t| {
+            if query {
+                format!("Instruct: {INSTRUCT}\nQuery: {t}")
+            } else {
+                t.clone()
+            }
+        })
+        .collect();
+    let body = serde_json::json!({"model": "embed", "input": inputs});
     let resp = browser_req(http_agent(None)?.post(url))
-        .header("Authorization", &format!("Bearer {key}"))
         .header("Content-Type", "application/json")
         .send_json(body)?;
     let status = resp.status().as_u16();
     let text = resp.into_body().read_to_string()?;
     if !(200..300).contains(&status) {
         anyhow::bail!(
-            "Jina embeddings -> {status}: {}",
+            "local embeddings -> {status}: {}",
             text.chars().take(300).collect::<String>()
         );
     }
     let parsed: serde_json::Value =
-        serde_json::from_str(&text).context("Jina embeddings response JSON")?;
+        serde_json::from_str(&text).context("local embeddings response JSON")?;
     let data = parsed
         .get("data")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow::anyhow!("Jina embeddings response has no data[]"))?;
+        .ok_or_else(|| anyhow::anyhow!("local embeddings response has no data[]"))?;
     let mut indexed: Vec<(usize, Vec<f32>)> = Vec::with_capacity(data.len());
     for item in data {
         let index = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -1352,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn jina_embedding_request_response_roundtrip() {
+    fn local_embedding_request_response_roundtrip() {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1369,10 +1466,8 @@ mod tests {
             let _ = socket.read(&mut buf);
             let _ = socket.write_all(response.as_bytes());
         });
-        let vectors = jina_embed_at(
+        let vectors = local_embed_at(
             &format!("http://{addr}/v1/embeddings"),
-            "test-key",
-            "jina-embeddings-v3",
             &["passage".into(), "query".into()],
             true,
         )

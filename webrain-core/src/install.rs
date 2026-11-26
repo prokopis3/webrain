@@ -19,6 +19,30 @@ const LLAMA_RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cp
 const VISION_MODEL: &str = "Qwen3-VL-2B-Instruct-Q4_K_M.gguf";
 const VISION_MMPROJ: &str = "mmproj-F16.gguf";
 
+/// Efficient text-embedding model used by web-memory: Qwen3-Embedding-0.6B
+/// (official GGUF, 1024-d, instruction-aware, multilingual, 32K context).
+const EMBED_MODEL_FILE: &str = "Qwen3-Embedding-0.6B-Q8_0.gguf";
+const EMBED_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf";
+
+pub fn embed_model_path() -> PathBuf {
+    browsers_dir().join("embeddings").join(EMBED_MODEL_FILE)
+}
+
+/// `webrain install embed`: llama-server + Nomic Embed Text v1.5 GGUF.
+pub fn install_embed(force: bool) -> Result<PathBuf> {
+    install_llama_server(force)?;
+    let dest = embed_model_path();
+    if dest.exists() && !force {
+        return Ok(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    download_to_file(EMBED_MODEL_URL, &dest)
+        .with_context(|| format!("download embedding model -> {}", dest.display()))?;
+    Ok(dest)
+}
+
 /// One installable local vision model. `webrain install vision --model <id>`
 /// accepts ONLY these — a free-form repo name would let a typo pull arbitrary
 /// files into the cache. Each entry carries its own mmproj; a model without one

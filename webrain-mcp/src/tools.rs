@@ -2094,8 +2094,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false)
                     {
-                        let vectors = if webrain_core::webmemory::jina_configured() {
-                            webrain_core::webmemory::jina_embed(&[query.to_string()], true)
+                        let vectors = if webrain_core::webmemory::local_embed_configured() {
+                            webrain_core::webmemory::local_embed(&[query.to_string()], true)
                         } else {
                             let client = webrain_core::vision::EmbeddingClient::from_env();
                             let input = webrain_core::vision::EmbedInput::Text(query.to_string());
@@ -2114,7 +2114,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                                 json!({"status": "error", "message": "embedding endpoint returned no vector"})
                             }
                             Err(e) => {
-                                json!({"status": "error", "message": format!("hybrid search needs JINA_API_KEY or a working EMBED_* endpoint: {e}")})
+                                json!({"status": "error", "message": format!("hybrid search needs the local model (webrain install embed) or a working EMBED_* endpoint: {e}")})
                             }
                         }
                     } else {
@@ -2127,14 +2127,17 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                 }
                 "embed" => {
-                    let jina = webrain_core::webmemory::jina_configured();
-                    let client = if jina {
+                    let local = webrain_core::webmemory::local_embed_configured();
+                    let client = if local {
                         None
                     } else {
                         Some(webrain_core::vision::EmbeddingClient::from_env())
                     };
-                    let model = if jina {
-                        webrain_core::webmemory::jina_model()
+                    let model = if local {
+                        webrain_core::webmemory::local_embed_model_path()
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "nomic-embed-text-v1.5".to_string())
                     } else {
                         client.as_ref().unwrap().model().to_string()
                     };
@@ -2146,8 +2149,8 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     for chunk in pages.chunks(8) {
                         let texts: Vec<String> =
                             chunk.iter().map(|(_, text)| text.clone()).collect();
-                        let vectors = if jina {
-                            webrain_core::webmemory::jina_embed(&texts, false)
+                        let vectors = if local {
+                            webrain_core::webmemory::local_embed(&texts, false)
                         } else {
                             let inputs: Vec<webrain_core::vision::EmbedInput> = texts
                                 .into_iter()
@@ -2168,7 +2171,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             }
                         }
                     }
-                    json!({"status": "ok", "op": "embed", "provider": if jina { "jina" } else { "embed" }, "model": model, "pages": pages.len(), "stored": stored})
+                    json!({"status": "ok", "op": "embed", "provider": if local { "local-llama" } else { "embed" }, "model": model, "pages": pages.len(), "stored": stored})
                 }
                 "page" => match args.get("url").and_then(|v| v.as_str()) {
                     Some(url) => match mem.page(url) {
