@@ -63,7 +63,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-19 TOOLS — match the request to a boundary:
+20 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
@@ -112,6 +112,7 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_stats      host health (load, memory, browser process count) — separates
                      "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
+  webrain_domain_memory  persisted domain index (op: search|coverage|architecture|status)
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Browser identity, profile, and session are EXECUTION STATE. Never treat a
@@ -851,6 +852,17 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_stats",
             "description": "Host stats for the machine webrain runs in: load average, memory total/available, process counts (including how many browser processes are alive), and uptime. Read-only, takes no arguments. `available: false` means this platform has no /proc. Use it to tell 'the page is slow' from 'the machine is out of memory'.",
             "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
+            "name": "webrain_domain_memory",
+            "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status"], "description": "search | coverage | architecture | status"},
+                "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
+                "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
+                "top_k": {"type": "integer", "description": "search: max hits (default 10, max 100)"},
+                "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
+            }, "required": ["op"]}
         }),
         json!({
             "name": "webrain_eval",
@@ -2005,6 +2017,62 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
 
     match name {
         "webrain_guide" => guide_from_args(args),
+        "webrain_domain_memory" => {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("status");
+            let db = args
+                .get("db")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+            let mem = match webrain_core::webmemory::WebMemory::open(&db) {
+                Ok(m) => m,
+                Err(e) => return err(e),
+            };
+            let domain = args.get("domain").and_then(|v| v.as_str());
+            match op {
+                "status" => match mem.status() {
+                    Ok(v) => {
+                        json!({"status": "ok", "op": "status", "db": db.display().to_string(), "counts": v})
+                    }
+                    Err(e) => err(e),
+                },
+                "coverage" => match domain {
+                    Some(d) => match mem.coverage(d) {
+                        Ok(v) => json!({"status": "ok", "op": "coverage", "report": v}),
+                        Err(e) => err(e),
+                    },
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=coverage"})
+                    }
+                },
+                "architecture" => match domain {
+                    Some(d) => match mem.architecture(d) {
+                        Ok(v) => json!({"status": "ok", "op": "architecture", "report": v}),
+                        Err(e) => err(e),
+                    },
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=architecture"})
+                    }
+                },
+                "search" => {
+                    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let top_k = args
+                        .get("top_k")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 100) as usize)
+                        .unwrap_or(10);
+                    match mem.search(query, domain, top_k) {
+                        Ok(hits) => {
+                            json!({"status": "ok", "op": "search", "query": query, "count": hits.len(), "hits": hits})
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                other => {
+                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status")})
+                }
+            }
+        }
         "webrain_add_init_script" => {
             let js = match js_arg(args, "js") {
                 Ok(js) => js,
@@ -2086,7 +2154,8 @@ fn family_of(name: &str) -> Option<&'static str> {
         | "webrain_clean"
         | "webrain_profiles"
         | "webrain_captcha"
-        | "webrain_login" => "toolbox",
+        | "webrain_login"
+        | "webrain_domain_memory" => "toolbox",
         _ => return None,
     })
 }
@@ -4377,7 +4446,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("19 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("20 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 

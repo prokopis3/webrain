@@ -152,6 +152,29 @@ fn fts_query(q: &str) -> String {
 }
 
 impl WebMemory {
+    /// Default store location: `WEBRAIN_MEMORY_DB`, else `web-memory.sqlite`
+    /// in the process working directory. Tool callers can override with `db`.
+    pub fn default_path() -> std::path::PathBuf {
+        std::env::var_os("WEBRAIN_MEMORY_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("web-memory.sqlite"))
+    }
+
+    /// Global store counts (no domain filter).
+    pub fn status(&self) -> Result<serde_json::Value> {
+        let count = |table: &str| -> Result<i64> {
+            Ok(self
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
+        };
+        Ok(serde_json::json!({
+            "hosts": count("hosts")?,
+            "urls": count("urls")?,
+            "pages": count("pages")?,
+            "edges": count("edges")?,
+        }))
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
