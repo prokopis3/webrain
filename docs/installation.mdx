@@ -242,7 +242,10 @@ positional `install vision <id>`); anything else prints the choices with
 download size and RAM/VRAM instead of fetching a repo:
 
 ```bash
+webrain install vision --help                    # every id, with download + RAM/VRAM
 webrain install vision --model qwen3-vl-2b-q6k   # recommended 2B (1.4 GB + 819 MB)
+webrain install vision --model lfm3-vl-2b-q6k    # 2B LFM, 125K ctx (1.43 GB + 203 MB)
+webrain install vision --model lfm25-vl-3b-q4km  # 3B LFM, 32K ctx  (1.67 GB + 583 MB)
 webrain install vision --model qwen35-9b-q4km    # 9B distill   (5.6 GB + 922 MB)
 webrain install vision --model qwen3-vl-2b --model-update  # re-check files on Hugging Face
 webrain uninstall vision --model qwen35-9b-q4km  # free the disk space
@@ -253,15 +256,28 @@ webrain uninstall vision --all                   # remove every local vision mod
 |---|---|---|---|
 | `qwen3-vl-2b` | Qwen3-VL-2B-Instruct Q4_K_M | 1.1 GB + 819 MB | 8–16 GB RAM, 2–4 GB VRAM |
 | `qwen3-vl-2b-q6k` | Qwen3-VL-2B-Instruct Q6_K *(recommended)* | 1.4 GB + 819 MB | 8–16 GB RAM, 2–4 GB VRAM |
+| `lfm3-vl-2b-q4km` | LFM3-VL-2B Q4_K_M, 125K ctx | 1.10 GB + 203 MB | 8–16 GB RAM, 2–4 GB VRAM |
+| `lfm3-vl-2b-q5km` | LFM3-VL-2B Q5_K_M, 125K ctx | 1.26 GB + 203 MB | 8–16 GB RAM, 2–4 GB VRAM |
+| `lfm3-vl-2b-q6k` | LFM3-VL-2B Q6_K, 125K ctx | 1.43 GB + 203 MB | 8–16 GB RAM, 2–4 GB VRAM |
+| `lfm3-vl-2b-q8` | LFM3-VL-2B Q8_0, 125K ctx | 1.85 GB + 203 MB | 8–16 GB RAM, 3–5 GB VRAM |
+| `lfm25-vl-3b-q4km` | LFM2.5-VL-3B Q4_K_M, 32K ctx | 1.67 GB + 583 MB | 8–16 GB RAM, 3–6 GB VRAM |
+| `lfm25-vl-3b-q5km` | LFM2.5-VL-3B Q5_K_M, 32K ctx | 1.94 GB + 583 MB | 8–16 GB RAM, 3–6 GB VRAM |
+| `lfm25-vl-3b-q6k` | LFM2.5-VL-3B Q6_K, 32K ctx | 2.22 GB + 583 MB | 8–16 GB RAM, 4–6 GB VRAM |
+| `lfm25-vl-3b-q8` | LFM2.5-VL-3B Q8_0, 32K ctx | 2.87 GB + 583 MB | 16–32 GB RAM, 6–8 GB VRAM |
 | `qwen35-9b-q4km` | Qwen3.5-9B-DeepSeek-V4-Flash Q4_K_M | 5.63 GB + 922 MB | 16–32 GB RAM, 8–12 GB VRAM |
 | `qwen35-9b-q5km` | Qwen3.5-9B-DeepSeek-V4-Flash Q5_K_M | 6.47 GB + 922 MB | 16–32 GB RAM, 10–12 GB VRAM |
 | `qwen35-9b-q6k` | Qwen3.5-9B-DeepSeek-V4-Flash Q6_K | 7.36 GB + 922 MB | 24–32 GB RAM, 12–16 GB VRAM |
 | `qwen35-9b-q8` | Qwen3.5-9B-DeepSeek-V4-Flash Q8_0 | 9.53 GB + 922 MB | 32–64 GB RAM, 16 GB+ VRAM |
 
-Each entry brings its own mmproj (`mmproj-F16.gguf` for the 2B, `mmproj.gguf`
-for the 9B); models land in `vision/<id>/` and an existing single-model install
-keeps working. Download sizes are the exact blob sizes on Hugging Face; the
-RAM/VRAM columns are guidance, not a measured fit — a 9B at Q4_K_M is 5.63 GB of
-weights plus 922 MB of projector before any KV cache. The 9B quants need a
-GPU-enabled `llama-server` (`WEBRAIN_LLAMA_SERVER`) to be worth it — the bundled
-build is CPU-only.
+`webrain install vision --help` prints this catalog from the compiled table, so the
+list cannot drift from what `--model` accepts.
+
+Each entry brings its own mmproj (`mmproj-F16.gguf` for the Qwen 2B,
+`mmproj.gguf` for the Qwen 9B, `mmproj-LFM3-VL-2B-Q8_0.gguf` /
+`mmproj-LFM2.5-VL-3B-Q8_0.gguf` for the LFMs); models land in `vision/<id>/` and
+an existing single-model install keeps working. Download sizes are the exact blob
+sizes on Hugging Face; the RAM/VRAM columns are guidance, not a measured fit — a
+9B at Q4_K_M is 5.63 GB of weights plus 922 MB of projector before any KV cache,
+and the LFM 3B's projector alone is 583 MB. The 9B quants need a GPU-enabled
+`llama-server` (`WEBRAIN_LLAMA_SERVER`) to be worth it — the bundled build is
+CPU-only.

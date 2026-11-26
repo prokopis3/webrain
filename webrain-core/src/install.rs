@@ -47,6 +47,66 @@ pub const VISION_MODELS: &[VisionModel] = &[
         mmproj: "mmproj-F16.gguf",
         about: "1.4 GB + 819 MB | 8-16 GB RAM | 2-4 GB VRAM (recommended)",
     },
+    // LFM3-VL-2B (LiquidAI, 125K ctx) — the strongest 2B-class VL on BenchLM's
+    // image-understanding ranking (66.4), and small enough for a 2 GB GPU.
+    VisionModel {
+        id: "lfm3-vl-2b-q4km",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q4_K_M.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.10 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q5km",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q5_K_M.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.26 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q6k",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q6_K.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.43 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q8",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q8_0.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.85 GB + 203 MB | 8-16 GB RAM | 3-5 GB VRAM | 125K ctx",
+    },
+    // LFM2.5-VL-3B (LiquidAI, 32K ctx) — the 3B class; needs the larger mmproj
+    // (583 MB), so budget VRAM for weights + projector together.
+    VisionModel {
+        id: "lfm25-vl-3b-q4km",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q4_K_M.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "1.67 GB + 583 MB | 8-16 GB RAM | 3-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q5km",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q5_K_M.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "1.94 GB + 583 MB | 8-16 GB RAM | 3-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q6k",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q6_K.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "2.22 GB + 583 MB | 8-16 GB RAM | 4-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q8",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q8_0.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "2.87 GB + 583 MB | 16-32 GB RAM | 6-8 GB VRAM | 32K ctx",
+    },
     VisionModel {
         id: "qwen35-9b-q4km",
         repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
@@ -87,7 +147,7 @@ pub fn vision_model(id: &str) -> Option<&'static VisionModel> {
 pub fn vision_model_choices() -> String {
     let mut out = String::new();
     for m in VISION_MODELS {
-        out.push_str(&format!("  {:<15} {}\n", m.id, m.about));
+        out.push_str(&format!("  {:<18} {}\n", m.id, m.about));
     }
     out
 }

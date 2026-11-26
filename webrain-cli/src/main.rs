@@ -105,7 +105,7 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "install vision",
         "webrain install vision [--model ID] [--model-update] [--force]",
         "The local vision backend `webrain watch --vision` uses: llama-server plus one catalog model.",
-        "Offline and keyless — the whisper analog. Only catalog ids are accepted; an\n  unknown one prints the choices instead of fetching an arbitrary repo. A bare id is\n  positional too (`webrain install vision qwen3-vl-2b-q6k`), and --model-update\n  re-checks the model files against Hugging Face. Remove one with\n  `webrain uninstall vision --model ID`.",
+        "Offline and keyless — the whisper analog. Only catalog ids are accepted; an\n  unknown one prints the choices instead of fetching an arbitrary repo, and\n  `--help` lists them with download size and RAM/VRAM target. A bare id is\n  positional too (`webrain install vision qwen3-vl-2b-q6k`), and --model-update\n  re-checks the model files against Hugging Face. Remove one with\n  `webrain uninstall vision --model ID`.",
     ),
     (
         "install skills",
@@ -773,6 +773,21 @@ fn help_page(cmd: &str) -> String {
                 for (leaf, about) in kids {
                     s.push_str(&format!("  {leaf:<14} {about}\n"));
                 }
+            }
+            // The catalog is runtime data (one row per quants x family), so it
+            // cannot live in the const HELP table — this is where a user looks
+            // for "which ids can I download?".
+            if name == "install vision" {
+                s.push_str("\nMODELS — `webrain install vision --model <id>`\n");
+                s.push_str(
+                    "  Each id is one GGUF plus its own mmproj, pulled from Hugging Face.\n",
+                );
+                s.push_str(&webrain_core::install::vision_model_choices());
+                s.push_str(
+                    "\nDefaults to `qwen3-vl-2b` when --model is omitted. Load one of several\n",
+                );
+                s.push_str("installed ids with WEBRAIN_VISION_MODEL; remove one with\n");
+                s.push_str("`webrain uninstall vision --model <id>`.\n");
             }
             s
         }
