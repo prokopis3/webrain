@@ -884,6 +884,7 @@ pub fn list_tools() -> Vec<Value> {
                 "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
                 "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
                 "max_hosts": {"type": "integer", "description": "subdomains: max hosts to crawl, seed included (default 5, max 25)"},
+                "max_db_bytes": {"type": "integer", "description": "preflight disk budget: fail with budget_exhausted if the store already exceeds this"},
                 "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
             }, "required": ["url"]}
         }),
@@ -2230,6 +2231,32 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 }
             }
 
+            // Hard disk budget: refuse to start another crawl when the existing
+            // store is already over the caller's cap (a soft post-check would let
+            // every call grow it first).
+            if let Some(max_bytes) = args.get("max_db_bytes").and_then(|v| v.as_i64()) {
+                let budget_db = args
+                    .get("db")
+                    .and_then(|v| v.as_str())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+                if let Ok(m) = webrain_core::webmemory::WebMemory::open(&budget_db) {
+                    let used = m
+                        .status()
+                        .ok()
+                        .and_then(|s| s.get("db_bytes").and_then(|v| v.as_i64()))
+                        .unwrap_or(0);
+                    if used >= max_bytes {
+                        return json!({
+                            "status": "error",
+                            "code": "budget_exhausted",
+                            "db_bytes": used,
+                            "max_db_bytes": max_bytes,
+                        });
+                    }
+                }
+            }
+
             // ONE page budget across every host: a host that returns fewer pages
             // than its share passes the rest to the next, so a thin subdomain
             // does not strand the budget.
@@ -2287,6 +2314,11 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let fetched = report.get("fetched").and_then(|v| v.as_i64()).unwrap_or(0);
             let indexed = report.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
             let _ = mem.finish_run(run, discovered, fetched, indexed);
+            let db_bytes = mem
+                .status()
+                .ok()
+                .and_then(|s| s.get("db_bytes").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
             let errors = merged.iter().filter(|r| r.page.error.is_some()).count();
             json!({
                 "status": "ok",
@@ -2295,6 +2327,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 "hosts_crawled": hosts_crawled,
                 "pages": merged.len(),
                 "budget_remaining": remaining,
+                "db_bytes": db_bytes,
                 "errors": errors,
                 "db": db.display().to_string(),
                 "coverage": report,
