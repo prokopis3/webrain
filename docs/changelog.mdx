@@ -26,6 +26,15 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Added
 
+- **link discovery**: `webrain_crawl` gained `seed_from_sitemap` (robots/sitemap
+  first) and `http_only` (pooled HTTP + `scraper`, no tab/JS); `webrain_assets`
+  now returns `documents` and `network` and scans CSS backgrounds over a bounded
+  visible candidate set; `webrain_batch op=assets` carries the same fields
+  (default 200/array, max 2000) and the new `op=network` returns every URL each
+  page requested (Resource Timing). The bundled **`domain-links`** skill has the
+  sitemap-first and no-sitemap recipes for internal, external, media, document
+  and network links.
+
 - **chat**: the composer's field resizes. A handle on its own top edge drags it taller
   (arrow keys step it too), clamped to one row and `min(420px, 55vh)` and remembered per
   browser; a corner button toggles one row ↔ 30% of the viewport, with its glyph and label
