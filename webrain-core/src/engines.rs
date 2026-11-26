@@ -1324,15 +1324,15 @@ impl SpiderEngine {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
             let start = std::time::Instant::now();
-            let (links, error) = match fetch_links_http(&url) {
-                Ok(links) => (links, None),
-                Err(e) => (Vec::new(), Some(e.to_string())),
+            let (links, title, content, error) = match fetch_http_page(&url) {
+                Ok(page) => (page.links, Some(page.title), Some(page.text), None),
+                Err(e) => (Vec::new(), None, None, Some(e.to_string())),
             };
             results.push(SpiderResult {
                 page: PageResult {
                     url: url.clone(),
-                    title: None,
-                    content: None,
+                    title,
+                    content,
                     error,
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
@@ -3867,7 +3867,16 @@ mod autoschema_tests {
 /// This is the browserless half of a link-only crawl: one GET, `scraper` for
 /// `<a>/<area>`, no tab, no JS, no wait. Relative URLs are resolved against the
 /// page URL; duplicates are removed in page order.
-pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
+pub struct HttpPage {
+    pub title: String,
+    pub text: String,
+    pub links: Vec<String>,
+}
+
+/// One HTTP GET + HTML parse: title, visible body text and resolved links. This
+/// is the single-request path the HTTP-only spider and the web-memory indexer
+/// both use; `fetch_links_http` is the links-only wrapper.
+pub fn fetch_http_page(url: &str) -> anyhow::Result<HttpPage> {
     let agent = http_agent(None)?;
     let resp = browser_req(agent.get(url)).call()?;
     let status = resp.status().as_u16();
@@ -3876,10 +3885,20 @@ pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("GET {url} -> {status}");
     }
     let doc = scraper::Html::parse_document(&body);
+    let title = doc
+        .select(&scraper::Selector::parse("title").unwrap())
+        .next()
+        .map(|e| e.text().collect::<String>())
+        .unwrap_or_default();
+    let text = doc
+        .select(&scraper::Selector::parse("body").unwrap())
+        .next()
+        .map(|e| e.text().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
     let sel = scraper::Selector::parse("a[href], area[href]")
         .map_err(|e| anyhow::anyhow!("link selector: {e}"))?;
     let base = url::Url::parse(url)?;
-    let mut out = Vec::new();
+    let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for el in doc.select(&sel) {
         let Some(href) = el.value().attr("href").map(str::trim) else {
@@ -3894,10 +3913,14 @@ pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
         }
         let s = u.to_string();
         if seen.insert(s.clone()) {
-            out.push(s);
+            links.push(s);
         }
     }
-    Ok(out)
+    Ok(HttpPage { title, text, links })
+}
+
+pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
+    Ok(fetch_http_page(url)?.links)
 }
 
 pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {

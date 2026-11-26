@@ -63,7 +63,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-20 TOOLS — match the request to a boundary:
+21 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
@@ -113,6 +113,7 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
                      "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
   webrain_domain_memory  persisted domain index (op: search|coverage|architecture|status)
+  webrain_index_domain   crawl a domain into web-memory (HTTP-only + sitemap seed)
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Browser identity, profile, and session are EXECUTION STATE. Never treat a
@@ -863,6 +864,16 @@ pub fn list_tools() -> Vec<Value> {
                 "top_k": {"type": "integer", "description": "search: max hits (default 10, max 100)"},
                 "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
             }, "required": ["op"]}
+        }),
+        json!({
+            "name": "webrain_index_domain",
+            "description": "Index a domain/seed URL into the persistent web-memory SQLite store. Runs an HTTP-only, sitemap-seeded, same-domain spider (no browser tab), then writes page text to FTS5 and LINKS_TO edges, returning the coverage report. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "Seed URL or bare domain, e.g. https://example.com or example.com"},
+                "max_pages": {"type": "integer", "description": "page budget (default 50, max 2000)"},
+                "max_depth": {"type": "integer", "description": "link depth (default 2, max 5)"},
+                "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
+            }, "required": ["url"]}
         }),
         json!({
             "name": "webrain_eval",
@@ -2073,6 +2084,74 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 }
             }
         }
+        "webrain_index_domain" => {
+            let raw = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("domain").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if raw.is_empty() {
+                return json!({"status": "error", "message": "url required"});
+            }
+            let seed = if raw.contains("://") {
+                raw.to_string()
+            } else {
+                format!("https://{raw}")
+            };
+            let Some(host) = webrain_core::webmemory::host_of_url(&seed) else {
+                return json!({"status": "error", "message": "invalid url"});
+            };
+            let max_pages = args
+                .get("max_pages")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 2000) as usize)
+                .unwrap_or(50);
+            let max_depth = args
+                .get("max_depth")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 5) as usize)
+                .unwrap_or(2);
+            let db = args
+                .get("db")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+            let mem = match webrain_core::webmemory::WebMemory::open(&db) {
+                Ok(m) => m,
+                Err(e) => return err(e),
+            };
+            let engine = webrain_core::engines::SpiderEngine::new(max_depth, max_pages)
+                .with_http_only(true)
+                .with_sitemap_seed(true)
+                .with_same_domain(true)
+                .with_respect_robots(true)
+                .with_concurrency(6);
+            let run = match mem.start_run(&host) {
+                Ok(id) => id,
+                Err(e) => return err(e),
+            };
+            let results = engine.crawl(backend, &seed).await;
+            let report = match mem.ingest_crawl(&host, &results) {
+                Ok(r) => r,
+                Err(e) => return err(e),
+            };
+            let discovered = report
+                .get("discovered")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let fetched = report.get("fetched").and_then(|v| v.as_i64()).unwrap_or(0);
+            let indexed = report.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
+            let _ = mem.finish_run(run, discovered, fetched, indexed);
+            let errors = results.iter().filter(|r| r.page.error.is_some()).count();
+            json!({
+                "status": "ok",
+                "domain": host,
+                "pages": results.len(),
+                "errors": errors,
+                "db": db.display().to_string(),
+                "coverage": report,
+            })
+        }
         "webrain_add_init_script" => {
             let js = match js_arg(args, "js") {
                 Ok(js) => js,
@@ -2155,7 +2234,8 @@ fn family_of(name: &str) -> Option<&'static str> {
         | "webrain_profiles"
         | "webrain_captcha"
         | "webrain_login"
-        | "webrain_domain_memory" => "toolbox",
+        | "webrain_domain_memory"
+        | "webrain_index_domain" => "toolbox",
         _ => return None,
     })
 }
@@ -4446,7 +4526,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("20 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("21 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 

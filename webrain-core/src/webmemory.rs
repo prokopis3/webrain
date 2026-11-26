@@ -133,7 +133,7 @@ fn now() -> i64 {
 /// Spider content is already capped (~3000 chars); keep the store consistent.
 const PAGE_TEXT_CAP: usize = 3000;
 
-fn host_of(url: &str) -> Option<String> {
+pub fn host_of_url(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
@@ -419,7 +419,9 @@ impl WebMemory {
         for result in results {
             let page = &result.page;
             let url = page.url.as_str();
-            let Some(host) = host_of(url) else { continue };
+            let Some(host) = host_of_url(url) else {
+                continue;
+            };
             self.discover_url(url, &host, result.depth)?;
             if let Some(content) = page.content.as_deref() {
                 let text: String = content.chars().take(PAGE_TEXT_CAP).collect();
@@ -439,7 +441,7 @@ impl WebMemory {
                 self.mark_fetched(url, 0, page.title.as_deref())?;
             }
             for link in &result.links {
-                let Some(target_host) = host_of(link) else {
+                let Some(target_host) = host_of_url(link) else {
                     continue;
                 };
                 self.discover_url(link, &target_host, result.depth + 1)?;
