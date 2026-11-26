@@ -1,7 +1,7 @@
 /target
 /output
 /build_err.txt
-
+/tmp
 .codebase-memory/
 __pycache__/
 *.pyc
