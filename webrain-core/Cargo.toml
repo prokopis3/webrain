@@ -41,6 +41,9 @@ base64 = "0.23"
 # their first reply. Behaviour for engines that never set a cookie is unchanged.
 ureq = { version = "3", features = ["json", "cookies"] }
 sha2 = "0.11"
+# Web-memory store: SQLite graph + FTS5 page index. Bundled so no system
+# libsqlite3 is needed on any target (same build the CLI chat store uses).
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 aes-gcm = "0.11"
 getrandom = "0.4"
 hmac = "0.13"
