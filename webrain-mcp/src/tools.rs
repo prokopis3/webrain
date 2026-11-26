@@ -2094,9 +2094,14 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false)
                     {
-                        let client = webrain_core::vision::EmbeddingClient::from_env();
-                        let input = webrain_core::vision::EmbedInput::Text(query.to_string());
-                        match client.embed(&[input]) {
+                        let vectors = if webrain_core::webmemory::jina_configured() {
+                            webrain_core::webmemory::jina_embed(&[query.to_string()], true)
+                        } else {
+                            let client = webrain_core::vision::EmbeddingClient::from_env();
+                            let input = webrain_core::vision::EmbedInput::Text(query.to_string());
+                            client.embed(&[input])
+                        };
+                        match vectors {
                             Ok(vectors) if !vectors.is_empty() => {
                                 match mem.hybrid_search(query, &vectors[0], domain, top_k) {
                                     Ok(hits) => {
@@ -2109,7 +2114,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                                 json!({"status": "error", "message": "embedding endpoint returned no vector"})
                             }
                             Err(e) => {
-                                json!({"status": "error", "message": format!("hybrid search needs a working EMBED_* endpoint: {e}")})
+                                json!({"status": "error", "message": format!("hybrid search needs JINA_API_KEY or a working EMBED_* endpoint: {e}")})
                             }
                         }
                     } else {
@@ -2122,19 +2127,35 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                 }
                 "embed" => {
-                    let client = webrain_core::vision::EmbeddingClient::from_env();
-                    let model = client.model().to_string();
+                    let jina = webrain_core::webmemory::jina_configured();
+                    let client = if jina {
+                        None
+                    } else {
+                        Some(webrain_core::vision::EmbeddingClient::from_env())
+                    };
+                    let model = if jina {
+                        webrain_core::webmemory::jina_model()
+                    } else {
+                        client.as_ref().unwrap().model().to_string()
+                    };
                     let pages = match mem.pages_for_embedding(1000) {
                         Ok(p) => p,
                         Err(e) => return err(e),
                     };
                     let mut stored = 0usize;
-                    for chunk in pages.chunks(32) {
-                        let inputs: Vec<webrain_core::vision::EmbedInput> = chunk
-                            .iter()
-                            .map(|(_, text)| webrain_core::vision::EmbedInput::Text(text.clone()))
-                            .collect();
-                        match client.embed(&inputs) {
+                    for chunk in pages.chunks(8) {
+                        let texts: Vec<String> =
+                            chunk.iter().map(|(_, text)| text.clone()).collect();
+                        let vectors = if jina {
+                            webrain_core::webmemory::jina_embed(&texts, false)
+                        } else {
+                            let inputs: Vec<webrain_core::vision::EmbedInput> = texts
+                                .into_iter()
+                                .map(webrain_core::vision::EmbedInput::Text)
+                                .collect();
+                            client.as_ref().unwrap().embed(&inputs)
+                        };
+                        match vectors {
                             Ok(vectors) => {
                                 for ((url, _), vector) in chunk.iter().zip(vectors) {
                                     if mem.set_embedding(url, &vector, &model).is_ok() {
@@ -2147,7 +2168,7 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                             }
                         }
                     }
-                    json!({"status": "ok", "op": "embed", "model": model, "pages": pages.len(), "stored": stored})
+                    json!({"status": "ok", "op": "embed", "provider": if jina { "jina" } else { "embed" }, "model": model, "pages": pages.len(), "stored": stored})
                 }
                 "page" => match args.get("url").and_then(|v| v.as_str()) {
                     Some(url) => match mem.page(url) {

@@ -821,6 +821,85 @@ impl WebMemory {
     }
 }
 
+/// Production embedding provider: Jina Embeddings v3. It is used when
+/// `JINA_API_KEY` is set; otherwise the generic EMBED_* client remains the
+/// fallback. Jina's retrieval task types (query vs passage) matter for ranking.
+pub fn jina_configured() -> bool {
+    std::env::var("JINA_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub fn jina_model() -> String {
+    std::env::var("JINA_EMBED_MODEL").unwrap_or_else(|_| "jina-embeddings-v3".to_string())
+}
+
+fn jina_url() -> String {
+    std::env::var("JINA_EMBED_URL")
+        .unwrap_or_else(|_| "https://api.jina.ai/v1/embeddings".to_string())
+}
+
+/// Embed page chunks (`query=false` => retrieval.passage) or a search query
+/// (`query=true` => retrieval.query) through Jina v3. Batches are caller-sized.
+pub fn jina_embed(texts: &[String], query: bool) -> Result<Vec<Vec<f32>>> {
+    let key = std::env::var("JINA_API_KEY").context("JINA_API_KEY is not set")?;
+    jina_embed_at(&jina_url(), &key, &jina_model(), texts, query)
+}
+
+/// Testable transport: same request/response contract as `jina_embed`.
+pub fn jina_embed_at(
+    url: &str,
+    key: &str,
+    model: &str,
+    texts: &[String],
+    query: bool,
+) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let body = serde_json::json!({
+        "model": model,
+        "input": texts,
+        "task": if query { "retrieval.query" } else { "retrieval.passage" },
+        "dimensions": 1024,
+        "normalized": true,
+    });
+    let resp = browser_req(http_agent(None)?.post(url))
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("Content-Type", "application/json")
+        .send_json(body)?;
+    let status = resp.status().as_u16();
+    let text = resp.into_body().read_to_string()?;
+    if !(200..300).contains(&status) {
+        anyhow::bail!(
+            "Jina embeddings -> {status}: {}",
+            text.chars().take(300).collect::<String>()
+        );
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).context("Jina embeddings response JSON")?;
+    let data = parsed
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Jina embeddings response has no data[]"))?;
+    let mut indexed: Vec<(usize, Vec<f32>)> = Vec::with_capacity(data.len());
+    for item in data {
+        let index = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let vector: Vec<f32> = item
+            .get("embedding")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_f64().map(|n| n as f32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        indexed.push((index, vector));
+    }
+    indexed.sort_by_key(|(i, _)| *i);
+    Ok(indexed.into_iter().map(|(_, v)| v).collect())
+}
+
 fn pct(n: i64, total: i64) -> f64 {
     if total <= 0 {
         0.0
@@ -1270,6 +1349,38 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].url, "https://e.test/b");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn jina_embedding_request_response_roundtrip() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body =
+            r#"{"data":[{"index":1,"embedding":[0.0,1.0]},{"index":0,"embedding":[1.0,0.0]}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let vectors = jina_embed_at(
+            &format!("http://{addr}/v1/embeddings"),
+            "test-key",
+            "jina-embeddings-v3",
+            &["passage".into(), "query".into()],
+            true,
+        )
+        .unwrap();
+        server.join().unwrap();
+        // Response order is restored by `index`, not trusted as-is.
+        assert_eq!(vectors[0], vec![1.0, 0.0]);
+        assert_eq!(vectors[1], vec![0.0, 1.0]);
     }
 
     #[test]
