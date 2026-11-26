@@ -1,6 +1,8 @@
 ---
 name: pdf-extraction
 description: 'Extract text, tables, figures and page images from PDFs — one file, many files, or URLs — with webrain_pdf and webrain_batch op=pdf. Use when asked to read/summarise a paper or report, convert PDF to Markdown, pull tables out of a PDF, OCR a scanned PDF, describe figures/charts, or extract a batch of PDF links found by a crawl. Covers arxiv.org/pdf, ?download= links, login-gated PDFs, and when to switch from text extraction to render + vision.'
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
 ---
 
 # PDF extraction (single file, batch, and URL)

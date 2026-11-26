@@ -1,9 +1,12 @@
 ---
 name: web-research
-version: "1.0.0"
 description: Turn any website (or set of websites) into structured, verifiable data with the webrain MCP tools — discover a schema once, batch it across many URLs, persist the payload to disk, and report with source URLs. Use when researching a question across pages/sites, building a dataset from web pages, monitoring a site, or comparing what several sites say. For shopping / prices / product specs use `product-market-research` instead.
-argument-hint: "<question or what to extract> [from <url|site>] [how many pages?]"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash Read Write
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  version: "1.0.0"
+  argument-hint: "<question or what to extract> [from <url|site>] [how many pages?]"
 ---
 
 # /web-research

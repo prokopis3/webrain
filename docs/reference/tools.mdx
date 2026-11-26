@@ -424,6 +424,10 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdow
 
 `wait_selector` + `wait_selector_state` (`attached\|visible\|hidden\|detached`, default `visible`) poll after navigate. The state is satisfied by **any** match — an SPA list page renders the cards twice (hidden mobile copy first), so `visible` on the first match used to stall the whole `wait_timeout_secs`. Prefer `attached` with `wait_timeout_secs: 6` on a list: measured 27 URLs in **10 s** versus **159 s**, identical rows.
 
+Navigation failures are policy, not luck: `retry` (0–3, default 0) re-navigates the **same tab** before it is recycled, and `retry_on` (`timeout` \| `connect` \| `all`, default `timeout`) decides which failures qualify — a DNS or auth failure is never retried. `navigate_timeout_ms` (5 000–120 000) raises the fixed 30 s `Page.navigate` cap, so a legitimately slow page whose `wait_timeout_secs` is above 25 can finish. `delay_ms` plus `autothrottle` / `autothrottle_max_ms` pace a rate-limited origin. Measured: 6 URLs stalling past 30 s went **0/6 → 6/6** (+1.8 s wall); 3 URLs stalling 31.5 s with `navigate_timeout_ms: 45000` went **0/3 → 3/3**; 20 heavy SPA pages at K=20 went **8/20 → 18/20** (14 retries, +24.6 s).
+
+Connect failures are **not result rows**: a refused `cdp_url` no longer shifts `results[i] ↔ urls[i]` (a 20-URL run used to report `count: 22`). Each endpoint gets one reconnect attempt; the failures are collected in stats, and `count` stays `urls.length`.
+
 Every reply ends with `stats`, and the concurrency numbers are **measured, not assumed**:
 
 | field | meaning |
@@ -432,6 +436,9 @@ Every reply ends with `stats`, and the concurrency numbers are **measured, not a
 | `requested_concurrency` | what you asked for on this connection |
 | `effective_concurrency` | tabs the batch **really obtained**; summed across `cdp_urls`; `0` when every row failed, `1` on a single-target engine |
 | `single_target` | `true` when the connection holds one tab (lightpanda, or a browser whose last window was closed): the batch runs serially and no `concurrency` value changes that |
+| `retries_used` / `autothrottled` | navigation retries actually spent, and whether adaptive pacing kicked in |
+| `connect_errors` / `connect_error_details` | CDP endpoints that could not be connected; they are stats, not rows, so `total` stays equal to `urls.length` |
+| `backends_connected` / `suggested_concurrency` | CDP backends that did connect, and the K the surviving backends can sustain |
 | `ms_total` / `ms_wall` | summed per-URL time vs the wall clock — far apart means real parallelism |
 
 A browser that refuses new targets is **not** an error: `webrain_batch` attaches the page that browser already has and runs the queue there, so `single_target: true, effective_concurrency: 1` with `ok: total` is a pass (guest Chrome measured 8 URLs in 5.65 s vs 1.46 s on a real Chrome with `concurrency: 4`). Guest Chrome is for SERP + CAPTCHA, not batch — see the [agent decision guide](../guides/agent-decision-guide.mdx).

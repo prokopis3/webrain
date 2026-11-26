@@ -1,9 +1,12 @@
 ---
 name: auth-media-vision
-version: "1.0.0"
 description: Capture authenticated social-feed media (videos, images, audio) from a logged-in browser and actually understand it — frames AND speech — with the webrain MCP tools. Use when asked to scrape a feed/gallery behind a login, download posts, watch videos, or "use vision to understand" a batch of media. Read the frames webrain_watch already extracted (montage only as fallback). Covers the traps that silently produce useless output: empty audio track, missing STT, and per-item vision calls that take 20 round-trips.
-argument-hint: "extract top <N> posts from <site/feed> and describe them"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash Read Write
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  version: "1.0.0"
+  argument-hint: "extract top <N> posts from <site/feed> and describe them"
 ---
 
 # /auth-media-vision

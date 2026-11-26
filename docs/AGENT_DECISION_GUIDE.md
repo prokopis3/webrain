@@ -228,7 +228,9 @@ After `webrain_navigate(url)`, check `challenge` in the response:
     the MCP's default connection — then `webrain_batch` **without `cdp_urls`**
     so the batch reuses that same connection. Requirements: obscura **v0.2.7+
     stealth build** (BoringSSL TLS impersonation) launched with
-    `--user-agent` equal to the minting Chrome's UA, and the same egress IP.
+    `--user-agent` equal to the minting Chrome's UA — via `webrain obscura`, set
+    `WEBRAIN_OBSCURA_USER_AGENT` (and `WEBRAIN_OBSCURA_PROXY` for a matched
+    egress) instead of editing the launch by hand — and the same egress IP.
     New obscura connections do NOT inherit the cookie (duplicated `cdp_urls`
     and a `--storage-dir` profile were both still challenged), so the cleared
     batch stays on ONE connection — but that connection runs K tabs

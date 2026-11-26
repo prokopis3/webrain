@@ -1,9 +1,12 @@
 ---
 name: product-market-research
-version: "1.0.0"
 description: Compare products across shops/e-shops on price AND on the spec that actually matters (protein, calories, active ingredient, capacity, warranty) — normalise units, match the same SKU across retailers, and rank by value. Use for "find the best X in <market>", grocery/food shopping, price monitoring, spec comparison, alternatives and cheaper substitutes.
-argument-hint: "<what to buy / compare> [in <market or shops>] [priority: spec | price]"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash Read Write
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  version: "1.0.0"
+  argument-hint: "<what to buy / compare> [in <market or shops>] [priority: spec | price]"
 ---
 
 # /product-market-research

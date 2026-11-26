@@ -1,6 +1,8 @@
 ---
 name: page-tiles
 description: 'Read a page as pixels when text extraction is not enough — "screenshot-tiles <url> and summarise", "look at this page", "what does the chart/table show", "the extract is empty or garbled". Covers tiling (observe what=pixel), saving tiles to disk, and reading them with the local vision model in one batched call. Use when content is visual (charts, figures, CAPTCHA geometry, image-only pages) — not for ordinary text.'
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
 ---
 
 # Page tiles (screenshot -> disk -> one vision call)
