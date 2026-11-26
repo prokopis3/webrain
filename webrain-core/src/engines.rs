@@ -1537,7 +1537,7 @@ impl SpiderEngine {
         url: &str,
         start: std::time::Instant,
     ) -> (PageResult, Vec<String>) {
-        let links_expr = "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)";
+        let links_expr = crate::browser::PAGE_LINKS_JS;
 
         // Discover-only fast path (crawl4ai prefetch): short-cap nav + links only.
         if self.discover_only {
@@ -3932,50 +3932,99 @@ pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Valu
     // 1. If not given a sitemap URL, ask robots.txt for the Sitemap: line.
     let mut frontier: Vec<String> = Vec::new();
     let seed = start_url.trim_end_matches('/').to_string();
+    let origin = url::Url::parse(&seed).ok().and_then(|u| {
+        Some(format!(
+            "{}://{}",
+            u.scheme(),
+            u.host_str().filter(|h| !h.is_empty())?
+        ))
+    });
     if seed.contains("/sitemap") || seed.ends_with(".xml") {
         frontier.push(seed);
     } else {
-        let robots = format!("{seed}/robots.txt");
-        if let Ok(text) = get_text(&robots) {
-            // ponytail: multi-line Sitemap: entries; case-insensitive key.
-            for line in text.lines() {
-                if let Some(idx) = line.to_lowercase().find("sitemap:") {
-                    let url = line[idx + 8..].trim();
-                    if !url.is_empty() {
-                        frontier.push(url.to_string());
+        // A docs subpath (`/en/latest/`) usually has no robots.txt of its own;
+        // fall back to the origin's robots.txt and sitemap.xml so a caller can
+        // pass the page it cares about instead of having to know the site root.
+        let mut candidates = vec![format!("{seed}/robots.txt")];
+        if let Some(origin) = &origin {
+            if origin != &seed {
+                candidates.push(format!("{origin}/robots.txt"));
+            }
+        }
+        for robots in candidates {
+            if let Ok(text) = get_text(&robots) {
+                // ponytail: multi-line Sitemap: entries; case-insensitive key.
+                for line in text.lines() {
+                    if let Some(idx) = line.to_lowercase().find("sitemap:") {
+                        let url = line[idx + 8..].trim();
+                        if !url.is_empty() {
+                            frontier.push(url.to_string());
+                        }
                     }
                 }
+                sources.push(robots);
+                if !frontier.is_empty() {
+                    break;
+                }
             }
-            sources.push(robots);
+        }
+        if frontier.is_empty()
+            && let Some(origin) = &origin
+        {
+            frontier.push(format!("{origin}/sitemap.xml"));
         }
     }
 
     let mut seen = std::collections::HashSet::new();
-    while let Some(f) = frontier.pop() {
-        if !seen.insert(f.clone()) {
-            continue;
-        }
-        sources.push(f.clone());
-        match get_text(&f) {
-            Ok(xml) => {
-                if is_index(&xml) {
-                    // sitemap index → push child sitemaps onto the frontier.
-                    for child in locs(&xml) {
-                        if !seen.contains(&child) {
-                            frontier.push(child);
-                        }
-                    }
-                } else {
-                    urls.extend(locs(&xml));
-                }
+    // Sitemap indexes often list dozens of children; fetching them one at a
+    // time made a large site's inventory N round-trips. Walk the frontier in
+    // small parallel batches (the shared HTTP agent pools connections) while
+    // keeping the child order irrelevant — URLs are sorted at the end.
+    let batch_size = 8usize;
+    while !frontier.is_empty() {
+        let mut batch: Vec<String> = Vec::new();
+        while batch.len() < batch_size {
+            let Some(f) = frontier.pop() else { break };
+            if seen.insert(f.clone()) {
+                sources.push(f.clone());
+                batch.push(f);
             }
-            Err(e) => {
-                // A 404'd sitemap isn't fatal — keep going through the frontier.
-                tracing::debug!("sitemap fetch failed {f}: {e}");
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let get = &get_text;
+        let fetched: Vec<(String, anyhow::Result<String>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .into_iter()
+                .map(|f| scope.spawn(move || (f.clone(), get(&f))))
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        for (f, result) in fetched {
+            match result {
+                Ok(xml) => {
+                    if is_index(&xml) {
+                        // sitemap index → queue child sitemaps for the next batch.
+                        for child in locs(&xml) {
+                            if !seen.contains(&child) {
+                                frontier.push(child);
+                            }
+                        }
+                    } else {
+                        urls.extend(locs(&xml));
+                    }
+                }
+                Err(e) => {
+                    // A 404'd sitemap isn't fatal — keep going through the frontier.
+                    tracing::debug!("sitemap fetch failed {f}: {e}");
+                }
             }
         }
     }
 
+    sources.sort();
+    sources.dedup();
     urls.sort();
     urls.dedup();
     let mut v = json!({"urls": urls, "sources": sources, "count": urls.len()});
