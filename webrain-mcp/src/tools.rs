@@ -2376,6 +2376,20 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 Ok(m) => m,
                 Err(e) => return err(e),
             };
+            // Record the published inventory as ground truth before ingesting the
+            // crawl, so coverage can report sitemap URLs even when the page budget
+            // only fetched a subset.
+            if let Ok(sm) = webrain_core::engines::sitemap_urls(&seed, None) {
+                if let Some(urls) = sm.get("urls").and_then(|v| v.as_array()) {
+                    for u in urls {
+                        if let Some(u) = u.as_str() {
+                            if let Some(h) = webrain_core::webmemory::host_of_url(u) {
+                                let _ = mem.record_sitemap(&h, u, None);
+                            }
+                        }
+                    }
+                }
+            }
             let run = match mem.start_run(&host) {
                 Ok(id) => id,
                 Err(e) => return err(e),
