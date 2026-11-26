@@ -860,10 +860,12 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
                 "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
+                "id": {"type": "integer", "description": "finish: claimed job id"},
+                "error": {"type": "string", "description": "finish: failure message; omit for success"},
                 "depth": {"type": "integer", "description": "trace: max link hops (default 2, max 5)"},
                 "limit": {"type": "integer", "description": "trace: max edges (default 100, max 1000)"},
                 "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
@@ -2155,6 +2157,33 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 "queue" => match mem.job_counts() {
                     Ok(v) => json!({"status": "ok", "op": "queue", "queue": v}),
                     Err(e) => err(e),
+                },
+                "next" => {
+                    let n = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 100) as usize)
+                        .unwrap_or(1);
+                    match mem.claim_jobs(n) {
+                        Ok(jobs) => {
+                            let jobs: Vec<serde_json::Value> = jobs
+                                .into_iter()
+                                .map(|(id, url, host)| json!({"id": id, "url": url, "host": host}))
+                                .collect();
+                            json!({"status": "ok", "op": "next", "count": jobs.len(), "jobs": jobs})
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                "finish" => match args.get("id").and_then(|v| v.as_i64()) {
+                    Some(id) => {
+                        let error = args.get("error").and_then(|v| v.as_str());
+                        match mem.complete_job(id, error) {
+                            Ok(()) => json!({"status": "ok", "op": "finish", "id": id}),
+                            Err(e) => err(e),
+                        }
+                    }
+                    None => json!({"status": "error", "message": "id required for op=finish"}),
                 },
                 other => {
                     json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
