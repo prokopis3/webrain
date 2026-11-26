@@ -169,18 +169,22 @@ impl WebMemory {
             .unwrap_or_else(|| std::path::PathBuf::from("web-memory.sqlite"))
     }
 
-    /// Global store counts (no domain filter).
+    /// Global store counts plus the on-disk SQLite size (disk budget signal).
     pub fn status(&self) -> Result<serde_json::Value> {
         let count = |table: &str| -> Result<i64> {
             Ok(self
                 .conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
         };
+        let page_count: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         Ok(serde_json::json!({
             "hosts": count("hosts")?,
             "urls": count("urls")?,
             "pages": count("pages")?,
             "edges": count("edges")?,
+            "changes": count("changes")?,
+            "db_bytes": page_count * page_size,
         }))
     }
 
@@ -1061,6 +1065,20 @@ mod tests {
         assert_eq!(got["title"], "Title");
         assert_eq!(got["text"], "body text");
         assert!(mem.page("https://e.test/missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn status_reports_counts_and_disk_bytes() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        mem.discover_url("https://e.test/", "e.test", 0).unwrap();
+        mem.upsert_page(&page("https://e.test/", "e.test", "Home", "body"))
+            .unwrap();
+        let s = mem.status().unwrap();
+        assert_eq!(s["hosts"], 1);
+        assert_eq!(s["urls"], 1);
+        assert_eq!(s["pages"], 1);
+        assert!(s["db_bytes"].as_i64().unwrap() > 0);
+        assert_eq!(s["changes"], 1);
     }
 
     #[test]
