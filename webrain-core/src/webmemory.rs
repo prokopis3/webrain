@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::engines::{browser_req, http_agent};
@@ -280,6 +280,27 @@ impl WebMemory {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// One indexed page's stored text/title, or `None` when it was never indexed.
+    pub fn page(&self, url: &str) -> Result<Option<serde_json::Value>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT url, host, title, lang, text, fetched_at FROM pages WHERE url=?1",
+                params![url],
+                |r| {
+                    Ok(serde_json::json!({
+                        "url": r.get::<_, String>(0)?,
+                        "host": r.get::<_, String>(1)?,
+                        "title": r.get::<_, String>(2)?,
+                        "lang": r.get::<_, String>(3)?,
+                        "text": r.get::<_, String>(4)?,
+                        "fetched_at": r.get::<_, i64>(5)?,
+                    }))
+                },
+            )
+            .optional()?)
     }
 
     /// BM25 keyword search, optionally restricted to one host or its
@@ -768,6 +789,17 @@ mod tests {
         assert_eq!(report["indexed_this_run"], 1);
         assert_eq!(mem.search("rust", None, 10).unwrap().len(), 1);
         assert_eq!(mem.architecture("example.com").unwrap()["edges"], 1);
+    }
+
+    #[test]
+    fn page_returns_indexed_text_or_none() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        mem.upsert_page(&page("https://e.test/x", "e.test", "Title", "body text"))
+            .unwrap();
+        let got = mem.page("https://e.test/x").unwrap().unwrap();
+        assert_eq!(got["title"], "Title");
+        assert_eq!(got["text"], "body text");
+        assert!(mem.page("https://e.test/missing").unwrap().is_none());
     }
 
     #[test]

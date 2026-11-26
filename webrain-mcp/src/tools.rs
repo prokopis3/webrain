@@ -858,8 +858,9 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status"], "description": "search | coverage | architecture | status"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page"], "description": "search | coverage | architecture | status | page"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
+                "url": {"type": "string", "description": "page: indexed URL to retrieve"},
                 "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
                 "top_k": {"type": "integer", "description": "search: max hits (default 10, max 100)"},
                 "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
@@ -2079,8 +2080,16 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         Err(e) => err(e),
                     }
                 }
+                "page" => match args.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => match mem.page(url) {
+                        Ok(Some(page)) => json!({"status": "ok", "op": "page", "page": page}),
+                        Ok(None) => json!({"status": "ok", "op": "page", "page": null}),
+                        Err(e) => err(e),
+                    },
+                    None => json!({"status": "error", "message": "url required for op=page"}),
+                },
                 other => {
-                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status")})
+                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page")})
                 }
             }
         }
