@@ -370,6 +370,14 @@ Numbers from real runs in this repo, not estimates. Rerun the PDF comparison wit
 | PDF text layer, 9-page paper ([arxiv 2408.09869](https://arxiv.org/pdf/2408.09869)) | **5.2 s**, 48 KB markdown, 32,401 chars, 10 table rows |
 | Same PDF via render + tiles + local vision | 157.9 s (render 4.6 + tiles 2.3 + vision 151.0), 17,330 chars |
 | Vision on a page the text layer lost | page 7: **0 chars** in text, recovered the appendix heading + the Figure 2 caption in 16 s |
+| Domain link crawl, static docs site — HTTP-only, sitemap-seeded, 20 routes, 8 workers | **20 pages, 0 errors, 400 unique same-domain links in 2.1 s** (first 200 saved) |
+| Sitemap inventory, same site | **38 URLs** from 2 sitemaps in **~274 ms** |
+
+The link rows were measured on `https://scrapling.readthedocs.io/en/latest/`
+with `webrain_crawl {http_only:true, seed_from_sitemap:true, same_domain:true,
+max_pages:20, concurrency:8}`. It follows links, so it is a lower bound on the
+site's link graph, not a claim of every URL; the sitemap row is the
+published-URL side.
 
 Tiling is 1.4% of the tiled path and `llama-server` is single-slot, so parallel
 tiling is not the lever — routing is: extract text, then render + vision only the
