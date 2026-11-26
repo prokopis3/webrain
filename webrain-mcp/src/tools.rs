@@ -860,7 +860,8 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish","drain"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish | drain"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish","drain","embed"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish | drain | embed"},
+                "hybrid": {"type": "boolean", "description": "search: combine FTS5 BM25 with stored embeddings via EMBED_* endpoint"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
                 "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
@@ -2088,12 +2089,65 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         .and_then(|v| v.as_i64())
                         .map(|n| n.clamp(1, 100) as usize)
                         .unwrap_or(10);
-                    match mem.search(query, domain, top_k) {
-                        Ok(hits) => {
-                            json!({"status": "ok", "op": "search", "query": query, "count": hits.len(), "hits": hits})
+                    if args
+                        .get("hybrid")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        let client = webrain_core::vision::EmbeddingClient::from_env();
+                        let input = webrain_core::vision::EmbedInput::Text(query.to_string());
+                        match client.embed(&[input]) {
+                            Ok(vectors) if !vectors.is_empty() => {
+                                match mem.hybrid_search(query, &vectors[0], domain, top_k) {
+                                    Ok(hits) => {
+                                        json!({"status": "ok", "op": "search", "mode": "hybrid", "query": query, "count": hits.len(), "hits": hits})
+                                    }
+                                    Err(e) => err(e),
+                                }
+                            }
+                            Ok(_) => {
+                                json!({"status": "error", "message": "embedding endpoint returned no vector"})
+                            }
+                            Err(e) => {
+                                json!({"status": "error", "message": format!("hybrid search needs a working EMBED_* endpoint: {e}")})
+                            }
                         }
-                        Err(e) => err(e),
+                    } else {
+                        match mem.search(query, domain, top_k) {
+                            Ok(hits) => {
+                                json!({"status": "ok", "op": "search", "query": query, "count": hits.len(), "hits": hits})
+                            }
+                            Err(e) => err(e),
+                        }
                     }
+                }
+                "embed" => {
+                    let client = webrain_core::vision::EmbeddingClient::from_env();
+                    let model = client.model().to_string();
+                    let pages = match mem.pages_for_embedding(1000) {
+                        Ok(p) => p,
+                        Err(e) => return err(e),
+                    };
+                    let mut stored = 0usize;
+                    for chunk in pages.chunks(32) {
+                        let inputs: Vec<webrain_core::vision::EmbedInput> = chunk
+                            .iter()
+                            .map(|(_, text)| webrain_core::vision::EmbedInput::Text(text.clone()))
+                            .collect();
+                        match client.embed(&inputs) {
+                            Ok(vectors) => {
+                                for ((url, _), vector) in chunk.iter().zip(vectors) {
+                                    if mem.set_embedding(url, &vector, &model).is_ok() {
+                                        stored += 1;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return json!({"status": "error", "message": format!("embed failed: {e}")});
+                            }
+                        }
+                    }
+                    json!({"status": "ok", "op": "embed", "model": model, "pages": pages.len(), "stored": stored})
                 }
                 "page" => match args.get("url").and_then(|v| v.as_str()) {
                     Some(url) => match mem.page(url) {

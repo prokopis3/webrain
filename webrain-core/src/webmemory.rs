@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS changes (
 );
 CREATE INDEX IF NOT EXISTS changes_at ON changes(changed_at);
 
+CREATE TABLE IF NOT EXISTS embeddings (
+    url        TEXT PRIMARY KEY,
+    vector     BLOB NOT NULL,
+    model      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
     url UNINDEXED,
     host UNINDEXED,
@@ -580,6 +587,107 @@ impl WebMemory {
         Ok(serde_json::json!({"states": states, "queued_sample": queued}))
     }
 
+    /// Store/replace a page embedding (f32 little-endian bytes). The caller owns
+    /// the embedding model; `model` is metadata for later re-embedding.
+    pub fn set_embedding(&self, url: &str, vector: &[f32], model: &str) -> Result<()> {
+        let mut bytes = Vec::with_capacity(vector.len() * 4);
+        for v in vector {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        self.conn.execute(
+            "INSERT INTO embeddings(url, vector, model, updated_at) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(url) DO UPDATE SET vector=excluded.vector, model=excluded.model,
+               updated_at=excluded.updated_at",
+            params![url, bytes, model, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn embedding_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?)
+    }
+
+    /// Pages eligible for embedding (url + text), capped for a batch call.
+    pub fn pages_for_embedding(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, title || '\n' || text FROM pages ORDER BY fetched_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Hybrid retrieval: BM25 candidates plus cosine similarity over stored
+    /// embeddings. Pages with only an embedding are still returned, so this is
+    /// useful before/without full-text coverage. Scores combine cosine with a
+    /// small BM25 bonus; callers see both signals in the hit score.
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        domain: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let domain_filter = domain.unwrap_or("").trim().to_lowercase();
+        let pattern = format!("%.{domain_filter}");
+        let mut stmt = self.conn.prepare(
+            "SELECT e.url, p.host, p.title, p.text, e.vector FROM embeddings e
+             JOIN pages p ON p.url=e.url
+             WHERE (?1='' OR p.host=?1 OR p.host LIKE ?2)",
+        )?;
+        let rows = stmt.query_map(params![domain_filter, pattern], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Vec<u8>>(4)?,
+            ))
+        })?;
+        let bm25: std::collections::HashMap<String, (String, f64)> = self
+            .search(query, domain, limit.saturating_mul(5).max(20))?
+            .into_iter()
+            .map(|h| (h.url.clone(), (h.snippet, h.score)))
+            .collect();
+        let mut out = Vec::new();
+        for row in rows {
+            let (url, host, title, text, bytes) = row?;
+            let vector: Vec<f32> = bytes
+                .chunks_exact(4)
+                .filter_map(|c| c.try_into().ok().map(f32::from_le_bytes))
+                .collect();
+            let cos = cosine(query_vec, &vector);
+            let (snippet, bonus) = bm25
+                .get(&url)
+                .cloned()
+                .unwrap_or_else(|| (text.chars().take(160).collect::<String>(), 0.0));
+            // bm25 is negative (better = more negative); convert to a small bonus.
+            let score = cos
+                + if bonus < 0.0 {
+                    0.5 / (1.0 + bonus.abs())
+                } else {
+                    0.0
+                };
+            out.push(SearchHit {
+                url,
+                host,
+                title,
+                snippet,
+                score,
+            });
+        }
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out.truncate(limit);
+        Ok(out)
+    }
+
     /// BFS over stored `LINKS_TO` edges from one URL, up to `depth` hops and
     /// `limit` edges. Read-only: the backing web graph, not a live fetch.
     pub fn trace(&self, start: &str, depth: usize, limit: usize) -> Result<serde_json::Value> {
@@ -719,6 +827,22 @@ fn pct(n: i64, total: i64) -> f64 {
     } else {
         ((n as f64 / total as f64) * 1000.0).round() / 10.0
     }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for (x, y) in a.iter().zip(b) {
+        dot += (*x as f64) * (*y as f64);
+        na += (*x as f64) * (*x as f64);
+        nb += (*y as f64) * (*y as f64);
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 /// Hosts a domain index covers, seed host first: the seed itself plus the
@@ -1124,6 +1248,28 @@ mod tests {
         assert_eq!(got["title"], "Title");
         assert_eq!(got["text"], "body text");
         assert!(mem.page("https://e.test/missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn hybrid_search_combines_embeddings_with_bm25() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        mem.upsert_page(&page("https://e.test/a", "e.test", "A", "alpha rust"))
+            .unwrap();
+        mem.upsert_page(&page("https://e.test/b", "e.test", "B", "beta garden"))
+            .unwrap();
+        mem.set_embedding("https://e.test/a", &[1.0, 0.0], "test")
+            .unwrap();
+        mem.set_embedding("https://e.test/b", &[0.0, 1.0], "test")
+            .unwrap();
+        assert_eq!(mem.embedding_count().unwrap(), 2);
+
+        // Query vector points at page B; BM25 points at A. Cosine must win.
+        let hits = mem
+            .hybrid_search("alpha", &[0.0, 1.0], Some("e.test"), 2)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://e.test/b");
+        assert!(hits[0].score > hits[1].score);
     }
 
     #[test]
