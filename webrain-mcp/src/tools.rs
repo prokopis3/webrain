@@ -860,7 +860,7 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
                 "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
@@ -2152,6 +2152,10 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         Err(e) => err(e),
                     }
                 }
+                "queue" => match mem.job_counts() {
+                    Ok(v) => json!({"status": "ok", "op": "queue", "queue": v}),
+                    Err(e) => err(e),
+                },
                 other => {
                     json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
                 }

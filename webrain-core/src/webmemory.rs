@@ -550,6 +550,36 @@ impl WebMemory {
         }))
     }
 
+    /// Finish a claimed job: `done` on success, `failed` with the last error.
+    pub fn complete_job(&self, id: i64, error: Option<&str>) -> Result<()> {
+        let state = if error.is_some() { "failed" } else { "done" };
+        self.conn.execute(
+            "UPDATE jobs SET state=?2, last_error=?3 WHERE id=?1",
+            params![id, state, error],
+        )?;
+        Ok(())
+    }
+
+    /// Queue state counts (and the oldest queued URLs) for `op=queue`.
+    pub fn job_counts(&self) -> Result<serde_json::Value> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state, COUNT(*) FROM jobs GROUP BY state ORDER BY state")?;
+        let mut states = serde_json::Map::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (state, n) = row?;
+            states.insert(state, serde_json::json!(n));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT url FROM jobs WHERE state='queued' ORDER BY id LIMIT 20")?;
+        let queued: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        Ok(serde_json::json!({"states": states, "queued_sample": queued}))
+    }
+
     /// BFS over stored `LINKS_TO` edges from one URL, up to `depth` hops and
     /// `limit` edges. Read-only: the backing web graph, not a live fetch.
     pub fn trace(&self, start: &str, depth: usize, limit: usize) -> Result<serde_json::Value> {
@@ -1094,6 +1124,21 @@ mod tests {
         assert_eq!(got["title"], "Title");
         assert_eq!(got["text"], "body text");
         assert!(mem.page("https://e.test/missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn queue_jobs_can_complete_and_fail() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        mem.enqueue("https://e.test/1", "e.test").unwrap();
+        mem.enqueue("https://e.test/2", "e.test").unwrap();
+        let claimed = mem.claim_jobs(2).unwrap();
+        assert_eq!(claimed.len(), 2);
+        mem.complete_job(claimed[0].0, None).unwrap();
+        mem.complete_job(claimed[1].0, Some("boom")).unwrap();
+        let q = mem.job_counts().unwrap();
+        assert_eq!(q["states"]["done"], 1);
+        assert_eq!(q["states"]["failed"], 1);
+        assert_eq!(q["queued_sample"].as_array().unwrap().len(), 0);
     }
 
     #[test]
