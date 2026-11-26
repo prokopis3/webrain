@@ -112,8 +112,10 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_stats      host health (load, memory, browser process count) — separates
                      "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
-  webrain_domain_memory  persisted domain index (op: search|coverage|architecture|status)
-  webrain_index_domain   crawl a domain into web-memory (HTTP-only + sitemap seed)
+  webrain_domain_memory  persisted domain index (op: search|coverage|architecture|status|
+                     page|subdomains); coverage is per host + subdomain
+  webrain_index_domain   crawl a domain into web-memory (HTTP-only + sitemap seed;
+                     subdomains:true sweeps crt.sh/DNS and indexes each host)
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Browser identity, profile, and session are EXECUTION STATE. Never treat a
@@ -858,9 +860,11 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains"], "description": "search | coverage | architecture | status | page | subdomains"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace"], "description": "search | coverage | architecture | status | page | subdomains | trace"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
-                "url": {"type": "string", "description": "page: indexed URL to retrieve"},
+                "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
+                "depth": {"type": "integer", "description": "trace: max link hops (default 2, max 5)"},
+                "limit": {"type": "integer", "description": "trace: max edges (default 100, max 1000)"},
                 "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
                 "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
                 "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
@@ -870,11 +874,15 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "webrain_index_domain",
-            "description": "Index a domain/seed URL into the persistent web-memory SQLite store. Runs an HTTP-only, sitemap-seeded, same-domain spider (no browser tab), then writes page text to FTS5 and LINKS_TO edges, returning the coverage report. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
+            "description": "Index a domain/seed URL into the persistent web-memory SQLite store. Runs an HTTP-only, sitemap-seeded, same-domain spider (no browser tab), then writes page text to FTS5 and LINKS_TO edges, returning the coverage report with a per-host breakdown. With `subdomains: true` it first sweeps crt.sh certificate transparency (+ optional `dns` labels) and indexes each subdomain under ONE shared page budget. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "url": {"type": "string", "description": "Seed URL or bare domain, e.g. https://example.com or example.com"},
-                "max_pages": {"type": "integer", "description": "page budget (default 50, max 2000)"},
+                "url": {"type": "string", "description": "Seed URL or bare domain, e.g. https://example.com or example.com (pass the registrable domain to include subdomains)"},
+                "max_pages": {"type": "integer", "description": "total page budget across all hosts (default 50, max 2000)"},
                 "max_depth": {"type": "integer", "description": "link depth (default 2, max 5)"},
+                "subdomains": {"type": "boolean", "description": "discover subdomains via crt.sh/DNS and index each host, not just the seed (default false)"},
+                "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
+                "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
+                "max_hosts": {"type": "integer", "description": "subdomains: max hosts to crawl, seed included (default 5, max 25)"},
                 "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
             }, "required": ["url"]}
         }),
@@ -2111,6 +2119,25 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                         json!({"status": "error", "message": "domain required for op=subdomains"})
                     }
                 },
+                "trace" => match args.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => {
+                        let depth = args
+                            .get("depth")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 5) as usize)
+                            .unwrap_or(2);
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 1000) as usize)
+                            .unwrap_or(100);
+                        match mem.trace(url, depth, limit) {
+                            Ok(v) => json!({"status": "ok", "op": "trace", "trace": v}),
+                            Err(e) => err(e),
+                        }
+                    }
+                    None => json!({"status": "error", "message": "url required for op=trace"}),
+                },
                 other => {
                     json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
                 }
@@ -2143,27 +2170,103 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                 .and_then(|v| v.as_i64())
                 .map(|n| n.clamp(1, 5) as usize)
                 .unwrap_or(2);
+            let want_subdomains = args
+                .get("subdomains")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let use_ct = args.get("use_ct").and_then(|v| v.as_bool()).unwrap_or(true);
+            let max_hosts = args
+                .get("max_hosts")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 25) as usize)
+                .unwrap_or(5);
+            let dns_labels: Vec<String> = args
+                .get("dns")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Subdomain discovery is blocking network I/O (crt.sh + DNS); keep it
+            // off the executor like every other blocking fetch in this server.
+            let mut discovery = serde_json::Value::Null;
+            let mut hosts = vec![host.clone()];
+            if want_subdomains {
+                let apex = host.clone();
+                let sweep = tokio::task::spawn_blocking(move || {
+                    let refs: Vec<&str> = dns_labels.iter().map(String::as_str).collect();
+                    webrain_core::webmemory::discover_hosts(&apex, use_ct, &refs)
+                })
+                .await;
+                match sweep {
+                    Ok(Ok(found)) => {
+                        discovery = found.to_json();
+                        hosts = webrain_core::webmemory::plan_index_hosts(
+                            &host,
+                            &found.subdomains,
+                            max_hosts,
+                        );
+                    }
+                    // Discovery is evidence, not a gate: a CT outage still gets
+                    // the seed crawled, with the failure reported.
+                    Ok(Err(e)) => discovery = json!({"error": e.to_string()}),
+                    Err(e) => {
+                        discovery = json!({"error": format!("discovery task failed: {e}")})
+                    }
+                }
+            }
+
+            // ONE page budget across every host: a host that returns fewer pages
+            // than its share passes the rest to the next, so a thin subdomain
+            // does not strand the budget.
+            let mut merged: Vec<webrain_core::engines::SpiderResult> = Vec::new();
+            let mut remaining = max_pages;
+            let mut hosts_crawled = 0usize;
+            for (i, current) in hosts.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                let budget =
+                    webrain_core::webmemory::host_budget(remaining, hosts.len() - i);
+                let target = if i == 0 {
+                    seed.clone()
+                } else {
+                    format!("https://{current}/")
+                };
+                let engine = webrain_core::engines::SpiderEngine::new(max_depth, budget)
+                    .with_http_only(true)
+                    .with_sitemap_seed(true)
+                    .with_same_domain(true)
+                    .with_respect_robots(true)
+                    .with_concurrency(6);
+                let results = engine.crawl(backend, &target).await;
+                // Charge attempts, not unique URLs: an error page still cost a
+                // request from the same site.
+                let attempted = results.len();
+                webrain_core::webmemory::merge_crawl_results(&mut merged, results);
+                remaining = remaining.saturating_sub(attempted);
+                hosts_crawled += 1;
+            }
+
             let db = args
                 .get("db")
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+            // Open the store only after the crawl: no connection (and no
+            // "running" run row) is held across the network waits.
             let mem = match webrain_core::webmemory::WebMemory::open(&db) {
                 Ok(m) => m,
                 Err(e) => return err(e),
             };
-            let engine = webrain_core::engines::SpiderEngine::new(max_depth, max_pages)
-                .with_http_only(true)
-                .with_sitemap_seed(true)
-                .with_same_domain(true)
-                .with_respect_robots(true)
-                .with_concurrency(6);
             let run = match mem.start_run(&host) {
                 Ok(id) => id,
                 Err(e) => return err(e),
             };
-            let results = engine.crawl(backend, &seed).await;
-            let report = match mem.ingest_crawl(&host, &results) {
+            let report = match mem.ingest_crawl(&host, &merged) {
                 Ok(r) => r,
                 Err(e) => return err(e),
             };
@@ -2174,14 +2277,18 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
             let fetched = report.get("fetched").and_then(|v| v.as_i64()).unwrap_or(0);
             let indexed = report.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
             let _ = mem.finish_run(run, discovered, fetched, indexed);
-            let errors = results.iter().filter(|r| r.page.error.is_some()).count();
+            let errors = merged.iter().filter(|r| r.page.error.is_some()).count();
             json!({
                 "status": "ok",
                 "domain": host,
-                "pages": results.len(),
+                "hosts": hosts,
+                "hosts_crawled": hosts_crawled,
+                "pages": merged.len(),
+                "budget_remaining": remaining,
                 "errors": errors,
                 "db": db.display().to_string(),
                 "coverage": report,
+                "discovery": discovery,
             })
         }
         "webrain_add_init_script" => {
