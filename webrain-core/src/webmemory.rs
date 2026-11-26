@@ -372,6 +372,12 @@ impl WebMemory {
             params![domain.trim().to_lowercase(), pattern],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        let last_fetched: Option<i64> = self.conn.query_row(
+            "SELECT MAX(fetched_at) FROM urls WHERE host=?1 OR host LIKE ?2",
+            params![domain.trim().to_lowercase(), pattern],
+            |r| r.get(0),
+        )?;
+        let freshness_secs = last_fetched.map(|t| (now() - t).max(0)).unwrap_or(0);
         Ok(serde_json::json!({
             "domain": domain,
             "discovered": discovered,
@@ -379,6 +385,8 @@ impl WebMemory {
             "indexed": indexed,
             "fetched_pct": pct(fetched, discovered),
             "indexed_pct": pct(indexed, discovered),
+            "last_fetched": last_fetched,
+            "freshness_secs": freshness_secs,
         }))
     }
 
