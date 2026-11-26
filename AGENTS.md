@@ -55,9 +55,56 @@ Cursor, …). Follow `docs/AGENT_DECISION_GUIDE.md` — or just call the
 | Material / interactive SPA (Google Flights, dropdowns, calendars) — **never obscura/lightpanda** | real Chrome via `cdp_urls:["http://127.0.0.1:9222"]` |
 | Protected / authenticated / Cloudflare / CAPTCHA / Turnstile challenges, real screenshots, rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain login`) |
 | **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **the ephemeral ("guest") Chrome** — `--incognito` since 2026-11-07; `--guest` cannot open a tab (`-32000 "Failed to open new tab - no browser is open"`, Chrome 151 + 156). A *purpose tool* with exactly two callers: `webrain_serp` and the CAPTCHA solve. Its profile (`serp/<profile>`, persisted unless `--fresh`) carries the clearance to the next call |
-| Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — v0.2.0+ render builds screenshot/PDF; no-render builds have no paint engine; no interactive Material |
+| Fast scraping of non-challenged JS pages | obscura (docker, `--stealth`) — v0.2.7+ mounts data-driven SPAs natively (v0.2.6/0.2.7 fixed the HTML interface prototypes); v0.2.5 and older cannot. Batch = one tab per CDP **connection**, K≈4 (§ Obscura batch) |
 | Lightweight / minimal, want real a11y, no rendering needed | lightpanda — real AX tree, but screenshot = fake placeholder PNG |
 | Static HTML, no JS/auth | `webrain_fetch_http` |
+
+### Obscura batch: tabs share the process, connections add CPU (measured)
+
+Tabs on one obscura connection **run concurrently but share one process's CPU**
+— they do not serialize. Measured on 50 light recipe pages (~0.5 s each):
+`concurrency: 6` on one connection = **10.5 s** vs **23.9 s serial** (2.3×);
+K=10 = 10.1 s but each page +57% slower. Heavy ~1 MB pages saturate that one
+process, so there the recipe is one connection per page, K≈4; heavy origins
+also throttle in-flight loads. Measured on a heavy e-commerce product page
+(1.07 MB Next.js SPA, obscura v0.2.5, 16 cores):
+
+| in-flight | layout | wall | per-row | throughput |
+|---|---|---|---|---|
+| 1 | 1 conn | 3.2 s | 3.2 s | 0.31 /s |
+| **4** | **4 conns, 1 proc** | **7.4 s** | **7.0–7.3 s** | **0.54 /s (peak)** |
+| 8 | 8 conns, 1 proc | 20.1 s | 16.0–19.9 s | 0.40 /s |
+| 8 | 8 procs × 1 tab | 20.5 s | 17.1–20.4 s | 0.39 /s |
+| 10 | 10 conns, 1 proc | 30.2 s | 26.1–29.0 s | 0.33 /s |
+| 20 | 1 proc × 20 tabs | 30.5 s | **0/20** (30 s cap) | — |
+| 20 | 10 procs × 2 tabs | 42.1 s | 13/20; retry 7/7 in 12.4 s → **54.5 s** | — |
+
+Recipe:
+
+```json
+{"op": "eval", "urls": ["..."],
+ "cdp_urls": ["http://127.0.0.1:9224", "http://127.0.0.1:9224",
+              "http://127.0.0.1:9224", "http://127.0.0.1:9224"],
+ "per_backend_concurrency": 1,
+ "disable_resources": true, "block_trackers": true}
+```
+
+- Repeat the **same endpoint** in `cdp_urls` (one connection per entry) and force
+  `per_backend_concurrency: 1` — it defaults to `concurrency`, which stacks tabs
+  back onto one connection.
+- K≈4 for ~1 MB JS-heavy pages; K=6 was slower (52.4 s / 20 pages on v0.2.7) and
+  K=20 returned 0/20. Light pages scale fine (8 example.com pages = 834 ms).
+- Only one obscura process is needed (`--max-connections` default 128);
+  `--workers N` is for isolation, not speed (1 proc × 8 conns = 8 procs × 1 conn).
+- Retry a missed `Page.navigate` instead of lowering K for everyone:
+  `retry: 1, retry_on: "timeout"` re-navigates the SAME tab once (the row then
+  reports `retries: 1`). `navigate_timeout_ms` (5 000–120 000) raises the fixed
+  30 s command cap when an origin legitimately needs longer; `delay_ms` +
+  `autothrottle` pace a rate-limited origin. Batch stats expose
+  `retries_used`, `connect_errors`, `suggested_concurrency`, `autothrottled`.
+- v0.2.7 numbers: 20 heavy product pages at K=4 → **20/20 in 43.3 s**.
+
+Full recipe, version gate and consent handling: `skills/webrain/references/obscura-batch.md`.
 
 ### Engine install (agent-browser style)
 Mirrors vercel-labs/agent-browser: `webrain install` downloads **Chrome for
@@ -89,24 +136,42 @@ runtime; both are applied as CDP emulation (`Emulation.setTimezoneOverride` /
 is not set: without coordinates it would be a third lie, not a fourth truth.
 
 ### Interactive SPAs (Google Flights, Material UI, calendars, search UIs)
-Heavy JS apps with Material/segmented controls need **real Chrome**. Obscura's
-render build **does** paint (`obscura fetch <url> -s out.png` writes a real PNG),
-but a data-driven SPA can stay **unmounted**: measured on `ab.gr/eshop/search`,
-obscura v0.2.5 — even with `OBSCURA_SCRIPT_DEADLINE_MS=120000` — returns a ~1 MB
-shell whose Apollo cache is empty (~518 B), with 0 product links and 0 prices.
+Heavy JS apps with Material/segmented controls need **real Chrome** for
+interaction. Obscura's render build **does** paint (`obscura fetch <url> -s
+out.png` writes a real PNG), and since **v0.2.7 it also mounts data-driven SPAs**
+— but Material menus/comboboxes still don't respond to synthetic clicks.
+
+Version gate (this is a property of the engine build, not the site). On obscura
+**≤ v0.2.5** a data-driven SPA stays **unmounted**: measured on a large
+supermarket SPA search page, v0.2.5 — even with
+`OBSCURA_SCRIPT_DEADLINE_MS=120000` — returns a ~1 MB shell whose Apollo cache
+is empty (~518 B), with 0 product links, 0 prices and no consent modal.
 Obscura's own stderr names the cause: React hydration throws `TypeError: Cannot
-read properties of undefined (reading 'firstChild')` inside `_next/.../_app.js`,
-so the app never mounts and its data query never fires. Root cause is a missing
-DOM API: obscura has **one** `Element` prototype for every tag, so
-`HTMLTemplateElement.prototype === Element.prototype`, and AB's
-`HTMLTemplateElement.firstChild` polyfill therefore breaks `firstChild` on all
-elements. Probe it in two lines before trusting any engine on an SPA:
-`HTMLTemplateElement.prototype === Element.prototype` must be `false`, and
+read properties of undefined (reading 'firstChild')` inside `_next/.../_app.js`.
+Root cause is a missing DOM API: obscura v0.2.5 has **one** `Element` prototype
+for every tag, so `HTMLTemplateElement.prototype === Element.prototype`, and the
+site's `HTMLTemplateElement.firstChild` polyfill therefore breaks `firstChild`
+on all elements. v0.2.6 fixed 28 missing HTML interface prototypes (`#1387`) and
+v0.2.7 fixed 24 more aliased interfaces (`#1482`), plus Windows runtime
+packaging (`#1492`).
+
+On **v0.2.7 the same page mounts natively**: 20 product cards, the full 537-item
+result count, prices, and the cookie-consent modal. Accept consent with a click
+on its accept button (it writes `VersionedCookieConsent`); the v0.2.5-era
+`HTMLTemplateElement` init script polyfill is **obsolete on v0.2.7 — remove
+it**. Upgrade with `webrain install --engine obscura --stealth --force` (a plain
+install says "already installed" and does nothing).
+
+Probe the engine build in two lines before trusting it on an SPA:
+`HTMLTemplateElement.prototype !== Element.prototype` must be `true`, and
 `document.createElement('template').constructor.name` must be
-`HTMLTemplateElement`. Material menus/comboboxes
-also don't respond to synthetic clicks. Route the
-batch there with `cdp_urls: ["http://127.0.0.1:9222"]` (Chrome), NOT the obscura
-session backend. Recipe that works (Google Flights ATH→NYC):
+`HTMLTemplateElement`. A failing probe means "this build cannot boot data-driven
+SPAs at all" — upgrade, don't write per-site polyfills.
+
+Route *interactive* Material work (dropdowns, calendars, segmented controls) to
+real Chrome with `cdp_urls: ["http://127.0.0.1:9222"]`; data extraction from
+SPA pages on obscura v0.2.7+ is fine. Recipe that works for Google Flights
+ATH→NYC on Chrome:
 1. Google consent gate: set cookies `SOCS` + `CONSENT` on `.google.com` via
    `webrain setcookies tmp/google_consent_cookies.json --port 9222` once, then
    every tab skips the dialog.
@@ -130,9 +195,9 @@ name, value, and css_path).
 ### Waits (`wait_selector`)
 The state is satisfied by **any** match (fixed in this build); before the fix only
 the first DOM match counted, and an SPA list renders the cards twice (hidden
-mobile container first), so `visible` never arrived. Measured on masoutis.gr, 27
-search URLs, `concurrency: 6`: `visible` + 30 s = **159 s** (810 s of `ms_total`
-was pure timeout), `attached` + 6 s = **10 s**, identical rows.
+mobile container first), so `visible` never arrived. Measured on a 27-URL
+grocery search list, `concurrency: 6`: `visible` + 30 s = **159 s** (810 s of
+`ms_total` was pure timeout), `attached` + 6 s = **10 s**, identical rows.
 - Use `wait_selector_state: "attached"` with `wait_timeout_secs: 6` on lists.
 - Anchor on the repeated card (`div.product`), not on a shell element that exists
   before the cards (`#ProductsClass` answered in 0.2-2.4 s with `found: 0`).
@@ -154,5 +219,34 @@ point the MCP at the batch browser (`CDP_URL=...9224` obscura), then
 cookie jars per CDP connection, so set + batch must share one connection.
 Session cookies die on Chrome restart — export on the live authenticated
 browser. Full procedure: `skills/webrain/SKILL.md` → "Auth-gated pages".
+
+**Cloudflare clearance CAN be transferred to obscura stealth (verified
+2026-11-25).** The old "cf_clearance never transfers" rule
+is too absolute: with the obscura **v0.2.7 stealth build** (BoringSSL TLS
+impersonation) started with a **UA matching the Chrome that minted the cookie**
+(`--user-agent`), and the same egress IP, Cloudflare accepts an imported
+`cf_clearance` and serves the origin page to obscura. Procedure:
+
+1. Headed Chrome solves the challenge (headless Chrome and obscura are both
+   detected: `crippled: true` / "Just a moment…").
+2. `webrain_session{op:"cookies", session_id:"<chrome-session>"}` → export,
+   keep only the target-domain cookies including `cf_clearance`.
+3. `webrain_session{op:"setcookies", cookies:[...]}` **without** `session_id`
+   — that writes the MCP's default connection (the one `webrain_batch` uses
+   when `cdp_urls` is omitted).
+4. `webrain_batch` **without** `cdp_urls` (same connection). New connections do
+   NOT inherit the clearance: duplicating the endpoint in `cdp_urls` gets
+   challenged again, and a `--storage-dir` profile did not carry it across
+   connections in testing. The cleared batch stays on one connection, but its
+   tabs run concurrently: 20 recipes = 4.6–9.7 s, and 50 recipe pages at
+   K=6 = **10.5 s wall** (23.9 s serial), all `challenge:false`.
+5. Faster variant when the clearance holder is Chrome: batch **on Chrome**
+   (`cdp_urls:["http://127.0.0.1:<chrome-port>"]`, concurrency 6) — Chrome
+   shares the profile's cookies across tabs: 20 recipes in 4.6 s.
+
+If the import still shows "Just a moment…", the minting Chrome's UA/TLS/IP does
+not match the obscura process: relaunch obscura with that exact `--user-agent`
+and the same exit, re-export, repeat once — otherwise keep the batch on Chrome,
+which is the supported path.
 
 Full detail: `docs/AGENT_DECISION_GUIDE.md`.

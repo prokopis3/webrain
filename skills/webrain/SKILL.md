@@ -53,6 +53,7 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 | Solve a CAPTCHA (generic tool flow: claim → scaled vision → exact geometry via `webrain_eval_in_frame` → parallel clicks → token) | `workflows/captcha-solve.md` |
 | Auth / login / persistent session / cookie transfer | `references/profiles.md` |
 | Structured extraction / pagination / scale | `references/extraction.md` |
+| Obscura batch throughput / "20 in parallel" is slow / 30 s navigate timeouts | `references/obscura-batch.md` |
 | Protected / authenticated site end-to-end | `workflows/protected-site.md` |
 | What NOT to do (anti-patterns) | `references/anti-patterns.md` |
 
@@ -68,7 +69,14 @@ Browser/MCP down? Run `webrain doctor` (or read `webrain_guide`) once:
 - **Never dump raw HTML to the model.** `webrain_observe(what="html")` is the LAST
   resort — use `what="clean"`, `eval`, or the extractors for text/structure. Return summaries.
 - **Batch before loop.** N pages in one `webrain_batch(op=extract, ...)`, not N sequential
-  navigates. Concurrency 4-8.
+  navigates. On real Chrome, concurrency 4-8. On **obscura**: tabs on one
+  connection run concurrently but share one process's CPU — light pages (≤~0.6 s)
+  are best at `concurrency: 6` on ONE connection (50 recipe pages = 10.5 s vs
+  23.9 s serial); heavy (~1 MB) pages saturate it, so repeat the same endpoint in
+  `cdp_urls`, set `per_backend_concurrency: 1`, and keep K≈4. The 30 s
+  `Page.navigate` cap is patched: `retry: 1, retry_on: "timeout"` and
+  `navigate_timeout_ms` (5 000–120 000) — measured numbers:
+  `references/obscura-batch.md`.
 - **Zero-LLM extraction first.** `autoschema` → `extract(mode=schema)` is free and deterministic;
   fall back to `eval` (JS) only when a schema can't be expressed in CSS.
 - **Don't re-scrape what you have.** Persist the JSON once; `webrain_scrape` revalidates from
@@ -139,10 +147,23 @@ session_id=X)`, then navigate with `session_id=X`). A CLI `webrain setcookies
 the SPA bounces to `/login`, and the shell HTML still answers 200. Verify from the
 same session with an authenticated endpoint (200 vs 403), never with `readback: N`.
 
-Cookie transfer moves **login state, not bot clearance**: `cf_clearance` is bound to
-the minting browser's TLS fingerprint, so a Cloudflare-gated site stays on the Chrome
-that solved it (verified: obscura/lightpanda fail with the exact same UA + cookies).
-For an obscura/lightpanda identity, start the binary with `--storage-dir` (it persists cookies across a server restart; it does NOT give a live jar to another connection).
+Cookie transfer moves **login state**, and — verified 2026-11-25 — it can also
+move **Cloudflare clearance**: `cf_clearance` is normally bound to the minting
+browser's TLS fingerprint, so the safe default is to keep a gated site on the
+Chrome that solved it. But with the **obscura v0.2.7 stealth build** (BoringSSL
+TLS impersonation) launched with `--user-agent` matching the minting Chrome and
+the same egress IP, Cloudflare accepts an imported `cf_clearance`:
+`webrain_session(op=cookies)` on the Chrome → `webrain_session(op=setcookies)`
+**without `session_id`** (writes the MCP default connection) → `webrain_batch`
+**without `cdp_urls`** (same connection). Do not expect parallel obscura
+connections to inherit it: duplicated `cdp_urls` and a `--storage-dir` profile
+were both still challenged. The cleared batch stays on that one connection, but
+its tabs run concurrently (K≈6 for light pages): 20 recipes = 4.6–9.7 s and
+50 recipe pages at K=6 = **10.5 s** (23.9 s serial), while Chrome shares its
+profile cookies across tabs (20 recipes = 4.6 s at `concurrency: 6`). If it
+still shows "Just a moment…", keep the batch on Chrome.
+For an obscura/lightpanda identity, `--storage-dir` persists cookies across a
+server restart (it does NOT give a live jar to another connection).
 
 **The ephemeral Chrome ("guest") is a purpose tool, and it is SERP-only**: `webrain_serp`
 engine=google|brave and interactive CAPTCHA/Turnstile are the only callers — its
@@ -191,6 +212,16 @@ consent pages as target content · write sequential loops when `webrain_batch` e
   touching `concurrency`: 27 URLs took **159 s** because 27 × 30 s of
   `wait_selector` timeout was 94 % of the run. `attached` + `wait_timeout_secs: 6`
   on the same URLs: **10 s**, identical rows.
+- **A batch on obscura "hangs" / rows say `Page.navigate timed out after
+  30s`** → the connection is oversubscribed (tabs share one process's CPU; heavy
+  origins also throttle in-flight loads) — or the origin legitimately needs
+  longer than 30 s. Fix in this order: `retry: 1, retry_on: "timeout"` (same-tab
+  re-navigation, row shows `retries`), raise `navigate_timeout_ms` (5 000–120 000),
+  then for heavy pages duplicate the endpoint in `cdp_urls` with
+  `per_backend_concurrency: 1` and K≈4 (light pages: one connection, K≈6; 50
+  recipe pages = 10.5 s at K=6 vs 23.9 s serial). Measured: 20 heavy pages 20/20
+  in 43 s at K=4; K=20 went 8/20 → 18/20 once `retry: 1` recovered 14 rows.
+  Full recipe: `references/obscura-batch.md`.
 
 ### Wait on the list, not on the first card
 
@@ -222,7 +253,7 @@ const el = document.querySelector('input');
 Object.keys(el).filter(k => k.startsWith('__react')).length   // 0 = never mounted
 ```
 
-Measured (`ab.gr/storelocator`, real Chrome, 2026-10-24): the fake `navigator.plugins`
+Measured (a Next.js store-locator SPA, real Chrome, 2026-10-24): the fake `navigator.plugins`
 threw `TypeError: Illegal invocation` in page code (fixed: spoof only when the
 browser has none), and the NOISE block — it replaces `Object.defineProperty` and
 hooks canvas/audio/`canPlayType` — made Next.js abort with
