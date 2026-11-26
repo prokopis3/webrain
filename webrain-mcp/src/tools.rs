@@ -860,14 +860,15 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish","drain"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish | drain"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
                 "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
                 "id": {"type": "integer", "description": "finish: claimed job id"},
                 "error": {"type": "string", "description": "finish: failure message; omit for success"},
                 "depth": {"type": "integer", "description": "trace: max link hops (default 2, max 5)"},
-                "limit": {"type": "integer", "description": "trace: max edges (default 100, max 1000)"},
+                "limit": {"type": "integer", "description": "trace: max edges; drain: jobs per batch (default 5)"},
+                "max_batches": {"type": "integer", "description": "drain: batch rounds (default 1, max 20)"},
                 "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
                 "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
                 "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
@@ -2185,6 +2186,49 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     }
                     None => json!({"status": "error", "message": "id required for op=finish"}),
                 },
+                "drain" => {
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 50) as usize)
+                        .unwrap_or(5);
+                    let max_batches = args
+                        .get("max_batches")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 20) as usize)
+                        .unwrap_or(1);
+                    let mut processed = 0usize;
+                    let mut failed = 0usize;
+                    for _ in 0..max_batches {
+                        let jobs = match mem.claim_jobs(limit) {
+                            Ok(j) => j,
+                            Err(e) => return err(e),
+                        };
+                        if jobs.is_empty() {
+                            break;
+                        }
+                        for (id, url, host) in jobs {
+                            let engine = webrain_core::engines::SpiderEngine::new(1, 1)
+                                .with_http_only(true)
+                                .with_same_domain(true)
+                                .with_respect_robots(true)
+                                .with_concurrency(1);
+                            let results = engine.crawl(backend, &url).await;
+                            match mem.ingest_crawl(&host, &results) {
+                                Ok(_) => {
+                                    let _ = mem.complete_job(id, None);
+                                    processed += 1;
+                                }
+                                Err(e) => {
+                                    let _ = mem.complete_job(id, Some(&e.to_string()));
+                                    failed += 1;
+                                }
+                            }
+                        }
+                    }
+                    let queue = mem.job_counts().unwrap_or(serde_json::Value::Null);
+                    json!({"status": "ok", "op": "drain", "processed": processed, "failed": failed, "queue": queue})
+                }
                 other => {
                     json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
                 }
