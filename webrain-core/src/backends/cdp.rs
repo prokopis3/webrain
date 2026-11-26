@@ -3176,6 +3176,44 @@ impl CdpBackend {
     }
 }
 
+impl CdpBackend {
+    /// obscura's `LP.getMarkdown`: the engine serialises the live DOM to
+    /// Markdown itself — one round-trip, no JS selector play, and it is the
+    /// same renderer obscura uses for `obscura fetch --dump markdown`.
+    ///
+    /// `LP` is obscura-specific, not core CDP, so Chrome and lightpanda answer
+    /// `-32601` ("wasn't found"). That is not an error for a caller: it returns
+    /// `Ok(None)` so the tool can fall back to webrain's own extractors, and a
+    /// genuine transport failure still surfaces as `Err`.
+    pub async fn get_markdown(&self) -> anyhow::Result<Option<String>> {
+        self.ensure_page_attached().await?;
+        match self.send_cmd("LP.getMarkdown", json!({})).await {
+            Ok(v) => {
+                let md = v
+                    .get("markdown")
+                    .and_then(|m| m.as_str())
+                    // tolerate a bare-string result, which is what obscura's own
+                    // CLI path returns when the domain replies without an object
+                    .or_else(|| v.as_str())
+                    .map(str::to_string);
+                Ok(md.filter(|s| !s.trim().is_empty()))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+                if msg.contains("-32601")
+                    || lower.contains("wasn't found")
+                    || lower.contains("method not found")
+                {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl BrowserBackend for CdpBackend {
     async fn navigate(&self, url: &str) -> anyhow::Result<PageState> {
