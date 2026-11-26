@@ -14,6 +14,41 @@ All notable changes, in reverse chronological order. The full version lives in
 
 ### Added
 
+- **fix**: the offline `webrain tool` surface can run `webrain_stats` and the
+  stateless `webrain_session` ops (`open`/`close`/`list`). Both were implemented
+  only in the MCP pre-dispatch layer, so the CLI answered
+  `Unknown tool: webrain_stats` / `webrain_list_sessions`. `webrain_stats` now
+  shares `host_stats` + `cdp_latency`; the CLI session ops report its single
+  ephemeral connection while the MCP server keeps its real per-connection
+  registry. `webrain_guide` and `webrain_stats` also answer through the same
+  pre-CDP check, so the offline CLI no longer needs a browser for them. Verified
+  by a 20-case smoke of all 19 tools on real Chrome 151 + obscura: **20/20
+  pass** (`watch`/`vision` need yt-dlp/whisper and the local Qwen model
+  respectively).
+
+- **fix**: `webrain tool` can run `webrain_pdf`'s browserless sub-ops again.
+  `map_surface` folds `webrain_pdf(op=render|extract|images)` into
+  `webrain_pdf_render|_extract|_images`, but only the MCP handler intercepted
+  those names; the offline `webrain tool` path calls `call_tool` directly and
+  answered `Unknown tool: webrain_pdf_render`. `call_tool` now serves the same
+  three ops from core (pdfium / lopdf / pure-Rust), and the CLI checks them
+  **before** the CDP connect, so
+  `webrain tool webrain_pdf '{"op":"render","path":…}'` works with no browser
+  running (verified on Rust 1.100: a real 1-page render in ~1.1 s → 228 KB PNG,
+  `op=extract` and `op=images` too). The one-shot CLI exits via
+  `TerminateProcess` after printing: in an optimized build the pdfium teardown
+  (DLL detach) could block for tens of seconds after the reply and PNG were
+  already complete (debug builds exited fine).
+
+- **build**: the workspace moved to **Rust 1.100** (current stable, 2026-11-12) and
+  refreshed the dependency graph for it. `rust-version` is now `1.100` (the
+  optional `chat` SDK's own floor is lower, but the workspace builds, tests and
+  ships on current stable), the container builder is
+  `rust:1.100-slim-bookworm`, and `cargo update` brings `copilot-sdk`
+  2.0.1 → **2.0.3** and `pdfium-render` 0.9.3 → **0.9.6**. Verified on 1.100:
+  `--features pdfium,chat` builds, `fmt`/`clippy` clean, workspace tests pass.
+  No crate-version bump — this is the toolchain migration, not a 1.0 release.
+
 - **cli**: help follows the command path. `webrain install watch --help` prints that
   subcommand's own page instead of the install page again, and a parent
   (`webrain install --help`) lists its `SUBCOMMANDS`, derived from the same table the
@@ -43,6 +78,15 @@ All notable changes, in reverse chronological order. The full version lives in
   and `view_image` were only discoverable from `#` in the composer.
 
 ### Fixed
+
+- `install`: **chunked model downloads no longer corrupt, hang, or re-download
+  over a valid file.** The probe follows HF's redirect to the CDN and re-probes
+  the final URI with `Range`; chunks reject non-206 bodies, validate
+  `Content-Range`/byte counts, and the plain fallback writes `.part` then
+  length/checksum-verifies before rename. SHA-256 comes from the original 302's
+  `X-Linked-ETag` (LFS digest), not the CDN's Xet-hash `ETag`, and is verified
+  before the file becomes visible; `.ok` markers carry `sha256:<hex>` and size/
+  hash changes are reconciled.
 
 - **build**: the two static musl binaries ship without `chat`. `copilot-sdk` 2.0.1's
   build script requires OS OpenSSL 3, `OPENSSL_STATIC=0` and no vendored copy, so a
@@ -94,6 +138,12 @@ All notable changes, in reverse chronological order. The full version lives in
   bare URL, and local image paths are served through `/local`.
 
 ### Changed
+
+- `install`: downloads share one keep-alive agent, run up to 16 chunks with a
+  32 MiB target (`WEBRAIN_DL_WORKERS`, `WEBRAIN_DL_CHUNK_MB`), and use
+  per-read/connect timeouts instead of a whole-request budget that failed slow
+  chunks at 100 %. The sidecar records chunk geometry so resume cannot reuse
+  indices after a worker/chunk-size change.
 
 - **chat**: below 1100 px the right rail becomes a header drawer, and the two drawers
   close each other; settings lists scroll inside their own pane and their create/add

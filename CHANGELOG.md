@@ -8,6 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **fix**: the offline `webrain tool` surface can run `webrain_stats` and the
+  stateless `webrain_session` ops (`open`/`close`/`list`). Both were implemented
+  only in the MCP pre-dispatch layer, so the CLI answered
+  `Unknown tool: webrain_stats` / `webrain_list_sessions`. `webrain_stats` now
+  shares `host_stats` + `cdp_latency`; the CLI session ops report its single
+  ephemeral connection while the MCP server keeps its real per-connection
+  registry. `webrain_guide` and `webrain_stats` also answer through the same
+  pre-CDP check, so the offline CLI no longer needs a browser for them. Verified
+  by a 20-case smoke of all 19 tools on real Chrome 151 + obscura: **20/20
+  pass** (`watch`/`vision` need yt-dlp/whisper and the local Qwen model
+  respectively).
+- **fix**: `webrain tool` can run `webrain_pdf`'s browserless sub-ops again.
+  `map_surface` folds `webrain_pdf(op=render|extract|images)` into
+  `webrain_pdf_render|_extract|_images`, but only `lib::handle_tools_call` (the
+  MCP path) intercepted those names; the offline `webrain tool` path calls
+  `call_tool` directly and answered `Unknown tool: webrain_pdf_render`.
+  `call_tool` now serves the same three ops from core (pdfium / lopdf /
+  pure-Rust), and the CLI checks them **before** `CdpBackend::connect`, so
+  `webrain tool webrain_pdf '{"op":"render","path":…}'` works with no browser
+  running (verified on Rust 1.100: a real 1-page render in ~1.1 s → 228 KB PNG,
+  `op=extract` and `op=images` too). The one-shot CLI exits via
+  `TerminateProcess` after printing: in an optimized build the pdfium teardown
+  (DLL detach) could block for tens of seconds even though the reply and the PNG
+  were already complete (debug builds exited fine).
+- **build**: the workspace moved to **Rust 1.100** (current stable, 2026-11-12) and
+  refreshed the dependency graph for it. `rust-version` is now `1.100` (the
+  optional `chat` SDK's own floor is lower, but the workspace builds, tests and
+  ships on current stable), the container builder is
+  `rust:1.100-slim-bookworm`, and `cargo update` brings `copilot-sdk`
+  2.0.1 → **2.0.3** and `pdfium-render` 0.9.3 → **0.9.6**. Verified on 1.100:
+  `--features pdfium,chat` builds, `fmt`/`clippy` clean, workspace tests pass.
+  No crate-version bump — this is the toolchain migration, not a 1.0 release.
+- **`webrain_batch` retry, timeout and pacing knobs — the 30 s navigate cliff is
+  configurable.** New args: `retry` (0–3, default 0), `retry_on`
+  (`timeout|connect|all`, default `timeout`), `navigate_timeout_ms` (5 000–120 000;
+  raises the fixed 30 s `Page.navigate` cap so `wait_timeout_secs` above 25 can
+  complete), `delay_ms`, `autothrottle`, `autothrottle_max_ms`. A retry
+  re-navigates the SAME tab before it is recycled and is classified on the error
+  text (`timed out after`, connection phrases), so a DNS/auth failure is not
+  retried. Rows carry `retries`; stats carry `retries_used` and `autothrottled`.
+  Measured: 6 URLs stalling past 30 s went **0/6 → 6/6** (+1.8 s wall); 3 URLs
+  stalling 31.5 s with `navigate_timeout_ms: 45000` went **0/3 → 3/3**; 20 heavy
+  SPA pages at K=20 went **8/20 → 18/20** (14 retries, +24.6 s).
+- **Batch connection failures are no longer result rows.** A refused `cdp_url`
+  used to be prepended to `results` (a 20-URL run reported `count: 22`), which
+  shifted `results[i] ↔ urls[i]`. Connect errors now live in
+  `stats.connect_errors` / `connect_error_details`, each endpoint gets one
+  reconnect attempt before being reported, `count` stays `urls.length`, and
+  `suggested_concurrency` reports the K the surviving backends can sustain.
 - **help follows the command path: `webrain install watch --help` is a page, not the
   install page again.** `HELP` was one row per top-level command and the resolver read
   `args[1]` alone, so every subcommand's flags crowded into its parent's NOTES paragraph
@@ -179,6 +228,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"this conversation has no session yet","session":false}`.
 
 ### Changed
+- `install`: **larger model downloads are faster and resumable on slow links.**
+  One keep-alive `ureq::Agent` now serves the probe and every chunk (the old
+  code built a fresh agent per chunk *and* per retry, paying a new TCP+TLS
+  handshake each time); up to 16 chunks run in parallel with a 32 MiB target
+  (`WEBRAIN_DL_WORKERS`, `WEBRAIN_DL_CHUNK_MB` override both). The 300 s
+  whole-request budget is gone — a slow chunk legitimately exceeded it and
+  failed an install at 100 % — replaced by bounded connect, first-byte, and
+  per-read idle timeouts that only fire on a dead peer. The `.part.done`
+  sidecar now records the chunk geometry, so resume discards stale indices
+  after a worker-count/chunk-size change instead of writing them at the wrong
+  offsets.
 - **`upgrade` refreshes the chat page and the Copilot runtime, so a version bump is one
   command again.** The page and the runtime are checked against the binary that ships them
   — the page by four digests `build.rs` compiles in, the runtime by `COPILOT_VERSION` — and
@@ -208,6 +268,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so `copilot`, `chat-ui`, `pdfium`, `nemotron` and `skills` were undiscoverable).
 
 ### Fixed
+- `install`: **the chunked downloader no longer corrupts or re-downloads models on
+  redirect/Range quirks.** Hugging Face redirects to a CDN and ureq can drop the
+  `Range` header on that hop; the probe then saw `200` and fell into the
+  single-stream path, overwriting a valid `.gguf`/`.mmproj`. The probe now
+  resolves the final CDN URI first, re-probes it with `Range` for a real `206`,
+  and all chunks go to that URI directly (also saving N redirects). Chunks
+  reject non-206 responses, validate `Content-Range` + exact byte counts, and a
+  whole-file fallback runs only when Range is genuinely unsupported.
+- `install`: **SHA-256 is verified before a download becomes visible.** The
+  probe now reads Hugging Face's `X-Linked-ETag` from the original 302 (the LFS
+  SHA-256) instead of trusting the CDN's final `ETag`, which is a Xet storage
+  hash and caused a false mismatch on a perfectly good mmproj. The merged
+  `.part` is hashed before rename; a mismatch deletes the corrupt file and
+  fails with the expected/got hashes. `.ok` markers now carry
+  `sha256:<hex>`, and a complete file without a marker (or a size/hash change
+  upstream) is reconciled instead of blindly re-downloaded. This is the class
+  of bug that left `mmproj-F16.part` at full length but with the wrong hash.
+- `install`: the plain fallback writes `<dest>.part`, checks `Content-Length`
+  and the checksum, and only then renames — a killed plain download can no
+  longer leave a partial file under the final name that `vision_local` treats
+  as installed.
 - `chat`: **a custom tool that shares a built-in's name no longer kills every turn.** The runtime
   refuses to initialize a session at all — `tool initialization before the turn failed: GenericFailure,
   External tool "web_fetch" conflicts with a built-in tool of the same name` — and it does so *before*
@@ -1953,7 +2034,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renders the same cards twice — a hidden mobile container first, the visible
   desktop copy second — so the poll locked onto the hidden copy and `visible`
   never arrived, burning the whole `wait_timeout_secs` on a page that was ready
-  in under a second. Measured on masoutis.gr, 27 search URLs, `concurrency: 6`:
+  in under a second. Measured on a large supermarket SPA, 27 search URLs, `concurrency: 6`:
   `visible` + 30 s = **159.4 s** (`ms_total` 858 s, of which 27 × 30 s = **810 s,
   94 %,** was pure wait); `attached` + 6 s = **10.1 s** with identical rows. The
   box test is `getClientRects()`, so `position: fixed` counts as visible and
@@ -3391,7 +3472,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Rust source to learn: (1) cookie transfer moves **login state, not bot
   clearance** — `cf_clearance`/DataDome/`_abck` are TLS-fingerprint-bound, so
   lightpanda and obscura stay on the challenge page even with a byte-identical UA
-  and the full jar (verified on skroutz.gr: 46 s wait, 12/12 pages only in the
+  and the full jar (verified on a large marketplace: 46 s wait, 12/12 pages only in the
   Chrome that minted the cookie); (2) **engine identity** — obscura
   `--storage-dir` is a real profile (persists cookies across restarts, lifts
   per-connection jar isolation), obscura `--user-agent`, lightpanda
@@ -3659,7 +3740,7 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   `docs/AGENT_DECISION_GUIDE.md` (§8) and `skills/webrain/SKILL.md` now describe
   each variable's *agent-visible* effect. `WEBRAIN_STEALTH_NOISE` carries the
   verified hydration cause (Next.js aborting on the spoofed
-  `Object.defineProperty`/canvas hooks, measured on `ab.gr/storelocator`) instead
+  `Object.defineProperty`/canvas hooks, measured on a large e-commerce store locator) instead
   of the earlier guess "sites that distrust the spoofed profile".
 
 ### Fixed
@@ -3667,12 +3748,12 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   turns per-URL wait lists into batches was built **inside** the
   `if cdp_urls.is_empty()` branch, so with `cdp_urls` set the plural argument was
   silently dropped and no wait was applied — a site that hydrates after
-  `readyState: complete` (masoutis.gr: cards render ~1 s later) came back as
+  `readyState: complete` (a large supermarket SPA: cards render ~1 s later) came back as
   shells with an empty title. Probed against the live server with a
   never-matching selector and a 5 s cap: plural returned in 492 ms (ignored),
   singular took 12 604 ms. The grouping now runs before the branch, and the
   per-group batches fan out per backend inside one `fan_out()`, so a
-  multi-backend call applies its waits too. Re-probed: 13 019 ms, and masoutis
+  multi-backend call applies its waits too. Re-probed: 13 019 ms, and the supermarket SPA
   then honoured `h1.item-title` and returned names + prices on the `cdp_urls`
   path.
 - **core**: `wss://` CDP endpoints now connect at all. `tokio-tungstenite` was
@@ -3778,7 +3859,7 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   own docs and a direct test disagree: release archives ship the renderer, and
   `obscura.exe fetch https://example.com -s out.png` wrote a 63 KB PNG on v0.2.5.
   What actually fails on a data-driven SPA is **boot, not paint** —
-  `ab.gr/eshop/search` returns a ~1 MB shell with an empty Apollo cache (~518 B),
+  a heavy e-commerce search page returns a ~1 MB shell with an empty Apollo cache (~518 B),
   0 product links and 0 prices, both at the default 30 s
   `OBSCURA_SCRIPT_DEADLINE_MS` and at 120 s, through `webrain_batch` and through
   the bare binary with no webrain injection. `AGENTS.md`,
@@ -3792,7 +3873,7 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   if the page needs it + `WEBRAIN_NO_STEALTH` **deleted**", and it now appears in
   `AGENT_GUIDE` (so the binary explains it), `docs/AGENT_DECISION_GUIDE.md` §8,
   `docs/reference/environment.mdx`, `skills/webrain/SKILL.md` and `AGENTS.md`.
-- **docs**: obscura's ab.gr failure now has a named cause instead of a guess. It
+- **docs**: obscura's e-commerce SPA failure now has a named cause instead of a guess. It
   is not the renderer and not our injection: obscura gives **every** element one
   shared `Element` prototype (`HTMLTemplateElement.prototype === Element.prototype`),
   so an app that feature-detects and polyfills `HTMLTemplateElement.firstChild`
@@ -4572,7 +4653,7 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   capabilities grid saved under `design/landing/` (not yet wired into the
   page — they match the live tokens).
 - **docs**: the "Proven on real jobs" section gains a "Real operations, end
-  to end" block — two full agent jobs as bento cards: the live skroutz.gr
+  to end" block — two full agent jobs as bento cards: the live marketplace
   hardware-buy (16 tool calls · 0 challenges · 100% price match · ~$0.04,
   verdict Acer Helios 16 AI @ 3.699 €) and the multi-source drone-build
   research (2× serp · 6 sources · 1m43s · 12-part plan). Reuses the existing
