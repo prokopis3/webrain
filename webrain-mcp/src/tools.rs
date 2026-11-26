@@ -858,9 +858,11 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_domain_memory",
             "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page"], "description": "search | coverage | architecture | status | page"},
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains"], "description": "search | coverage | architecture | status | page | subdomains"},
                 "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
                 "url": {"type": "string", "description": "page: indexed URL to retrieve"},
+                "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
+                "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
                 "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
                 "top_k": {"type": "integer", "description": "search: max hits (default 10, max 100)"},
                 "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
@@ -2088,8 +2090,29 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
                     },
                     None => json!({"status": "error", "message": "url required for op=page"}),
                 },
+                "subdomains" => match domain {
+                    Some(d) => {
+                        let use_ct = args.get("use_ct").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let labels: Vec<String> = args
+                            .get("dns")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        let discovery =
+                            webrain_core::webmemory::discover_subdomains(d, use_ct, &refs);
+                        json!({"status": "ok", "op": "subdomains", "discovery": discovery})
+                    }
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=subdomains"})
+                    }
+                },
                 other => {
-                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page")})
+                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
                 }
             }
         }
