@@ -130,6 +130,15 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Spider content is already capped (~3000 chars); keep the store consistent.
+const PAGE_TEXT_CAP: usize = 3000;
+
+fn host_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
 /// FTS5 is not a full query language here: turn user keywords into safe
 /// prefix terms, so `rust crawler` means both words and punctuation cannot
 /// produce a syntax error.
@@ -374,6 +383,51 @@ impl WebMemory {
     }
 
     /// Start a crawl run; returns its id.
+    /// Feed a completed spider crawl into the store: discover every URL, index
+    /// page text (spider content is capped, see `PAGE_TEXT_CAP`), and record
+    /// `LINKS_TO` edges. Returns the resulting coverage report.
+    pub fn ingest_crawl(
+        &self,
+        domain: &str,
+        results: &[crate::engines::SpiderResult],
+    ) -> Result<serde_json::Value> {
+        use sha2::{Digest, Sha256};
+        let mut indexed = 0usize;
+        for result in results {
+            let page = &result.page;
+            let url = page.url.as_str();
+            let Some(host) = host_of(url) else { continue };
+            self.discover_url(url, &host, result.depth)?;
+            if let Some(content) = page.content.as_deref() {
+                let text: String = content.chars().take(PAGE_TEXT_CAP).collect();
+                let hash = format!("{:?}", Sha256::digest(text.as_bytes()));
+                self.upsert_page(&WebPage {
+                    url: url.to_string(),
+                    host: host.clone(),
+                    title: page.title.clone().unwrap_or_default(),
+                    lang: String::new(),
+                    text,
+                    content_hash: hash,
+                    status: 200,
+                    fetched_at: now(),
+                })?;
+                indexed += 1;
+            } else {
+                self.mark_fetched(url, 0, page.title.as_deref())?;
+            }
+            for link in &result.links {
+                let Some(target_host) = host_of(link) else {
+                    continue;
+                };
+                self.discover_url(link, &target_host, result.depth + 1)?;
+                self.add_edge(url, link, "LINKS_TO")?;
+            }
+        }
+        let mut report = self.coverage(domain)?;
+        report["indexed_this_run"] = serde_json::json!(indexed);
+        Ok(report)
+    }
+
     pub fn start_run(&self, domain: &str) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO runs(domain, started_at) VALUES(?1, ?2)",
@@ -667,6 +721,28 @@ mod tests {
         assert_eq!(arch["hosts"], 2);
         assert_eq!(arch["urls"], 3);
         assert_eq!(arch["edges"], 1);
+    }
+
+    #[test]
+    fn ingests_crawl_results_into_pages_and_edges() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        let results = vec![crate::engines::SpiderResult {
+            page: crate::browser::PageResult {
+                url: "https://example.com/".into(),
+                title: Some("Home".into()),
+                content: Some("a rust crawler for web memory".into()),
+                error: None,
+                duration_ms: 5,
+            },
+            depth: 0,
+            links: vec!["https://example.com/a".into()],
+        }];
+        let report = mem.ingest_crawl("example.com", &results).unwrap();
+        assert_eq!(report["discovered"], 2);
+        assert_eq!(report["indexed"], 1);
+        assert_eq!(report["indexed_this_run"], 1);
+        assert_eq!(mem.search("rust", None, 10).unwrap().len(), 1);
+        assert_eq!(mem.architecture("example.com").unwrap()["edges"], 1);
     }
 
     #[test]
