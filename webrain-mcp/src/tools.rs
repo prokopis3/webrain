@@ -986,9 +986,9 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_batch",
             "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields, in a browser tab) | scrape (the SAME schema over plain HTTP — no tab, no render, the batch twin of webrain_scrape) | read (the batch twin of `webrain read`: HTTP markdown negotiation, `.md` retry, nearest llms.txt — no tab) | interact (async JS per tab) | eval (custom JS extractor) | assets (every link internal+external, images incl. CSS backgrounds, video sources+embeds — counts plus a `max` sample per URL) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping. PDFs are webrain_pdf, not an op here. Every row is {url, title, text, data, error, ms}: extract/scrape/read/eval/interact put the payload in `data` (text stays empty), fetch/markdown put it in `text`; `title` is the document that was actually read, so a challenge/consent/404 title means you did NOT read the page you asked for.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","scrape","read","interact","eval","screenshot","autoschema","assets"], "description": "pdf moved to its own tool (webrain_pdf) — it was advertised here but never dispatched, so `op=pdf` silently returned an empty fetch row. scrape: the CSS schema over plain HTTP, no tab (the batch twin of webrain_scrape); extract: the same schema in a browser tab; read: the batch twin of `webrain read` — HTTP markdown negotiation + `.md` retry + nearest llms.txt, no tab, payload in `data` with `source`. assets: per-array cap comes from `max` (default 20)."},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","scrape","read","interact","eval","screenshot","autoschema","assets","network"], "description": "pdf moved to its own tool (webrain_pdf) — it was advertised here but never dispatched, so `op=pdf` silently returned an empty fetch row. scrape: the CSS schema over plain HTTP, no tab (the batch twin of webrain_scrape); extract: the same schema in a browser tab; read: the batch twin of `webrain read` — HTTP markdown negotiation + `.md` retry + nearest llms.txt, no tab, payload in `data` with `source`. assets: internal+external links, images (incl. CSS backgrounds), videos, documents and network URLs, with `max` per array (default 200). network: every URL the page requested (Resource Timing, all initiator types)."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
-                "max": {"type": "integer", "description": "assets: per-array cap per URL (default 20, max 500)"},
+                "max": {"type": "integer", "description": "assets/network: per-array cap per URL (assets default 200, max 2000; network default 1000, max 5000)"},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "query": {"type": "string", "description": "markdown/read: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM). For read it prunes the markdown the row produced, so N pages can be read for ONE question"},
                 "proxy": {"type": "string", "description": "scrape/read ONLY (the browserless ops): HTTP(S)/SOCKS exit for the fetches. Omit to rotate the WEBRAIN_PROXIES pool per request; an explicit URL is honored as-is and never rotates. Browser ops (fetch/markdown/extract/interact/eval/screenshot) ignore it — their exit is the browser's, set at launch or via cdp_urls."},
@@ -1027,6 +1027,8 @@ pub fn list_tools() -> Vec<Value> {
                 "same_domain": {"type": "boolean", "default": true},
                 "allowed_domains": {"type": "array", "items": {"type": "string"}},
                 "no_content": {"type": "boolean", "default": false, "description": "spider: link-only fast path"},
+                "http_only": {"type": "boolean", "default": false, "description": "spider: fetch each page over the pooled HTTP agent instead of a browser tab (no JS/no tab; ideal for link discovery on static sites)"},
+                "seed_from_sitemap": {"type": "boolean", "default": false, "description": "spider: seed the frontier from robots.txt/sitemap.xml before crawling; falls back to the seed URL when no sitemap exists"},
                 "respect_robots": {"type": "boolean", "default": false},
                 "keywords": {"type": "array", "items": {"type": "string"}, "description": "spider bestfirst: relevance keywords"},
                 "allow": {"type": "array", "items": {"type": "string"}, "description": "spider: only follow URLs matching these regexes"},
@@ -1365,11 +1367,14 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
     for (const l of document.querySelectorAll('link[rel~="icon"], link[rel="image_src"], link[rel="apple-touch-icon"], meta[property="og:image"], meta[name="twitter:image"]')) {
       pushImg(abs(l.getAttribute('href') || l.getAttribute('content') || ''), 'icon', '');
     }
-    const all = document.querySelectorAll('*');
-    const n = Math.min(all.length, 2500);
+    const bgCandidates = document.querySelectorAll('body,main,section,article,header,footer,aside,nav,div,span,a,li,button,figure,figcaption,picture,td,th');
+    const n = Math.min(bgCandidates.length, 1600);
     for (let i = 0; i < n; i++) {
+      const el = bgCandidates[i];
+      // Hidden nodes do not paint a background an agent can fetch.
+      if (!el.offsetParent && el !== document.body) continue;
       let bi = '';
-      try { bi = getComputedStyle(all[i]).backgroundImage; } catch (e) { continue; }
+      try { bi = getComputedStyle(el).backgroundImage; } catch (e) { continue; }
       if (!bi || bi === 'none') continue;
       const found = bi.match(/url\((['"]?)([^'")]+)\1\)/g) || [];
       for (const raw of found) {
@@ -1417,13 +1422,55 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
       }
     } catch (e) {}
 
+    // ---- documents: stylesheets, scripts, preloads, iframes, forms, manifests
+    // and meta-refresh targets. These are links an agent can fetch but that the
+    // anchor/media scans above do not see.
+    const docSeen = new Set();
+    const documents = {stylesheets: [], scripts: [], preloads: [], iframes: [], forms: [], meta_refresh: [], manifest: []};
+    const pushDoc = (arr, u, kind) => {
+      if (!u || !/^https?:/i.test(u)) return;
+      const key = kind + '|' + u;
+      if (docSeen.has(key)) return;
+      docSeen.add(key);
+      if (arr.length < LIM) arr.push({url: u, kind: kind});
+    };
+    for (const l of document.querySelectorAll('link[href]')) {
+      const rel = (l.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+      const u = abs(l.getAttribute('href') || '');
+      if (rel.indexOf('stylesheet') > -1) pushDoc(documents.stylesheets, u, 'stylesheet');
+      else if (rel.indexOf('manifest') > -1) pushDoc(documents.manifest, u, 'manifest');
+      else if (rel.some(r => ['preload','modulepreload','prefetch','dns-prefetch','preconnect'].indexOf(r) > -1)) pushDoc(documents.preloads, u, rel.join(' '));
+    }
+    for (const s of document.querySelectorAll('script[src]')) pushDoc(documents.scripts, abs(s.getAttribute('src') || ''), 'script');
+    for (const f of document.querySelectorAll('iframe[src]')) pushDoc(documents.iframes, abs(f.getAttribute('src') || ''), 'iframe');
+    for (const f of document.querySelectorAll('form[action]')) pushDoc(documents.forms, abs(f.getAttribute('action') || ''), 'form');
+    for (const m of document.querySelectorAll('meta[http-equiv]')) {
+      if ((m.getAttribute('http-equiv') || '').toLowerCase() !== 'refresh') continue;
+      const mm = (m.getAttribute('content') || '').match(/url\s*=\s*([^;]+)/i);
+      if (mm) pushDoc(documents.meta_refresh, abs(mm[1].trim().replace(/^['"]|['"]$/g, '')), 'refresh');
+    }
+
+    // ---- network: every URL the page actually requested (XHR/fetch/API images
+    // included), from Resource Timing. One pass, no CDP arming.
+    const netSeen = new Set(), network = [];
+    try {
+      for (const e of performance.getEntriesByType('resource')) {
+        const u = e.name;
+        if (!/^https?:/i.test(u) || netSeen.has(u)) continue;
+        netSeen.add(u);
+        if (network.length < LIM) network.push({url: u, type: e.initiatorType || '', transferSize: e.transferSize || 0, duration: Math.round(e.duration || 0)});
+      }
+    } catch (e) {}
+
     return JSON.stringify({
       url: location.href,
       host: host,
-      counts: { internal: inAll.size, external: exAll.size, images: imgSeen.size, videos: vidSeen.size, scanned: n },
+      counts: { internal: inAll.size, external: exAll.size, images: imgSeen.size, videos: vidSeen.size, documents: docSeen.size, network: netSeen.size, scanned: n },
       links: { internal: internal, external: external, other_schemes: other },
       images: images,
-      videos: videos
+      videos: videos,
+      documents: documents,
+      network: network
     });
   } catch (e) { return JSON.stringify({ error: String(e) }); }
 })()"#;
@@ -1432,6 +1479,27 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
 /// batch wants counts plus a sample, or the reply is megabytes of JSON.
 fn asset_scan_js(limit: usize) -> String {
     ASSET_SCAN_JS_TMPL.replace("__LIM__", &limit.to_string())
+}
+
+/// Every URL the page actually requested, via Resource Timing. This is the
+/// cheap, batchable sibling of `webrain_network op=log` (which needs CDP armed
+/// before navigation): no bodies, but all initiator types and transfer sizes.
+const NETWORK_SCAN_JS_TMPL: &str = r#"(() => {
+  try {
+    const LIM = __LIM__;
+    const seen = new Set(), network = [];
+    for (const e of performance.getEntriesByType('resource')) {
+      const u = e.name;
+      if (!/^https?:/i.test(u) || seen.has(u)) continue;
+      seen.add(u);
+      if (network.length < LIM) network.push({url: u, type: e.initiatorType || '', transferSize: e.transferSize || 0, duration: Math.round(e.duration || 0)});
+    }
+    return JSON.stringify({url: location.href, count: seen.size, network: network});
+  } catch (e) { return JSON.stringify({error: String(e)}); }
+})()"#;
+
+fn network_scan_js(limit: usize) -> String {
+    NETWORK_SCAN_JS_TMPL.replace("__LIM__", &limit.to_string())
 }
 
 /// crawl4ai `PruningContentFilter` borrow: no-query "fit" content extractor.
@@ -2359,6 +2427,14 @@ async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 .get("respect_robots")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let http_only = args
+                .get("http_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let seed_from_sitemap = args
+                .get("seed_from_sitemap")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let allowed: Vec<String> = args
                 .get("allowed_domains")
                 .and_then(|v| v.as_array())
@@ -2428,6 +2504,8 @@ async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 .with_allowed_domains(allowed)
                 .with_discover_only(discover_only)
                 .with_respect_robots(respect_robots)
+                .with_http_only(http_only)
+                .with_sitemap_seed(seed_from_sitemap)
                 .with_keywords(keywords)
                 .with_filters(allow, deny)
                 .with_retry(retry)
@@ -3097,16 +3175,25 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                             .max(1) as usize;
                         batch_eval(b, urls, &autoschema_js(min), concurrency, opts).await
                     }
-                    // Link/image/video inventory across N URLs. `max` is small by
-                    // default (20) because this is counts-plus-sample: 20 URLs × 300
-                    // internal links would be megabytes of JSON in one reply.
+                    // Link/image/video/document/network inventory across N URLs.
+                    // `max` caps each array; counts stay unbounded.
                     "assets" => {
                         let lim = args
                             .get("max")
                             .and_then(|v| v.as_i64())
-                            .map(|n| n.clamp(1, 500) as usize)
-                            .unwrap_or(20);
+                            .map(|n| n.clamp(1, 2000) as usize)
+                            .unwrap_or(200);
                         batch_eval(b, urls, &asset_scan_js(lim), concurrency, opts).await
+                    }
+                    // All URLs each page actually requested (Resource Timing), no
+                    // CDP arming and no response bodies. Composes across N URLs.
+                    "network" => {
+                        let lim = args
+                            .get("max")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 5000) as usize)
+                            .unwrap_or(1000);
+                        batch_eval(b, urls, &network_scan_js(lim), concurrency, opts).await
                     }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
@@ -3607,14 +3694,32 @@ async fn call_media(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                             "links" => {
                                 o.remove("images");
                                 o.remove("videos");
+                                o.remove("documents");
+                                o.remove("network");
                             }
                             "images" => {
                                 o.remove("links");
                                 o.remove("videos");
+                                o.remove("documents");
+                                o.remove("network");
                             }
                             "videos" => {
                                 o.remove("links");
                                 o.remove("images");
+                                o.remove("documents");
+                                o.remove("network");
+                            }
+                            "documents" => {
+                                o.remove("links");
+                                o.remove("images");
+                                o.remove("videos");
+                                o.remove("network");
+                            }
+                            "network" => {
+                                o.remove("links");
+                                o.remove("images");
+                                o.remove("videos");
+                                o.remove("documents");
                             }
                             _ => {}
                         }

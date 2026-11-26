@@ -14,6 +14,9 @@
 // See webrain-core/src/lib.rs: nested ifs deliberate, let-chains available at
 // MSRV 1.88 but collapsing the sites is a separate cleanup.
 #![allow(clippy::collapsible_if)]
+// `list_tools` is one nested `json!` map for the whole surface; adding a few
+// input-schema fields pushes the default macro recursion limit over the edge.
+#![recursion_limit = "256"]
 
 mod tools;
 
