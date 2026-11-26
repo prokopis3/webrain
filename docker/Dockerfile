@@ -14,21 +14,22 @@
 # ── Build stage ─────────────────────────────────────────────────
 # Pinned to a concrete minor version (not a floating `latest`) so rebuilds are
 # reproducible. (A full @sha256: digest pin is the next step — obtain it with
-# `docker buildx imagetools inspect rust:1.94-slim-bookworm`.)
+# `docker buildx imagetools inspect rust:1.100-slim-bookworm`.)
 #
-# Debian, not Alpine; 1.94, not 1.85. Three independent reasons:
+# Debian, not Alpine; 1.100, not 1.85. Three independent reasons:
 #   * this toolchain must MATCH THE RUNTIME. The builder's libc decides the
 #     binary's libc, and the runtime has to be glibc so it can exec Obscura
 #     (see the runtime stage). A musl-built binary in a glibc image is a
 #     mismatch waiting to surface at the first browser launch.
-#   * the workspace resolves deps needing rustc 1.88, so the 1.85 toolchain
-#     fails `cargo build --release` outright.
-#   * the workspace `rust-version` is 1.94 (forced by the optional `chat`
-#     feature's SDK), and cargo refuses to build a package below its declared
-#     rust-version — so the old 1.88 base fails even with chat off.
+#   * the workspace resolves deps needing current stable rustc, so the old
+#     1.85 toolchain fails `cargo build --release` outright.
+#   * the workspace `rust-version` is 1.100 (the current stable toolchain; the
+#     optional `chat` feature's SDK declares a lower floor), and cargo refuses
+#     to build a package below its declared rust-version — so older bases fail
+#     even with chat off.
 # `musl-dev` is gone with Alpine: it was there to link against musl, which is
 # exactly what we no longer want.
-FROM rust:1.94-slim-bookworm AS builder
+FROM rust:1.100-slim-bookworm AS builder
 # BuildKit's automatic platform args exist only in the global scope BEFORE the
 # first FROM, so `$TARGETARCH` used inside a stage without redeclaring it here
 # expands to EMPTY. That silently collapsed the target cache below into one

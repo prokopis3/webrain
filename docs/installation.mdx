@@ -143,9 +143,10 @@ in.
 Add `--features chat` for `webrain chat`. Two consequences worth knowing before
 you type it:
 
-- The build now needs **Rust 1.94+** (the `github-copilot-sdk` crate's floor,
-  enforced by Cargo's MSRV-aware resolver). The workspace declares `1.94`, so an
-  older toolchain fails on *any* `cargo build`, feature or not.
+- The build now needs **Rust 1.100+** (the workspace's declared MSRV; the
+  `github-copilot-sdk`'s own floor is lower, but the workspace builds, tests and
+  ships on current stable). The workspace declares `1.100`, so an older
+  toolchain fails on *any* `cargo build`, feature or not.
 - The binary does **not** embed the Copilot runtime: `chat` keeps the artifact at
   ~45 MB, and `webrain install copilot` downloads the official runtime for this
   platform (SHA-256 verified) so `webrain chat` can start it. Use

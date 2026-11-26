@@ -58,7 +58,7 @@ sha2 = "0.11"
 # keeps managed `Client::start`; `network-forwarding` is the HTTP/TLS/WS handler
 # that `bundled-cli` used to pull in. The runtime is then resolved at run time
 # from `COPILOT_CLI_PATH` (or an explicit `CliProgram::Path`).
-copilot-sdk = { version = "2.0.1", optional = true, default-features = false, features = [
+copilot-sdk = { version = "2.0.3", optional = true, default-features = false, features = [
     "runtime",
     "network-forwarding",
 ] }
