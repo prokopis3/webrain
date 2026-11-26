@@ -449,6 +449,17 @@ impl WebMemory {
             |r| r.get(0),
         )?;
         let hosts = self.host_coverage(domain, 50)?;
+        let sitemap_urls: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sitemaps WHERE host=?1 OR host LIKE ?2",
+            params![domain.trim().to_lowercase(), pattern],
+            |r| r.get(0),
+        )?;
+        let sitemap_indexed: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sitemaps s JOIN urls u ON u.url=s.url
+             WHERE (s.host=?1 OR s.host LIKE ?2) AND u.indexed=1",
+            params![domain.trim().to_lowercase(), pattern],
+            |r| r.get(0),
+        )?;
         Ok(serde_json::json!({
             "domain": domain,
             "discovered": discovered,
@@ -460,6 +471,9 @@ impl WebMemory {
             "freshness_secs": freshness_secs,
             "host_count": host_count,
             "hosts": hosts,
+            "sitemap_urls": sitemap_urls,
+            "sitemap_indexed": sitemap_indexed,
+            "sitemap_indexed_pct": pct(sitemap_indexed, sitemap_urls),
         }))
     }
 
@@ -1047,6 +1061,22 @@ mod tests {
         assert_eq!(got["title"], "Title");
         assert_eq!(got["text"], "body text");
         assert!(mem.page("https://e.test/missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn sitemap_coverage_uses_published_ground_truth() {
+        let mem = WebMemory::open_in_memory().unwrap();
+        for u in ["https://e.test/a", "https://e.test/b", "https://e.test/c"] {
+            mem.record_sitemap("e.test", u, None).unwrap();
+        }
+        mem.discover_url("https://e.test/a", "e.test", 1).unwrap();
+        mem.discover_url("https://e.test/b", "e.test", 1).unwrap();
+        mem.upsert_page(&page("https://e.test/a", "e.test", "A", "alpha"))
+            .unwrap();
+        let cov = mem.coverage("e.test").unwrap();
+        assert_eq!(cov["sitemap_urls"], 3);
+        assert_eq!(cov["sitemap_indexed"], 1);
+        assert_eq!(cov["sitemap_indexed_pct"], 33.3);
     }
 
     #[test]
