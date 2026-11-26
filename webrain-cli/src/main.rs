@@ -273,7 +273,7 @@ const HELP: &[(&str, &str, &str, &str)] = &[
         "tool",
         "webrain tool [<name>] ['<json args>'] [--url URL] [--raw]",
         "Run any MCP tool from the shell — no model, no client. Bare `webrain tool` lists them.",
-        "This is the whole 19-tool surface, offline: args and reply are the tool's own JSON,\n  so it cannot drift from `webrain_mcp::list_tools()`. `--url` navigates first (most\n  tools read the current page), `@file.json` passes args from a file, and a reply's\n  base64 images are replaced by their size unless --raw is given. Exit 1 when the\n  tool reports an error. Examples:\n    webrain tool webrain_extract '{\"mode\":\"table\"}' --url https://example.com\n    webrain tool webrain_network '{\"op\":\"log\",\"url\":\"https://x/\",\"wait_ms\":3000}'\n  Needs a reachable browser (CDP_URL). `diff`, `pdf`, `serp --http` and `watch` are\n  the verbs that do not.",
+        "This is the whole 19-tool surface, offline: args and reply are the tool's own JSON,\n  so it cannot drift from `webrain_mcp::list_tools()`. `--url` navigates first (most\n  tools read the current page), `@file.json` passes args from a file, and a reply's\n  base64 images are replaced by their size unless --raw is given. Exit 1 when the\n  tool reports an error. Examples:\n    webrain tool webrain_extract '{\"mode\":\"table\"}' --url https://example.com\n    webrain tool webrain_network '{\"op\":\"log\",\"url\":\"https://x/\",\"wait_ms\":3000}'\n  Needs a reachable browser (CDP_URL) **except** `webrain tool webrain_pdf`'s\n  browserless sub-ops (`op=render|extract|images`), and the `diff`, `pdf`,\n  `serp --http` and `watch` verbs.",
     ),
     (
         "serp",
@@ -887,6 +887,26 @@ fn check_skill_tools(dir: &std::path::Path) {
     println!("  (a skill naming a removed tool sends every agent to a tool that is not there)");
 }
 
+/// Terminate immediately, skipping DLL-detach/teardown. The pdfium DLL can block
+/// inside ExitProcess's detach in an optimized build *after* a `webrain tool
+/// webrain_pdf` reply is already printed (debug exits fine). TerminateProcess
+/// ends all threads without running that detach, so the one-shot command returns
+/// as soon as its JSON is written.
+fn exit_now(code: i32) -> ! {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn TerminateProcess(process: *mut core::ffi::c_void, exit_code: u32) -> i32;
+        }
+        unsafe {
+            TerminateProcess(GetCurrentProcess(), code as u32);
+        }
+    }
+    std::process::exit(code);
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1158,6 +1178,29 @@ fn main() -> anyhow::Result<()> {
             // One pass over the tail: `--flag value` pairs and the single JSON
             // argument, which may sit anywhere.
             let (tool_args, nav_to, raw) = parse_tool_argv(&args[3.min(args.len())..])?;
+            // Browserless pdf sub-ops must not need a browser. The MCP handler
+            // intercepts them before the CDP connect; `webrain tool` is the same
+            // surface, so serve them here too — otherwise `webrain tool
+            // webrain_pdf '{"op":"render",…}'` attaches (or hangs on) a browser it
+            // never uses.
+            if let Some(mut reply) = rt.block_on(webrain_mcp::browserless_tool(name, &tool_args)) {
+                if !raw {
+                    strip_inline_images(&mut reply);
+                }
+                println!("{}", serde_json::to_string_pretty(&reply)?);
+                if reply.get("status").and_then(|s| s.as_str()) == Some("error")
+                    || reply.get("error").is_some()
+                {
+                    std::process::exit(1);
+                }
+                // One-shot command: return immediately instead of walking the
+                // process teardown. In an optimized build the pdfium teardown
+                // (DLL unload / document destructors) can block for tens of
+                // seconds after the reply is already printed; `exit` still runs
+                // ExitProcess's DLL detach, so use the hard exit.
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                exit_now(0);
+            }
             let backend = rt.block_on(CdpBackend::connect_default())?;
             if let Some(u) = nav_to {
                 rt.block_on(backend.navigate(&u))?;
