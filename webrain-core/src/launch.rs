@@ -423,6 +423,14 @@ pub fn launch_lightpanda(port: u16) -> anyhow::Result<Launched> {
 /// install::find_obscura() (`webrain install --engine obscura`, PATH,
 /// WEBRAIN_OBSCURA). CDP endpoint mirrors Chrome's /devtools/browser path.
 /// ponytail: reuse `Launched`; no profile dir for obscura.
+/// Obscura's per-launch capabilities that a CDP client cannot set later.
+fn env_on(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
     if port_open(port) {
         anyhow::bail!("port {port} already has a CDP endpoint — another server is running there");
@@ -434,7 +442,7 @@ pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
     })?;
     // Bind to loopback: an unauthenticated CDP server on 0.0.0.0 would give any
     // network peer full browser control. CdpBackend connects via 127.0.0.1.
-    let args = vec![
+    let mut args = vec![
         "serve".to_string(),
         "--host".to_string(),
         "127.0.0.1".to_string(),
@@ -442,6 +450,42 @@ pub fn launch_obscura(port: u16) -> anyhow::Result<Launched> {
         port.to_string(),
         "--stealth".to_string(),
     ];
+    // Obscura's per-launch capabilities that a CDP client cannot set later.
+    // Without these the binary is stuck on its defaults (1 worker, no proxy, no
+    // UA override, SSRF-blocked localhost), which is exactly the gap that made
+    // operators relaunch it by hand for cf_clearance transfers and LAN targets.
+    let env_arg = |key: &str, flag: &str, args: &mut Vec<String>| {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                args.push(flag.to_string());
+                args.push(v.to_string());
+            }
+        }
+    };
+    env_arg("WEBRAIN_OBSCURA_PROXY", "--proxy", &mut args);
+    env_arg("WEBRAIN_OBSCURA_USER_AGENT", "--user-agent", &mut args);
+    env_arg("WEBRAIN_OBSCURA_STORAGE_DIR", "--storage-dir", &mut args);
+    if let Ok(v) = std::env::var("WEBRAIN_OBSCURA_WORKERS") {
+        // `--workers 0` would start nothing; reject rather than spawn a dead server.
+        let n: u32 = v.trim().parse().unwrap_or(1);
+        if n > 1 {
+            args.push("--workers".to_string());
+            args.push(n.to_string());
+        }
+    }
+    if env_on("WEBRAIN_OBSCURA_ALLOW_PRIVATE_NETWORK") {
+        args.push("--allow-private-network".to_string());
+    }
+    if env_on("WEBRAIN_OBSCURA_OBEY_ROBOTS") {
+        args.push("--obey-robots".to_string());
+    }
+    // Escape hatch for flags this build of webrain does not know yet (e.g.
+    // --font-dir for a render build); whitespace-separated, appended last so an
+    // explicit caller value wins over the ones above.
+    if let Ok(extra) = std::env::var("WEBRAIN_OBSCURA_ARGS") {
+        args.extend(extra.split_whitespace().map(str::to_string));
+    }
     spawn_and_wait(
         &bin,
         &args,
