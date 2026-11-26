@@ -936,6 +936,35 @@ mod discovery_tests {
     }
 
     #[test]
+    fn index_hosts_stay_inside_the_domain_and_respect_cap() {
+        let hosts = plan_index_hosts(
+            "Example.com.",
+            &[
+                "api.example.com".into(),
+                "*.example.com".into(),
+                "evil.com".into(),
+                "api.example.com".into(),
+                "www.example.com".into(),
+            ],
+            3,
+        );
+        assert_eq!(
+            hosts,
+            vec!["example.com", "api.example.com", "www.example.com"]
+        );
+        // A tiny cap never drops the seed host.
+        assert_eq!(plan_index_hosts("e.test", &[], 0), vec!["e.test"]);
+    }
+
+    #[test]
+    fn host_budget_carries_unused_pages_forward() {
+        assert_eq!(host_budget(10, 3), 4); // ceil(10/3)
+        assert_eq!(host_budget(1, 5), 1);
+        assert_eq!(host_budget(0, 5), 0);
+        assert_eq!(host_budget(10, 0), 0);
+    }
+
+    #[test]
     fn discovery_without_network_sources_is_empty_but_reports() {
         let v = discover_subdomains("example.com", false, &[]);
         assert_eq!(v["domain"], "example.com");
