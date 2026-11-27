@@ -65,7 +65,7 @@ ravif = { version = "0.11", default-features = false }
 # MATCH pdf-inspector's transitive lopdf (0.44 compiled a second, duplicate PDF
 # stack). The extraction code already targets 0.41's API. Removed when
 # pdf-inspector exposes images natively.
-lopdf = "0.42"
+lopdf = "0.45"
 flate2 = "1"
 # Available memory for the tab budget (memory_tab_budget in backends/cdp.rs) and
 # for the soak example. host_stats() only knows /proc, so it answers
