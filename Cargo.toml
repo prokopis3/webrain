@@ -3,7 +3,7 @@ resolver = "3"
 members = ["webrain-core", "webrain-mcp", "webrain-cli"]
 
 [workspace.package]
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 license = "MIT"
 # Builds with the current stable toolchain (1.100, 2026-11). The optional
@@ -42,3 +42,4 @@ incremental = false
 
 [profile.release]
 strip = true
+
