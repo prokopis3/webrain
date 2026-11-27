@@ -8,12 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Web-memory domain index.** `webrain_index_domain` crawls a seed with the
-  HTTP-only sitemap-seeded spider and writes pages, `LINKS_TO` edges and FTS5
-  text into a persistent SQLite (WAL) store. `webrain_domain_memory` exposes
-  BM25 search, coverage SLO counts (discovered/fetched/indexed), site
-  architecture, stored page text, and CT/DNS subdomain discovery. Coverage is
-  reported/measured, never guaranteed; ADR 0006 records the phases and limits.
 - **Link discovery: sitemap-seeded and browserless crawls, plus a full asset
   inventory.** `webrain_crawl mode=spider` accepts `seed_from_sitemap` (seed the
   frontier from robots.txt/sitemap.xml, falling back to the seed URL) and

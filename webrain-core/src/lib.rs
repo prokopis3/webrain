@@ -28,7 +28,6 @@ pub mod vault;
 pub mod vendor_search;
 pub mod video;
 pub mod vision;
-pub mod webmemory;
 
 pub use backends::cdp::CdpBackend;
 // ponytail: TileEngine/TileShot/EmbeddingClient/VectoreStore used internally

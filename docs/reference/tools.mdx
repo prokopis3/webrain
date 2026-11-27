@@ -39,8 +39,6 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
 | `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · scrape (the same CSS schema over plain HTTP — no tab, no render) · read (the batch twin of `webrain read`: markdown negotiation, `.md` retry, nearest `llms.txt` — no tab; `filter`/`outline`/`max_chars` per row, `query`+`top_k` prune each row's markdown) · autoschema · interact · eval · screenshot · assets (links, images incl. CSS backgrounds, videos, documents, network; counts + `max` per array) · network (every URL each page requested, Resource Timing) (+ `cdp_urls` fan-out, per-URL `wait_selectors`). PDFs are `webrain_pdf`, not an op here | 🔶 mixed |
 | `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate. Spider supports `http_only` (no browser) and `seed_from_sitemap` (robots/sitemap first) | 🔶 mixed |
-| `webrain_domain_memory` | persistent SQLite web-memory: FTS5 BM25 search, coverage SLO counts, host/URL/edge architecture, store status, stored page text (`op=page`), and CT/DNS subdomain discovery (`op=subdomains`), and stored link tracing (`op=trace`). Browserless; `db` or `WEBRAIN_MEMORY_DB` | 🔶 read-only |
-| `webrain_index_domain` | crawl a seed URL/domain into web-memory: HTTP-only, sitemap-seeded, same-domain spider → FTS5 pages + `LINKS_TO` edges + coverage report. No browser tab | 🔶 read-only |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
 | `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
@@ -648,5 +646,3 @@ Stop a Chrome launched by `webrain launch` (kills the browser process; the persi
 </Accordion>
 
 </AccordionGroup>
-
-
