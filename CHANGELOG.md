@@ -11,6 +11,8 @@ _No unreleased changes yet._
 
 ## [0.21.0] - 2026-11-27
 
+> Per-conversation chat sessions, the DeepSeek Harness bundle, and static-musl builds without `chat`.
+
 ### Added
 - **`dsh-webrain`: webrain as an installable DeepSeek Harness bundle.** `dsh`
   composes MCP servers through Loader patches rather than a client-side JSON
@@ -42,6 +44,8 @@ _No unreleased changes yet._
   every other target still ships `chat`, and the chat guide/install notes now
   state which binary includes it.
 ## [0.20.0] - 2026-11-24
+
+> Batch extraction over HTTP, restart-safe chat context, and a resizable composer.
 
 ### Added
 
@@ -894,6 +898,8 @@ _No unreleased changes yet._
 
 ## [0.19.0] - 2026-11-21
 
+> A chat page you can read tables in, browser-engine fixes, and a recorded README demo.
+
 ### Added
 
 - **chat (rendering)**: Settings → Chat has a **reply rendering** switch, `markdown`
@@ -1736,6 +1742,8 @@ _No unreleased changes yet._
 
 ## [0.17.1] - 2026-11-06
 
+> `chat --serve` accepts the bundled UI on Windows.
+
 ### Fixed
 
 - **cli**: `chat --serve` refused the UI that shipped beside it on Windows. The
@@ -1752,6 +1760,8 @@ _No unreleased changes yet._
   still passes).
 
 ## [0.17.0] - 2026-11-06
+
+> `webrain chat` + `chat --serve`, 16 BYOK providers, dictation, and an honest batch report.
 
 ### Added
 
@@ -2746,6 +2756,8 @@ _No unreleased changes yet._
 
 ## [0.16.2] - 2026-11-03
 
+> OCI image labels and container metadata in release builds.
+
 ### Added
 
 - **build**: OCI image labels (`org.opencontainers.image.title/description/source/
@@ -2878,6 +2890,8 @@ _No unreleased changes yet._
 
 ## [0.15.3] - 2026-11-03
 
+> `webrain_pdf` accepts http(s) URLs plus PDF extraction fixes.
+
 ### Added
 
 - **core**: `webrain_pdf` accepts an `http(s)` URL anywhere it took a file path
@@ -2926,6 +2940,8 @@ _No unreleased changes yet._
 
 ## [0.14.5] - 2026-11-02
 
+> Timezone/locale coherence and browser fixes.
+
 ### Added
 
 - **core**: `WEBRAIN_TZ` / `WEBRAIN_LOCALE` are applied as CDP
@@ -2961,6 +2977,8 @@ _No unreleased changes yet._
   bucket hash typo is corrected in place.
 
 ## [0.14.0] - 2026-11-02
+
+> Per-platform and per-architecture release binaries plus installers.
 
 ### Added
 
@@ -3079,6 +3097,8 @@ _No unreleased changes yet._
   `ServerHello` poisons the per-connection).
 
 ## [0.13.0] - 2026-11-02
+
+> Bundled operator skills install via `webrain install skills`.
 
 ### Added
 
@@ -3208,6 +3228,8 @@ _No unreleased changes yet._
 
 ## [0.12.1] - 2026-10-29
 
+> Vision model install allowlist and related fixes.
+
 ### Added
 
 - **vision**: `install vision --model <id>` is now an allowlist, not a free-form
@@ -3321,6 +3343,8 @@ _No unreleased changes yet._
 
 ## [0.11.0] - 2026-10-26
 
+> Yahoo, Baidu and Yandex SERP engines on HTTP and browser paths.
+
 ### Added
 
 - **serp**: three more engines — `yahoo`, `baidu`, `yandex` — on **both** paths
@@ -3391,6 +3415,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   propagated, so `--no-fallback` surfaces the challenge instead of a silent 0.
 
 ## [0.10.0] - 2026-10-26
+
+> Progressive `webrain_guide` and tool-surface improvements.
 
 ### Added
 
@@ -3681,6 +3707,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.9.0] - 2026-10-23
 
+> Optional Brave Search API provider.
+
 ### Added
 
 - **core**: optional **Brave Search API** provider — `BRAVE_API_KEY` routes
@@ -3960,6 +3988,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   identical list).
 
 ## [0.8.0] - 2026-08-27
+
+> Batch `op=markdown` and page-markdown extraction.
 
 ### Added
 
@@ -4379,6 +4409,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.7.3] - 2026-08-15
 
+> Google guest SERP flow via direct search URL and pagination.
+
 ### Added
 
 - **core**: serp **google guest flow = direct search URL + pagination** — the
@@ -4630,6 +4662,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.6.2] - 2026-08-12
 
+> Rebuilt documentation landing page.
+
 ### Added
 
 - **docs**: landing page (now `docs/index.mdx`, served at `/`) rebuilt with a
@@ -4742,6 +4776,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.6.1] - 2026-08-09
 
+> RustCrypto dependency stack upgrade.
+
 ### Changed
 
 - **deps**: RustCrypto stack upgraded together (sha1 0.10→0.11, sha2 0.10→0.11,
@@ -4758,6 +4794,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   delete-branch-on-merge, CodeQL scanning.
 
 ## [0.6.0] - 2026-08-08
+
+> Docs synced to the 16-tool intent-based MCP surface.
 
 ### Added
 
@@ -4987,6 +5025,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.5.0] - 2026-08-06
 
+> Local video watch/transcription (`webrain_watch` / `webrain watch`).
+
 ### Added
 
 - **watch videos** (`webrain_core::video` + `webrain_watch` + `webrain watch`):
@@ -5092,6 +5132,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   `h-captcha`/`g-recaptcha`.
 
 ## [0.4.0] - 2026-08-06
+
+> Init-script tooling (`webrain_add_init_script`) and browser parity.
 
 ### Added
 
@@ -5238,6 +5280,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.3.3] - 2026-08-05
 
+> Runtime-flow documentation.
+
 ### Added
 
 - **docs**: new `concepts/runtime-flow.mdx` — source-grounded runtime flow and
@@ -5258,6 +5302,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   itself as a running instance of webrain and refuses to replace the binary.
 
 ## [0.3.2] - 2026-08-05
+
+> Mintlify documentation site in `docs/`.
 
 ### Added
 
@@ -5284,6 +5330,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 - **style**: `cargo fmt` on the mcp session-routing match indent.
 
 ## [0.3.1] - 2026-08-05
+
+> Lightpanda engine install.
 
 ### Added
 
@@ -5315,6 +5363,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.3.0] - 2026-08-05
 
+> `webrain_page_info` page metadata tool.
+
 ### Added
 
 - **tools** `webrain_page_info` —
@@ -5345,6 +5395,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.2.0] - 2026-08-05
 
+> `webrain upgrade` self-update command.
+
 ### Added
 - **cli**: `webrain upgrade` — updates to the latest release. Delegates to
   Homebrew/Scoop when installed through one (`brew upgrade webrain` /
@@ -5364,6 +5416,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
 
 ## [0.1.1] - 2026-08-04
 
+> Real all-OS install one-liners.
+
 ### Added
 - **docs**: real all-OS install one-liners (PowerShell + curl against release
   binaries) and the working scoop bucket (`prokopis3/scoop-webrain`).
@@ -5373,6 +5427,8 @@ reach the capability. Measured on 50 SERP URLs at concurrency 8: 50/50 ok,
   failed with "GLIBC_2.39 not found" on Ubuntu 22.04 / Debian 12 and older.
 
 ## [0.1.0] - 2026-08-04
+
+> Initial Cargo workspace and MCP scraping core.
 
 ### Added
 - **workspace**: Cargo workspace (`resolver 3`, `edition 2024`, Rust 1.85) with
