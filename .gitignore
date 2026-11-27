@@ -17,3 +17,7 @@ reamd_owasp.md
 deploy/
 .webrain/
 .dsh-tmp/
+
+/web-memory.sqlite
+/web-memory.sqlite-shm
+/web-memory.sqlite-wal

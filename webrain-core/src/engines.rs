@@ -1324,15 +1324,15 @@ impl SpiderEngine {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
             let start = std::time::Instant::now();
-            let (links, error) = match fetch_links_http(&url) {
-                Ok(links) => (links, None),
-                Err(e) => (Vec::new(), Some(e.to_string())),
+            let (links, title, content, error) = match fetch_http_page(&url) {
+                Ok(page) => (page.links, Some(page.title), Some(page.text), None),
+                Err(e) => (Vec::new(), None, None, Some(e.to_string())),
             };
             results.push(SpiderResult {
                 page: PageResult {
                     url: url.clone(),
-                    title: None,
-                    content: None,
+                    title,
+                    content,
                     error,
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
@@ -3197,7 +3197,7 @@ pub(crate) fn browser_agent() -> ureq::Agent {
 /// Attach the Chrome header set to a no-body request (GET/HEAD).
 /// Generic over the request body so we never name ureq's (re-)exported body
 /// types; `.header()` lives on `impl<Any> RequestBuilder<Any>`.
-fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+pub(crate) fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
     for (k, v) in browser_headers() {
         req = req.header(&k, &v);
     }
@@ -3370,7 +3370,7 @@ fn proxy_agents() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 
 /// Shared ureq agent for the serp helpers: one pooled agent per proxy URL when
 /// a proxy is set, otherwise the shared unproxied pool.
-fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
+pub(crate) fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
     // An explicit exit wins and never rotates; otherwise the pool applies. Without
     // this fallback only the callers that resolved `next_proxy()` themselves honoured
     // `WEBRAIN_PROXIES`, so `read`, `batch op=scrape|read` and every engine-level fetch
@@ -3867,7 +3867,16 @@ mod autoschema_tests {
 /// This is the browserless half of a link-only crawl: one GET, `scraper` for
 /// `<a>/<area>`, no tab, no JS, no wait. Relative URLs are resolved against the
 /// page URL; duplicates are removed in page order.
-pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
+pub struct HttpPage {
+    pub title: String,
+    pub text: String,
+    pub links: Vec<String>,
+}
+
+/// One HTTP GET + HTML parse: title, visible body text and resolved links. This
+/// is the single-request path the HTTP-only spider and the web-memory indexer
+/// both use; `fetch_links_http` is the links-only wrapper.
+pub fn fetch_http_page(url: &str) -> anyhow::Result<HttpPage> {
     let agent = http_agent(None)?;
     let resp = browser_req(agent.get(url)).call()?;
     let status = resp.status().as_u16();
@@ -3876,10 +3885,20 @@ pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("GET {url} -> {status}");
     }
     let doc = scraper::Html::parse_document(&body);
+    let title = doc
+        .select(&scraper::Selector::parse("title").unwrap())
+        .next()
+        .map(|e| e.text().collect::<String>())
+        .unwrap_or_default();
+    let text = doc
+        .select(&scraper::Selector::parse("body").unwrap())
+        .next()
+        .map(|e| e.text().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
     let sel = scraper::Selector::parse("a[href], area[href]")
         .map_err(|e| anyhow::anyhow!("link selector: {e}"))?;
     let base = url::Url::parse(url)?;
-    let mut out = Vec::new();
+    let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for el in doc.select(&sel) {
         let Some(href) = el.value().attr("href").map(str::trim) else {
@@ -3894,10 +3913,14 @@ pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
         }
         let s = u.to_string();
         if seen.insert(s.clone()) {
-            out.push(s);
+            links.push(s);
         }
     }
-    Ok(out)
+    Ok(HttpPage { title, text, links })
+}
+
+pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
+    Ok(fetch_http_page(url)?.links)
 }
 
 pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {
@@ -4958,6 +4981,33 @@ mod crawl_url_tests {
             links,
             vec![format!("http://{addr}/a"), "https://x.test/b".to_string()]
         );
+    }
+
+    #[test]
+    fn fetch_http_page_extracts_title_text_and_links() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "<html><head><title>Docs page</title></head>\
+            <body><h1>Rust crawler</h1><p>fast domain indexing</p>\
+            <a href=\"/next\">Next</a></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let page = super::fetch_http_page(&format!("http://{addr}/")).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.title, "Docs page");
+        assert!(page.text.contains("Rust crawler"));
+        assert_eq!(page.links, vec![format!("http://{addr}/next")]);
     }
 }
 
