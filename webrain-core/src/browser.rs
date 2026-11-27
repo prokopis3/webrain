@@ -239,6 +239,24 @@ pub const CONSOLE_CAPTOR_JS: &str = r#"
 /// internal links" into a single navigate call.
 /// ponytail: returns the array directly (like ELEMENTS_JS) so returnByValue gives
 /// a JSON array — JSON.stringify would make from_value::<Vec<_>>() fail.
+/// Page links for a crawl frontier: every http(s) `<a>`/`<area>` href, resolved
+/// against the document, deduped and ordered. Unlike `LINKS_JS` (the navigator's
+/// same-origin sample) this keeps external links and has no 200-item cap; the
+/// spider applies its own domain/allow/deny filters.
+pub const PAGE_LINKS_JS: &str = r#"(() => {
+    const out = new Set();
+    for (const el of document.querySelectorAll('a[href], area[href]')) {
+        const raw = el.getAttribute('href') || '';
+        if (!raw || raw.startsWith('#')) continue;
+        if (raw.toLowerCase().startsWith('javascript:')) continue;
+        let u = '';
+        try { u = new URL(raw, document.baseURI).href; } catch (e) { continue; }
+        if (!/^https?:/i.test(u)) continue;
+        out.add(u);
+    }
+    return [...out];
+})()"#;
+
 pub const LINKS_JS: &str = r#"
     (() => {
         try {
@@ -426,9 +444,7 @@ pub trait BrowserBackend: Send + Sync {
     /// (crawl4ai `prefetch=True`). Default impl falls back to navigate+evaluate.
     async fn discover_links(&self, url: &str) -> anyhow::Result<Vec<String>> {
         self.navigate(url).await?;
-        let v = self
-            .evaluate("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
-            .await?;
+        let v = self.evaluate(PAGE_LINKS_JS).await?;
         let mut out = vec![];
         if let Some(arr) = v.as_array() {
             for item in arr {

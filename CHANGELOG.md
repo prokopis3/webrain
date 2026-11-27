@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Link discovery: sitemap-seeded and browserless crawls, plus a full asset
+  inventory.** `webrain_crawl mode=spider` accepts `seed_from_sitemap` (seed the
+  frontier from robots.txt/sitemap.xml, falling back to the seed URL) and
+  `http_only` (pooled HTTP GET + `scraper` for `<a>/<area>`, no tab and no JS —
+  the fast path for static sites). `webrain_assets` now also returns
+  `documents` (stylesheets, scripts, preloads, iframes, forms, meta-refresh,
+  manifest) and `network` (Resource Timing: every URL the page requested, with
+  initiator type/transfer size), and its CSS-background pass scans a bounded,
+  visible candidate set instead of every node. `webrain_batch op=assets` gained
+  the same fields (per-array default 200, max 2000), and the new
+  `webrain_batch op=network` collects requested URLs across many pages without
+  CDP network arming. A bundled **`domain-links`** skill covers sitemap-first,
+  no-sitemap, internal/external, media/documents/network and link-audit recipes.
 - **`dsh-webrain`: webrain as an installable DeepSeek Harness bundle.** `dsh` composes
   MCP servers through Loader patches rather than a client-side JSON file, so webrain now
   ships as a bundle under `integrations/dsh-webrain`: one `@deepseek-ai/dsh-mcp-client`
@@ -30,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same fingerprint-noise choice `webrain chat --serve` makes for itself — the
   documented fix when a page renders but never mounts — and `'1'` in a row override
   restores the shim. The bundle is now `0.1.2`.
+### Changed
+- `webrain_crawl` frontier canonicalisation now removes tracking/campaign
+  parameters (`utm_*`, `fbclid`, `gclid`, `mc_cid`, …) before dedupe, so one page
+  reached with different campaign tags is crawled once. Sitemap and HTTP-only
+  crawls share the same seeded frontier and the same filters.
+
 ### Fixed
 - `build`: **the two static musl binaries ship without `chat`, because the SDK forbids
   the only OpenSSL a static binary can have.** Tagging 0.20.0 failed on both musl jobs
