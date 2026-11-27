@@ -1,6 +1,7 @@
 /target
 /output
 /build_err.txt
+/tmp
 
 .codebase-memory/
 __pycache__/
@@ -16,3 +17,7 @@ reamd_owasp.md
 deploy/
 .webrain/
 .dsh-tmp/
+
+/web-memory.sqlite
+/web-memory.sqlite-shm
+/web-memory.sqlite-wal

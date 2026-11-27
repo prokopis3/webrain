@@ -1,6 +1,6 @@
 // webrain-mcp: Model Context Protocol server for AI model browser automation.
 //
-// 19 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
+// 21 tools. The authoritative list is `tools::list_tools()`; the agent-facing map
 // is `tools::AGENT_GUIDE`. This header used to enumerate every tool and drifted two
 // rewrites behind both — one line pointing at the source of truth instead.
 //
@@ -14,6 +14,9 @@
 // See webrain-core/src/lib.rs: nested ifs deliberate, let-chains available at
 // MSRV 1.88 but collapsing the sites is a separate cleanup.
 #![allow(clippy::collapsible_if)]
+// `list_tools` is one nested `json!` map for the whole surface; adding a few
+// input-schema fields pushes the default macro recursion limit over the edge.
+#![recursion_limit = "256"]
 
 mod tools;
 

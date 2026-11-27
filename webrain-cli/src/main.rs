@@ -43,7 +43,7 @@ const HELP: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "install",
-        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install nemotron\n    webrain install vision [--model ID] [--model-update]\n    webrain install copilot\n    webrain install chat-ui [--from <url|file>]\n    webrain install skills [--force]",
+        "webrain install [--engine chrome|obscura|lightpanda] [--stealth] [--force]\n    webrain install watch|whisper [--model NAME]\n    webrain install nemotron\n    webrain install vision [--model ID] [--model-update]\n    webrain install embed\n    webrain install copilot\n    webrain install chat-ui [--from <url|file>]\n    webrain install skills [--force]",
         "Download a browser engine, the local AI stack (ffmpeg, yt-dlp, whisper, Nemotron 3.5 ASR dictation, Qwen3-VL), the Copilot runtime `webrain chat` drives, the browser UI `chat --serve` serves, or the bundled operator skills.",
         "--model ID picks one of the local vision models (an unknown id prints the\n  choices); --model-update re-checks the model files against Hugging Face.\n  `install copilot` is what makes `webrain chat` work in a release binary — it\n  is not embedded there. `install chat-ui` does the same for the page: the four\n  files\n  are verified against digests compiled into the binary, so one from a\n  different version is refused. `install skills` is offline — the bundle is\n  compiled into the binary — and keeps any skill file you already edited unless\n  --force is passed.",
     ),
@@ -1469,6 +1469,17 @@ fn main() -> anyhow::Result<()> {
                 "chrome" => {
                     let bin = webrain_core::install::install_chrome(force)?;
                     println!("engine ready: chrome (default) at {}", bin.display());
+                    // Default install also prepares the local web-memory
+                    // embedding stack (llama-server + Nomic Embed Text v1.5).
+                    match webrain_core::install::install_embed(force) {
+                        Ok(model) => println!("embedding model ready: {}", model.display()),
+                        Err(e) => eprintln!("warning: embedding model not installed: {e}"),
+                    }
+                }
+                "embed" => {
+                    let model = webrain_core::install::install_embed(force)?;
+                    println!("embedding model ready: {}", model.display());
+                    println!("  web-memory uses it automatically for op=embed / hybrid search");
                 }
                 "whisper" => {
                     // webrain install whisper [--model small.en] [--force]

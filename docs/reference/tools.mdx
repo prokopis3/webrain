@@ -37,8 +37,10 @@ WebSocket to the engine); a handful of tools skip the browser entirely.
 | `webrain_interact` (`action=…`) | click · click_coords · hold · drag · type · press · scroll · nav · tab · select · hover · check · dialog · wait · upload · dismiss_overlays · add_init_script | ✅ CDP |
 | `webrain_extract` (`mode=…`) | schema · regex · jsonld · table · autoschema · bm25 | ✅ CDP (in-page, zero-LLM) |
 | `webrain_scrape` | fetch_http: text probe (`max_chars`, `full`) · browserless `base_selector`+`fields` extract · browserless `autoschema` · `proxy` | ❌ no browser |
-| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · scrape (the same CSS schema over plain HTTP — no tab, no render) · read (the batch twin of `webrain read`: markdown negotiation, `.md` retry, nearest `llms.txt` — no tab; `filter`/`outline`/`max_chars` per row, `query`+`top_k` prune each row's markdown) · autoschema · interact · eval · screenshot · assets (link/image/video inventory; `max`) (+ `cdp_urls` fan-out, per-URL `wait_selectors`). PDFs are `webrain_pdf`, not an op here | 🔶 mixed |
-| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate | 🔶 mixed |
+| `webrain_batch` (`op=…`) | fetch · markdown (full page as Markdown, optional `query`+`top_k` bm25 prune) · extract · scrape (the same CSS schema over plain HTTP — no tab, no render) · read (the batch twin of `webrain read`: markdown negotiation, `.md` retry, nearest `llms.txt` — no tab; `filter`/`outline`/`max_chars` per row, `query`+`top_k` prune each row's markdown) · autoschema · interact · eval · screenshot · assets (links, images incl. CSS backgrounds, videos, documents, network; counts + `max` per array) · network (every URL each page requested, Resource Timing) (+ `cdp_urls` fan-out, per-URL `wait_selectors`). PDFs are `webrain_pdf`, not an op here | 🔶 mixed |
+| `webrain_crawl` (`mode=…`) | spider · sitemap · scan · validate. Spider supports `http_only` (no browser) and `seed_from_sitemap` (robots/sitemap first) | 🔶 mixed |
+| `webrain_domain_memory` | persistent SQLite web-memory: FTS5 BM25 search, coverage SLO counts, host/URL/edge architecture, store status, stored page text (`op=page`), and CT/DNS subdomain discovery (`op=subdomains`), and stored link tracing (`op=trace`). Browserless; `db` or `WEBRAIN_MEMORY_DB` | 🔶 read-only |
+| `webrain_index_domain` | crawl a seed URL/domain into web-memory: HTTP-only, sitemap-seeded, same-domain spider → FTS5 pages + `LINKS_TO` edges + coverage report. No browser tab | 🔶 read-only |
 | `webrain_search` | search (duckduckgo · google · bing · brave) | ❌ no browser |
 | `webrain_serp` | serp — **structured JSON** results (duckduckgo · bing · yahoo · baidu · yandex · google · brave · auto; optional proxy) | 🔶 mixed (HTTP engines no browser; google uses CDP; brave uses its keyed API or CDP; baidu/yandex report a challenge page as `skipped`) |
 | `webrain_pdf` (`op=…`) | page · extract · images · render (`--features pdfium` only) | ❌ no browser |
@@ -421,6 +423,8 @@ Batch over many URLs using concurrent tabs. `op`: `fetch` (read text) | `markdow
 
 `cdp_urls` fans out across N CDP backends round-robin (per-proxy isolation). `output` persists the full payload to disk. Optional `disable_resources`, `network_idle`, `wait_selector` shared with navigate. `proxy` applies to the browserless ops (`scrape`, `read`) only — omit it and each request rotates the `WEBRAIN_PROXIES` pool; an explicit URL pins one exit. A browser op's exit is the browser's, set at launch or by `cdp_urls`.
 
+`op:"assets"` returns every link class from one pass: `links.internal` / `links.external` / `links.other_schemes`, `images` (including `kind:"background"` from CSS), `videos`, `documents` (stylesheets, scripts, preloads, iframes, forms, meta-refresh, manifest) and `network` (Resource Timing), with per-array `max` (default 200, max 2000) and unbounded `counts`. `op:"network"` returns only the URLs each page actually requested — one Resource-Timing read per tab, all initiator types, `transferSize` and `duration` — with `max` default 1000. Neither op needs CDP network arming, so N pages cost N tab evaluations rather than N navigation captures.
+
 `wait_selector` + `wait_selector_state` (`attached\|visible\|hidden\|detached`, default `visible`) poll after navigate. The state is satisfied by **any** match — an SPA list page renders the cards twice (hidden mobile copy first), so `visible` on the first match used to stall the whole `wait_timeout_secs`. Prefer `attached` with `wait_timeout_secs: 6` on a list: measured 27 URLs in **10 s** versus **159 s**, identical rows.
 
 Every reply ends with `stats`, and the concurrency numbers are **measured, not assumed**:
@@ -437,11 +441,13 @@ A browser that refuses new targets is **not** an error: `webrain_batch` attaches
 </Accordion>
 
 <Accordion title="webrain_spider">
-Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume (persists `{queue, seen, results}` atomically; resume returns prior + new, never re-fetches; `max_pages` counts the whole crawldir), `concurrency` (parallel tabs on Chrome/obscura, default 4), `crawl_timeout_secs`. The frontier dedupes on path + sorted query params with the anchor fragment ignored, so `?b=2&a=1#top` and `?a=1&b=2` are crawled once; a `#/` hash route is kept (it is a real page) and output URLs keep their original form. `dedupe_pages` (off by default) keeps the first page per visible-text hash and reports `duplicates` — it removes rows, so leave it off when every facet row matters. The politeness gate is per host, so two domains each get their own `delay_ms`.
+Crawl a website from a seed URL (BFS / DFS / BestFirst). `allow`/`deny` URL-regex filters, `retry`, `delay_ms`, `autothrottle` (adaptive backoff), `crawldir` checkpoint/resume (persists `{queue, seen, results}` atomically; resume returns prior + new, never re-fetches; `max_pages` counts the whole crawldir), `concurrency` (parallel tabs on Chrome/obscura, default 4), `crawl_timeout_secs`. The frontier dedupes on path + sorted query params with the anchor fragment ignored and tracking parameters (`utm_*`, `fbclid`, `gclid`, …) stripped, so `?b=2&a=1#top` and `?a=1&b=2` are crawled once; a `#/` hash route is kept (it is a real page) and output URLs keep their original form. `dedupe_pages` (off by default) keeps the first page per visible-text hash and reports `duplicates` — it removes rows, so leave it off when every facet row matters. The politeness gate is per host, so two domains each get their own `delay_ms`.
+
+Two link-discovery fast paths: `http_only:true` fetches each page with the pooled HTTP agent and parses `<a>/<area>` with `scraper` — no tab, no JS, no settle; use it for static sites and browserless link audits. `seed_from_sitemap:true` seeds the frontier from robots.txt/sitemap.xml (child sitemaps fetched in parallel; a docs subpath falls back to the origin's robots/sitemap) before BFS, so a site with a sitemap does not have to rediscover its own pages. `no_content:true` skips text extraction and returns links only. Use the browser path (omit `http_only`) for JS-rendered pages; both paths use the shared `PAGE_LINKS_JS` extractor (resolved, deduped http(s) `<a>/<area>`, external links kept for the domain filters).
 </Accordion>
 
 <Accordion title="webrain_sitemap">
-Discover crawlable URLs from a site's sitemap. Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Returns `{urls, count, sources}`.
+Discover crawlable URLs from a site's sitemap. Follows robots.txt `Sitemap:` → index → leaf sitemaps → every `<loc>`. Pure HTTP, no browser. Child sitemaps are fetched in small parallel batches, and when `url` is a docs subpath the walk falls back to the origin's robots.txt/sitemap.xml. Returns `{urls, count, sources}`.
 </Accordion>
 
 <Accordion title="webrain_scan">
@@ -642,3 +648,5 @@ Stop a Chrome launched by `webrain launch` (kills the browser process; the persi
 </Accordion>
 
 </AccordionGroup>
+
+

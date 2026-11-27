@@ -536,6 +536,14 @@ pub struct SpiderEngine {
     /// 1 = sequential (legacy behavior); single-target backends (lightpanda)
     /// always fall back to 1 regardless of this.
     concurrency: usize,
+    /// Fetch pages with the pooled HTTP agent instead of a browser tab. Intended
+    /// for link discovery on static sites: no tab, no JS, no 300 ms settle. A
+    /// JS-rendered site still needs the browser path.
+    http_only: bool,
+    /// Seed the frontier from robots.txt / sitemap.xml before crawling, so a
+    /// crawl can start from the published URL inventory instead of rediscovering
+    /// it one depth at a time.
+    seed_from_sitemap: bool,
     /// NavOpts applied to every page fetch (stealth is always injected by the
     /// backend; these control blocking, waiting, and timeout).
     nav_opts: NavOpts,
@@ -563,6 +571,8 @@ impl Default for SpiderEngine {
             crawldir: None,
             checkpoint_every: 10,
             concurrency: 1,
+            http_only: false,
+            seed_from_sitemap: false,
             nav_opts: NavOpts::default(),
         }
     }
@@ -594,10 +604,40 @@ struct SpiderShared {
     deadline: Option<std::time::Instant>,
 }
 
+/// Tracking/campaign parameters that never change the document a crawler gets;
+/// keeping them turns one page into dozens of frontier entries.
+fn is_tracking_param(param: &str) -> bool {
+    let key = param
+        .split_once('=')
+        .map(|(k, _)| k)
+        .unwrap_or(param)
+        .to_ascii_lowercase();
+    key.starts_with("utm_")
+        || matches!(
+            key.as_str(),
+            "fbclid"
+                | "gclid"
+                | "dclid"
+                | "gbraid"
+                | "wbraid"
+                | "mc_cid"
+                | "mc_eid"
+                | "yclid"
+                | "msclkid"
+                | "_ga"
+                | "_gl"
+                | "igshid"
+                | "mkt_tok"
+                | "ref_src"
+                | "ref_url"
+        )
+}
+
 /// Dedupe key for the crawl frontier: drop the fragment and sort the query
-/// params, so `?b=2&a=1#top` and `?a=1&b=2` are the same page. Nothing else is
-/// rewritten — lowercasing a path or trimming a trailing slash can change what
-/// the server returns, and a wrong page costs more than a duplicate.
+/// params, so `?b=2&a=1#top` and `?a=1&b=2` are the same page. Tracking
+/// parameters are removed (they select a campaign, not a document); every other
+/// rewrite is avoided — lowercasing a path or trimming a trailing slash can
+/// change what the server returns, and a wrong page costs more than a duplicate.
 fn canonical_url(url: &str) -> String {
     let head = match url.split_once('#') {
         // A hash route (`#/page/2`, `#!/x`) is a real page in an SPA; an anchor
@@ -609,7 +649,13 @@ fn canonical_url(url: &str) -> String {
     match head.split_once('?') {
         None => head.to_string(),
         Some((path, q)) => {
-            let mut params: Vec<&str> = q.split('&').filter(|s| !s.is_empty()).collect();
+            let mut params: Vec<&str> = q
+                .split('&')
+                .filter(|s| !s.is_empty() && !is_tracking_param(s))
+                .collect();
+            if params.is_empty() {
+                return path.to_string();
+            }
             params.sort_unstable();
             format!("{path}?{}", params.join("&"))
         }
@@ -702,6 +748,17 @@ impl SpiderEngine {
     /// Concurrent multi-tab crawl width (real Chrome/obscura). 1 = sequential.
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.concurrency = n.max(1);
+        self
+    }
+    /// Link-only crawls over plain HTTP: no browser tab. Falls back to the
+    /// browser path only if the caller leaves this false (the default).
+    pub fn with_http_only(mut self, v: bool) -> Self {
+        self.http_only = v;
+        self
+    }
+    /// Seed the frontier from robots.txt / sitemap.xml on a fresh crawl.
+    pub fn with_sitemap_seed(mut self, v: bool) -> Self {
+        self.seed_from_sitemap = v;
         self
     }
     pub fn with_nav_opts(mut self, opts: NavOpts) -> Self {
@@ -881,6 +938,19 @@ impl SpiderEngine {
     }
 
     pub async fn crawl(&self, browser: &CdpBackend, seed_url: &str) -> Vec<SpiderResult> {
+        // Sitemap seeding happens before the path split: both the browser crawl
+        // and the browserless one start from the published URL inventory.
+        let sitemap_seeds = if self.seed_from_sitemap {
+            self.sitemap_seed_urls(seed_url)
+        } else {
+            Vec::new()
+        };
+        // Link-only HTTP crawl: no tab, no JS, no 300 ms settle. Use this for
+        // static sites and for `webrain_crawl {no_content:true,http_only:true}`;
+        // a JS-rendered site still needs the browser path below.
+        if self.http_only {
+            return self.crawl_http(seed_url, sitemap_seeds).await;
+        }
         // Multi-tab concurrent crawl (real Chrome/obscura) when concurrency > 1
         // on a multi-target backend. Single-target (lightpanda) and concurrency
         // = 1 fall through to the exact sequential path below. The capability
@@ -898,7 +968,7 @@ impl SpiderEngine {
                 Vec::new()
             };
             return self
-                .crawl_parallel(browser, seed_url, seed_host, disallowed)
+                .crawl_parallel(browser, seed_url, seed_host, disallowed, sitemap_seeds)
                 .await;
         }
         use std::collections::{HashSet, VecDeque};
@@ -984,9 +1054,18 @@ impl SpiderEngine {
         // kept checkpoint must never re-seed — the old `queue.is_empty()` guard
         // re-crawled the whole site after a drained-but-kept checkpoint.
         if visited.is_empty() && queue.is_empty() {
-            let seed = canonical_url(seed_url);
-            visited.insert(seed.clone());
-            queue.push_back((seed, 0));
+            if sitemap_seeds.is_empty() {
+                let seed = canonical_url(seed_url);
+                visited.insert(seed.clone());
+                queue.push_back((seed, 0));
+            } else {
+                for seed in sitemap_seeds.iter().take(self.max_pages) {
+                    let seed = canonical_url(seed);
+                    if visited.insert(seed.clone()) {
+                        queue.push_back((seed, 0));
+                    }
+                }
+            }
         }
         let mut since_checkpoint = 0usize;
 
@@ -1178,6 +1257,125 @@ impl SpiderEngine {
         results
     }
 
+    /// Browserless link crawl: one pooled HTTP GET per URL, `scraper` for the
+    /// links, no tab and no JS. This is the fast path for static sites and the
+    /// fallback when a browser is unavailable; the caller can still use the
+    /// browser path for JS-rendered pages.
+    async fn crawl_http(&self, seed_url: &str, sitemap_seeds: Vec<String>) -> Vec<SpiderResult> {
+        use std::collections::{HashSet, VecDeque};
+
+        let seed_host = url::Url::parse(seed_url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_default();
+        let seed_origin = seed_url.split('/').take(3).collect::<Vec<_>>().join("/");
+        let disallowed = if self.respect_robots {
+            self.fetch_robots(&seed_origin).await
+        } else {
+            Vec::new()
+        };
+        let robots_ok = |link: &str| {
+            if disallowed.is_empty() {
+                return true;
+            }
+            let path = url::Url::parse(link)
+                .map(|u| {
+                    let mut p = u.path().to_lowercase();
+                    if let Some(q) = u.query() {
+                        p.push('?');
+                        p.push_str(&q.to_lowercase());
+                    }
+                    p
+                })
+                .unwrap_or_else(|_| link.to_lowercase());
+            !disallowed.iter().any(|p| path.starts_with(p))
+        };
+
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        if !sitemap_seeds.is_empty() {
+            for seed in sitemap_seeds.iter().take(self.max_pages) {
+                let seed = canonical_url(seed);
+                if visited.insert(seed.clone()) {
+                    queue.push_back((seed, 0));
+                }
+            }
+        }
+        if queue.is_empty() {
+            let seed = canonical_url(seed_url);
+            visited.insert(seed.clone());
+            queue.push_back((seed, 0));
+        }
+
+        let mut results = Vec::new();
+        let deadline = self
+            .crawl_timeout_secs
+            .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+        while results.len() < self.max_pages {
+            if let Some(dl) = deadline
+                && std::time::Instant::now() >= dl
+            {
+                break;
+            }
+            let Some((url, depth)) = queue.pop_front() else {
+                break;
+            };
+            if self.delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            }
+            let start = std::time::Instant::now();
+            let (links, title, content, error) = match fetch_http_page(&url) {
+                Ok(page) => (page.links, Some(page.title), Some(page.text), None),
+                Err(e) => (Vec::new(), None, None, Some(e.to_string())),
+            };
+            results.push(SpiderResult {
+                page: PageResult {
+                    url: url.clone(),
+                    title,
+                    content,
+                    error,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                },
+                depth,
+                links: links.clone(),
+            });
+            if depth < self.max_depth {
+                for link in links {
+                    let link = canonical_url(&link);
+                    if !visited.contains(&link)
+                        && self.domain_ok(&link, &seed_host)
+                        && self.url_ok(&link)
+                        && robots_ok(&link)
+                    {
+                        visited.insert(link.clone());
+                        self.push_link(&mut queue, link, depth + 1);
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// The published URL inventory: robots.txt → sitemap index → leaves. Empty
+    /// when the site exposes no sitemap, so callers can fall back to BFS.
+    fn sitemap_seed_urls(&self, seed_url: &str) -> Vec<String> {
+        match sitemap_urls(seed_url, None) {
+            Ok(v) => v
+                .get("urls")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(e) => {
+                tracing::debug!("sitemap seed failed for {seed_url}: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Fetch the seed origin's robots.txt `Disallow` prefixes once (blocking
     /// ureq off the executor, timed agent). Shared by the parallel path; the
     /// serial path inlines the same fetch. ponytail: single fetch, prefix match
@@ -1238,6 +1436,7 @@ impl SpiderEngine {
         seed_url: &str,
         seed_host: String,
         disallowed: Vec<String>,
+        sitemap_seeds: Vec<String>,
     ) -> Vec<SpiderResult> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1253,9 +1452,18 @@ impl SpiderEngine {
             results = r;
         }
         if visited.is_empty() && queue.is_empty() {
-            let seed = canonical_url(seed_url);
-            visited.insert(seed.clone());
-            queue.push_back((seed, 0));
+            if sitemap_seeds.is_empty() {
+                let seed = canonical_url(seed_url);
+                visited.insert(seed.clone());
+                queue.push_back((seed, 0));
+            } else {
+                for seed in sitemap_seeds.iter().take(self.max_pages) {
+                    let seed = canonical_url(seed);
+                    if visited.insert(seed.clone()) {
+                        queue.push_back((seed, 0));
+                    }
+                }
+            }
         }
         // Combined budget across resumes: prior results count toward max_pages.
         let next_checkpoint = results.len() + self.checkpoint_every;
@@ -1329,7 +1537,7 @@ impl SpiderEngine {
         url: &str,
         start: std::time::Instant,
     ) -> (PageResult, Vec<String>) {
-        let links_expr = "Array.from(document.querySelectorAll('a[href]')).map(a => a.href)";
+        let links_expr = crate::browser::PAGE_LINKS_JS;
 
         // Discover-only fast path (crawl4ai prefetch): short-cap nav + links only.
         if self.discover_only {
@@ -2989,7 +3197,7 @@ pub(crate) fn browser_agent() -> ureq::Agent {
 /// Attach the Chrome header set to a no-body request (GET/HEAD).
 /// Generic over the request body so we never name ureq's (re-)exported body
 /// types; `.header()` lives on `impl<Any> RequestBuilder<Any>`.
-fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+pub(crate) fn browser_req<B>(mut req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
     for (k, v) in browser_headers() {
         req = req.header(&k, &v);
     }
@@ -3162,7 +3370,7 @@ fn proxy_agents() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 
 /// Shared ureq agent for the serp helpers: one pooled agent per proxy URL when
 /// a proxy is set, otherwise the shared unproxied pool.
-fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
+pub(crate) fn http_agent(proxy: Option<&str>) -> anyhow::Result<ureq::Agent> {
     // An explicit exit wins and never rotates; otherwise the pool applies. Without
     // this fallback only the callers that resolved `next_proxy()` themselves honoured
     // `WEBRAIN_PROXIES`, so `read`, `batch op=scrape|read` and every engine-level fetch
@@ -3655,6 +3863,66 @@ mod autoschema_tests {
 /// sitemap format; if a server serves a nonstandard sitemap, it yields fewer
 /// URLs, the agent falls back to crawl.
 /// Returns a JSON object: {urls: [...], sources: [fetched sitemap urls], error?}.
+/// Fetch one page over the pooled HTTP agent and return its http(s) links.
+/// This is the browserless half of a link-only crawl: one GET, `scraper` for
+/// `<a>/<area>`, no tab, no JS, no wait. Relative URLs are resolved against the
+/// page URL; duplicates are removed in page order.
+pub struct HttpPage {
+    pub title: String,
+    pub text: String,
+    pub links: Vec<String>,
+}
+
+/// One HTTP GET + HTML parse: title, visible body text and resolved links. This
+/// is the single-request path the HTTP-only spider and the web-memory indexer
+/// both use; `fetch_links_http` is the links-only wrapper.
+pub fn fetch_http_page(url: &str) -> anyhow::Result<HttpPage> {
+    let agent = http_agent(None)?;
+    let resp = browser_req(agent.get(url)).call()?;
+    let status = resp.status().as_u16();
+    let body = resp.into_body().read_to_string()?;
+    if !(200..400).contains(&status) {
+        anyhow::bail!("GET {url} -> {status}");
+    }
+    let doc = scraper::Html::parse_document(&body);
+    let title = doc
+        .select(&scraper::Selector::parse("title").unwrap())
+        .next()
+        .map(|e| e.text().collect::<String>())
+        .unwrap_or_default();
+    let text = doc
+        .select(&scraper::Selector::parse("body").unwrap())
+        .next()
+        .map(|e| e.text().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    let sel = scraper::Selector::parse("a[href], area[href]")
+        .map_err(|e| anyhow::anyhow!("link selector: {e}"))?;
+    let base = url::Url::parse(url)?;
+    let mut links = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for el in doc.select(&sel) {
+        let Some(href) = el.value().attr("href").map(str::trim) else {
+            continue;
+        };
+        if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
+            continue;
+        }
+        let Ok(u) = base.join(href) else { continue };
+        if u.scheme() != "http" && u.scheme() != "https" {
+            continue;
+        }
+        let s = u.to_string();
+        if seen.insert(s.clone()) {
+            links.push(s);
+        }
+    }
+    Ok(HttpPage { title, text, links })
+}
+
+pub fn fetch_links_http(url: &str) -> anyhow::Result<Vec<String>> {
+    Ok(fetch_http_page(url)?.links)
+}
+
 pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Value> {
     // A closure, not a nested fn: it needs the exit, and `http_agent` pools one
     // agent per proxy URL so the whole sitemap walk reuses one connection.
@@ -3687,50 +3955,99 @@ pub fn sitemap_urls(start_url: &str, proxy: Option<&str>) -> anyhow::Result<Valu
     // 1. If not given a sitemap URL, ask robots.txt for the Sitemap: line.
     let mut frontier: Vec<String> = Vec::new();
     let seed = start_url.trim_end_matches('/').to_string();
+    let origin = url::Url::parse(&seed).ok().and_then(|u| {
+        Some(format!(
+            "{}://{}",
+            u.scheme(),
+            u.host_str().filter(|h| !h.is_empty())?
+        ))
+    });
     if seed.contains("/sitemap") || seed.ends_with(".xml") {
         frontier.push(seed);
     } else {
-        let robots = format!("{seed}/robots.txt");
-        if let Ok(text) = get_text(&robots) {
-            // ponytail: multi-line Sitemap: entries; case-insensitive key.
-            for line in text.lines() {
-                if let Some(idx) = line.to_lowercase().find("sitemap:") {
-                    let url = line[idx + 8..].trim();
-                    if !url.is_empty() {
-                        frontier.push(url.to_string());
+        // A docs subpath (`/en/latest/`) usually has no robots.txt of its own;
+        // fall back to the origin's robots.txt and sitemap.xml so a caller can
+        // pass the page it cares about instead of having to know the site root.
+        let mut candidates = vec![format!("{seed}/robots.txt")];
+        if let Some(origin) = &origin {
+            if origin != &seed {
+                candidates.push(format!("{origin}/robots.txt"));
+            }
+        }
+        for robots in candidates {
+            if let Ok(text) = get_text(&robots) {
+                // ponytail: multi-line Sitemap: entries; case-insensitive key.
+                for line in text.lines() {
+                    if let Some(idx) = line.to_lowercase().find("sitemap:") {
+                        let url = line[idx + 8..].trim();
+                        if !url.is_empty() {
+                            frontier.push(url.to_string());
+                        }
                     }
                 }
+                sources.push(robots);
+                if !frontier.is_empty() {
+                    break;
+                }
             }
-            sources.push(robots);
+        }
+        if frontier.is_empty()
+            && let Some(origin) = &origin
+        {
+            frontier.push(format!("{origin}/sitemap.xml"));
         }
     }
 
     let mut seen = std::collections::HashSet::new();
-    while let Some(f) = frontier.pop() {
-        if !seen.insert(f.clone()) {
-            continue;
-        }
-        sources.push(f.clone());
-        match get_text(&f) {
-            Ok(xml) => {
-                if is_index(&xml) {
-                    // sitemap index → push child sitemaps onto the frontier.
-                    for child in locs(&xml) {
-                        if !seen.contains(&child) {
-                            frontier.push(child);
-                        }
-                    }
-                } else {
-                    urls.extend(locs(&xml));
-                }
+    // Sitemap indexes often list dozens of children; fetching them one at a
+    // time made a large site's inventory N round-trips. Walk the frontier in
+    // small parallel batches (the shared HTTP agent pools connections) while
+    // keeping the child order irrelevant — URLs are sorted at the end.
+    let batch_size = 8usize;
+    while !frontier.is_empty() {
+        let mut batch: Vec<String> = Vec::new();
+        while batch.len() < batch_size {
+            let Some(f) = frontier.pop() else { break };
+            if seen.insert(f.clone()) {
+                sources.push(f.clone());
+                batch.push(f);
             }
-            Err(e) => {
-                // A 404'd sitemap isn't fatal — keep going through the frontier.
-                tracing::debug!("sitemap fetch failed {f}: {e}");
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let get = &get_text;
+        let fetched: Vec<(String, anyhow::Result<String>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .into_iter()
+                .map(|f| scope.spawn(move || (f.clone(), get(&f))))
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        for (f, result) in fetched {
+            match result {
+                Ok(xml) => {
+                    if is_index(&xml) {
+                        // sitemap index → queue child sitemaps for the next batch.
+                        for child in locs(&xml) {
+                            if !seen.contains(&child) {
+                                frontier.push(child);
+                            }
+                        }
+                    } else {
+                        urls.extend(locs(&xml));
+                    }
+                }
+                Err(e) => {
+                    // A 404'd sitemap isn't fatal — keep going through the frontier.
+                    tracing::debug!("sitemap fetch failed {f}: {e}");
+                }
             }
         }
     }
 
+    sources.sort();
+    sources.dedup();
     urls.sort();
     urls.dedup();
     let mut v = json!({"urls": urls, "sources": sources, "count": urls.len()});
@@ -4601,6 +4918,97 @@ pub fn pdf_extract_batch(paths: &[String]) -> Vec<Value> {
             .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     })
+}
+
+#[cfg(test)]
+mod crawl_url_tests {
+    use super::canonical_url;
+
+    #[test]
+    fn canonical_url_sorts_query_and_drops_fragment() {
+        assert_eq!(
+            canonical_url("https://site/p?b=2&a=1#section"),
+            "https://site/p?a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn canonical_url_keeps_hash_routes() {
+        assert_eq!(
+            canonical_url("https://site/app#/page/2"),
+            "https://site/app#/page/2"
+        );
+    }
+
+    #[test]
+    fn canonical_url_strips_tracking_params() {
+        assert_eq!(
+            canonical_url("https://site/p?id=7&utm_source=x&fbclid=abc&gclid=1"),
+            "https://site/p?id=7"
+        );
+        assert_eq!(
+            canonical_url("https://site/p?utm_medium=email"),
+            "https://site/p"
+        );
+    }
+
+    #[test]
+    fn fetch_links_http_resolves_relative_links_and_skips_non_http() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "<html><body>\
+            <a href=\"/a\">A</a>\
+            <a href=\"https://x.test/b\">B</a>\
+            <a href=\"#fragment\">C</a>\
+            <a href=\"mailto:a@b.test\">D</a>\
+            </body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let links = super::fetch_links_http(&format!("http://{addr}/page")).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            links,
+            vec![format!("http://{addr}/a"), "https://x.test/b".to_string()]
+        );
+    }
+
+    #[test]
+    fn fetch_http_page_extracts_title_text_and_links() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "<html><head><title>Docs page</title></head>\
+            <body><h1>Rust crawler</h1><p>fast domain indexing</p>\
+            <a href=\"/next\">Next</a></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(response.as_bytes());
+        });
+        let page = super::fetch_http_page(&format!("http://{addr}/")).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.title, "Docs page");
+        assert!(page.text.contains("Rust crawler"));
+        assert_eq!(page.links, vec![format!("http://{addr}/next")]);
+    }
 }
 
 #[cfg(test)]

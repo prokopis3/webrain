@@ -63,7 +63,7 @@ fn semantic_tree_text(nodes: &Value) -> String {
 /// can fetch it (webrain_guide). Mirrors docs/AGENT_DECISION_GUIDE.md.
 pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this first when unsure how to proceed)
 
-19 TOOLS — match the request to a boundary:
+21 TOOLS — match the request to a boundary:
   webrain_navigate   go to a URL (THE entry point; read `challenge` every time)
   webrain_observe    read the CURRENT page (what: state|a11y|semantic|html|images|
                      assets|console|flatten|fit|clean|screenshot|pixel|page_info|
@@ -112,6 +112,10 @@ pub const AGENT_GUIDE: &str = r#"webrain — agent decision guide (call this fir
   webrain_stats      host health (load, memory, browser process count) — separates
                      "the page is slow" from "the machine is out of memory"
   webrain_guide      this guide
+  webrain_domain_memory  persisted domain index (op: search|coverage|architecture|status|
+                     page|subdomains); coverage is per host + subdomain
+  webrain_index_domain   crawl a domain into web-memory (HTTP-only + sitemap seed;
+                     subdomains:true sweeps crt.sh/DNS and indexes each host)
 
 BROWSER / PROFILE / SESSION / CHALLENGE MODEL
 - Browser identity, profile, and session are EXECUTION STATE. Never treat a
@@ -853,6 +857,42 @@ pub fn list_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
+            "name": "webrain_domain_memory",
+            "description": "Query the persistent web-memory SQLite store built by domain crawls: FTS5 BM25 search over indexed page text (op=search), coverage SLO counts discovered/fetched/indexed (op=coverage), host/URL/page/edge architecture (op=architecture), or global store counts (op=status). Read-only and browserless. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
+            "inputSchema": {"type": "object", "properties": {
+                "op": {"type": "string", "enum": ["search","coverage","architecture","status","page","subdomains","trace","changes","queue","next","finish","drain","embed"], "description": "search | coverage | architecture | status | page | subdomains | trace | changes | queue | next | finish | drain | embed"},
+                "hybrid": {"type": "boolean", "description": "search: combine FTS5 BM25 with stored embeddings via EMBED_* endpoint"},
+                "query": {"type": "string", "description": "search: keyword query (FTS5 BM25)"},
+                "url": {"type": "string", "description": "page: indexed URL; trace: start URL"},
+                "since": {"type": "integer", "description": "changes: unix timestamp lower bound (default 0 = all)"},
+                "id": {"type": "integer", "description": "finish: claimed job id"},
+                "error": {"type": "string", "description": "finish: failure message; omit for success"},
+                "depth": {"type": "integer", "description": "trace: max link hops (default 2, max 5)"},
+                "limit": {"type": "integer", "description": "trace: max edges; drain: jobs per batch (default 5)"},
+                "max_batches": {"type": "integer", "description": "drain: batch rounds (default 1, max 20)"},
+                "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
+                "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
+                "domain": {"type": "string", "description": "coverage/architecture/search filter; includes subdomains"},
+                "top_k": {"type": "integer", "description": "search: max hits (default 10, max 100)"},
+                "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
+            }, "required": ["op"]}
+        }),
+        json!({
+            "name": "webrain_index_domain",
+            "description": "Index a domain/seed URL into the persistent web-memory SQLite store. Runs an HTTP-only, sitemap-seeded, same-domain spider (no browser tab), then writes page text to FTS5 and LINKS_TO edges, returning the coverage report with a per-host breakdown. With `subdomains: true` it first sweeps crt.sh certificate transparency (+ optional `dns` labels) and indexes each subdomain under ONE shared page budget. Store path: `db` or WEBRAIN_MEMORY_DB (default ./web-memory.sqlite).",
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "Seed URL or bare domain, e.g. https://example.com or example.com (pass the registrable domain to include subdomains)"},
+                "max_pages": {"type": "integer", "description": "total page budget across all hosts (default 50, max 2000)"},
+                "max_depth": {"type": "integer", "description": "link depth (default 2, max 5)"},
+                "subdomains": {"type": "boolean", "description": "discover subdomains via crt.sh/DNS and index each host, not just the seed (default false)"},
+                "use_ct": {"type": "boolean", "description": "subdomains: query crt.sh certificate transparency (default true)"},
+                "dns": {"type": "array", "items": {"type": "string"}, "description": "subdomains: optional DNS labels to probe (e.g. [\"www\",\"api\"])"},
+                "max_hosts": {"type": "integer", "description": "subdomains: max hosts to crawl, seed included (default 5, max 25)"},
+                "max_db_bytes": {"type": "integer", "description": "preflight disk budget: fail with budget_exhausted if the store already exceeds this"},
+                "db": {"type": "string", "description": "SQLite store path (default WEBRAIN_MEMORY_DB or ./web-memory.sqlite)"}
+            }, "required": ["url"]}
+        }),
+        json!({
             "name": "webrain_eval",
             "description": "Run arbitrary JavaScript in the current page and return the JSON result. The escape hatch for anything a tool doesn't cover (probe DOM, read scripts, call APIs).",
             "inputSchema": {"type": "object", "properties": {
@@ -986,9 +1026,9 @@ pub fn list_tools() -> Vec<Value> {
             "name": "webrain_batch",
             "description": "Run one op across MANY URLs in parallel tabs. op: fetch (visible text, 3000-char cap) | markdown (FULL page as Markdown, no cap; query+top_k bm25-prune it) | extract (CSS schema: base_selector+fields, in a browser tab) | scrape (the SAME schema over plain HTTP — no tab, no render, the batch twin of webrain_scrape) | read (the batch twin of `webrain read`: HTTP markdown negotiation, `.md` retry, nearest llms.txt — no tab) | interact (async JS per tab) | eval (custom JS extractor) | assets (every link internal+external, images incl. CSS backgrounds, video sources+embeds — counts plus a `max` sample per URL) | screenshot. concurrency bounds in-flight tabs; cdp_urls round-robins across N browsers and runs their batches CONCURRENTLY (per-proxy isolation). For a single-target engine — lightpanda, one page per CONNECTION — repeat the same endpoint in cdp_urls to get parallel pages (up to --cdp-max-connections, default 16); on one connection it reports single_target:true, effective_concurrency:1. The workhorse for at-scale scraping. PDFs are webrain_pdf, not an op here. Every row is {url, title, text, data, error, ms}: extract/scrape/read/eval/interact put the payload in `data` (text stays empty), fetch/markdown put it in `text`; `title` is the document that was actually read, so a challenge/consent/404 title means you did NOT read the page you asked for.",
             "inputSchema": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": ["fetch","markdown","extract","scrape","read","interact","eval","screenshot","autoschema","assets"], "description": "pdf moved to its own tool (webrain_pdf) — it was advertised here but never dispatched, so `op=pdf` silently returned an empty fetch row. scrape: the CSS schema over plain HTTP, no tab (the batch twin of webrain_scrape); extract: the same schema in a browser tab; read: the batch twin of `webrain read` — HTTP markdown negotiation + `.md` retry + nearest llms.txt, no tab, payload in `data` with `source`. assets: per-array cap comes from `max` (default 20)."},
+                "op": {"type": "string", "enum": ["fetch","markdown","extract","scrape","read","interact","eval","screenshot","autoschema","assets","network"], "description": "pdf moved to its own tool (webrain_pdf) — it was advertised here but never dispatched, so `op=pdf` silently returned an empty fetch row. scrape: the CSS schema over plain HTTP, no tab (the batch twin of webrain_scrape); extract: the same schema in a browser tab; read: the batch twin of `webrain read` — HTTP markdown negotiation + `.md` retry + nearest llms.txt, no tab, payload in `data` with `source`. assets: internal+external links, images (incl. CSS backgrounds), videos, documents and network URLs, with `max` per array (default 200). network: every URL the page requested (Resource Timing, all initiator types)."},
                 "min_occurrences": {"type": "integer", "default": 3, "description": "autoschema: min repeats for a container to count as a pattern"},
-                "max": {"type": "integer", "description": "assets: per-array cap per URL (default 20, max 500)"},
+                "max": {"type": "integer", "description": "assets/network: per-array cap per URL (assets default 200, max 2000; network default 1000, max 5000)"},
                 "urls": {"type": "array", "items": {"type": "string"}},
                 "query": {"type": "string", "description": "markdown/read: optional focus — bm25 keeps only the top_k chunks relevant to this query (crawl4ai fit_markdown style, no LLM). For read it prunes the markdown the row produced, so N pages can be read for ONE question"},
                 "proxy": {"type": "string", "description": "scrape/read ONLY (the browserless ops): HTTP(S)/SOCKS exit for the fetches. Omit to rotate the WEBRAIN_PROXIES pool per request; an explicit URL is honored as-is and never rotates. Browser ops (fetch/markdown/extract/interact/eval/screenshot) ignore it — their exit is the browser's, set at launch or via cdp_urls."},
@@ -1027,6 +1067,8 @@ pub fn list_tools() -> Vec<Value> {
                 "same_domain": {"type": "boolean", "default": true},
                 "allowed_domains": {"type": "array", "items": {"type": "string"}},
                 "no_content": {"type": "boolean", "default": false, "description": "spider: link-only fast path"},
+                "http_only": {"type": "boolean", "default": false, "description": "spider: fetch each page over the pooled HTTP agent instead of a browser tab (no JS/no tab; ideal for link discovery on static sites)"},
+                "seed_from_sitemap": {"type": "boolean", "default": false, "description": "spider: seed the frontier from robots.txt/sitemap.xml before crawling; falls back to the seed URL when no sitemap exists"},
                 "respect_robots": {"type": "boolean", "default": false},
                 "keywords": {"type": "array", "items": {"type": "string"}, "description": "spider bestfirst: relevance keywords"},
                 "allow": {"type": "array", "items": {"type": "string"}, "description": "spider: only follow URLs matching these regexes"},
@@ -1365,11 +1407,14 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
     for (const l of document.querySelectorAll('link[rel~="icon"], link[rel="image_src"], link[rel="apple-touch-icon"], meta[property="og:image"], meta[name="twitter:image"]')) {
       pushImg(abs(l.getAttribute('href') || l.getAttribute('content') || ''), 'icon', '');
     }
-    const all = document.querySelectorAll('*');
-    const n = Math.min(all.length, 2500);
+    const bgCandidates = document.querySelectorAll('body,main,section,article,header,footer,aside,nav,div,span,a,li,button,figure,figcaption,picture,td,th');
+    const n = Math.min(bgCandidates.length, 1600);
     for (let i = 0; i < n; i++) {
+      const el = bgCandidates[i];
+      // Hidden nodes do not paint a background an agent can fetch.
+      if (!el.offsetParent && el !== document.body) continue;
       let bi = '';
-      try { bi = getComputedStyle(all[i]).backgroundImage; } catch (e) { continue; }
+      try { bi = getComputedStyle(el).backgroundImage; } catch (e) { continue; }
       if (!bi || bi === 'none') continue;
       const found = bi.match(/url\((['"]?)([^'")]+)\1\)/g) || [];
       for (const raw of found) {
@@ -1417,13 +1462,55 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
       }
     } catch (e) {}
 
+    // ---- documents: stylesheets, scripts, preloads, iframes, forms, manifests
+    // and meta-refresh targets. These are links an agent can fetch but that the
+    // anchor/media scans above do not see.
+    const docSeen = new Set();
+    const documents = {stylesheets: [], scripts: [], preloads: [], iframes: [], forms: [], meta_refresh: [], manifest: []};
+    const pushDoc = (arr, u, kind) => {
+      if (!u || !/^https?:/i.test(u)) return;
+      const key = kind + '|' + u;
+      if (docSeen.has(key)) return;
+      docSeen.add(key);
+      if (arr.length < LIM) arr.push({url: u, kind: kind});
+    };
+    for (const l of document.querySelectorAll('link[href]')) {
+      const rel = (l.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+      const u = abs(l.getAttribute('href') || '');
+      if (rel.indexOf('stylesheet') > -1) pushDoc(documents.stylesheets, u, 'stylesheet');
+      else if (rel.indexOf('manifest') > -1) pushDoc(documents.manifest, u, 'manifest');
+      else if (rel.some(r => ['preload','modulepreload','prefetch','dns-prefetch','preconnect'].indexOf(r) > -1)) pushDoc(documents.preloads, u, rel.join(' '));
+    }
+    for (const s of document.querySelectorAll('script[src]')) pushDoc(documents.scripts, abs(s.getAttribute('src') || ''), 'script');
+    for (const f of document.querySelectorAll('iframe[src]')) pushDoc(documents.iframes, abs(f.getAttribute('src') || ''), 'iframe');
+    for (const f of document.querySelectorAll('form[action]')) pushDoc(documents.forms, abs(f.getAttribute('action') || ''), 'form');
+    for (const m of document.querySelectorAll('meta[http-equiv]')) {
+      if ((m.getAttribute('http-equiv') || '').toLowerCase() !== 'refresh') continue;
+      const mm = (m.getAttribute('content') || '').match(/url\s*=\s*([^;]+)/i);
+      if (mm) pushDoc(documents.meta_refresh, abs(mm[1].trim().replace(/^['"]|['"]$/g, '')), 'refresh');
+    }
+
+    // ---- network: every URL the page actually requested (XHR/fetch/API images
+    // included), from Resource Timing. One pass, no CDP arming.
+    const netSeen = new Set(), network = [];
+    try {
+      for (const e of performance.getEntriesByType('resource')) {
+        const u = e.name;
+        if (!/^https?:/i.test(u) || netSeen.has(u)) continue;
+        netSeen.add(u);
+        if (network.length < LIM) network.push({url: u, type: e.initiatorType || '', transferSize: e.transferSize || 0, duration: Math.round(e.duration || 0)});
+      }
+    } catch (e) {}
+
     return JSON.stringify({
       url: location.href,
       host: host,
-      counts: { internal: inAll.size, external: exAll.size, images: imgSeen.size, videos: vidSeen.size, scanned: n },
+      counts: { internal: inAll.size, external: exAll.size, images: imgSeen.size, videos: vidSeen.size, documents: docSeen.size, network: netSeen.size, scanned: n },
       links: { internal: internal, external: external, other_schemes: other },
       images: images,
-      videos: videos
+      videos: videos,
+      documents: documents,
+      network: network
     });
   } catch (e) { return JSON.stringify({ error: String(e) }); }
 })()"#;
@@ -1432,6 +1519,27 @@ const ASSET_SCAN_JS_TMPL: &str = r#"(() => {
 /// batch wants counts plus a sample, or the reply is megabytes of JSON.
 fn asset_scan_js(limit: usize) -> String {
     ASSET_SCAN_JS_TMPL.replace("__LIM__", &limit.to_string())
+}
+
+/// Every URL the page actually requested, via Resource Timing. This is the
+/// cheap, batchable sibling of `webrain_network op=log` (which needs CDP armed
+/// before navigation): no bodies, but all initiator types and transfer sizes.
+const NETWORK_SCAN_JS_TMPL: &str = r#"(() => {
+  try {
+    const LIM = __LIM__;
+    const seen = new Set(), network = [];
+    for (const e of performance.getEntriesByType('resource')) {
+      const u = e.name;
+      if (!/^https?:/i.test(u) || seen.has(u)) continue;
+      seen.add(u);
+      if (network.length < LIM) network.push({url: u, type: e.initiatorType || '', transferSize: e.transferSize || 0, duration: Math.round(e.duration || 0)});
+    }
+    return JSON.stringify({url: location.href, count: seen.size, network: network});
+  } catch (e) { return JSON.stringify({error: String(e)}); }
+})()"#;
+
+fn network_scan_js(limit: usize) -> String {
+    NETWORK_SCAN_JS_TMPL.replace("__LIM__", &limit.to_string())
 }
 
 /// crawl4ai `PruningContentFilter` borrow: no-query "fit" content extractor.
@@ -1937,6 +2045,464 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
 
     match name {
         "webrain_guide" => guide_from_args(args),
+        "webrain_domain_memory" => {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("status");
+            let db = args
+                .get("db")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+            let mem = match webrain_core::webmemory::WebMemory::open(&db) {
+                Ok(m) => m,
+                Err(e) => return err(e),
+            };
+            let domain = args.get("domain").and_then(|v| v.as_str());
+            match op {
+                "status" => match mem.status() {
+                    Ok(v) => {
+                        json!({"status": "ok", "op": "status", "db": db.display().to_string(), "counts": v})
+                    }
+                    Err(e) => err(e),
+                },
+                "coverage" => match domain {
+                    Some(d) => match mem.coverage(d) {
+                        Ok(v) => json!({"status": "ok", "op": "coverage", "report": v}),
+                        Err(e) => err(e),
+                    },
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=coverage"})
+                    }
+                },
+                "architecture" => match domain {
+                    Some(d) => match mem.architecture(d) {
+                        Ok(v) => json!({"status": "ok", "op": "architecture", "report": v}),
+                        Err(e) => err(e),
+                    },
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=architecture"})
+                    }
+                },
+                "search" => {
+                    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let top_k = args
+                        .get("top_k")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 100) as usize)
+                        .unwrap_or(10);
+                    if args
+                        .get("hybrid")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        let vectors = if webrain_core::webmemory::local_embed_configured() {
+                            webrain_core::webmemory::local_embed(&[query.to_string()], true)
+                        } else {
+                            let client = webrain_core::vision::EmbeddingClient::from_env();
+                            let input = webrain_core::vision::EmbedInput::Text(query.to_string());
+                            client.embed(&[input])
+                        };
+                        match vectors {
+                            Ok(vectors) if !vectors.is_empty() => {
+                                match mem.hybrid_search(query, &vectors[0], domain, top_k) {
+                                    Ok(hits) => {
+                                        json!({"status": "ok", "op": "search", "mode": "hybrid", "query": query, "count": hits.len(), "hits": hits})
+                                    }
+                                    Err(e) => err(e),
+                                }
+                            }
+                            Ok(_) => {
+                                json!({"status": "error", "message": "embedding endpoint returned no vector"})
+                            }
+                            Err(e) => {
+                                json!({"status": "error", "message": format!("hybrid search needs the local model (webrain install embed) or a working EMBED_* endpoint: {e}")})
+                            }
+                        }
+                    } else {
+                        match mem.search(query, domain, top_k) {
+                            Ok(hits) => {
+                                json!({"status": "ok", "op": "search", "query": query, "count": hits.len(), "hits": hits})
+                            }
+                            Err(e) => err(e),
+                        }
+                    }
+                }
+                "embed" => {
+                    let local = webrain_core::webmemory::local_embed_configured();
+                    let client = if local {
+                        None
+                    } else {
+                        Some(webrain_core::vision::EmbeddingClient::from_env())
+                    };
+                    let model = if local {
+                        webrain_core::webmemory::local_embed_model_path()
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "nomic-embed-text-v1.5".to_string())
+                    } else {
+                        client.as_ref().unwrap().model().to_string()
+                    };
+                    let pages = match mem.pages_for_embedding(1000) {
+                        Ok(p) => p,
+                        Err(e) => return err(e),
+                    };
+                    let mut stored = 0usize;
+                    for chunk in pages.chunks(8) {
+                        let texts: Vec<String> =
+                            chunk.iter().map(|(_, text)| text.clone()).collect();
+                        let vectors = if local {
+                            webrain_core::webmemory::local_embed(&texts, false)
+                        } else {
+                            let inputs: Vec<webrain_core::vision::EmbedInput> = texts
+                                .into_iter()
+                                .map(webrain_core::vision::EmbedInput::Text)
+                                .collect();
+                            client.as_ref().unwrap().embed(&inputs)
+                        };
+                        match vectors {
+                            Ok(vectors) => {
+                                for ((url, _), vector) in chunk.iter().zip(vectors) {
+                                    if mem.set_embedding(url, &vector, &model).is_ok() {
+                                        stored += 1;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return json!({"status": "error", "message": format!("embed failed: {e}")});
+                            }
+                        }
+                    }
+                    json!({"status": "ok", "op": "embed", "provider": if local { "local-llama" } else { "embed" }, "model": model, "pages": pages.len(), "stored": stored})
+                }
+                "page" => match args.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => match mem.page(url) {
+                        Ok(Some(page)) => json!({"status": "ok", "op": "page", "page": page}),
+                        Ok(None) => json!({"status": "ok", "op": "page", "page": null}),
+                        Err(e) => err(e),
+                    },
+                    None => json!({"status": "error", "message": "url required for op=page"}),
+                },
+                "subdomains" => match domain {
+                    Some(d) => {
+                        let use_ct = args.get("use_ct").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let labels: Vec<String> = args
+                            .get("dns")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        let discovery =
+                            webrain_core::webmemory::discover_subdomains(d, use_ct, &refs);
+                        json!({"status": "ok", "op": "subdomains", "discovery": discovery})
+                    }
+                    None => {
+                        json!({"status": "error", "message": "domain required for op=subdomains"})
+                    }
+                },
+                "trace" => match args.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => {
+                        let depth = args
+                            .get("depth")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 5) as usize)
+                            .unwrap_or(2);
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 1000) as usize)
+                            .unwrap_or(100);
+                        match mem.trace(url, depth, limit) {
+                            Ok(v) => json!({"status": "ok", "op": "trace", "trace": v}),
+                            Err(e) => err(e),
+                        }
+                    }
+                    None => json!({"status": "error", "message": "url required for op=trace"}),
+                },
+                "changes" => {
+                    let since = args.get("since").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 1000) as usize)
+                        .unwrap_or(100);
+                    match mem.changes(since, limit) {
+                        Ok(v) => json!({"status": "ok", "op": "changes", "changes": v}),
+                        Err(e) => err(e),
+                    }
+                }
+                "queue" => match mem.job_counts() {
+                    Ok(v) => json!({"status": "ok", "op": "queue", "queue": v}),
+                    Err(e) => err(e),
+                },
+                "next" => {
+                    let n = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 100) as usize)
+                        .unwrap_or(1);
+                    match mem.claim_jobs(n) {
+                        Ok(jobs) => {
+                            let jobs: Vec<serde_json::Value> = jobs
+                                .into_iter()
+                                .map(|(id, url, host)| json!({"id": id, "url": url, "host": host}))
+                                .collect();
+                            json!({"status": "ok", "op": "next", "count": jobs.len(), "jobs": jobs})
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                "finish" => match args.get("id").and_then(|v| v.as_i64()) {
+                    Some(id) => {
+                        let error = args.get("error").and_then(|v| v.as_str());
+                        match mem.complete_job(id, error) {
+                            Ok(()) => json!({"status": "ok", "op": "finish", "id": id}),
+                            Err(e) => err(e),
+                        }
+                    }
+                    None => json!({"status": "error", "message": "id required for op=finish"}),
+                },
+                "drain" => {
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 50) as usize)
+                        .unwrap_or(5);
+                    let max_batches = args
+                        .get("max_batches")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.clamp(1, 20) as usize)
+                        .unwrap_or(1);
+                    let mut processed = 0usize;
+                    let mut failed = 0usize;
+                    for _ in 0..max_batches {
+                        let jobs = match mem.claim_jobs(limit) {
+                            Ok(j) => j,
+                            Err(e) => return err(e),
+                        };
+                        if jobs.is_empty() {
+                            break;
+                        }
+                        for (id, url, host) in jobs {
+                            let engine = webrain_core::engines::SpiderEngine::new(1, 1)
+                                .with_http_only(true)
+                                .with_same_domain(true)
+                                .with_respect_robots(true)
+                                .with_concurrency(1);
+                            let results = engine.crawl(backend, &url).await;
+                            match mem.ingest_crawl(&host, &results) {
+                                Ok(_) => {
+                                    let _ = mem.complete_job(id, None);
+                                    processed += 1;
+                                }
+                                Err(e) => {
+                                    let _ = mem.complete_job(id, Some(&e.to_string()));
+                                    failed += 1;
+                                }
+                            }
+                        }
+                    }
+                    let queue = mem.job_counts().unwrap_or(serde_json::Value::Null);
+                    json!({"status": "ok", "op": "drain", "processed": processed, "failed": failed, "queue": queue})
+                }
+                other => {
+                    json!({"status": "error", "message": format!("unknown op {other:?}; use search|coverage|architecture|status|page|subdomains")})
+                }
+            }
+        }
+        "webrain_index_domain" => {
+            let raw = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("domain").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if raw.is_empty() {
+                return json!({"status": "error", "message": "url required"});
+            }
+            let seed = if raw.contains("://") {
+                raw.to_string()
+            } else {
+                format!("https://{raw}")
+            };
+            let Some(host) = webrain_core::webmemory::host_of_url(&seed) else {
+                return json!({"status": "error", "message": "invalid url"});
+            };
+            let max_pages = args
+                .get("max_pages")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 2000) as usize)
+                .unwrap_or(50);
+            let max_depth = args
+                .get("max_depth")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 5) as usize)
+                .unwrap_or(2);
+            let want_subdomains = args
+                .get("subdomains")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let use_ct = args.get("use_ct").and_then(|v| v.as_bool()).unwrap_or(true);
+            let max_hosts = args
+                .get("max_hosts")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.clamp(1, 25) as usize)
+                .unwrap_or(5);
+            let dns_labels: Vec<String> = args
+                .get("dns")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Subdomain discovery is blocking network I/O (crt.sh + DNS); keep it
+            // off the executor like every other blocking fetch in this server.
+            let mut discovery = serde_json::Value::Null;
+            let mut hosts = vec![host.clone()];
+            if want_subdomains {
+                let apex = host.clone();
+                let sweep = tokio::task::spawn_blocking(move || {
+                    let refs: Vec<&str> = dns_labels.iter().map(String::as_str).collect();
+                    webrain_core::webmemory::discover_hosts(&apex, use_ct, &refs)
+                })
+                .await;
+                match sweep {
+                    Ok(Ok(found)) => {
+                        discovery = found.to_json();
+                        hosts = webrain_core::webmemory::plan_index_hosts(
+                            &host,
+                            &found.subdomains,
+                            max_hosts,
+                        );
+                    }
+                    // Discovery is evidence, not a gate: a CT outage still gets
+                    // the seed crawled, with the failure reported.
+                    Ok(Err(e)) => discovery = json!({"error": e.to_string()}),
+                    Err(e) => discovery = json!({"error": format!("discovery task failed: {e}")}),
+                }
+            }
+
+            // Hard disk budget: refuse to start another crawl when the existing
+            // store is already over the caller's cap (a soft post-check would let
+            // every call grow it first).
+            if let Some(max_bytes) = args.get("max_db_bytes").and_then(|v| v.as_i64()) {
+                let budget_db = args
+                    .get("db")
+                    .and_then(|v| v.as_str())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+                if let Ok(m) = webrain_core::webmemory::WebMemory::open(&budget_db) {
+                    let used = m
+                        .status()
+                        .ok()
+                        .and_then(|s| s.get("db_bytes").and_then(|v| v.as_i64()))
+                        .unwrap_or(0);
+                    if used >= max_bytes {
+                        return json!({
+                            "status": "error",
+                            "code": "budget_exhausted",
+                            "db_bytes": used,
+                            "max_db_bytes": max_bytes,
+                        });
+                    }
+                }
+            }
+
+            // ONE page budget across every host: a host that returns fewer pages
+            // than its share passes the rest to the next, so a thin subdomain
+            // does not strand the budget.
+            let mut merged: Vec<webrain_core::engines::SpiderResult> = Vec::new();
+            let mut remaining = max_pages;
+            let mut hosts_crawled = 0usize;
+            for (i, current) in hosts.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                let budget = webrain_core::webmemory::host_budget(remaining, hosts.len() - i);
+                let target = if i == 0 {
+                    seed.clone()
+                } else {
+                    format!("https://{current}/")
+                };
+                let engine = webrain_core::engines::SpiderEngine::new(max_depth, budget)
+                    .with_http_only(true)
+                    .with_sitemap_seed(true)
+                    .with_same_domain(true)
+                    .with_respect_robots(true)
+                    .with_concurrency(6);
+                let results = engine.crawl(backend, &target).await;
+                // Charge attempts, not unique URLs: an error page still cost a
+                // request from the same site.
+                let attempted = results.len();
+                webrain_core::webmemory::merge_crawl_results(&mut merged, results);
+                remaining = remaining.saturating_sub(attempted);
+                hosts_crawled += 1;
+            }
+
+            let db = args
+                .get("db")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(webrain_core::webmemory::WebMemory::default_path);
+            // Open the store only after the crawl: no connection (and no
+            // "running" run row) is held across the network waits.
+            let mem = match webrain_core::webmemory::WebMemory::open(&db) {
+                Ok(m) => m,
+                Err(e) => return err(e),
+            };
+            // Record the published inventory as ground truth before ingesting the
+            // crawl, so coverage can report sitemap URLs even when the page budget
+            // only fetched a subset.
+            if let Ok(sm) = webrain_core::engines::sitemap_urls(&seed, None) {
+                if let Some(urls) = sm.get("urls").and_then(|v| v.as_array()) {
+                    for u in urls {
+                        if let Some(u) = u.as_str() {
+                            if let Some(h) = webrain_core::webmemory::host_of_url(u) {
+                                let _ = mem.record_sitemap(&h, u, None);
+                            }
+                        }
+                    }
+                }
+            }
+            let run = match mem.start_run(&host) {
+                Ok(id) => id,
+                Err(e) => return err(e),
+            };
+            let report = match mem.ingest_crawl(&host, &merged) {
+                Ok(r) => r,
+                Err(e) => return err(e),
+            };
+            let discovered = report
+                .get("discovered")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let fetched = report.get("fetched").and_then(|v| v.as_i64()).unwrap_or(0);
+            let indexed = report.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
+            let _ = mem.finish_run(run, discovered, fetched, indexed);
+            let db_bytes = mem
+                .status()
+                .ok()
+                .and_then(|s| s.get("db_bytes").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            let errors = merged.iter().filter(|r| r.page.error.is_some()).count();
+            json!({
+                "status": "ok",
+                "domain": host,
+                "hosts": hosts,
+                "hosts_crawled": hosts_crawled,
+                "pages": merged.len(),
+                "budget_remaining": remaining,
+                "db_bytes": db_bytes,
+                "errors": errors,
+                "db": db.display().to_string(),
+                "coverage": report,
+                "discovery": discovery,
+            })
+        }
         "webrain_add_init_script" => {
             let js = match js_arg(args, "js") {
                 Ok(js) => js,
@@ -2018,7 +2584,9 @@ fn family_of(name: &str) -> Option<&'static str> {
         | "webrain_clean"
         | "webrain_profiles"
         | "webrain_captcha"
-        | "webrain_login" => "toolbox",
+        | "webrain_login"
+        | "webrain_domain_memory"
+        | "webrain_index_domain" => "toolbox",
         _ => return None,
     })
 }
@@ -2359,6 +2927,14 @@ async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 .get("respect_robots")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let http_only = args
+                .get("http_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let seed_from_sitemap = args
+                .get("seed_from_sitemap")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let allowed: Vec<String> = args
                 .get("allowed_domains")
                 .and_then(|v| v.as_array())
@@ -2428,6 +3004,8 @@ async fn call_crawl(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 .with_allowed_domains(allowed)
                 .with_discover_only(discover_only)
                 .with_respect_robots(respect_robots)
+                .with_http_only(http_only)
+                .with_sitemap_seed(seed_from_sitemap)
                 .with_keywords(keywords)
                 .with_filters(allow, deny)
                 .with_retry(retry)
@@ -3097,16 +3675,25 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                             .max(1) as usize;
                         batch_eval(b, urls, &autoschema_js(min), concurrency, opts).await
                     }
-                    // Link/image/video inventory across N URLs. `max` is small by
-                    // default (20) because this is counts-plus-sample: 20 URLs × 300
-                    // internal links would be megabytes of JSON in one reply.
+                    // Link/image/video/document/network inventory across N URLs.
+                    // `max` caps each array; counts stay unbounded.
                     "assets" => {
                         let lim = args
                             .get("max")
                             .and_then(|v| v.as_i64())
-                            .map(|n| n.clamp(1, 500) as usize)
-                            .unwrap_or(20);
+                            .map(|n| n.clamp(1, 2000) as usize)
+                            .unwrap_or(200);
                         batch_eval(b, urls, &asset_scan_js(lim), concurrency, opts).await
+                    }
+                    // All URLs each page actually requested (Resource Timing), no
+                    // CDP arming and no response bodies. Composes across N URLs.
+                    "network" => {
+                        let lim = args
+                            .get("max")
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n.clamp(1, 5000) as usize)
+                            .unwrap_or(1000);
+                        batch_eval(b, urls, &network_scan_js(lim), concurrency, opts).await
                     }
                     _ => batch_fetch(b, urls, concurrency, opts).await,
                 }
@@ -3607,14 +4194,32 @@ async fn call_media(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                             "links" => {
                                 o.remove("images");
                                 o.remove("videos");
+                                o.remove("documents");
+                                o.remove("network");
                             }
                             "images" => {
                                 o.remove("links");
                                 o.remove("videos");
+                                o.remove("documents");
+                                o.remove("network");
                             }
                             "videos" => {
                                 o.remove("links");
                                 o.remove("images");
+                                o.remove("documents");
+                                o.remove("network");
+                            }
+                            "documents" => {
+                                o.remove("links");
+                                o.remove("images");
+                                o.remove("videos");
+                                o.remove("network");
+                            }
+                            "network" => {
+                                o.remove("links");
+                                o.remove("images");
+                                o.remove("videos");
+                                o.remove("documents");
                             }
                             _ => {}
                         }
@@ -4272,7 +4877,7 @@ mod guide_tests {
         let (intro, sections) = guide_sections();
         assert!(intro.unwrap().contains("agent decision guide"));
         let titles: Vec<&str> = sections.iter().map(|(t, _)| *t).collect();
-        assert!(titles.iter().any(|t| t.starts_with("19 TOOLS")));
+        assert!(titles.iter().any(|t| t.starts_with("21 TOOLS")));
         assert!(titles.iter().any(|t| t.starts_with("EXTRACTION MATRIX")));
         assert!(titles.iter().any(|t| t.starts_with("MULTI-AGENT")));
 
