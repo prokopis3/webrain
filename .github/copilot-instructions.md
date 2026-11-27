@@ -143,6 +143,45 @@ extraction tool matrix (autoschema → extract_json → batch, regex, table, spi
 memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 `challenge` field on every navigate.
 
+**Obscura batch: tabs share the process, connections add CPU — the #1 perf trap.**
+`webrain_batch(concurrency: N)` without `cdp_urls` opens N tabs on ONE
+connection; they **run concurrently but share that process's CPU**, they do not
+serialize. Measured on 50 light recipe pages: K=6 on one connection = **10.5 s**
+vs 23.9 s serial; K=10 = 10.1 s but +57% per-page (knee ≈6). Heavy (~1 MB JS)
+pages saturate one process, so give each its own connection: repeat the SAME
+endpoint in `cdp_urls` with `per_backend_concurrency: 1`, start at **K=4**,
+`disable_resources` + `block_trackers`. The 30 s `Page.navigate` cap is now
+patched: `retry: 1, retry_on: "timeout"` re-navigates the same tab (rows report
+`retries`, stats `retries_used`), and `navigate_timeout_ms` (5 000–120 000)
+raises the cap; `delay_ms`/`autothrottle` pace a pushy origin. Measured: 6 URLs
+stalling past 30 s went **0/6 → 6/6**; 20 heavy SPA pages at K=20 went
+**8/20 → 18/20** with 14 retries; K=4 → 20/20 in 43 s (v0.2.7). Refused
+`cdp_urls` connections are reported in `stats.connect_errors` /
+`connect_error_details` and no longer inflate `count` or shift `results` —
+`suggested_concurrency` says what the surviving backends sustain. The same
+concurrency rule applies to `webrain_crawl(mode=spider)`.
+
+Also gate the engine version: **obscura v0.2.7+ boots data-driven SPAs**
+(v0.2.6 fixed 28 HTML interface prototypes `#1387`, v0.2.7 fixed 24 more
+`#1482`); v0.2.5 and older cannot, which is what the `HTMLTemplateElement`
+hydration crash was. Probe: `HTMLTemplateElement.prototype !== Element.prototype`
+and `createElement('template').constructor.name === 'HTMLTemplateElement'`.
+Upgrade with `webrain install --engine obscura --stealth --force` (plain install
+says "already installed"). Full recipe: `skills/webrain/references/obscura-batch.md`.
+
+**Cloudflare clearance is transferable to obscura v0.2.7 stealth (verified
+2026-11-25).** Headed Chrome solves it, then
+`webrain_session{op:"cookies"}` → `webrain_session{op:"setcookies"}` with **no
+`session_id`** (writes the MCP default connection) → `webrain_batch` with **no
+`cdp_urls`** (same connection). Requires the stealth build launched with a
+`--user-agent` matching the minting Chrome and the same egress IP. New
+connections/`--storage-dir` do not inherit it, so the cleared batch stays on
+that one connection — but its tabs run concurrently (K≈6 light pages: 50 recipes
+= 10.5 s, 23.9 s serial); batching on the Chrome that holds clearance is also
+fast (4.6 s at `concurrency: 6`). Still judge success by the page title, not
+`challenge` — a Cloudflare interstitial reports `challenge: null` with
+`crippled: true`.
+
 ## Key Reference Files
 
 | File | Purpose |
@@ -155,6 +194,7 @@ memory — discover via `webrain_autoschema`/`webrain_eval` and read the
 | `docs/adr/` | Architecture Decision Records |
 | `docs/reference/tools.mdx` | The MCP tool surface, tool by tool |
 | `skills/webrain/SKILL.md` | The agent-facing skill (shipped in the binary) |
+| `skills/webrain/references/obscura-batch.md` | **Obscura batch recipe** — tabs share one process (K≈6 light), one connection per page for heavy K≈4, retry/timeout/pacing args, version gate, measured numbers |
 | `skills/webrain/web-research/SKILL.md` | Generic web→dataset research loop |
 | `skills/webrain/product-market-research/SKILL.md` | Cross-shop product/price/spec comparison |
 | `/memories/repo/project-structure.md` | Repo memory with live codebase stats |

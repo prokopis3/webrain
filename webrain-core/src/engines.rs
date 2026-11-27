@@ -2191,9 +2191,17 @@ pub struct BatchResult {
     /// which URL was slow, and feeds the batch `stats` block.
     #[serde(skip_serializing_if = "is_zero")]
     pub ms: u64,
+    /// Retry attempts spent on this URL (0 when it succeeded first try). Lets a
+    /// caller tell "succeeded immediately" from "succeeded after recovering".
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub retries: u32,
 }
 
 fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -2205,6 +2213,7 @@ fn batch_err(url: &str, e: anyhow::Error) -> BatchResult {
         data: None,
         error: Some(e.to_string()),
         ms: 0,
+        retries: 0,
     }
 }
 
@@ -2234,37 +2243,70 @@ where
         + 'static,
 {
     let t0 = std::time::Instant::now();
-    let res = async {
-        let sid = browser.tab_session(&id).await?;
-        browser.navigate_session_opts(&sid, &url, &opts).await?;
-        let (mut title, text, data) = per_url(browser.clone(), sid.clone(), url.clone()).await?;
-        if title.is_empty() {
-            // Only fetch fills `title` itself; extract/eval/markdown/interact left it
-            // empty, so a row could not say WHICH document it read — and a challenge or
-            // consent title is the cheapest "you are not on the page you asked for"
-            // signal a batch row can carry (AGENTS.md rule 4).
-            title = browser
-                .eval_session(&sid, "document.title")
-                .await
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
+    // `retry` is the number of EXTRA attempts the caller allows; the tool path
+    // caps it at 3 so a bad URL cannot pin a tab for minutes.
+    let extra = opts.retry.min(3);
+    let mut used = 0u32;
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 0..=extra {
+        if attempt > 0 {
+            // Same tab, same session: a retry is a re-navigation, not a new tab,
+            // so the batch keeps its tab and the retried URL inherits the same
+            // cookie jar. A short pause keeps a throttling origin from seeing an
+            // instant hammer.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        Ok::<_, anyhow::Error>(BatchResult {
-            url: url.clone(),
-            title,
-            text,
-            data,
-            error: None,
-            ms: 0,
-        })
+        let res = async {
+            let sid = browser.tab_session(&id).await?;
+            browser.navigate_session_opts(&sid, &url, &opts).await?;
+            let (mut title, text, data) =
+                per_url(browser.clone(), sid.clone(), url.clone()).await?;
+            if title.is_empty() {
+                // Only fetch fills `title` itself; extract/eval/markdown/interact left it
+                // empty, so a row could not say WHICH document it read — and a challenge or
+                // consent title is the cheapest "you are not on the page you asked for"
+                // signal a batch row can carry (AGENTS.md rule 4).
+                title = browser
+                    .eval_session(&sid, "document.title")
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+            }
+            Ok::<_, anyhow::Error>(BatchResult {
+                url: url.clone(),
+                title,
+                text,
+                data,
+                error: None,
+                ms: 0,
+                retries: 0,
+            })
+        }
+        .await;
+        match res {
+            Ok(mut r) => {
+                r.ms = t0.elapsed().as_millis() as u64;
+                r.retries = used;
+                return r;
+            }
+            Err(e) => {
+                let retryable = opts.retry_on.matches(&e.to_string());
+                last = Some(e);
+                if attempt < extra && retryable {
+                    used += 1;
+                    continue;
+                }
+                break;
+            }
+        }
     }
-    .await;
-    let mut r = match res {
-        Ok(r) => r,
-        Err(e) => batch_err(&url, e),
-    };
+    let mut r = batch_err(
+        &url,
+        last.unwrap_or_else(|| anyhow::anyhow!("batch attempt failed")),
+    );
     r.ms = t0.elapsed().as_millis() as u64;
+    r.retries = used;
     r
 }
 
@@ -2272,6 +2314,42 @@ where
 /// reset: the caller reports the DELTA across its own call, so two batches on
 /// two backends can trip in the same call without one clearing the other's flag.
 pub static THROTTLE_EVENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How often a batch worker deliberately paused because `autothrottle` saw
+/// failures. Monotonic like `THROTTLE_EVENTS`; the caller reports the delta so a
+/// slow-but-successful batch is distinguishable from a throttled one.
+pub static AUTOTHROTTLE_EVENTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Pacing shared by the pool and serial paths: a fixed `delay_ms` before every
+/// URL, plus the currently accumulated adaptive backoff from `batch_after_row`.
+async fn batch_pace(opts: &crate::backends::cdp::NavOpts, backoff: &mut u64) {
+    let wait = opts.delay_ms.saturating_add(*backoff);
+    if wait > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+    }
+}
+
+/// Update the adaptive pause after a row: on failure grow 200 ms → … →
+/// `autothrottle_max_ms`; on success decay by half. Only active when the caller
+/// asked for `autothrottle`.
+async fn batch_after_row(opts: &crate::backends::cdp::NavOpts, backoff: &mut u64, failed: bool) {
+    if !opts.autothrottle {
+        return;
+    }
+    if failed {
+        *backoff = if *backoff == 0 {
+            200
+        } else {
+            (*backoff * 2).min(opts.autothrottle_max_ms.max(200))
+        };
+        AUTOTHROTTLE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        *backoff /= 2;
+    }
+    // The pause is taken by the next `batch_pace`, so the caller controls the
+    // loop and one failed row never sleeps while holding a tab against the queue.
+}
 
 /// Shared batch skeleton. Multi-target browsers (obscura/Chrome) load N tabs IN
 /// PARALLEL (crawl4ai MemoryAdaptiveDispatcher / arun_many): a fixed pool of
@@ -2384,6 +2462,7 @@ where
                 }
             };
             opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut backoff = 0u64;
             loop {
                 // Retired by the pressure valve: break BEFORE claiming a URL so
                 // the survivors' queue is exactly what it would have been.
@@ -2394,6 +2473,7 @@ where
                 if i >= urls.len() {
                     break;
                 }
+                batch_pace(&opts, &mut backoff).await;
                 let t0 = std::time::Instant::now();
                 let mut r = run_on_tab(
                     &b,
@@ -2404,6 +2484,7 @@ where
                 )
                 .await;
                 r.ms = t0.elapsed().as_millis() as u64;
+                batch_after_row(&opts, &mut backoff, r.error.is_some()).await;
                 // A failed URL can leave the tab wedged (renderer crash, hung
                 // navigation). Recycle it so one bad URL costs one tab instead of
                 // poisoning the rest of this worker's queue — but not when the
@@ -2422,7 +2503,9 @@ where
                 // Sample once per `workers` rows, not per row: the probe is a
                 // syscall round trip and the threshold moves far slower than the
                 // queue. Never re-sample after a trip — see `keep`.
-                if rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % workers == 0
+                if rows
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .is_multiple_of(workers)
                     && !pressure.load(std::sync::atomic::Ordering::Relaxed)
                 {
                     let avail = crate::backends::cdp::memory_available_mb();
@@ -2514,17 +2597,19 @@ where
     };
     browser.set_batch_tabs(1);
     let mut out = Vec::with_capacity(urls.len());
+    let mut backoff = 0u64;
     for url in urls {
-        out.push(
-            run_on_tab(
-                browser,
-                id.clone(),
-                url.clone(),
-                opts.clone(),
-                per_url.clone(),
-            )
-            .await,
-        );
+        batch_pace(opts, &mut backoff).await;
+        let r = run_on_tab(
+            browser,
+            id.clone(),
+            url.clone(),
+            opts.clone(),
+            per_url.clone(),
+        )
+        .await;
+        batch_after_row(opts, &mut backoff, r.error.is_some()).await;
+        out.push(r);
     }
     out
 }
@@ -2597,6 +2682,7 @@ pub async fn batch_scrape(
                             data: Some(v),
                             error: None,
                             ms: 0,
+                            retries: 0,
                         },
                         Err(e) => batch_err(&u, e),
                     };
@@ -2667,6 +2753,7 @@ pub async fn batch_read(
                                 data: Some(v),
                                 error: None,
                                 ms: 0,
+                                retries: 0,
                             }
                         }
                         Err(e) => batch_err(&u, e),
@@ -4063,6 +4150,7 @@ pub fn download_files(urls: &[String], dir: &str, proxy: Option<&str>) -> Vec<Ba
                 data: None,
                 error: None,
                 ms: 0,
+                retries: 0,
             })
         })();
         out.push(match res {
@@ -4552,7 +4640,9 @@ fn flate_to_image(w: u32, h: u32, dec: Vec<u8>) -> Option<image::DynamicImage> {
         // CMYK: 4 samples/px. Naive conversion, enough to read a figure.
         n if n == px * 4 => {
             let rgb: Vec<u8> = dec
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| {
                     let k = 255 - c[3] as u32;
                     [

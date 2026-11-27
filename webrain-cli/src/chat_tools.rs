@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use copilot_sdk::Error;
 use copilot_sdk::ToolResult;
 use copilot_sdk::tool::ToolHandler;
-use copilot_sdk::types::{Tool, ToolInvocation};
+use copilot_sdk::types::{Tool, ToolBinaryResult, ToolInvocation, ToolResultExpanded};
 use serde_json::{Value, json};
 
 /// A shell command that has not answered by now is a command the user did not
@@ -42,18 +42,44 @@ const KEEP_DEAD: usize = 20;
 
 /// The names the session's tool allowlist has to carry, in the order the prompt
 /// lists them. A box in the page's tools dialog is checked for each of these.
-pub(crate) const NAMES: [&str; 7] = [
+pub(crate) const NAMES: [&str; 10] = [
     "read_file",
     "write_file",
     "list_dir",
     "edit_file",
     "search_files",
+    "view_image",
+    "web_search",
+    "web_fetch",
     "run_shell",
     "terminal",
 ];
 
-/// The seven tools, with their schemas and their handlers attached.
-pub(crate) fn workspace_tools() -> Vec<Tool> {
+/// Where "search the web" and "read this page" go.
+///
+/// DeepSeek sells both as plain JSON APIs on the key the session already holds
+/// (`/v1/tools/search`, `/v1/tools/fetch` — 0.75 USD per 1000 successful calls),
+/// and their *server-side* web tools are not usable here: the runtime builds the
+/// request, so we cannot inject a vendor-native tool declaration. A host tool
+/// calling the JSON endpoints is the only way in, which is what this is. Every
+/// other provider falls back to webrain's own engines.
+pub(crate) struct Web {
+    pub(crate) base: String,
+    pub(crate) key: String,
+}
+
+impl Web {
+    fn deepseek(&self) -> Option<String> {
+        self.base
+            .contains("deepseek.com")
+            .then(|| self.base.trim_end_matches('/').to_string())
+    }
+}
+
+/// The tools, with their schemas and their handlers attached. `web` carries the
+/// session's provider so the two web tools can prefer its own search.
+pub(crate) fn workspace_tools(web: Option<Web>) -> Vec<Tool> {
+    let web = web.map(std::sync::Arc::new);
     vec![
         tool(
             "read_file",
@@ -129,6 +155,53 @@ pub(crate) fn workspace_tools() -> Vec<Tool> {
             }),
             SearchFiles,
         ),
+        // VS Code's chat gets this from the extension (`ViewImageTool`, gated by
+        // `chat.tools.viewImage.enabled`), not from the CLI runtime: the model
+        // cannot open a picture with a text tool, and no runtime built-in
+        // carries bytes back. `ToolResult::Expanded` is the only shape in this
+        // SDK that can, so this one tool answers with an image content part.
+        tool(
+            "view_image",
+            "Look at an image file and see it: png, jpg, gif, webp, bmp or svg. \
+             This is the only way to read a screenshot, chart or diagram — \
+             read_file gives you its bytes, not its content.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "path relative to the working directory"}
+                },
+                "required": ["path"]
+            }),
+            ViewImage,
+        ),
+        tool(
+            "web_search",
+            "Search the live web. Returns a ranked list of title, url and summary \
+             — the thing to do before claiming anything about current prices, \
+             releases or news.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "the search query"},
+                    "count": {"type": "integer", "description": "how many results, default 5, max 20"}
+                },
+                "required": ["query"]
+            }),
+            WebSearch(web.clone()),
+        ),
+        tool(
+            "web_fetch",
+            "Read one web page and get it back as Markdown text. Use it after \
+             web_search, or for a url the user pasted.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "an http or https url"}
+                },
+                "required": ["url"]
+            }),
+            WebFetch(web.clone()),
+        ),
         tool(
             "run_shell",
             "Run a shell command and return its combined output. `cmd /C` on \
@@ -180,6 +253,13 @@ fn tool(name: &str, description: &str, schema: Value, handler: impl ToolHandler)
     // tool publishes — no second shape to keep in sync.
     t.parameters = serde_json::from_value(schema).unwrap_or_default();
     t.skip_permission = false;
+    // The runtime refuses to initialize a session at all when a custom tool
+    // shares a name with a built-in — `External tool "web_fetch" conflicts with
+    // a built-in tool of the same name` — and that failure lands before the
+    // first message, so every turn dies rather than the one call. It is exactly
+    // the names we want (`web_fetch`, `web_search` are in its registry but not
+    // in our allowlist), so the override is the intent, not a workaround.
+    t.overrides_built_in_tool = true;
     t.with_handler(std::sync::Arc::new(handler))
 }
 
@@ -266,6 +346,275 @@ impl ToolHandler for ListDir {
         let path = inv.arguments["path"].as_str().unwrap_or(".");
         Ok(ToolResult::Text(shown(list(path))))
     }
+}
+
+struct ViewImage;
+
+#[async_trait::async_trait]
+impl ToolHandler for ViewImage {
+    async fn call(&self, inv: ToolInvocation) -> Result<ToolResult, Error> {
+        let path = inv.arguments["path"].as_str().unwrap_or_default();
+        Ok(view(path))
+    }
+}
+
+/// The bytes, as an image the model can look at. A refusal is text, because a
+/// failed call has nothing to show.
+fn view(path: &str) -> ToolResult {
+    let p = match inside(path) {
+        Ok(p) => p,
+        Err(e) => return ToolResult::Text(e),
+    };
+    let Some(mime) = image_mime(&p) else {
+        return ToolResult::Text(format!(
+            "{path} is not an image (png, jpg, gif, webp, bmp, svg) — use read_file for text"
+        ));
+    };
+    // The provider bills and buffers these: a 40 MB TIFF is a turn's whole budget
+    // and some APIs reject the request outright.
+    const CAP: u64 = 8 * 1024 * 1024;
+    match std::fs::metadata(&p) {
+        Ok(m) if m.len() > CAP => {
+            return ToolResult::Text(format!(
+                "{path} is {} KB — too large to view (limit {} MB)",
+                m.len() / 1024,
+                CAP / (1024 * 1024)
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return ToolResult::Text(format!("{path}: {e}")),
+    }
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) => return ToolResult::Text(format!("{path}: {e}")),
+    };
+    image_result(path, bytes, mime)
+}
+
+/// The bytes as an image content part. Split out because the fence correctly
+/// refuses the OS temp dir, so a test cannot reach this through `view`.
+fn image_result(path: &str, bytes: Vec<u8>, mime: &str) -> ToolResult {
+    let kb = bytes.len() / 1024;
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    ToolResult::Expanded(
+        ToolResultExpanded::new(format!("viewed {path} ({kb} KB, {mime})"), "success")
+            .with_binary_results(vec![ToolBinaryResult {
+                data,
+                mime_type: mime.to_string(),
+                r#type: "image".to_string(),
+                description: Some(path.to_string()),
+            }])
+            .with_session_log(format!("viewed {path}")),
+    )
+}
+
+/// An image by extension. The content is not sniffed: a file whose name says
+/// `.png` is handed over as one, which is what the model is told it is.
+fn image_mime(p: &Path) -> Option<&'static str> {
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => return None,
+    })
+}
+
+struct WebSearch(Option<Arc<Web>>);
+
+#[async_trait::async_trait]
+impl ToolHandler for WebSearch {
+    async fn call(&self, inv: ToolInvocation) -> Result<ToolResult, Error> {
+        let query = inv.arguments["query"].as_str().unwrap_or_default();
+        let count = inv.arguments["count"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
+        Ok(ToolResult::Text(
+            web_results(self.0.as_deref(), query, count).await,
+        ))
+    }
+}
+
+struct WebFetch(Option<Arc<Web>>);
+
+#[async_trait::async_trait]
+impl ToolHandler for WebFetch {
+    async fn call(&self, inv: ToolInvocation) -> Result<ToolResult, Error> {
+        let url = inv.arguments["url"].as_str().unwrap_or_default();
+        Ok(ToolResult::Text(read_page(self.0.as_deref(), url).await))
+    }
+}
+
+/// Results as the model reads them: title, url, summary — never raw JSON.
+async fn web_results(web: Option<&Web>, query: &str, count: usize) -> String {
+    if query.trim().is_empty() {
+        return "a search with no query".to_string();
+    }
+    if let Some(api) = web.and_then(Web::deepseek) {
+        let key = web.map(|w| w.key.clone()).unwrap_or_default();
+        let body = json!({"query": query, "count": count, "need_content": false});
+        match json_post(&format!("{api}/v1/tools/search"), &key, body).await {
+            Ok(v) => {
+                let mut out = String::new();
+                for (i, r) in v["results"].as_array().into_iter().flatten().enumerate() {
+                    let title = r["title"].as_str().unwrap_or("(untitled)");
+                    let url = r["url"].as_str().unwrap_or("");
+                    let summary = r["summary"].as_str().unwrap_or("");
+                    out.push_str(&format!("{}. {title}\n   {url}\n   {summary}\n", i + 1));
+                }
+                if out.is_empty() {
+                    "no results".to_string()
+                } else {
+                    out
+                }
+            }
+            // A vendor failure is not a reason to answer from memory: fall back
+            // to the engines that need no key at all.
+            Err(e) => {
+                let alt = serp_results(query, count).await;
+                format!("deepseek search failed ({e}); webrain serp instead:\n\n{alt}")
+            }
+        }
+    } else {
+        serp_results(query, count).await
+    }
+}
+
+/// webrain's own engines, over pooled HTTP — no browser, no key.
+async fn serp_results(query: &str, count: usize) -> String {
+    let opts = webrain_core::serp::SerpOpts {
+        query: query.to_string(),
+        limit: count,
+        http_only: true,
+        ..Default::default()
+    };
+    match webrain_core::serp::serp_search(&opts, None::<&webrain_core::backends::cdp::CdpBackend>)
+        .await
+    {
+        Ok(r) if !r.results.is_empty() => r
+            .results
+            .iter()
+            .enumerate()
+            .map(|(i, x)| format!("{}. {}\n   {}\n", i + 1, x.title, x.url))
+            .collect(),
+        Ok(_) => "no results".to_string(),
+        Err(e) => format!("search failed: {e}"),
+    }
+}
+
+/// One page as Markdown, capped — a 2 MB article is not a turn's budget.
+async fn read_page(web: Option<&Web>, url: &str) -> String {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return format!("{url:?} is not an http or https url");
+    }
+    if let Some(api) = web.and_then(Web::deepseek) {
+        let key = web.map(|w| w.key.clone()).unwrap_or_default();
+        match json_post(&format!("{api}/v1/tools/fetch"), &key, json!({"url": url})).await {
+            Ok(v) => {
+                let title = v["title"].as_str().unwrap_or("");
+                let body = v["content"].as_str().unwrap_or("");
+                if body.is_empty() {
+                    return "that page had no readable content".to_string();
+                }
+                return clip_bytes(&format!("# {title}\n\n{body}"), 40_000);
+            }
+            Err(e) => return format!("fetch failed: {e}"),
+        }
+    }
+    match webrain_core::engines::http_get_accept(
+        url,
+        // Ask for markdown first: a docs site that publishes it sends it, and a
+        // page that ignores the header still arrives as HTML to be stripped.
+        Some("text/markdown, text/plain;q=0.9, text/html;q=0.8"),
+        None,
+    ) {
+        Ok((status, ctype, body)) => {
+            let text = if ctype.contains("html") {
+                html_to_text(&body)
+            } else {
+                body
+            };
+            clip_bytes(&format!("[{status} {ctype}]\n\n{text}"), 40_000)
+        }
+        Err(e) => format!("fetch failed: {e}"),
+    }
+}
+
+/// Just enough HTML to text: the model needs the words, not the markup. Scripts
+/// and styles go first (their contents are not prose), then every tag, then the
+/// entities that actually appear in text.
+fn html_to_text(html: &str) -> String {
+    let mut s = html.to_string();
+    // Drop <script>…</script> and friends whole, in place: their contents are
+    // not prose, and stripping their tags alone would leave the code behind.
+    for tag in ["script", "style", "noscript", "svg"] {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        while let Some(i) = s.to_ascii_lowercase().find(&open) {
+            let after = i + open.len();
+            let end = s[after..]
+                .to_ascii_lowercase()
+                .find(&close)
+                .map(|j| after + j + close.len())
+                .unwrap_or(s.len());
+            s.replace_range(i..end, " ");
+        }
+    }
+    let mut out = String::with_capacity(s.len() / 2);
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    // Collapse the runs of blank space a stripped document is mostly made of.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n\n[truncated at {max} bytes]", &s[..cut])
+}
+
+/// One JSON POST on the session's key. Blocking client, so it runs on the
+/// blocking pool: a `ureq` call on the runtime's own thread would stall the turn.
+async fn json_post(url: &str, key: &str, body: Value) -> Result<Value, String> {
+    let url = url.to_string();
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || {
+        ureq::post(&url)
+            .header("authorization", &format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .send_json(&body)
+            .map_err(|e| e.to_string())?
+            .body_mut()
+            .read_json::<Value>()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("task failed: {e}")))
 }
 
 struct RunShell;
@@ -1033,13 +1382,111 @@ mod tests {
 
     #[test]
     fn every_tool_asks_before_it_runs() {
-        let tools = workspace_tools();
+        let tools = workspace_tools(None);
         assert_eq!(tools.len(), NAMES.len());
         for (t, name) in tools.iter().zip(NAMES) {
             assert_eq!(t.name, name);
             assert!(!t.skip_permission, "{name} must ask");
             assert!(t.handler().is_some(), "{name} has no handler");
             assert!(!t.parameters.is_empty(), "{name} has no schema");
+            // A custom tool that shadows a built-in without this flag makes the
+            // runtime refuse the session — before the first message, so every
+            // turn fails. Measured: `web_fetch` is in its registry.
+            assert!(
+                t.overrides_built_in_tool,
+                "{name} must override the built-in"
+            );
+        }
+    }
+
+    /// The one tool whose answer is not text: the bytes have to arrive as a
+    /// binary result or the model cannot see the picture at all.
+    #[test]
+    fn view_image_hands_the_bytes_over_instead_of_describing_them() {
+        let png = vec![0x89, b'P', b'N', b'G', 0, 1, 2, 3];
+        match image_result("shot.png", png.clone(), "image/png") {
+            ToolResult::Expanded(e) => {
+                let bins = e.binary_results_for_llm.expect("an image result");
+                assert_eq!(bins.len(), 1);
+                assert_eq!(bins[0].mime_type, "image/png");
+                use base64::Engine as _;
+                let back = base64::engine::general_purpose::STANDARD
+                    .decode(&bins[0].data)
+                    .expect("valid base64");
+                assert_eq!(back, png);
+                assert!(
+                    e.text_result_for_llm.contains("shot.png"),
+                    "{}",
+                    e.text_result_for_llm
+                );
+            }
+            ToolResult::Text(t) => panic!("an image came back as text: {t}"),
+            _ => panic!("unexpected tool result shape"),
+        }
+        // A text file is refused by name rather than shipped as bytes.
+        match view("Cargo.toml") {
+            ToolResult::Text(t) => assert!(t.contains("not an image"), "{t}"),
+            _ => panic!("a .toml was treated as an image"),
+        }
+        // And the fence still refuses a path outside the working directory.
+        match view("../shot.png") {
+            ToolResult::Text(t) => assert!(t.contains("outside"), "{t}"),
+            _ => panic!("a path above the root was accepted"),
+        }
+    }
+
+    /// A page with no vendor API behind it still arrives as words: the tag
+    /// stripper is the difference between "read this page" and 39 KB of markup.
+    #[test]
+    fn html_falls_back_to_the_words_not_the_markup() {
+        let page = "<html><head><style>.a{color:red}</style><script>var x=1</script></head>\
+                    <body><h1>Title &amp; more</h1><p>Hello <b>world</b>.</p></body></html>";
+        let text = html_to_text(page);
+        assert!(!text.contains('<'), "{text}");
+        assert!(!text.contains("var x"), "a script body survived: {text}");
+        assert!(!text.contains("color:red"), "a style body survived: {text}");
+        assert!(text.contains("Title & more"), "{text}");
+        assert!(
+            text.contains("Hello world .") || text.contains("Hello world."),
+            "{text}"
+        );
+        // The collapse is what keeps a 40 KB word salad inside the cap.
+        assert!(!text.contains("  "), "{text}");
+    }
+
+    /// The vendor branch is chosen by the session's provider, offline — a call
+    /// with a bad key would reach the network and take a minute to fail.
+    #[test]
+    fn the_vendor_branch_follows_the_providers_base_url() {
+        let ds = Web {
+            base: "https://api.deepseek.com".to_string(),
+            key: "k".to_string(),
+        };
+        assert_eq!(ds.deepseek().as_deref(), Some("https://api.deepseek.com"));
+        // Trimmed, so the `/v1/tools/...` path joins without a double slash.
+        let slashed = Web {
+            base: "https://api.deepseek.com/".to_string(),
+            key: "k".to_string(),
+        };
+        assert_eq!(
+            slashed.deepseek().as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        // Every other provider gets webrain's engines instead.
+        for base in [
+            "https://openrouter.ai/api/v1",
+            "https://api.openai.com/v1",
+            "http://localhost:11434/v1",
+        ] {
+            assert!(
+                Web {
+                    base: base.into(),
+                    key: "k".into()
+                }
+                .deepseek()
+                .is_none(),
+                "{base} was mistaken for deepseek"
+            );
         }
     }
 

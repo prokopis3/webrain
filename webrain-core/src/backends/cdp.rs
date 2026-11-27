@@ -350,6 +350,65 @@ fn tracker_domains() -> &'static [&'static str] {
             .collect()
     })
 }
+/// Which failures a batch retries. `Timeout` covers the CDP command cap
+/// ("… timed out after 30s" / "navigation exceeded … deadline"), `Connect`
+/// covers dead or refused sockets, `All` both.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryOn {
+    #[default]
+    None,
+    Timeout,
+    Connect,
+    All,
+}
+
+impl RetryOn {
+    /// Parse the tool-level spelling (`timeout|connect|all`); unknown → None.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "timeout" => Self::Timeout,
+            "connect" => Self::Connect,
+            "all" => Self::All,
+            _ => Self::None,
+        }
+    }
+
+    /// Would this error message be retried under the policy? Matching is on the
+    /// rendered error string because `run_on_tab` only sees an `anyhow::Error`;
+    /// the phrases mirror `webrain-mcp::lib::is_connection_error` plus the fixed
+    /// CDP command-cap wording.
+    pub fn matches(self, msg: &str) -> bool {
+        if self == Self::None {
+            return false;
+        }
+        let m = msg.to_ascii_lowercase();
+        let timeout = m.contains("timed out after")
+            || m.contains("timeout")
+            || m.contains("deadline")
+            || m.contains("exceeded");
+        let connect = [
+            "connection",
+            "reset",
+            "broken pipe",
+            "stream closed",
+            "eof",
+            "channel closed",
+            "cdp write failed",
+            "cdp connection closed",
+            "could not get a tab",
+            "no tab available",
+        ]
+        .iter()
+        .any(|k| m.contains(k));
+        match self {
+            Self::Timeout => timeout,
+            Self::Connect => connect,
+            Self::All => timeout || connect,
+            Self::None => false,
+        }
+    }
+}
+
 /// Optional navigate/batch request-quality params (Scrapling-style). All default off.
 /// ponytail: one shared struct, threaded through navigate + navigate_session so the
 /// single-tool path and the batch crawl path hit the SAME wait logic — a fix here
@@ -370,6 +429,30 @@ pub struct NavOpts {
     pub css_selector: Option<String>,
     /// Max seconds to wait for readyState + conditions before returning (default 20).
     pub wait_timeout_secs: Option<u64>,
+    /// Retry a failed URL on the SAME tab before the batch recycles it.
+    /// 0 = never. Tool callers cap this at 3.
+    pub retry: u32,
+    /// Which errors are worth retrying.
+    pub retry_on: RetryOn,
+    /// Per-command cap for `Page.navigate` in ms. Default 30 000; the
+    /// `send_cmd_with_cap` path clamps it to 5 000–120 000. This is the only way
+    /// to let `wait_timeout_secs` above 25 actually complete.
+    pub navigate_timeout_ms: Option<u64>,
+    /// Batch pacing: fixed pause before each claimed URL, ms.
+    pub delay_ms: u64,
+    /// Batch pacing: grow the pause when rows fail, decay it on success.
+    pub autothrottle: bool,
+    /// Upper bound for the adaptive pause, ms.
+    pub autothrottle_max_ms: u64,
+}
+
+/// Effective `Page.navigate` cap: `navigate_timeout_ms` clamped to 5–120 s.
+fn navigate_cap(opts: &NavOpts) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        opts.navigate_timeout_ms
+            .unwrap_or(30_000)
+            .clamp(5_000, 120_000),
+    )
 }
 
 /// Compact page-state caps: keep MCP responses small (a11y-style), not full-page dumps.
@@ -1244,6 +1327,19 @@ impl CdpBackend {
         self.send_cmd_with(session.as_deref(), method, params).await
     }
 
+    /// `send_cmd` with an explicit response cap (used by `Page.navigate` so
+    /// `navigate_timeout_ms` can exceed the 30 s default).
+    async fn send_cmd_cap(
+        &self,
+        method: &str,
+        params: Value,
+        cap: std::time::Duration,
+    ) -> anyhow::Result<Value> {
+        let session = self.active_session().await;
+        self.send_cmd_with_cap(session.as_deref(), method, params, cap)
+            .await
+    }
+
     /// All cookies for the browser context (includes HttpOnly, which
     /// document.cookie can't see). Used for logged_in detection + export.
     ///
@@ -1298,11 +1394,28 @@ impl CdpBackend {
     }
 
     /// Send a command, optionally scoped to a session id (None = browser-level).
+    /// Default 30 s response cap (120 s for the two heavy Page commands).
     async fn send_cmd_with(
         &self,
         session: Option<&str>,
         method: &str,
         params: Value,
+    ) -> anyhow::Result<Value> {
+        let cap = match method {
+            "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
+            _ => std::time::Duration::from_secs(30),
+        };
+        self.send_cmd_with_cap(session, method, params, cap).await
+    }
+
+    /// `send_cmd_with` with an explicit response cap. `Page.navigate` uses it so
+    /// `NavOpts::navigate_timeout_ms` can exceed the 30 s fail-fast default.
+    async fn send_cmd_with_cap(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        params: Value,
+        cap: std::time::Duration,
     ) -> anyhow::Result<Value> {
         // Fail the same way every time once the transport is gone. Without this,
         // each later command re-sends into a closed channel and invents its own
@@ -1339,13 +1452,8 @@ impl CdpBackend {
             anyhow::bail!("CDP connection closed (CDP write failed: {e})");
         }
 
-        // 30s response cap: an unanswered command (renderer paused on a dialog,
-        // tab crash, half-open socket) must fail fast. Only this command's slot
-        // is dropped, so the shared connection stays usable for other tabs.
-        let cap = match method {
-            "Page.printToPDF" | "Page.captureScreenshot" => std::time::Duration::from_secs(120),
-            _ => std::time::Duration::from_secs(30),
-        };
+        // The cap is a parameter now: `Page.navigate` carries
+        // `navigate_timeout_ms`, everything else keeps 30 s / 120 s defaults.
         let t0 = std::time::Instant::now();
         let reply = match tokio::time::timeout(cap, rx).await {
             Ok(Ok(v)) => v,
@@ -1964,8 +2072,13 @@ impl CdpBackend {
         opts: &NavOpts,
     ) -> anyhow::Result<()> {
         self.apply_blocking(Some(sid), opts).await?;
-        self.send_cmd_with(Some(sid), "Page.navigate", json!({"url": url}))
-            .await?;
+        self.send_cmd_with_cap(
+            Some(sid),
+            "Page.navigate",
+            json!({"url": url}),
+            navigate_cap(opts),
+        )
+        .await?;
         // ponytail: eval_session omits contextId (default ctx), so no stale ctx here.
         let start = std::time::Instant::now();
         loop {
@@ -2507,7 +2620,8 @@ impl CdpBackend {
 
         self.apply_blocking(self.active_session().await.as_deref(), opts)
             .await?;
-        self.send_cmd("Page.navigate", json!({"url": url})).await?;
+        self.send_cmd_cap("Page.navigate", json!({"url": url}), navigate_cap(opts))
+            .await?;
 
         // Queen Reader wait: poll until DOMContentLoaded (interactive), fall back to
         // full load when the page is still sparse (<500 chars). Faster than a fixed
@@ -3058,6 +3172,44 @@ impl CdpBackend {
                 return Ok(false);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
+impl CdpBackend {
+    /// obscura's `LP.getMarkdown`: the engine serialises the live DOM to
+    /// Markdown itself — one round-trip, no JS selector play, and it is the
+    /// same renderer obscura uses for `obscura fetch --dump markdown`.
+    ///
+    /// `LP` is obscura-specific, not core CDP, so Chrome and lightpanda answer
+    /// `-32601` ("wasn't found"). That is not an error for a caller: it returns
+    /// `Ok(None)` so the tool can fall back to webrain's own extractors, and a
+    /// genuine transport failure still surfaces as `Err`.
+    pub async fn get_markdown(&self) -> anyhow::Result<Option<String>> {
+        self.ensure_page_attached().await?;
+        match self.send_cmd("LP.getMarkdown", json!({})).await {
+            Ok(v) => {
+                let md = v
+                    .get("markdown")
+                    .and_then(|m| m.as_str())
+                    // tolerate a bare-string result, which is what obscura's own
+                    // CLI path returns when the domain replies without an object
+                    .or_else(|| v.as_str())
+                    .map(str::to_string);
+                Ok(md.filter(|s| !s.trim().is_empty()))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+                if msg.contains("-32601")
+                    || lower.contains("wasn't found")
+                    || lower.contains("method not found")
+                {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 }
@@ -4153,11 +4305,53 @@ fn css_escape(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::RetryOn;
     use super::human_path;
+    use super::navigate_cap;
     use super::one_tab_only;
     use super::wait_state_js;
     use super::{build_dom_paths, collect_shadow_root_ids};
     use serde_json::json;
+
+    /// A batch retry must be opt-in and must only claim the failures the caller
+    /// asked for: a timeout policy must NOT swallow an auth/login failure (which
+    /// no retry can fix), and `connect` must catch a dead socket.
+    #[test]
+    fn retry_policy_classifies_only_the_errors_it_claims() {
+        let timeout = "CDP command Page.navigate timed out after 30s";
+        let deadline = "CDP error [Page.navigate]: {\"code\":-32000,\"message\":\"Network error: navigation exceeded 30000ms deadline\"}";
+        let connect = "CDP connection closed (transport already dead)";
+        let hard = "CDP error [Page.navigate]: net::ERR_NAME_NOT_RESOLVED";
+        assert!(!RetryOn::None.matches(timeout));
+        assert!(!RetryOn::parse("off").matches(timeout));
+        assert!(RetryOn::parse("timeout").matches(timeout));
+        assert!(RetryOn::parse("timeout").matches(deadline));
+        assert!(!RetryOn::parse("timeout").matches(connect));
+        assert!(RetryOn::parse("connect").matches(connect));
+        assert!(!RetryOn::parse("connect").matches(timeout));
+        assert!(RetryOn::parse("all").matches(timeout));
+        assert!(RetryOn::parse("all").matches(connect));
+        // A DNS/auth error is not retryable under any policy — retrying it only
+        // burns the tab budget.
+        assert!(!RetryOn::parse("all").matches(hard));
+    }
+
+    /// `navigate_timeout_ms` is clamped so a typo cannot pin a tab forever and a
+    /// too-small value cannot make every navigation fail.
+    #[test]
+    fn navigate_cap_is_clamped() {
+        let cap = |ms: Option<u64>| {
+            navigate_cap(&super::NavOpts {
+                navigate_timeout_ms: ms,
+                ..super::NavOpts::default()
+            })
+            .as_secs()
+        };
+        assert_eq!(cap(None), 30);
+        assert_eq!(cap(Some(1_000)), 5);
+        assert_eq!(cap(Some(45_000)), 45);
+        assert_eq!(cap(Some(999_000)), 120);
+    }
 
     /// Chrome reporting "Failed to open a new tab" must be classified as
     /// single-target. Treating it as multi-target made `batch_map` fan out N

@@ -1,9 +1,12 @@
 ---
 name: monitoring
-version: "1.0.0"
 description: Watch a live page for real change (price, score, order book, listing count, stock, queue depth) with the webrain MCP tools. Gives the self-contained eval tick (one JS pass, ≤25 s, samples + distinct count), the agent-driven repeat-and-diff loop, external cron/systemd for anything slower, re-pinning the target every tick, and the honest limits — no scheduler, no stored history, no change predicate in wait yet. Use when asked to monitor, watch, poll, track changes, follow a live number, or "tell me when X changes". For one-shot extraction use `web-research`; for feeds use `workflows/feed-and-news.md`.
-argument-hint: "<what to watch> [from <url>] [every <N>s]"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash Read Write
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  version: "1.0.0"
+  argument-hint: "<what to watch> [from <url>] [every <N>s]"
 ---
 
 # /monitoring

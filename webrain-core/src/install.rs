@@ -47,6 +47,66 @@ pub const VISION_MODELS: &[VisionModel] = &[
         mmproj: "mmproj-F16.gguf",
         about: "1.4 GB + 819 MB | 8-16 GB RAM | 2-4 GB VRAM (recommended)",
     },
+    // LFM3-VL-2B (LiquidAI, 125K ctx) — the strongest 2B-class VL on BenchLM's
+    // image-understanding ranking (66.4), and small enough for a 2 GB GPU.
+    VisionModel {
+        id: "lfm3-vl-2b-q4km",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q4_K_M.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.10 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q5km",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q5_K_M.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.26 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q6k",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q6_K.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.43 GB + 203 MB | 8-16 GB RAM | 2-4 GB VRAM | 125K ctx",
+    },
+    VisionModel {
+        id: "lfm3-vl-2b-q8",
+        repo: "LiquidAI/LFM3-VL-2B-GGUF",
+        file: "LFM3-VL-2B-Q8_0.gguf",
+        mmproj: "mmproj-LFM3-VL-2B-Q8_0.gguf",
+        about: "1.85 GB + 203 MB | 8-16 GB RAM | 3-5 GB VRAM | 125K ctx",
+    },
+    // LFM2.5-VL-3B (LiquidAI, 32K ctx) — the 3B class; needs the larger mmproj
+    // (583 MB), so budget VRAM for weights + projector together.
+    VisionModel {
+        id: "lfm25-vl-3b-q4km",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q4_K_M.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "1.67 GB + 583 MB | 8-16 GB RAM | 3-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q5km",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q5_K_M.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "1.94 GB + 583 MB | 8-16 GB RAM | 3-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q6k",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q6_K.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "2.22 GB + 583 MB | 8-16 GB RAM | 4-6 GB VRAM | 32K ctx",
+    },
+    VisionModel {
+        id: "lfm25-vl-3b-q8",
+        repo: "LiquidAI/LFM2.5-VL-3B-GGUF",
+        file: "LFM2.5-VL-3B-Q8_0.gguf",
+        mmproj: "mmproj-LFM2.5-VL-3B-Q8_0.gguf",
+        about: "2.87 GB + 583 MB | 16-32 GB RAM | 6-8 GB VRAM | 32K ctx",
+    },
     VisionModel {
         id: "qwen35-9b-q4km",
         repo: "Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF",
@@ -87,7 +147,7 @@ pub fn vision_model(id: &str) -> Option<&'static VisionModel> {
 pub fn vision_model_choices() -> String {
     let mut out = String::new();
     for m in VISION_MODELS {
-        out.push_str(&format!("  {:<15} {}\n", m.id, m.about));
+        out.push_str(&format!("  {:<18} {}\n", m.id, m.about));
     }
     out
 }
@@ -541,6 +601,19 @@ fn copilot_bin_name() -> &'static str {
     }
 }
 
+/// The runtime at THIS build's pin — the only one safe to spawn, because the
+/// SDK's JSON-RPC surface is version-coupled (see `COPILOT_VERSION` above).
+fn pinned_copilot() -> Option<PathBuf> {
+    find_named(&copilot_dir(), copilot_bin_name(), 4)
+}
+
+/// Is *any* Copilot runtime in the engine cache? `webrain upgrade` refreshes
+/// only what the user opted into: nobody who never ran `install copilot` wants
+/// a 166 MB archive fetched behind their back by a version bump.
+pub fn copilot_present() -> bool {
+    find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4).is_some()
+}
+
 /// A Copilot runtime `webrain chat` can start: `COPILOT_CLI_PATH` when it names
 /// a real file, otherwise what `webrain install copilot` put in the engine cache.
 pub fn find_copilot() -> Option<PathBuf> {
@@ -549,7 +622,11 @@ pub fn find_copilot() -> Option<PathBuf> {
     {
         return Some(p);
     }
-    find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4)
+    // The pin first. `find_named` prefers the newest version dir, so a runtime
+    // left by a NEWER webrain — a downgrade, or an upgrade whose `install` step
+    // has not run yet — would otherwise win the search and be spoken to by a
+    // build it was never compiled against.
+    pinned_copilot().or_else(|| find_named(&browsers_dir().join("copilot"), copilot_bin_name(), 4))
 }
 
 /// `webrain install copilot` — the runtime `webrain chat` drives.
@@ -560,7 +637,16 @@ pub fn find_copilot() -> Option<PathBuf> {
 /// the digest the SDK pins before it is ever spawned.
 pub fn install_copilot(force: bool) -> Result<PathBuf> {
     if !force {
-        if let Some(bin) = find_copilot() {
+        // Pin, not "any runtime": this is the check that used to make `--force`
+        // the step everyone missed after a Copilot bump. A `COPILOT_CLI_PATH`
+        // runtime is the user's own and is left alone.
+        if let Some(p) = std::env::var_os("COPILOT_CLI_PATH").map(PathBuf::from)
+            && p.is_file()
+        {
+            println!("copilot runtime already installed: {}", p.display());
+            return Ok(p);
+        }
+        if let Some(bin) = pinned_copilot() {
             println!("copilot runtime already installed: {}", bin.display());
             return Ok(bin);
         }
@@ -580,9 +666,31 @@ pub fn install_copilot(force: bool) -> Result<PathBuf> {
     extract_archive(&bytes, &dest, asset)?;
     let bin = find_named(&dest, copilot_bin_name(), 4)
         .with_context(|| format!("{} not found in {}", copilot_bin_name(), dest.display()))?;
+    prune_other_copilot();
     println!("copilot runtime ready: {}", bin.display());
     println!("  `webrain chat` finds it automatically (engine cache)");
     Ok(bin)
+}
+
+/// Drop runtime dirs from other pins once this build's is in place. Each is
+/// ~166 MB and `find_copilot` will never spawn one now that it looks at the pin
+/// first, so keeping them only makes an upgrade look like it doubled the cache.
+/// Best-effort: a runtime another process still has open stays until next time.
+fn prune_other_copilot() {
+    prune_copilot_except(&browsers_dir().join("copilot"), COPILOT_VERSION);
+}
+
+/// Every version dir under `root` except `keep`. Split from the caller so the
+/// delete — recursively, 166 MB at a time — can be checked without a download.
+fn prune_copilot_except(root: &Path, keep: &str) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in rd.flatten() {
+        if e.path().is_dir() && e.file_name().to_string_lossy() != keep {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1189,14 +1297,89 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// Parse an HTTP validator that carries a SHA-256. Hugging Face's Xet bridge
+/// sends `X-Linked-ETag: "<hex>"`; Git LFS uses `"sha256:<hex>"`. Anything
+/// else (weak Etags, multipart Etags) is ignored rather than misread.
+fn sha256_from_etag(v: &str) -> Option<String> {
+    let t = v.trim().trim_matches('"');
+    let t = t.strip_prefix("W/").unwrap_or(t).trim_matches('"');
+    let t = t.strip_prefix("sha256:").unwrap_or(t);
+    (t.len() == 64 && t.bytes().all(|c| c.is_ascii_hexdigit())).then(|| t.to_ascii_lowercase())
+}
+
+/// Parse the total size out of `Content-Range: bytes a-b/total`.
+fn content_range_total<B>(resp: &ureq::http::Response<B>) -> Option<u64> {
+    resp.headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|v| v.parse().ok())
+}
+
+/// The SHA-256 a CDN advertises for the linked file, if any.
+///
+/// Only `X-Linked-ETag` (Hugging Face's LFS digest) or an ETag that explicitly
+/// names the algorithm are trusted. A CDN's bare ETag is often a Xet/storage
+/// key, not SHA-256 — trusting it fails a good download with a bogus mismatch.
+fn etag_sha256<B>(resp: &ureq::http::Response<B>) -> Option<String> {
+    if let Some(v) = resp
+        .headers()
+        .get("X-Linked-ETag")
+        .and_then(|v| v.to_str().ok())
+        && let Some(sha) = sha256_from_etag(v)
+    {
+        return Some(sha);
+    }
+    let etag = resp.headers().get("ETag").and_then(|v| v.to_str().ok())?;
+    etag.contains("sha256:")
+        .then(|| sha256_from_etag(etag))
+        .flatten()
+}
+
+/// Streaming SHA-256 of a file (256 KiB buffer, no whole-file allocation).
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 256 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Read an overridable env integer, clamped so a typo can't spawn 10k threads
+/// or make a chunk smaller than a packet.
+fn env_knob(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
 /// Fallback for servers that ignore Range (GitHub API JSON etc.): one plain GET
-/// streamed straight to `dest`. No chunking, no sidecar — small responses.
-fn download_plain(url: &str, dest: &Path) -> Result<()> {
+/// streamed to `<dest>.part`, length/checksum-verified, then renamed. Never
+/// leaves a partial file under the final name (an old version wrote `dest`
+/// directly, so a killed plain download looked installed to `vision_local`).
+fn download_plain(url: &str, dest: &Path, expected_sha: Option<&str>) -> Result<()> {
     use std::io::{Read, Write};
+    let part = dest.with_extension("part");
+    let ok = dest.with_extension("ok");
     let resp = ureq::get(url)
         .header("User-Agent", "webrain")
         .call()
         .with_context(|| format!("GET {url}"))?;
+    let status = resp.status().as_u16();
+    if status != 200 {
+        anyhow::bail!("{url}: plain GET returned HTTP {status}");
+    }
     let total = resp
         .headers()
         .get("Content-Length")
@@ -1204,7 +1387,7 @@ fn download_plain(url: &str, dest: &Path) -> Result<()> {
         .and_then(|v| v.parse::<u64>().ok());
     let name = url.rsplit('/').next().unwrap_or(url).to_string();
     let mut body = resp.into_body().into_reader();
-    let mut file = std::fs::File::create(dest)?;
+    let mut file = std::fs::File::create(&part)?;
     let mut done: u64 = 0;
     let mut last: i64 = -1;
     let mut buf = [0u8; 64 * 1024];
@@ -1233,6 +1416,26 @@ fn download_plain(url: &str, dest: &Path) -> Result<()> {
         done as f64 / 1048576.0
     );
     let _ = std::io::stdout().flush();
+    if let Some(t) = total
+        && done != t
+    {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("{name}: short plain download ({done}/{t} bytes)");
+    }
+    if let Some(exp) = expected_sha {
+        let got = sha256_file(&part)?;
+        if !got.eq_ignore_ascii_case(exp) {
+            let _ = std::fs::remove_file(&part);
+            anyhow::bail!(
+                "{name}: checksum mismatch (expected {exp}, got {got}) — discarded the corrupt file"
+            );
+        }
+    }
+    std::fs::rename(&part, dest)?;
+    let marker = expected_sha
+        .map(|h| format!("sha256:{h}"))
+        .unwrap_or_else(|| "ok".to_string());
+    std::fs::write(&ok, marker)?;
     Ok(())
 }
 
@@ -1251,53 +1454,186 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     let part = dest.with_extension("part");
     let sidecar = dest.with_extension("part.done");
     let ok = dest.with_extension("ok");
     let name = url.rsplit('/').next().unwrap_or(url).to_string();
+    let timeout_secs = env_knob("WEBRAIN_FETCH_TIMEOUT_SECS", 60, 5, 600);
+    // One keep-alive agent shared by the probe and EVERY chunk: the old code
+    // built a fresh Agent per chunk (and per retry), paying a TCP+TLS handshake
+    // each time and losing ureq's connection pool.
+    //
+    // NO global/whole-request budget: on a slow link a legitimate 88 MB chunk
+    // can take far longer than any fixed total (that is exactly how a 300 s
+    // global budget failed an install at 100%). Detect a DEAD peer instead:
+    // bounded connect, bounded first-byte, and a per-read idle timeout that
+    // restarts for every successful read.
+    let agent = Arc::new(ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(timeout_secs)))
+            .timeout_per_read(Some(Duration::from_secs(timeout_secs)))
+            .build(),
+    ));
+    // A no-redirect agent used only to read the ORIGINAL response's
+    // X-Linked-ETag: Hugging Face's 302 carries the LFS SHA-256, while the CDN's
+    // final 206 exposes a Xet-hash ETag (different value) instead.
+    let meta_agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(timeout_secs)))
+            .timeout_per_read(Some(Duration::from_secs(timeout_secs)))
+            .build(),
+    );
 
-    // Probe total size with a 1-byte Range (CDN answers 206 + Content-Range).
-    let probe = ureq::get(url)
-        .header("User-Agent", "webrain")
-        .header("Range", "bytes=0-0")
-        .call()
-        .with_context(|| format!("probe {url}"))?;
-    let total: Option<u64> = if probe.status() == 206 {
+    // Probe total size + the SHA-256 the server publishes (HF X-Linked-ETag),
+    // with a 1-byte Range. Retry: a transient probe failure must not abort a
+    // multi-GB install.
+    let mut last_probe_err: Option<String> = None;
+    let mut probe = None;
+    for attempt in 0..3 {
+        match agent
+            .get(url)
+            .header("User-Agent", "webrain")
+            .header("Range", "bytes=0-0")
+            .call()
+        {
+            Ok(p) => {
+                probe = Some(p);
+                break;
+            }
+            Err(e) => {
+                last_probe_err = Some(e.to_string());
+                std::thread::sleep(Duration::from_millis(500 * (attempt + 1)));
+            }
+        }
+    }
+    let mut probe = probe.ok_or_else(|| {
+        anyhow::anyhow!(
+            "probe {url}: {}",
+            last_probe_err.unwrap_or_else(|| "unknown error".into())
+        )
+    })?;
+    // A redirect can drop the Range header (HF -> CDN does, intermittently):
+    // the probe then returns 200 with the full body. Re-issue the probe against
+    // the FINAL uri so chunks are Range requests to the CDN directly — that
+    // both restores 206 and saves N redirect round-trips per download.
+    use ureq::ResponseExt;
+    let final_url = probe.get_uri().to_string();
+    let mut range_ok = probe.status() == 206;
+    let mut total = content_range_total(&probe);
+    let mut expected_sha = etag_sha256(&probe);
+    // The final CDN response's ETag can be a Xet hash; ask the original URL
+    // (without following) for the LFS SHA-256 before falling back to no check.
+    if expected_sha.is_none()
+        && let Ok(hop) = meta_agent
+            .get(url)
+            .header("User-Agent", "webrain")
+            .header("Range", "bytes=0-0")
+            .call()
+    {
+        expected_sha = etag_sha256(&hop);
+    }
+    if !range_ok {
+        if let Ok(p2) = agent
+            .get(&final_url)
+            .header("User-Agent", "webrain")
+            .header("Range", "bytes=0-0")
+            .call()
+        {
+            range_ok = p2.status() == 206;
+            total = content_range_total(&p2).or(total);
+            expected_sha = etag_sha256(&p2).or(expected_sha);
+            probe = p2;
+        }
+    }
+    // A 200 probe still tells us the size, which lets the skip/reconcile checks
+    // below avoid re-downloading a complete file even when Range is unavailable.
+    let total = total.or_else(|| {
         probe
             .headers()
-            .get("Content-Range")
+            .get("Content-Length")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|v| v.parse().ok())
-    } else {
-        None
-    };
+            .and_then(|v| v.parse::<u64>().ok())
+    });
 
     // Server ignored Range (e.g. GitHub API JSON) — plain single-stream copy.
     let Some(total) = total else {
-        return download_plain(url, dest);
+        return download_plain(url, dest, expected_sha.as_deref());
     };
 
-    // Genuinely complete (has the .ok marker AND the destination file — a stale
-    // marker left behind after the dest was deleted must not fake success) and
-    // still the size the server reports, so an upstream bump re-downloads and
-    // `--model-update` needs no separate path.
+    // Genuinely complete: `.ok` marker + dest + server-reported size. If the
+    // marker carries a SHA-256 and the server now advertises a different one,
+    // treat it as an upstream change even when the size is unchanged.
     if ok.exists() && dest.exists() {
         let have = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-        if have == total {
+        let marker = std::fs::read_to_string(&ok).unwrap_or_default();
+        let hash_changed = marker.strip_prefix("sha256:").is_some_and(|m| {
+            expected_sha
+                .as_deref()
+                .is_some_and(|e| !m.eq_ignore_ascii_case(e))
+        });
+        if have == total && !hash_changed {
             println!("  ✓ {name}: {} (already complete)", human_bytes(total));
             return Ok(());
         }
         let _ = std::fs::remove_file(&ok);
-        println!(
-            "  ↑ {name}: upstream changed ({} → {})",
-            human_bytes(have),
-            human_bytes(total)
-        );
+        let why = if hash_changed {
+            "upstream checksum changed".to_string()
+        } else {
+            format!(
+                "upstream changed ({} → {})",
+                human_bytes(have),
+                human_bytes(total)
+            )
+        };
+        println!("  ↑ {name}: {why}");
     }
 
-    let workers = 8usize.min(total.div_ceil(16 * 1024 * 1024) as usize).max(1);
+    // A complete dest without a marker (older build, manual copy): verify the
+    // size (and the SHA-256 when the server publishes one) instead of blindly
+    // re-downloading gigabytes.
+    if !ok.exists() && dest.exists() {
+        let have = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        if have == total {
+            let trusted = match expected_sha.as_deref() {
+                Some(exp) => sha256_file(dest)?.eq_ignore_ascii_case(exp),
+                None => true,
+            };
+            if trusted {
+                let marker = expected_sha
+                    .as_deref()
+                    .map(|h| format!("sha256:{h}"))
+                    .unwrap_or_else(|| "ok".to_string());
+                std::fs::write(&ok, marker)?;
+                println!(
+                    "  ✓ {name}: {} (already complete, marker restored)",
+                    human_bytes(total)
+                );
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(dest);
+        }
+    }
+
+    // Range unavailable for this origin: skip/reconcile is done, so the only
+    // correct path left is one plain stream.
+    if !range_ok {
+        return download_plain(url, dest, expected_sha.as_deref());
+    }
+
+    // Resume loss is bounded by one chunk. A fixed 8 workers meant 1/8 of the
+    // file (~177 MB for a 1.4 GB model) could be redone after a kill; a 32 MB
+    // chunk target + up to 16 workers keeps more progress and shortens the
+    // slowest-chunk tail. Both knobs are env-overridable for slow links / CI.
+    let target_chunk = env_knob("WEBRAIN_DL_CHUNK_MB", 32, 1, 256) * 1024 * 1024;
+    let max_workers = env_knob("WEBRAIN_DL_WORKERS", 16, 1, 64) as usize;
+    let chunk_count = total.div_ceil(target_chunk).max(1);
+    let workers = (chunk_count as usize).min(max_workers).max(1);
     let chunk = total.div_ceil(workers as u64);
     let done = Arc::new(AtomicU64::new(0));
     let completed = Arc::new(Mutex::new(std::collections::HashSet::<u64>::new()));
@@ -1306,15 +1642,28 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     // would otherwise spin the loop forever at 120 ms).
     let finished = Arc::new(AtomicU64::new(0));
 
+    // The sidecar must identify the chunk geometry: an index is only
+    // meaningful for the (chunk size, worker count) that produced it. A
+    // default/knob change would otherwise map old indices onto different byte
+    // ranges and silently corrupt the merged file.
+    let layout = format!("webrain-v1 chunk={chunk} total={total} workers={workers}");
     // Recover completed chunks from a prior run's sidecar (true resume).
     if let Ok(s) = std::fs::read_to_string(&sidecar) {
-        for line in s.lines() {
-            if let Ok(i) = line.trim().parse::<u64>() {
-                if i < workers as u64 {
-                    completed.lock().unwrap().insert(i);
+        let mut lines = s.lines();
+        let header_ok = lines.next().map(str::trim) == Some(layout.as_str());
+        let mut recovered_set = std::collections::HashSet::<u64>::new();
+        if header_ok {
+            for line in lines {
+                if let Ok(i) = line.trim().parse::<u64>()
+                    && i < workers as u64
+                {
+                    recovered_set.insert(i);
                 }
             }
+        } else {
+            let _ = std::fs::remove_file(&sidecar);
         }
+        *completed.lock().unwrap() = recovered_set;
     }
     let recovered = completed.lock().unwrap().len() as u64;
     done.store(recovered * chunk, Ordering::Relaxed);
@@ -1330,33 +1679,35 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         f.set_len(total)?;
     }
     let t0 = std::time::Instant::now();
+    let fetch_url = final_url;
 
     let handles: Vec<_> = (0..workers)
         .filter(|w| !completed.lock().unwrap().contains(&(*w as u64))) // skip recovered
         .map(|w| {
             let start = w as u64 * chunk;
             let end = (start + chunk - 1).min(total - 1);
-            let url = url.to_string();
+            let url = fetch_url.clone();
             let part = part.to_path_buf();
             let sidecar = sidecar.to_path_buf();
             let done = Arc::clone(&done);
             let completed = Arc::clone(&completed);
             let finished = Arc::clone(&finished);
+            let agent = Arc::clone(&agent);
+            let layout = layout.clone();
             std::thread::spawn(move || -> Result<()> {
                 let mut last_err = None;
                 for attempt in 0..3 {
-                    match fetch_chunk(&url, &part, start, end, &done) {
+                    match fetch_chunk(&agent, &url, &part, start, end, &done) {
                         Ok(()) => {
                             // mark chunk done + persist, so a kill resumes here
                             let mut c = completed.lock().unwrap();
                             c.insert(w as u64);
-                            let _ = std::fs::write(
-                                &sidecar,
-                                c.iter()
-                                    .map(|i| i.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            );
+                            let body = c
+                                .iter()
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let _ = std::fs::write(&sidecar, format!("{layout}\n{body}"));
                             finished.fetch_add(1, Ordering::Relaxed);
                             return Ok(());
                         }
@@ -1393,7 +1744,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
         }
         if connecting {
             // don't spam — one line, redrawn, until the first byte arrives
-            print!("\x1b[2K\r  Connecting…  [8× parallel chunks]   ");
+            print!("\x1b[2K\r  Connecting…  [{workers}× parallel chunks]   ");
         } else if pct != last_pct || rate >= 0.5 {
             let filled = ((pct as f64 / 100.0) * w as f64).round() as usize;
             let bar: String = (0..w).map(|i| if i < filled { '█' } else { '░' }).collect();
@@ -1416,13 +1767,53 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     }
     // The progress loop breaks when done >= total; join the workers and verify
     // EVERY chunk actually completed (sidecar count) before trusting the file.
+    let mut first_err: Option<anyhow::Error> = None;
     for h in handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("download worker panicked"))??;
+        match h.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some(anyhow::anyhow!("download worker panicked"));
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        if e.to_string().contains("Range ignored") {
+            // The CDN answered a Range request with the whole body; a chunked
+            // merge cannot be trusted. Re-download as one stream (slow but
+            // correct), then write the completion marker the chunk path would.
+            print!("\x1b[2K\r  {name}: CDN ignored Range — falling back to a single stream\n");
+            let _ = std::io::stdout().flush();
+            let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(&sidecar);
+            download_plain(url, dest, expected_sha.as_deref())?;
+            return Ok(());
+        }
+        return Err(e);
     }
     let completed_count = completed.lock().unwrap().len();
     if completed_count < workers {
         anyhow::bail!("incomplete download: {completed_count}/{workers} chunks done for {name}");
+    }
+    // A merge can be byte-complete and still wrong when a CDN serves corrupt
+    // chunks. Verify against the server-published SHA-256 before renaming: a
+    // wrong model must never become visible to `vision_local`, which only
+    // checks that the file exists.
+    if let Some(exp) = expected_sha.as_deref() {
+        let got = sha256_file(&part)?;
+        if !got.eq_ignore_ascii_case(exp) {
+            let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(&sidecar);
+            anyhow::bail!(
+                "{name}: checksum mismatch (expected {exp}, got {got}) — discarded the corrupt .part; rerun the install"
+            );
+        }
     }
     print!(
         "\x1b[2K\r  ✓ {name}: {} in {:.1}s\n",
@@ -1432,8 +1823,13 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     let _ = std::io::stdout().flush();
 
     std::fs::rename(&part, dest)?;
-    // `.ok` marker is the ONLY proof a dest is complete (not file length).
-    std::fs::write(&ok, "ok")?;
+    // `.ok` marker is the ONLY proof a dest is complete (not file length); it
+    // carries the SHA-256 when the server gave us one.
+    let marker = expected_sha
+        .as_deref()
+        .map(|h| format!("sha256:{h}"))
+        .unwrap_or_else(|| "ok".to_string());
+    std::fs::write(&ok, marker)?;
     let _ = std::fs::remove_file(&sidecar);
     Ok(())
 }
@@ -1442,6 +1838,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<()> {
 /// `done` is bumped per-read so the progress line moves live (not only when a
 /// whole multi-MB chunk completes).
 fn fetch_chunk(
+    agent: &ureq::Agent,
     url: &str,
     path: &std::path::Path,
     start: u64,
@@ -1450,31 +1847,42 @@ fn fetch_chunk(
 ) -> Result<()> {
     use std::io::{Read, Seek, Write};
     use std::sync::atomic::Ordering;
-    // Per-attempt timeout: ureq's default is no timeout, so a stalled server
-    // would block the worker thread forever (combined with the byte-count-only
-    // progress loop, the whole install would hang).
-    //
-    // It is PER ATTEMPT and this is a range request, so the value only has to
-    // clear ONE chunk. 60 s was too tight in practice: the ~180 MB lightpanda
-    // tarball failed with `timeout: global` on a slow link while the 67.6 MB
-    // obscura tarball went through in 44 s. Overridable so a slow CI or a cold
-    // machine is a SLOW build rather than a FAILED one.
-    let timeout_secs = std::env::var("WEBRAIN_FETCH_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .unwrap_or(300);
-    let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
-            .build(),
-    );
+    // The caller shares one keep-alive Agent across all chunks/retries; its
+    // global timeout is set once in `download_to_file` (WEBRAIN_FETCH_TIMEOUT_SECS).
     let resp = agent
         .get(url)
         .header("User-Agent", "webrain")
         .header("Range", &format!("bytes={start}-{end}"))
         .call()
         .with_context(|| format!("GET {url} chunk {start}-{end}"))?;
+    // A Range request that comes back 200 means the server sent the WHOLE file.
+    // Writing that at a chunk offset corrupts the merge (and the progress byte
+    // counter jumps past the total, wedging the joins) — refuse, let the caller
+    // fall back to a single stream.
+    let status = resp.status().as_u16();
+    if status != 206 {
+        anyhow::bail!("{url}: Range ignored for bytes {start}-{end} (HTTP {status})");
+    }
+    let expected = end - start + 1;
+    let content_range = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    match content_range.as_deref() {
+        Some(cr) => {
+            let ok = cr
+                .strip_prefix("bytes ")
+                .and_then(|rest| rest.split_once('/'))
+                .and_then(|(range, _)| range.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            match ok {
+                Some((a, b)) if a == start && b == end => {}
+                _ => anyhow::bail!("{url}: unexpected Content-Range {cr:?} for {start}-{end}"),
+            }
+        }
+        None => anyhow::bail!("{url}: missing Content-Range for bytes {start}-{end}"),
+    }
     let mut body = resp.into_body().into_reader();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -1482,13 +1890,24 @@ fn fetch_chunk(
         .open(path)?;
     file.seek(std::io::SeekFrom::Start(start))?;
     let mut buf = [0u8; 256 * 1024];
+    let mut written = 0u64;
     loop {
         let k = body.read(&mut buf)?;
         if k == 0 {
             break;
         }
+        if written + k as u64 > expected {
+            anyhow::bail!(
+                "{url}: chunk {start}-{end} sent {} bytes, capped at {expected}",
+                written + k as u64
+            );
+        }
         file.write_all(&buf[..k])?;
+        written += k as u64;
         done.fetch_add(k as u64, Ordering::Relaxed);
+    }
+    if written != expected {
+        anyhow::bail!("{url}: short chunk {start}-{end}: {written}/{expected} bytes");
     }
     Ok(())
 }
@@ -1771,5 +2190,53 @@ mod tests {
         let found = super::find_named(&dir, "chrome.exe", 4);
         assert_eq!(found, Some(bin));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The prune is a recursive delete, so it gets a check: it must take the
+    // superseded runtime and leave the pinned one alone (an inverted predicate
+    // here would delete the runtime it just verified).
+    #[test]
+    fn prune_keeps_only_the_pinned_runtime() {
+        let root = std::env::temp_dir().join(format!("webrain-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for v in ["1.0.114", "1.0.120"] {
+            let d = root.join(v);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("copilot.exe"), b"").unwrap();
+        }
+        super::prune_copilot_except(&root, "1.0.114");
+        assert!(
+            root.join("1.0.114/copilot.exe").is_file(),
+            "the pin survives"
+        );
+        assert!(!root.join("1.0.120").exists(), "the superseded pin is gone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sha256_file_matches_known_digest() {
+        let path = std::env::temp_dir().join(format!("webrain-sha-{}.bin", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            super::sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn etag_parser_accepts_hf_and_lfs_forms() {
+        let hex = "cd5a851d3928697fa1bd76d459d2cc409b6cf40c9d9682b2f5c8e7c6a9f9630f";
+        assert_eq!(
+            super::sha256_from_etag(&format!("\"{hex}\"")),
+            Some(hex.into())
+        );
+        assert_eq!(
+            super::sha256_from_etag(&format!("sha256:{hex}")),
+            Some(hex.into())
+        );
+        // A short/opaque or multipart validator is not a SHA-256.
+        assert_eq!(super::sha256_from_etag("\"abc123\""), None);
+        assert_eq!(super::sha256_from_etag("\"deadbeef-2\""), None);
     }
 }

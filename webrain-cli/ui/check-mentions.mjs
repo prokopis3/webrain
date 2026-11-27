@@ -51,4 +51,25 @@ for (const hue of ["--m-cmd", "--m-tool", "--m-skill"]) {
   assert.ok(seen >= 5, `${hue} is defined in one palette but not the rest (${seen})`);
 }
 
-console.log("mentions: 12 assertions passed");
+// The sent message is marked by the same parser, not a second one: the composer
+// layer paints transparent glyphs behind a textarea, so a mention you already
+// sent has to be re-painted as real text. That is one call site and three rules;
+// a second parser is how the two would drift.
+assert.ok(
+  src.includes("{@html markInput(item.text)}"),
+  "a sent message is not marked — the composer's tint stops at the field",
+);
+for (const cls of ["mark.mc", "mark.mt", "mark.ms"]) {
+  assert.ok(
+    src.includes(`.msg.user .body :global(${cls})`),
+    `${cls} has no rule in a sent message, so that sigil is painted with the default tint`,
+  );
+}
+// `mark` ships a yellow UA background; a rule that only sets `background-image`
+// leaves it painting as a highlighter, which is the bug `.marks` records.
+assert.ok(
+  /\.msg\.user \.body :global\(mark\) \{[^}]*background-color: transparent/.test(src),
+  "the transcript's mark does not clear the UA background",
+);
+
+console.log("mentions: 17 assertions passed");

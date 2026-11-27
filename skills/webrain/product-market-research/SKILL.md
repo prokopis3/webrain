@@ -1,9 +1,12 @@
 ---
 name: product-market-research
-version: "1.0.0"
 description: Compare products across shops/e-shops on price AND on the spec that actually matters (protein, calories, active ingredient, capacity, warranty) — normalise units, match the same SKU across retailers, and rank by value. Use for "find the best X in <market>", grocery/food shopping, price monitoring, spec comparison, alternatives and cheaper substitutes.
-argument-hint: "<what to buy / compare> [in <market or shops>] [priority: spec | price]"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash Read Write
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  version: "1.0.0"
+  argument-hint: "<what to buy / compare> [in <market or shops>] [priority: spec | price]"
 ---
 
 # /product-market-research
@@ -87,7 +90,7 @@ Useful as a starting map; verify before trusting — sites change.
 | My Market | `/search?query=<q>` (note: `query`, not `q`) | SSR, cards `article.product--teaser` with `data-google-analytics-item-value` JSON | no |
 | Lidl Hellas | `/q/search?q=<q>` | Stencil + **shadow DOM**; `wait_selector="odsc-tile"`, deep-text walk required | online assortment is thin; prices are in-store |
 | AB Vassilopoulos | `/el/eshop/<Cat>/<Sub>/<Product>/p/<id>` | React/Next SPA | **yes** — no price without postcode/slot |
-| Masoutis | — | Angular SPA, no stable search route | **yes** |
+| A large supermarket SPA | — | Angular SPA, no stable search route | **yes** |
 
 Sklavenitis product pages carry a full **Διατροφική Δήλωση** (energy, fat,
 carbs, sugars, protein, salt) **and** the ingredient list — that is what makes

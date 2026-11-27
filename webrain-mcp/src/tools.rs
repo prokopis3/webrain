@@ -1011,7 +1011,13 @@ pub fn list_tools() -> Vec<Value> {
                 "wait_selector": {"type": "string", "description": "Poll this CSS selector after navigate; `visible` is satisfied by ANY match, so a hidden mobile copy of a list (common in SPAs) does not stall the wait"},
                 "wait_selectors": {"type": "array", "items": {"type": "string"}, "description": "per-URL wait selector, index-parallel to urls (empty string = no selector). Use when one batch spans HOSTS that render differently; overrides wait_selector per URL."},
                 "wait_selector_state": {"type": "string", "enum": ["attached","visible","hidden","detached"], "default": "visible"},
-                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL. A page with no match at all pays this in full — set 6-8s on a list that may legitimately be empty"}
+                "wait_timeout_secs": {"type": "integer", "default": 20, "description": "Max seconds to wait for page load + conditions per URL. A page with no match at all pays this in full — set 6-8s on a list that may legitimately be empty"},
+                "retry": {"type": "integer", "default": 0, "description": "Retry a failed URL on the SAME tab before the batch recycles it (0 = off, max 3). Only errors matching retry_on are retried; the row reports `retries`."},
+                "retry_on": {"type": "string", "enum": ["timeout", "connect", "all"], "default": "timeout", "description": "Which failures are retryable: timeout (fixed CDP command cap / navigation deadline), connect (dead or refused socket), all."},
+                "navigate_timeout_ms": {"type": "integer", "minimum": 5000, "maximum": 120000, "description": "Per-command cap for Page.navigate, ms (default 30000). Raise it when wait_timeout_secs > 25 or a slow origin legitimately needs >30s; the command used to die at 30s regardless."},
+                "delay_ms": {"type": "integer", "default": 0, "description": "Fixed pause before each URL per worker (rate-limit friendly)."},
+                "autothrottle": {"type": "boolean", "default": false, "description": "Grow the pause after failures (200ms → autothrottle_max_ms) and decay it on success."},
+                "autothrottle_max_ms": {"type": "integer", "default": 30000},
             }, "required": ["op", "urls"]}
         }),
         json!({
@@ -1865,7 +1871,7 @@ pub fn map_surface(name: &str, args: &Value) -> Option<(&'static str, Value)> {
 // Parse Scrapling-style request-quality params from tool args (shared by
 // navigate + batch). All optional; defaults keep legacy behavior.
 fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
-    use webrain_core::backends::cdp::NavOpts;
+    use webrain_core::backends::cdp::{NavOpts, RetryOn};
     NavOpts {
         disable_resources: args
             .get("disable_resources")
@@ -1893,6 +1899,30 @@ fn nav_opts(args: &Value) -> webrain_core::backends::cdp::NavOpts {
             .and_then(|v| v.as_str())
             .map(String::from),
         wait_timeout_secs: args.get("wait_timeout_secs").and_then(|v| v.as_u64()),
+        retry: args
+            .get("retry")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(3) as u32,
+        retry_on: RetryOn::parse(
+            args.get("retry_on")
+                .and_then(|v| v.as_str())
+                .unwrap_or("timeout"),
+        ),
+        navigate_timeout_ms: args
+            .get("navigate_timeout_ms")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.clamp(5_000, 120_000)),
+        delay_ms: args.get("delay_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        autothrottle: args
+            .get("autothrottle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        autothrottle_max_ms: args
+            .get("autothrottle_max_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30_000)
+            .max(200),
     }
 }
 /// `js` / `interaction` may be a literal expression or `@path` — the convention
@@ -1921,12 +1951,150 @@ fn batch_js_err(urls: &[String], msg: String) -> Vec<BatchResult> {
             data: None,
             error: Some(msg.clone()),
             ms: 0,
+            retries: 0,
         })
         .collect()
 }
 
+/// A failed CDP *connection* (one per `cdp_urls` entry), kept OUT of the result
+/// rows: a row is one requested URL. Mixing endpoint failures into `results`
+/// used to make `count` exceed `urls.len()` and shifted `results[i] ↔ urls[i]`,
+/// so an agent indexing by position read the wrong page.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConnectFailure {
+    endpoint: String,
+    error: String,
+}
+
+/// Browserless tool entry point for callers that do not have a CDP backend yet
+/// (`webrain tool`). Folds the `webrain_pdf` surface to its browserless sub-ops,
+/// then serves them through the same `pdf_surface` used by `call_tool`, so the
+/// MCP handler and the offline CLI cannot drift. Returns `None` for anything
+/// that needs a browser.
+pub async fn browserless_tool(name: &str, args: &Value) -> Option<Value> {
+    // No browser, no page: the machine and the decision guide answer before a
+    // CDP backend exists (the MCP path does the same for stats in `lib.rs`).
+    if name == "webrain_guide" {
+        return Some(guide_from_args(args));
+    }
+    if name == "webrain_stats" {
+        return Some(if crate::no_state() {
+            json!({"status":"error","message":"webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set"})
+        } else {
+            let mut out = host_stats();
+            out["cdp_latency"] = webrain_core::backends::cdp::cdp_latency();
+            out
+        });
+    }
+    let folded = match name {
+        "webrain_pdf" => match args.get("op").and_then(|v| v.as_str()) {
+            Some("extract") => "webrain_pdf_extract",
+            Some("render") => "webrain_pdf_render",
+            Some("images") => "webrain_pdf_images",
+            _ => return None,
+        },
+        _ => name,
+    };
+    pdf_surface(folded, args).await
+}
+
+/// Folded `webrain_pdf` sub-ops that need no browser. `lib::handle_tools_call`
+/// intercepts these before the CDP connect on the MCP path; `call_tool` serves
+/// the same core functions here so the offline `webrain tool` path — which calls
+/// `call_tool` directly — does not fall through to "Unknown tool:
+/// webrain_pdf_render". Kept in one place so the two paths cannot drift.
+async fn pdf_surface(name: &str, args: &Value) -> Option<Value> {
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let pages: Option<Vec<u32>> = args.get("pages").and_then(|v| v.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_u64().map(|n| n as u32))
+            .collect()
+    });
+    Some(match name {
+        "webrain_pdf_render" => {
+            if path.is_empty() {
+                return Some(json!({"status":"error","message":"path required"}));
+            }
+            #[cfg(feature = "pdfium")]
+            {
+                let dpi = args.get("dpi").and_then(|v| v.as_f64()).map(|f| f as f32);
+                let tile_size = args
+                    .get("tile_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let dir = args.get("dir").and_then(|v| v.as_str());
+                match webrain_core::engines::pdf_render(path, pages.as_deref(), dpi, tile_size, dir)
+                {
+                    Ok(v) => json!({"status":"ok","result":v}),
+                    Err(e) => json!({"status":"error","message":e.to_string()}),
+                }
+            }
+            #[cfg(not(feature = "pdfium"))]
+            {
+                json!({"status":"error","message":"pdf_render needs a build with --features pdfium and pdfium.dll/libpdfium.so in PATH (prebuilt: https://github.com/bblanchon/pdfium-binaries). Without that build use op=extract for text/tables, or open the PDF in Chrome and observe what=screenshot for a raster."})
+            }
+        }
+        "webrain_pdf_images" => {
+            if path.is_empty() {
+                return Some(json!({"status":"error","message":"path required"}));
+            }
+            let path = path.to_string();
+            let dir = args.get("dir").and_then(|v| v.as_str()).map(String::from);
+            match tokio::task::spawn_blocking(move || {
+                webrain_core::engines::pdf_images(&path, pages.as_deref(), dir.as_deref())
+            })
+            .await
+            {
+                Ok(Ok(v)) => json!({"status":"ok","result":v}),
+                Ok(Err(e)) => json!({"status":"error","message":e.to_string()}),
+                Err(e) => {
+                    json!({"status":"error","message":format!("pdf_images task failed: {e}")})
+                }
+            }
+        }
+        "webrain_pdf_extract" => {
+            if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
+                let p: Vec<String> = paths
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                let results = tokio::task::spawn_blocking(move || {
+                    webrain_core::engines::pdf_extract_batch(&p)
+                })
+                .await
+                .unwrap_or_default();
+                json!({"status": "ok", "count": results.len(), "results": results})
+            } else if !path.is_empty() {
+                let path = path.to_string();
+                let results = tokio::task::spawn_blocking(move || {
+                    vec![
+                        webrain_core::engines::pdf_extract(&path)
+                            .unwrap_or_else(|e| json!({"error": e.to_string()})),
+                    ]
+                })
+                .await
+                .unwrap_or_default();
+                json!({"status": "ok", "count": results.len(), "results": results})
+            } else {
+                json!({"status":"error","message":"path or paths required"})
+            }
+        }
+        _ => return None,
+    })
+}
+
 #[tracing::instrument(skip_all, fields(tool = %name))]
+/// Public entry point: run the tool, then flag page text that looks like
+/// instructions. The annotation lives here (not in each arm) so every browser
+/// tool and both transports get it from one place; the reply is only touched
+/// when the heuristic fires.
 pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value {
+    let mut reply = call_tool_inner(backend, name, args).await;
+    webrain_core::injection::annotate(&mut reply);
+    reply
+}
+
+async fn call_tool_inner(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
 
     // Consolidated 17-tool surface → legacy executor. Legacy tool names pass
@@ -1935,8 +2103,26 @@ pub async fn call_tool(backend: &CdpBackend, name: &str, args: &Value) -> Value 
     let name: &str = mapped.as_ref().map(|(n, _)| *n).unwrap_or(name);
     let args: &Value = mapped.as_ref().map(|(_, a)| a).unwrap_or(args);
 
+    // Browserless `webrain_pdf` sub-ops: serve them before the family dispatch
+    // (the MCP path intercepts the same names in `lib::handle_tools_call`).
+    if let Some(reply) = pdf_surface(name, args).await {
+        return reply;
+    }
+
     match name {
         "webrain_guide" => guide_from_args(args),
+        // Host health, no browser. Implemented here as well as in
+        // `lib::handle_tools_call` so the offline `webrain tool` surface answers
+        // it too; both call the same `host_stats` + `cdp_latency`.
+        "webrain_stats" => {
+            if crate::no_state() {
+                json!({"status":"error","message":"webrain_stats is disabled on this instance: WEBRAIN_NO_STATE is set"})
+            } else {
+                let mut out = host_stats();
+                out["cdp_latency"] = webrain_core::backends::cdp::cdp_latency();
+                out
+            }
+        }
         "webrain_add_init_script" => {
             let js = match js_arg(args, "js") {
                 Ok(js) => js,
@@ -1983,7 +2169,11 @@ fn family_of(name: &str) -> Option<&'static str> {
         | "webrain_eval_in_frame"
         | "webrain_scroll"
         | "webrain_get_html" => "page",
-        "webrain_cookies" | "webrain_setcookies" => "session",
+        "webrain_cookies"
+        | "webrain_setcookies"
+        | "webrain_open_session"
+        | "webrain_close_session"
+        | "webrain_list_sessions" => "session",
         "webrain_spider" | "webrain_sitemap" | "webrain_snapshot" => "crawl",
         "webrain_pixel"
         | "webrain_extract_json"
@@ -2247,6 +2437,35 @@ async fn call_page(backend: &CdpBackend, name: &str, args: &Value) -> Value {
 async fn call_session(backend: &CdpBackend, name: &str, args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
     match name {
+        // One-shot CLI sessions: `webrain tool` is a single process with one
+        // connection, so "open" is already done by the caller's CDP_URL and
+        // "list" reports that one ephemeral session. The MCP server overrides
+        // these with its real per-connection registry in `lib.rs`.
+        "webrain_open_session" => {
+            let url = args
+                .get("cdp_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    std::env::var("CDP_URL")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                });
+            json!({"status": "ok", "session_id": "cli", "cdp_url": url, "created": false})
+        }
+        "webrain_close_session" => {
+            json!({"status": "ok", "session_id": "cli", "closed": false})
+        }
+        "webrain_list_sessions" => {
+            let url = std::env::var("CDP_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            json!({"status": "ok", "count": 1, "sessions": [{
+                "session_id": "cli",
+                "cdp_url": url,
+                "connected": true
+            }]})
+        }
         // Cross-browser session migration: read/write cookies ON THE SESSION
         // BACKEND. Set + batch on the same connection so per-connection
         // isolated browsers (obscura stealth) share the imported session.
@@ -2948,6 +3167,8 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
             // Before the work, so the delta answers "did THIS call get throttled".
             let throttle_t0 =
                 webrain_core::engines::THROTTLE_EVENTS.load(std::sync::atomic::Ordering::Relaxed);
+            let autothrottle_t0 = webrain_core::engines::AUTOTHROTTLE_EVENTS
+                .load(std::sync::atomic::Ordering::Relaxed);
             let concurrency = crate::clamp_concurrency_for(
                 args.get("concurrency")
                     .and_then(|v| v.as_i64())
@@ -3041,7 +3262,7 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     "interact" => {
                         let interaction = match js_arg(args, "interaction") {
                             Ok(js) => js,
-                            Err(m) => return batch_js_err(&urls, m),
+                            Err(m) => return batch_js_err(urls, m),
                         };
                         batch_interact(
                             b,
@@ -3066,10 +3287,10 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     "eval" => {
                         let js = match js_arg(args, "js") {
                             Ok(js) => js,
-                            Err(m) => return batch_js_err(&urls, m),
+                            Err(m) => return batch_js_err(urls, m),
                         };
                         if js.is_empty() {
-                            return batch_js_err(&urls, "js required (op=eval)".to_string());
+                            return batch_js_err(urls, "js required (op=eval)".to_string());
                         }
                         batch_eval(b, urls, &js, concurrency, opts).await
                     }
@@ -3186,7 +3407,7 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 args: &Value,
                 opts: &webrain_core::backends::cdp::NavOpts,
                 per_backend_concurrency: usize,
-                errs: &mut Vec<BatchResult>,
+                errs: &mut Vec<ConnectFailure>,
             ) -> (Vec<BatchResult>, usize, Option<bool>) {
                 // Connects are independent WebSocket handshakes: run them at the
                 // same time. Serially, four backends cost four round-trips of wall
@@ -3196,29 +3417,39 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                 for u in cdp_urls {
                     let u = u.clone();
                     conns.push(tokio::spawn(async move {
-                        let r = CdpBackend::connect_with_url(&u).await;
-                        (u, r)
+                        // A cloud/plan connection cap refuses bursts; one short retry
+                        // per endpoint turns a transient refusal into a live backend
+                        // instead of a silent missing shard.
+                        let mut last: Option<anyhow::Error> = None;
+                        for attempt in 0..2u8 {
+                            match CdpBackend::connect_with_url(&u).await {
+                                Ok(b) => return (u, Ok(b)),
+                                Err(e) => {
+                                    last = Some(e);
+                                    if attempt == 0 {
+                                        tokio::time::sleep(std::time::Duration::from_millis(300))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                        (
+                            u,
+                            Err(last.unwrap_or_else(|| anyhow::anyhow!("connect failed"))),
+                        )
                     }));
                 }
                 let mut backends = Vec::new();
                 for h in conns {
                     match h.await {
                         Ok((_, Ok(b))) => backends.push(b),
-                        Ok((u, Err(e))) => errs.push(BatchResult {
-                            url: u,
-                            title: String::new(),
-                            text: String::new(),
-                            data: None,
-                            error: Some(format!("cdp connect failed: {e}")),
-                            ms: 0,
+                        Ok((u, Err(e))) => errs.push(ConnectFailure {
+                            endpoint: u,
+                            error: format!("cdp connect failed: {e}"),
                         }),
-                        Err(join) => errs.push(BatchResult {
-                            url: String::new(),
-                            title: String::new(),
-                            text: String::new(),
-                            data: None,
-                            error: Some(format!("cdp connect task failed: {join}")),
-                            ms: 0,
+                        Err(join) => errs.push(ConnectFailure {
+                            endpoint: String::new(),
+                            error: format!("cdp connect task failed: {join}"),
                         }),
                     }
                 }
@@ -3286,6 +3517,7 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                                 data: None,
                                 error: Some("backend produced no result for this URL".to_string()),
                                 ms: 0,
+                                retries: 0,
                             }),
                     );
                 }
@@ -3293,7 +3525,7 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
             }
 
             let mut ordered: Vec<Option<BatchResult>> = (0..urls.len()).map(|_| None).collect();
-            let mut connect_errs: Vec<BatchResult> = Vec::new();
+            let mut connect_errs: Vec<ConnectFailure> = Vec::new();
             // Measured across groups: the widest fan-out this call achieved, and
             // whatever the engines said about their own tab capability.
             let mut tabs_seen = 0usize;
@@ -3349,8 +3581,36 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     }
                 }
             }
-            let mut results: Vec<BatchResult> = connect_errs;
-            results.extend(ordered.into_iter().flatten());
+            // results[i] is urls[i], ALWAYS: endpoint failures live in
+            // stats.connect_error_details, not as extra rows. A missing slot is a
+            // real row too (a dead backend's share), so count == urls.len().
+            let mut results: Vec<BatchResult> = Vec::with_capacity(urls.len());
+            for (i, slot) in ordered.into_iter().enumerate() {
+                results.push(slot.unwrap_or_else(|| BatchResult {
+                    url: urls[i].clone(),
+                    title: String::new(),
+                    text: String::new(),
+                    data: None,
+                    error: Some("backend produced no result for this URL".to_string()),
+                    ms: 0,
+                    retries: 0,
+                }));
+            }
+            let retries_used: u64 = results.iter().map(|r| r.retries as u64).sum();
+            let connected_backends = if cdp_urls.is_empty() {
+                0
+            } else {
+                cdp_urls.len().saturating_sub(connect_errs.len())
+            };
+            // What the batch could have run at if the refused endpoints are
+            // dropped: per-backend lanes × the connections that actually opened.
+            let suggested_concurrency = if cdp_urls.is_empty() {
+                concurrency.min(urls.len()).max(1)
+            } else {
+                (per_backend_concurrency * connected_backends.max(1)).min(concurrency.max(1))
+            };
+            let connect_error_details =
+                serde_json::to_value(&connect_errs).unwrap_or_else(|_| json!([]));
             let mut payload = json!({"status": "ok", "count": results.len(), "results": results});
             // ponytail: optional `output` path persists the batch payload to disk so a
             // temp-file GC (or a dropped MCP response) can't lose it between turns.
@@ -3420,6 +3680,18 @@ async fn call_batch(backend: &CdpBackend, name: &str, args: &Value) -> Value {
                     "throttled_by_memory": webrain_core::engines::THROTTLE_EVENTS
                         .load(std::sync::atomic::Ordering::Relaxed)
                         > throttle_t0,
+                    "autothrottled": webrain_core::engines::AUTOTHROTTLE_EVENTS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        > autothrottle_t0,
+                    "retries_used": retries_used,
+                    "connect_errors": connect_errs.len(),
+                    "connect_error_details": connect_error_details,
+                    "backends_connected": if cdp_urls.is_empty() {
+                        1
+                    } else {
+                        connected_backends
+                    },
+                    "suggested_concurrency": suggested_concurrency,
                     "capabilities": backend.caps(),
                 });
             }
@@ -4032,7 +4304,16 @@ async fn call_toolbox(backend: &CdpBackend, name: &str, args: &Value) -> Value {
 /// differently depending on which layer served it — and silently dropped
 /// `base_selector` / `autoschema`, returning 3 KB of truncated HTML instead of
 /// extracted rows.
+/// Public entry point for the browserless HTTP path — same annotation contract
+/// as `call_tool`, because a static page can carry instructions just as well as
+/// a rendered one.
 pub fn fetch_http_from_args(args: &Value) -> Value {
+    let mut reply = fetch_http_from_args_inner(args);
+    webrain_core::injection::annotate(&mut reply);
+    reply
+}
+
+fn fetch_http_from_args_inner(args: &Value) -> Value {
     let err = |e: anyhow::Error| json!({"status": "error", "message": e.to_string()});
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if url.is_empty() {

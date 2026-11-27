@@ -80,7 +80,7 @@ they are, when to create vs reuse, and how they carry authentication.
 ⚠️ **A vendor clearance does not transfer.** An anti-bot token (`cf_clearance`,
 DataDome, `_abck`) is bound to the minting browser's TLS/JA4 fingerprint + UA + IP.
 Importing it into another engine fails even with a byte-identical UA — verified
-2026-11-01 on skroutz.gr: lightpanda (jar preloaded via `--cookie`, `--user-agent`
+2026-11-01 on a large marketplace: lightpanda (jar preloaded via `--cookie`, `--user-agent`
 set to Chrome's) and obscura (`--user-agent` set, 4/4 cookies incl. `cf_clearance`,
 46 s wait) both still got `Just a moment...` on every HTML page, while the same
 Chrome that minted the cookie returned 200. So: transfer cookies for **login

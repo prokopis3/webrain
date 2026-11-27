@@ -67,6 +67,24 @@ fn read_verified(dir: &Path) -> Result<[String; 4], String> {
     Ok(files)
 }
 
+/// Is there a page on this machine at all? `webrain upgrade` refreshes only
+/// what is already installed — a CLI-only user should not be handed 285 KB of
+/// page (and a browser route they never open) by a version bump.
+///
+/// The portable zip ships the page beside the binary, and `self_update` replaces
+/// only the exe, so that copy is exactly what a version bump orphans. A
+/// `WEBRAIN_CHAT_UI` directory is the user's own and cannot be repaired by
+/// installing elsewhere, so it is not treated as a signal.
+pub(crate) fn installed() -> bool {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("webrain-chat-ui")));
+    [Some(webrain_core::install::chat_ui_dir()), beside]
+        .into_iter()
+        .flatten()
+        .any(|dir| MANIFEST.iter().all(|(name, ..)| dir.join(name).is_file()))
+}
+
 fn candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = std::env::var_os("WEBRAIN_CHAT_UI") {

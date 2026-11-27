@@ -20,7 +20,8 @@ state. Never pick an engine from memory — read the `challenge` field after eve
 | Engine | JS | SPA/Material | Screenshots | a11y | Interactive challenges | Batch |
 |---|---|---|---|---|---|---|
 | real Chrome | ✅ | ✅ | ✅ | ✅ | ✅ (native login) | ✅ parallel tabs |
-| obscura | ✅ | ❌ (not full layout parity) | ✅ v0.2.0+ render builds (+ PDF) | partial | ❌ | ✅ parallel tabs |
+| obscura v0.2.7+ | ✅ | ✅ apps mount (interface prototypes fixed in v0.2.6/0.2.7); no interactive Material | ✅ v0.2.0+ render builds (+ PDF) | partial | ❌ | ✅ tabs run concurrently on one process — K≈6 light pages on one connection; heavy pages = one connection per page, K≈4 (`obscura-batch.md`) |
+| obscura ≤ v0.2.5 | ✅ | ❌ (hydration crash: `HTMLTemplateElement.prototype === Element.prototype`) | ✅ render builds | partial | ❌ | ✅ parallel connections, but SPA data unavailable |
 | lightpanda | ✅ | ❌ | ❌ (fake placeholder PNG) | ✅ real AX tree | ❌ | sequential (single target) |
 | ephemeral ("guest") Chrome | ✅ | ✅ | ✅ | ✅ | ✅ — that is its job | tabs work (`--incognito`), but serp/CAPTCHA only |
 | `fetch_http` | ❌ | ❌ | ❌ | ❌ | ❌ | N/A |

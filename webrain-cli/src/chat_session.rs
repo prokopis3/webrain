@@ -72,6 +72,9 @@ fn system_prompt() -> String {
          which exposes: {}.\n\n\
          How to work:\n\
          - Static HTML: `webrain_http` (no browser). Rendered/JS pages: `webrain_navigate`.\n\
+         - Current facts: `web_search` then `web_fetch` on the urls it returns — on a\n\
+         DeepSeek session both call DeepSeek's own Search and Fetch APIs, elsewhere they\n\
+         use webrain's engines. Cite the url you read anything from.\n\
          - After every navigate, read the `challenge` field. A non-null challenge means \
          the page is gated, not loaded: say so instead of extracting it as content.\n\
          - Discover selectors with `webrain_observe`/`webrain_autoschema`; never guess them.\n\
@@ -406,7 +409,7 @@ fn mode_label(mode: SearchMode) -> &'static str {
 /// (`task`) and could not look at what it spawned: `list_agents` was excluded
 /// whether the switch was on or off. `validate_name` only checks the shape of a
 /// name, so a runtime that lacks one ignores it rather than failing the session.
-fn tool_filter(allow_agents: bool) -> Vec<String> {
+pub(crate) fn tool_filter(allow_agents: bool) -> Vec<String> {
     let mut allowed = webrain_mcp::tool_names()
         .iter()
         .fold(ToolSet::new(), |set, n| {
@@ -420,6 +423,17 @@ fn tool_filter(allow_agents: bool) -> Vec<String> {
             .add_custom(name)
             .expect("chat_tools::NAMES are runtime-valid names");
     }
+    // Every other server the runtime has attached — `filesystem`, whatever the
+    // user added from the MCP tab. Naming `webrain` alone made "connected" a lie:
+    // the runtime listed the server, then reported every one of its tools as
+    // `Disabled tools: filesystem-…`, so no model could ever call one. The
+    // wildcard is the only form that survives a server the user adds later, and
+    // the schemas stay deferred by `with_search` below, so the cost is per call
+    // rather than per request. Write-capable tools are still gated: every call
+    // raises a permission request the page answers.
+    allowed = allowed
+        .add_mcp("*")
+        .expect("the runtime accepts a wildcard server name");
     // The four built-ins we actually use, not `builtin:*`.
     //
     // Measured 2026-11-07 against the same one-word prompt: the wildcard costs
@@ -429,6 +443,20 @@ fn tool_filter(allow_agents: bool) -> Vec<String> {
     // `chat_hooks::Fence`. `add_builtin` validates the name's shape, so a typo
     // here is an error rather than a silently missing tool.
     let mut builtins = vec!["task", "task_complete", "ask_user", "skill"];
+    // The runtime serves these itself — the page already renders their output
+    // (the todo rail, the inbox, the plan board) and none of them has an
+    // equivalent among the `chat_tools` set. Withholding them was the reason the
+    // todo list the assistant is told to keep never appeared: `task_complete`
+    // reports a step, `update_todo` is what writes the table it reads.
+    builtins.extend([
+        "update_todo",
+        "context_board",
+        "read_inbox",
+        "send_inbox",
+        "manage_schedule",
+        "session_store_sql",
+        "fetch_copilot_cli_documentation",
+    ]);
     // Delegation is only half a feature without these: `task` spawns a worker,
     // and nothing could list the definitions it picks from, read one, or write
     // one. The hide list in `connect` already names them for the off case.
@@ -515,6 +543,24 @@ pub(crate) async fn connect(
     let model_cfg = ProviderModelConfig::new(&provider.model, "webrain")
         .with_model_id(provider.model.clone())
         .with_max_output_tokens(i64::from(args.max_output_tokens.unwrap_or(4096)));
+    // Whether the model can be shown a picture, when its own catalogue says so.
+    // Without this the runtime has no declaration to check, and a `view_image`
+    // result goes to a model that was never told images are allowed. Declared
+    // only on a vendor answer: inventing `true` would break a text-only model's
+    // every request, and inventing `false` hides the one feature this is for.
+    //
+    // Through the wire shape rather than `with_capabilities`: the SDK's override
+    // types live in a `pub(crate)` module, so an external crate cannot name them
+    // — but the field is public and `Serialize`/`Deserialize` is derived, so the
+    // documented JSON is the one path that works.
+    let model_cfg = match super::chat_server::model_vision(&provider.base_url, &provider.model) {
+        Some(v) => {
+            let mut wire = serde_json::to_value(&model_cfg).unwrap_or_default();
+            wire["capabilities"] = serde_json::json!({ "supports": { "vision": v } });
+            serde_json::from_value(wire).unwrap_or(model_cfg)
+        }
+        None => model_cfg,
+    };
     // Only when the user asked: the runtime already knows the model's real
     // limit, and overriding it upward makes a small-context model reject the
     // prompt as too long.
@@ -796,8 +842,14 @@ pub(crate) async fn connect(
     };
     // The disk and a shell, for the one mode that should have them. Installed on
     // the session rather than only configured, so a resumed one gets them too.
+    // The provider comes along so `web_search`/`web_fetch` can use its own API
+    // (DeepSeek sells both) instead of a generic engine.
+    let web = provider.bearer_token().map(|k| chat_tools::Web {
+        base: provider.base_url.clone(),
+        key: k.to_string(),
+    });
     session
-        .set_tools(chat_tools::workspace_tools())
+        .set_tools(chat_tools::workspace_tools(web))
         .await
         .map_err(|e| anyhow::anyhow!("could not install the local tools: {e}"))?;
     Ok((client, session))
@@ -1142,6 +1194,22 @@ mod tests {
                 "{name} missing from {served:?}"
             );
         }
+        // The runtime side of the features the page already renders: the todo
+        // rail, the plan board, the inbox, the schedule. None of them has a
+        // `chat_tools` equivalent, and together they cost 94 input tokens.
+        for name in [
+            "update_todo",
+            "context_board",
+            "read_inbox",
+            "send_inbox",
+            "manage_schedule",
+            "fetch_copilot_cli_documentation",
+        ] {
+            assert!(
+                served.contains(&format!("builtin:{name}")),
+                "{name} missing from {served:?}"
+            );
+        }
         // Delegation needs the definition surface too, or the model can spawn a
         // worker and never learn what it may pick from.
         for name in ["read_agent", "write_agent", "list_agents"] {
@@ -1167,6 +1235,13 @@ mod tests {
         assert!(
             served.iter().any(|f| f.starts_with("mcp:webrain-")),
             "{served:?}"
+        );
+        // And every *other* attached server too. `webrain` alone was the bug: the
+        // runtime connected `filesystem` and then reported all its tools disabled,
+        // so `#directory_tree` could never be called by any model.
+        assert!(
+            served.iter().any(|f| f == "mcp:*"),
+            "no wildcard server in {served:?}"
         );
     }
 

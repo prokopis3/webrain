@@ -1,6 +1,6 @@
 ---
 title: Environment Variables
-description: Every webrain environment variable — engine paths, browser cache and profile roots, encrypted vault, credentials, STT/vision keys, and local AI (whisper + Qwen3-VL-2B).
+description: Every webrain environment variable — engine paths, browser cache and profile roots, encrypted vault, credentials, download tuning, STT/vision keys, and local AI (watch + the vision catalog).
 ---
 
 # Environment Variables
@@ -12,10 +12,19 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_HTTP_CACHE` | Set `0`/`off`/`false`/`no` to disable the HTTP revalidation cache (conditional GETs on repeat fetches) | on |
 | `WEBRAIN_HTTP_CACHE_DIR` | Dir holding the HTTP cache metadata file | platform cache dir (`%LOCALAPPDATA%\webrain`, `~/.cache/webrain`) |
 | `WEBRAIN_DOWNLOAD_MAX_BYTES` | Per-file size cap in bytes for the `webrain_download` http engine | `536870912` (512 MiB) |
-| `WEBRAIN_FETCH_TIMEOUT_SECS` | Per-attempt HTTP timeout for engine/package downloads — raise it on a slow link so a slow install is slow, not failed | `300` |
+| `WEBRAIN_FETCH_TIMEOUT_SECS` | Per-read idle timeout (and first-byte timeout) for engine/package/model downloads, 5–600 s. There is **no whole-download deadline** — a legitimately slow chunk finishes; only a dead peer trips this. Raise it on a very slow link | `60` |
+| `WEBRAIN_DL_WORKERS` | Parallel Range chunks for model/engine downloads, 1–64. More workers help when the CDN throttles a single connection; fewer help on a tiny box | `16` |
+| `WEBRAIN_DL_CHUNK_MB` | MiB per download chunk, 1–256. Smaller chunks lose less progress when a download is killed; larger chunks do fewer requests | `32` |
 | `WEBRAIN_CHROME` | Explicit Chrome binary path | auto-discovered |
 | `WEBRAIN_BROWSERS_DIR` | Engine cache dir (Chrome for Testing, Obscura) | `%LOCALAPPDATA%\webrain\browsers` / `~/.cache/webrain/browsers` |
 | `WEBRAIN_LIGHTPANDA` / `WEBRAIN_OBSCURA` | Explicit lightpanda/obscura binary paths | auto-discovered |
+| `WEBRAIN_OBSCURA_WORKERS` | `--workers N` for `webrain obscura`: N isolated worker processes (each with its own V8 isolates). `1` (or unset) keeps a single process | `1` |
+| `WEBRAIN_OBSCURA_PROXY` | `--proxy` for `webrain obscura` — HTTP/SOCKS5 egress for the engine. CDP `proxyServer` is Chrome-only, so this is the only way to proxy obscura | — |
+| `WEBRAIN_OBSCURA_USER_AGENT` | `--user-agent` for `webrain obscura`. Required when importing a `cf_clearance` minted by a Chrome with a different UA | — |
+| `WEBRAIN_OBSCURA_STORAGE_DIR` | `--storage-dir` for `webrain obscura` — persist cookies/storage across runs | — |
+| `WEBRAIN_OBSCURA_ALLOW_PRIVATE_NETWORK` | Set `1` for `--allow-private-network`: obscura blocks loopback/RFC1918/link-local by default (SSRF guard), which also blocks local dev servers | off |
+| `WEBRAIN_OBSCURA_OBEY_ROBOTS` | Set `1` for `--obey-robots` on obscura's own navigation | off |
+| `WEBRAIN_OBSCURA_ARGS` | Extra whitespace-separated args appended to `obscura serve` — escape hatch for flags this build does not model (e.g. `--font-dir`, `--quiet`) | — |
 | `WEBRAIN_PROFILES_DIR` | Per-account browser profile root | `%APPDATA%\webrain\profiles` / XDG data dir, i.e. `~/.local/share/webrain/profiles` |
 | `WEBRAIN_MAX_TABS` | Cap on concurrent tabs an engine may open — lower it on a small box where a wide `webrain_batch` would thrash memory. Pinning it also **skips the admission refusal** below: an explicit number is a decision, not an estimate | engine default |
 | `WEBRAIN_RESPONSE_BUDGET` | Bytes of row text/data a batch reply may carry before later rows are returned truncated (`rows_truncated`, `bytes_returned`, `budget_bytes` in the reply's `stats`) | `8388608` (8 MiB) |
@@ -33,10 +42,11 @@ description: Every webrain environment variable — engine paths, browser cache 
 | `WEBRAIN_MCP_TOOLS` | Advertise only these MCP tools — `serp,scrape`, with or without the `webrain_` prefix. The full set is ~8,080 tokens of schema before any prompt, which is over Groq's free 7,000 tokens/minute cap, so trimming the surface is what makes a small tier work at all. An unmatched list falls back to the full surface | all tools |
 | `WEBRAIN_NO_STEALTH` | Set `1` to skip the injected stealth JS + UA override (e.g. the `webrain serp` google flow). `serp` sets it **for itself** — if it leaks into the shell that starts `mcp`, the server boots with all stealth off and every later result is measured against a different identity | off |
 | `WEBRAIN_STEALTH_NOISE` | Set `0` to disable the canvas/audio/`Object.defineProperty` fingerprint-noise block. **This is the fix when a page renders but never mounts.** Verified on `ab.gr/storelocator` (real Chrome): the NOISE block made Next.js abort with `Cannot read properties of undefined (reading 'getInitialProps')`, and the same browser mounted cleanly with it off. Read at attach — restart the server, then open a **fresh tab**; injected scripts live for the tab's lifetime, so re-navigating the same tab keeps the old one and the change looks ignored | on |
+| `WEBRAIN_TZ` / `WEBRAIN_LOCALE` | Emulated timezone and locale applied to every attached Chrome tab before page scripts run. Set them to the proxy exit's values so the page does not see the host's clock/locale against a foreign IP — the incoherence camoufox's `coherence.py` rejects. Unset leaves the host's values | host TZ / locale |
 | `WEBRAIN_STT_MODEL` | Cloud STT model override (e.g. `whisper-large-v3`) | provider default |
 | `WEBRAIN_WHISPER_BIN` / `WEBRAIN_WHISPER_MODEL` | Local whisper-cli binary / GGUF model paths | bundled cache |
 | `WEBRAIN_ASR_BIN` / `WEBRAIN_ASR_MODEL` | Chat dictation: the `nemo-speech` recognizer binary and the Nemotron 3.5 ASR GGUF. Unset resolves to the bundled `tools/nemo-speech/` and the largest installed model, so `webrain install nemotron` is the whole setup | bundled cache |
-| `WEBRAIN_VISION_MODEL` | Which installed local vision model to load (`qwen3-vl-2b`, `qwen3-vl-2b-q6k`, `qwen35-9b-q4km`/`q5km`/`q6k`/`q8`). Unset resolves to the default id, then to whatever is installed, so a single-model cache keeps working | `qwen3-vl-2b` |
+| `WEBRAIN_VISION_MODEL` | Which installed local vision model to load (`qwen3-vl-2b`, `qwen3-vl-2b-q6k`, `lfm3-vl-2b-q4km`/`q5km`/`q6k`/`q8`, `lfm25-vl-3b-q4km`/`q5km`/`q6k`/`q8`, `qwen35-9b-q4km`/`q5km`/`q6k`/`q8`). Unset resolves to the default id, then to whatever is installed, so a single-model cache keeps working. `webrain install vision --help` lists the catalog | `qwen3-vl-2b` |
 | `WEBRAIN_LLAMA_SERVER` | Path to a different `llama-server` binary — drop in a CUDA/Vulkan build and GPU offload engages on its own | bundled CPU build |
 | `WEBRAIN_VISION_GPU` | `1` forces `-ngl 99` layer offload, `0` forces CPU. Otherwise offload is enabled only when a GPU backend library (`ggml-cuda`, `ggml-vulkan`, `ggml-metal`, `ggml-hip`, `ggml-sycl`) sits beside the binary — `-ngl` on a CPU-only build is silently ignored, so the machine's GPU is never trusted over the build's | auto |
 | `EMBED_URL` / `EMBED_MODEL` / `EMBED_API_KEY` | OpenAI-compatible `/v1/embeddings` endpoint + model + Bearer token for `webrain_vision` `op=index` / `retrieve` (any compatible server: OpenAI, Ollama, TEI, local vLLM) | `api.openai.com/v1/embeddings` + `text-embedding-3-small` |
@@ -115,6 +125,8 @@ model. First match wins: flags → `WEBRAIN_CHAT_*` → the ambient chain.
 | `BUNDLED_CLI_CACHE_DIR` | build-time cache of the runtime archives (CI) | — |
 | `WEBRAIN_CHAT_DEBUG` | mirror every raw session event to stderr — the only way to see the provider's own error when a turn returns no answer | off |
 | `WEBRAIN_CHAT_HOME` | the `COPILOT_HOME` the chat runtime is given: sessions, auth and config live here, and `~/.copilot` is deliberately **not** used (inheriting it loaded ~480 unrelated tools). This directory **is** the model's context — session state, rewind points, plan, tool history — so it lives beside `chat.db`, not in the temp dir: a cleaned temp left the transcript on screen with nothing to resume. An existing `webrain-copilot-home` in temp is moved here once | `copilot-home` beside `chat.db` (i.e. `<app-data>/webrain/copilot-home`) |
+| `WEBRAIN_CHAT_DB` | SQLite file holding the conversation history. `settings.json` and `approvals.json` are written beside it and follow the same override, so a sandboxed run touches one directory | `<app-data>/webrain/chat.db` |
+| `WEBRAIN_CHAT_FILES` | Directory where uploaded attachments land. The agent's file tools are fenced to this directory; default is `.webrain/attachments` in the working directory, falling back to the temp dir on a read-only checkout | `.webrain/attachments` |
 
 The ambient chain, in order, with each row's base url and default model:
 

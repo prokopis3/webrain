@@ -55,11 +55,13 @@ assert.ok(src.includes('localStorage.setItem("webrain-chat-keys"'), "the keys ar
 
 // The running controls belong to the conversation that owns the turn. `current`
 // moves the moment another thread is opened, so deriving the owner from it drew
-// the Stop button — and the rail's dot — onto whichever chat you looked at, and
-// every chat read as running while one of them was.
+// the Stop button — and the rail's dot — onto whichever chat you looked at. Now
+// that two conversations can be mid-turn at once, this tab's own turn wins over a
+// foreign frame's: otherwise reading a busy thread would hand its stop button to
+// the other one.
 assert.ok(
-  src.includes('const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));'),
-  "runningConvo is derived from `current`, which moves when you open a thread",
+  src.includes("const runningConvo = $derived(busy ? busyConvo || current : runningIn);"),
+  "runningConvo must prefer this tab's own turn, then a foreign conversation's",
 );
 const busySets = (src.match(/busy = true;/g) || []).length;
 const owners = (src.match(/busyConvo = current;/g) || []).length;

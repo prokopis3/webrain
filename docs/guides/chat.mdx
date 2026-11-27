@@ -37,7 +37,16 @@ webrain install copilot
 That downloads the official runtime for this platform from `github/copilot-cli`
 (SHA-256 verified) into the engine cache, and `webrain chat` picks it up — no
 environment variable needed. `COPILOT_CLI_PATH` still wins if you already have a
-bundle of your own. To bake the runtime into the binary instead:
+bundle of your own. **After `webrain upgrade` both of these need installing again** —
+the upgrade replaces the binary only, and a new binary will not run the runtime or the
+page the old one installed:
+
+```bash
+webrain install chat-ui            # the new page; an old one fails its digest check
+webrain install copilot --force    # without --force it sees the old runtime and stops
+```
+
+To bake the runtime into the binary instead:
 
 ```bash
 cargo build --release --features chat,pdfium          # ~45 MB, runtime installed separately
@@ -316,12 +325,12 @@ everything else is the runtime's own event, forwarded unchanged.
 
 | Route | What it does |
 |---|---|
-| `POST /turn` | `{"prompt":"…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while busy and `delivery` is `turn` |
+| `POST /turn` | `{"prompt":"…","convo":"c…","mode":"agent\|plan\|ask","effort":"low\|medium\|high","tools":[…],"delivery":"turn\|queue\|steer"}` → `202`, or `409` while **that conversation** is busy and `delivery` is `turn` |
 | `POST /stop` | abort the turn that is running |
 | `GET /pending` | the approvals still waiting for an answer, so a reloaded page can redraw the cards |
 | `POST /permission` | `{"id":"…","allow":true}` — answers a pending approval |
 | `POST /answer` | `{"id":"…","answer":"…","freeform":true}` — answers `ask_user` |
-| `GET /mode`, `POST /mode` | the runtime's session mode (`interactive` / `plan` / `autopilot`) — a switch, not a prompt prefix |
+| `GET /mode`, `POST /mode` | the runtime's session mode (`interactive` / `plan` / `autopilot`) **of the conversation named in `convo`** — a switch, not a prompt prefix. A conversation with no session yet answers `session: false` and is left alone; its first turn carries the mode |
 | `GET /queue`, `POST /queue` | what waits behind the running turn: `POST` with `{"id"}` runs one now, `{"id","text"}` edits it, `{"id","remove":true}` drops it |
 | `GET /permission-mode`, `POST /permission-mode` | the runtime's own permission policy (`manual` / `assisted` / `allow-all`) |
 | `GET /plan`, `POST /plan` | the plan the agent keeps on file |
@@ -329,7 +338,7 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /rewind`, `POST /rewind` | the turns the session can go back to, then a preview of the files a rewind would restore (`{"event","preview":true}`) and the rewind itself (`{"event","files":true\|false}`) |
 | `POST /ephemeral` | `{"question":"…"}` → a one-shot answer against the conversation with no tools and no history |
 | `POST /command` | `{"name":"compact","input":"…"}` → runs one of the **runtime's own** slash commands (`session.commands.invoke`). The answer is text, a message, or a prompt the page puts in the field rather than one it starts for you |
-| `GET /context` | the runtime's token breakdown and per-message attribution |
+| `GET /context` | the runtime's token breakdown and per-message attribution **for the conversation in `convo`**. A conversation with no session yet answers `session: false` and serves its own last snapshot (`stale`, `savedAt`) rather than another chat's numbers |
 | `GET /todos` | the agent's todo rows |
 | `GET /tasks`, `POST /agents`, `POST /fleet` | the agents this session runs, a word to one of them, and `{"prompt":"…"}` to dispatch a fleet |
 | `GET /jobs`, `POST /jobs` | the OS processes the agent's own `terminal` tool started and left running — id, command, pid, `running`, `exit`, byte count and a tail of the output — then `{"id":N}` to kill one. Reading it consumes nothing, so a poll here never costs the model its next `terminal read`. A job that ends on its own is pushed to `/events` as `{"type":"webrain.job","data":{"id","command","exit","running":false}}`, because nothing polls the registry on its own |
@@ -339,10 +348,14 @@ everything else is the runtime's own event, forwarded unchanged.
 
 | Route | What it does |
 |---|---|
-| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu, plus `busy` and the runtime's own `processing` state |
+| `GET /sessions` | `{"current":"c…","sessions":[…]}` — the history menu. Each row carries **its own** `busy`, and the top level carries the request's conversation's `busy` plus the runtime's own `processing` state |
 | `POST /sessions` | a new conversation — or the current one, when nobody has written to it yet |
 | `GET /sessions/<id>` | that conversation's messages, oldest first, with its turns and its saved rows. A read: it does not change which conversation is live. Gzipped when the client accepts it |
 | `POST /sessions/<id>` | claim it — from here on a new turn belongs to it — and answer with the same payload as the read, so opening a thread is one request. `POST /sessions/<id>?light=1` skips the payload for a caller that already holds the rows |
+
+`POST /turn` names its conversation because **each conversation owns its own runtime session**. Two chats can therefore be mid-turn at the same time: a turn in one is never refused, killed or reseeded because of another, and a conversation you switch away from keeps streaming into its own transcript. Its context window and prompt cache belong to it too, so coming back is a resume rather than a replay. A conversation that has never been turned in this process gets its session on its first turn, carrying its stored tail. On every other route, `?convo=<id>` names the conversation the request is about and falls back to the one the page last opened — which is what the tab calling it is showing.
+
+Approvals and `ask_user` cards follow the same rule: each conversation has its own prompt handler, so `/pending` lists only the cards that conversation is waiting on and every `webrain.permission` / `webrain.ask` frame carries its `convo`, which is what the page routes on. The standing `server:tool` approvals stay global — a grant is about the tool, not the thread.
 | `PATCH /sessions/<id>` | `{"title":"…"}` → rename it in the menu |
 | `DELETE /sessions/<id>` | forget the conversation and everything in it |
 | `GET /search?q=…` | substring hits across every stored message, newest first |
@@ -355,11 +368,12 @@ everything else is the runtime's own event, forwarded unchanged.
 | `GET /providers` | provider *targets*: base url, model, where the key lives, a one-line description, and the context size its docs publish |
 | `POST /providers` | `{"id","base_url","model","key_env"}` → a target row in the local database (`key_env` may be empty) |
 | `POST /keys` | `{"provider":"deepseek","key":"…"}` → the key is written to the encrypted vault; nothing is echoed back |
-| `POST /switch` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes |
+| `POST /switch?convo=…` | `{"provider","model","effort"}` → live model/effort change, or a new session when the endpoint changes. The pick is stored for that conversation, so reopening the chat starts where you left it; a chat with no session yet records the pick and applies it to its first turn |
 | `GET /models?provider=…` | that provider's live catalogue, cached five minutes |
 | `GET /price` | the vendor's published price for the running model |
 | `GET /quota` | account credits (`session.quota.get` + `limitPrediction`) — null on a key of your own |
-| `GET /settings`, `POST /settings` | the switches only this server can honour |
+| `GET /settings?convo=…` | the switches only this server can honour, **for that conversation**: its own saved row when it has one, else the defaults in `settings.json`. `own` says which of the two answered, and it works with no live session — a closed chat still reports what it was held with |
+| `POST /settings?convo=…` | the switches, merged over that conversation's row and stored under it, so two chats cannot overwrite each other's model or tool picks. `"default": true` also writes `settings.json`, which is what every *new* chat starts from |
 
 **Tools, skills and the model's instructions**
 
@@ -508,14 +522,17 @@ still overrides the lookup for a model nobody publishes a window for.
 
 The dock carries the same number as a gauge: a ring with `used / limit` and a
 percentage, which is also the button for the runtime's own accounting. Open it and
-the panel reads the way the Copilot chat's session-info does:
+the **Session Info** panel reads the way the Copilot chat's does:
 `Reserved for response` as a count (it overlaps the allowance rather than occupying
 it), then **System** (System Instructions, Tool Definitions) and **User Context**
-(Messages) as percentages of the prompt allowance, and an `Uncategorized → Other`
-row only when the runtime counted tokens its own categories do not name. Every
-figure is `metadata.getContextAttribution`; the page invents no category, and there
-is no *Tool Results* row because this runtime reports user, assistant and tool
-messages as one `messages` figure. A **compact history** button runs the runtime's
+(Messages, Tool Results) as percentages of the prompt allowance, and an
+`Uncategorized → Other` row only when the runtime counted tokens its own categories
+do not name. Every figure is `metadata.getContextAttribution`; the page invents no
+category. The runtime rolls user, assistant *and* tool messages into one `messages`
+figure, but its `entries` list still names each source, so **Tool Results** is a row
+of its own — the sum of the `kind: "tool"` entries, subtracted from `messages` so
+the two add up to the runtime's number instead of counting the same tokens twice.
+A **compact history** button runs the runtime's
 `/compact` through `POST /command` — it asks first, and it is disabled while a turn
 is running, because compaction rewrites the history that turn is reading.
 
@@ -528,7 +545,19 @@ built-in descriptors — so `#` offers what the session can actually call rather
 a list this page typed out. All of it comes from `GET /catalog`, one row per name,
 so a menu can neither offer something this build does not have nor offer it twice.
 `+` attaches a file, and ↑/↓ walk the menu with the selected row scrolled into
-view. A pick inserts `@name` / `#name` into the prompt; nothing is sent for you.
+view. A pick inserts `@name` / `#name` into the prompt; nothing is sent for you, and
+the token keeps its tint once sent so a thread shows what was handed to the turn.
+
+`@name` is resolved **server-side, against both skill roots** — the bundle and
+`~/.agents/skills`, the tree the `npx`-style installers write — and the skill's text
+rides along with that turn (`<skill name="…">`). Both roots are in the menu as well, so a
+skill you can see is a skill a mention can read; Settings → Skills lists them with their
+descriptions. `#name` and `/name` are the session's own tools and commands: `#` offers
+only what `GET /catalog` reports, so a tool from an MCP server this session does not run
+is *not* in the menu. To let the chat call one (the codebase-memory server, for instance),
+add it in **Settings → MCP** (`POST /mcp/new`) — the session's allowlist grants `mcp:*`,
+so every attached server's tools are callable as soon as it connects, and their schemas
+cost nothing until the model asks for one.
 
 ### The deck: rail, transcript, instruments
 
@@ -869,6 +898,30 @@ command must not be reachable from the LAN. Put a reverse proxy in front of it
 and add authentication if you need it elsewhere — the binary will not do that
 for you.
 
+## Tools the session hands the model
+
+The tool list is fixed when the session is created, not discovered by the model:
+this build's nineteen MCP tools, ten host tools compiled into the binary, every
+MCP server you attach, and the runtime builtins whose output the page draws (the
+todo list, the inbox, the schedule). `#` and the tools dialog both read
+`GET /catalog`, which marks which of those names this session actually carries —
+unticking a builtin is a switch on the *call*, because the allowlist itself cannot
+change after creation.
+
+| Tool | What it is for |
+|---|---|
+| `read_file`, `write_file`, `edit_file` | text in and out. `edit_file` replaces one exact string and refuses a string that matches nothing or more than one place |
+| `list_dir`, `search_files` | one directory, or a regex over the tree — `.git`, `target` and `node_modules` are skipped |
+| `run_shell`, `terminal` | one command with its output, or a shell that stays alive between calls (`start` / `send` / `read` / `list` / `stop` — the jobs `/jobs` lists) |
+| `view_image` | the agent looks at a png, jpg, gif, webp, bmp or svg instead of reading its bytes. The runtime has no image tool of its own, so this answers with a binary result — and the session declares `capabilities.supports.vision` from the model's catalogue, declaring nothing when the vendor publishes no modalities |
+| `web_search` | a ranked `title` / `url` / `summary` list. On a DeepSeek session (its base url is `deepseek.com`) it calls DeepSeek's Search API with the session's own key; every other provider gets webrain's engines |
+| `web_fetch` | one URL as Markdown — DeepSeek's Fetch API on a DeepSeek session, `text/markdown`-first HTTP elsewhere, with the markup stripped when the host answers HTML |
+
+Every path resolves under the working directory, and a path that escapes it is
+refused by name, so a call cannot reach outside the directory the chat was started
+in. All ten raise a permission request unless `--yes`; `web_search` and `web_fetch`
+touch no local file but ask the same way.
+
 ## Permissions
 
 Without `--yes` the session approves reads, navigation and MCP tool calls, and
@@ -944,17 +997,21 @@ Point the state directory elsewhere with `WEBRAIN_CHAT_HOME` (default:
 `webrain-copilot-home` under the system temp directory).
 
 What is *not* removable: the runtime's built-in `github-mcp-server` (5 tools)
-still loads, and the tool list is filtered separately with the SDK's `ToolSet`
-so the model can only call `webrain-*`. Measured, `toolDefinitionsTokens` stays
-**8080** either way — the 18 `webrain_*` schemas are the floor, not the
-stragglers.
+still loads. The rest is an allowlist handed to the SDK's `ToolSet` when the
+session is created — `webrain-<n>` for this build's MCP server, `custom:` for the
+ten host tools in [Tools the session hands the model](#tools-the-session-hands-the-model),
+`mcp:*` for any server you attach, and `builtin:` for the runtime tools that ask
+before they act. A name outside those does not reach the model. Measured, the
+nineteen `webrain_*` schemas alone put `toolDefinitionsTokens` at **8080**: the
+MCP surface is the floor, not the stragglers.
 
 ## What chat does not do
 
-No interactive REPL and no session resume in this version. `--serve` keeps one
-runtime session alive for as long as the process does, but a **new** process
-replays the stored transcript instead of resuming the runtime's own context, and
-one-shot `webrain chat` is one prompt, one turn, one exit code. Everything here is
+No interactive REPL in this version. `--serve` keeps one runtime session per
+conversation — up to eight live at once, and only an idle one is ever evicted, its
+next turn rebuilding it from the store — but a **new** process replays the stored
+transcript instead of resuming the runtime's own context, and one-shot
+`webrain chat` is one prompt, one turn, one exit code. Everything here is
 additive to `webrain mcp`, which keeps its stdout contract — chat's own logs go to
 stderr for that reason.
 

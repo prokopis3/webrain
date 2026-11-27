@@ -21,7 +21,7 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 |---|---|---|
 | **Interactive Material / heavy SPA** (Google Flights, calendars, Material dropdowns/comboboxes, segmented controls) | **real Chrome**, routed per-tab via `cdp_urls:["http://127.0.0.1:9222"]` | Material/Google widgets open on `mousedown`/pointer hit-testing and read computed styles — only a real layout+paint engine works. **Never obscura or lightpanda** for interactive Material: obscura v0.2.0 rendering is not full Chromium parity, and lightpanda has no layout engine. |
 | **Cloudflare / Turnstile / CAPTCHA / any interactive challenge**, or need **real** screenshots / pixel rendering | **real Chrome + persistent profile + session** (`webrain launch` / `webrain_session(op=login)`) | Only a browser with a human-solvable session clears these. Obscura's render build **does** paint (PNG/PDF verified on v0.2.5), but its stealth cannot complete an interactive challenge — never read "it renders" as "it solves". |
-| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura** (docker, `--stealth`) | Fast, light, no Chrome overhead. Multi-tab: `webrain_batch` runs parallel tabs. v0.2.0+ render builds screenshot + PDF; no interactive Material (not full layout parity). |
+| JS-rendered pages **without** a challenge, high-concurrency batch scraping | **obscura v0.2.7+** (docker/binary, `--stealth`) | Fast, light, no Chrome overhead. v0.2.7 mounts data-driven SPAs natively (v0.2.6/0.2.7 fixed the HTML interface prototypes); batch: light pages K≈6 on one connection, heavy pages one connection per page (repeat the endpoint in `cdp_urls`, `per_backend_concurrency: 1`, K≈4); `retry`/`navigate_timeout_ms` cover the 30 s cap — see §1b. No interactive Material. |
 | Lightweight / minimal footprint, want a **real AX tree + semantic tree**, no rendering needed | **lightpanda** (`docker run -d --rm --name lightpanda -p 9225:9225 lightpanda/browser:nightly lightpanda serve --host 0.0.0.0 --port 9225 --advertise-host 127.0.0.1`) | Fastest, lightest, **real a11y** (`Accessibility.getFullAXTree` + `LP.getSemanticTree`). **Single-target per CONNECTION** — a batch on one endpoint serializes (probe detects it, `single_target: true`), but the process serves many connections: repeat the endpoint in `cdp_urls` for parallel pages, up to `--cdp-max-connections` (16). ⚠️ No layout engine: `captureScreenshot` returns a **fake placeholder PNG** (silently wrong, not an error), and interactive Material won't work. |
 | Pure static HTML, no JS/auth | **no browser** → `webrain_scrape` | No browser process, no render, no JS: one HTTP GET. |
 | **`webrain_serp` google/brave, or an interactive CAPTCHA/Turnstile to solve** | **the ephemeral ("guest") Chrome** (`--incognito`, what the SERP path launches) | Purpose tool, not an engine — `webrain_serp` and the CAPTCHA solve are its only callers, and it is the profile that carries the solved clearance to the next call. It no longer refuses new targets — `--guest` was the cause (verified 2026-11-07 on Chrome 151 and 156: `--guest` answers `-32000 "Failed to open new tab - no browser is open"` because Browse-as-Guest has no Browser in Chrome's BrowserList, while `--incognito` accepts `Target.createTarget` and `Target.createBrowserContext`), so the old single-tab caveat is gone. Bulk work still belongs on a real browser profile you control. |
@@ -55,9 +55,9 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 >
 > | connections to the same endpoint | URLs | wall | `effective_concurrency` |
 > |---|---|---|---|
-> | 1 | 8 | 6.15 s | 1 (wall ≈ Σ page times) |
+> | 1 | 8 | 6.15 s | 1 (wall ≈ sum of page times) |
 > | 4 | 8 | **1.17 s** | 4 |
-> | 8 | 16 | **4.19 s** (Σ 20.1 s) | 8 |
+> | 8 | 16 | **4.19 s** (sum 20.1 s) | 8 |
 >
 > So the cheap lever is **repeat the same endpoint in `cdp_urls`**, N times, up
 > to `--cdp-max-connections`.
@@ -66,8 +66,8 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 > pool.** `Network` (on `App`) owns `--http-max-concurrent` (default 40) and
 > `--http-max-host-open` (**default 6 per host**), so 8 workers all pulling
 > Wikipedia queue behind 6 per-host slots and every page slows down. Measured on
-> 25 URLs: 8 connections to one container = **9.6 s** (Σ page times 60.9 s) vs
-> **3.5 s** across 10 separate containers (Σ 25.0 s). Separate processes each
+> 25 URLs: 8 connections to one container = **9.6 s** (sum of page times 60.9 s) vs
+> **3.5 s** across 10 separate containers (sum 25.0 s). Separate processes each
 > get their own pool, plus their own profile, cookies and exit IP.
 >
 > **So pick by what you need:** a few extra connections (≈4 is the sweet spot on
@@ -82,7 +82,7 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 > and `CDP_URL` / `cdp_urls` accept `ws://` and `wss://` directly — passed
 > through, never probed for `/json/version`. Same rules: each connection is one
 > page, so list the cloud endpoint N times for N concurrent pages, up to your
-> plan's connection cap. Measured: 1 connection = 25 URLs in 16.5 s (Σ page
+> plan's connection cap. Measured: 1 connection = 25 URLs in 16.5 s (sum of page
 > times 14.7 s, i.e. fully serial); per-page cost is close to local, the
 > handshake is what costs ~1.8 s. Treat the token as a credential: it is
 > billable, never commit it or paste it into a report.
@@ -98,6 +98,76 @@ browsemind extraction guides + verified live on scrapingcourse.com.
 > Pick obscura for large parallel crawls, lightpanda for footprint and
 > per-page velocity (verified: ~2-4s/page on mymarket.gr vs ~12s/page on
 > obscura), N lightpanda containers when you want that velocity at scale.
+
+### 1b. Obscura batch — tabs share the process, connections add CPU; K≈6 light / K≈4 heavy (measured 2026-11-25)
+
+This is the obscura half of the batching rule (§1 lightpanda blockquote covers
+the single-target half). **Tabs on one connection run concurrently but share one
+obscura process's CPU — they do not serialize.** Measured on light recipe pages
+(~0.5 s each): 50 pages at `concurrency: 6` on ONE connection = **10.5 s** vs
+**23.9 s serial (K=1)**, a real 2.3×. The ceiling is CPU + origin, not
+"one tab per thread":
+
+- **Light pages** (≤ ~0.6 s render): one connection with `concurrency: 6` is
+  the sweet spot; K=10 = 10.1 s but costs +57% per-page (knee ≈ 6).
+- **Heavy pages** (~1 MB HTML + big JS bundle, ~3 s render): one process cannot
+  render several at once — give each page its OWN connection and keep K≈4.
+
+For heavy pages, repeat the SAME endpoint in `cdp_urls` (one connection per
+entry) and force one tab per connection:
+
+```json
+{"op": "eval", "urls": ["..."],
+ "cdp_urls": ["http://127.0.0.1:9224", "http://127.0.0.1:9224",
+              "http://127.0.0.1:9224", "http://127.0.0.1:9224"],
+ "per_backend_concurrency": 1,
+ "disable_resources": true, "block_trackers": true,
+ "retry": 1, "retry_on": "timeout"}
+```
+
+`per_backend_concurrency` defaults to `concurrency` (clamped by the tab
+budget), so omitting it can silently put several tabs back on one connection.
+The ceiling is the ORIGIN, not the engine: heavy pages (e.g. a 1.07 MB Next.js
+product page) slow down as in-flight count rises. Measured, obscura v0.2.5:
+
+| in-flight | layout | wall | per-row | throughput |
+|---|---|---|---|---|
+| 1 | 1 conn | 3.2 s | 3.2 s | 0.31 /s |
+| **4** | **4 conns, 1 proc** | **7.4 s** | **7.0–7.3 s** | **0.54 /s (peak)** |
+| 8 | 8 conns, 1 proc | 20.1 s | 16.0–19.9 s | 0.40 /s |
+| 8 | 8 procs × 1 tab | 20.5 s | 17.1–20.4 s | 0.39 /s |
+| 10 | 10 conns, 1 proc | 30.2 s | 26.1–29.0 s | 0.33 /s |
+| 20 | 1 proc × 20 tabs | 30.5 s | **0/20** (30 s cap) | — |
+| 20 | 10 procs × 2 tabs | 42.1 s | 13/20; retry 7/7 in 12.4 s → **54.5 s** 20/20 | — |
+
+On **v0.2.7** (20 heavy product pages): K=4 → **43.3 s**; K=6 → 52.4 s; K=20 →
+**0/20** (all timed out). Start at K=4, raise only while per-row ms stays flat.
+
+**The 30 s cap is now patched — no manual second pass needed.**
+`navigate_timeout_ms` (5 000–120 000) sets the `Page.navigate` cap, and
+`retry: 1, retry_on: "timeout"` re-navigates the SAME tab once before recycling
+it; the row reports `retries` and stats report `retries_used`. Measured:
+6 URLs stalling past 30 s → **0/6 → 6/6** (+1.8 s wall, `retries_used=6`);
+3 URLs stalling 31.5 s with `navigate_timeout_ms: 45000` → **0/3 → 3/3**;
+20 heavy SPA pages at K=20 → **8/20 → 18/20** (14 retries, +24.6 s — retries
+trade wall time for rows, so they are opt-in, `retry: 0` default).
+
+Endpoint failures are reported, not faked: `stats.connect_errors` +
+`connect_error_details` name refused `cdp_urls` connections, `count` stays
+`urls.length`, and `suggested_concurrency` reports the K the surviving backends
+can sustain (6 URLs + one dead endpoint: count 7→6). `stats.autothrottled` plus
+`delay_ms` / `autothrottle` / `autothrottle_max_ms` pace an origin that pushes
+back. One process serves many connections (`--max-connections`, default 128);
+`--workers N` is isolation, not throughput (1 proc × 8 conns ≈ 8 procs × 1 conn).
+
+`webrain_crawl(mode=spider)` follows the same rule: its `concurrency` opens tabs
+on one connection, so keep it ≈4 on obscura for heavy sites.
+
+For consent-gated SPAs on v0.2.7: the modal now mounts and covers the content.
+Use `op=interact` with an interaction that clicks the consent accept button
+before the schema extract, or read the server payload (`__NEXT_DATA__`/JSON-LD)
+which is present before consent. Full recipe + version gate:
+`skills/webrain/references/obscura-batch.md`.
 
 ### a11y (observe what=a11y)
 Google/Material widgets are often NOT `button`: dropdowns are `combobox`, menu
@@ -131,9 +201,10 @@ After `webrain_navigate(url)`, check `challenge` in the response:
   fetch it plain-HTTP (not blocked).
 - **`challenge: cloudflare_challenge`** (title "Just a moment…", `_cf_chl*`,
   `cf-turnstile`) or **`blocked`** (403/forbidden) → the page is gated:
-  - **obscura CANNOT pass it** (no layout engine → iframe never renders;
-    V8 watchdog kills the challenge script — proven: nowsecure, cf-turnstile,
-    cf-antibot all fail).
+  - **obscura CANNOT pass it from a cold start** (no layout engine → iframe never
+    renders; V8 watchdog kills the challenge script — proven: nowsecure,
+    cf-turnstile, cf-antibot all fail). Headless Chrome is detected too
+    (`crippled: true`). **Headed real Chrome** does pass.
   - **Solution — persistent profile + real Chrome + session** (native):
     1. Launch real Chrome on a persistent profile: `webrain launch <service>
        <profile> <login_url>` (or `webrain_session(op=login, ...)` for native
@@ -149,8 +220,28 @@ After `webrain_navigate(url)`, check `challenge` in the response:
        extract normally.
     Interactive Turnstile/hCaptcha the native path can't claim need a human in
     the headed browser (`waiting_for_human:true`).
+  - **Moving the solved clearance to obscura stealth works (verified
+    2026-11-25).** Export the cookies from the Chrome that
+    passed (`webrain_session{op:"cookies"}`, keep the target-domain cookies
+    including `cf_clearance`), import them with
+    `webrain_session{op:"setcookies"}` **without a `session_id`** — that writes
+    the MCP's default connection — then `webrain_batch` **without `cdp_urls`**
+    so the batch reuses that same connection. Requirements: obscura **v0.2.7+
+    stealth build** (BoringSSL TLS impersonation) launched with
+    `--user-agent` equal to the minting Chrome's UA — via `webrain obscura`, set
+    `WEBRAIN_OBSCURA_USER_AGENT` (and `WEBRAIN_OBSCURA_PROXY` for a matched
+    egress) instead of editing the launch by hand — and the same egress IP.
+    New obscura connections do NOT inherit the cookie (duplicated `cdp_urls`
+    and a `--storage-dir` profile were both still challenged), so the cleared
+    batch stays on ONE connection — but that connection runs K tabs
+    concurrently, it does not serialize: measured 20 recipes in 4.6–9.7 s and
+    50 recipe pages at K=6 in **10.5 s** (23.9 s serial), all
+    `challenge:false`.
+  - **Fastest when the clearance holder is Chrome:** batch on Chrome instead —
+    `cdp_urls:["http://127.0.0.1:<chrome-port>"]`, `concurrency: 6`; Chrome
+    shares the profile's cookies across tabs (20 recipes in 4.6 s).
   - **Non-interactive** Turnstile / basic bot detection → obscura `--stealth`
-    may pass (still verify via the `challenge` field).
+    may pass from a cold start (still verify via the `challenge` field).
 
 ### 2c. Interactive challenge → which input primitive
 
@@ -200,7 +291,7 @@ Gate on the **interaction**, not the markup: a page whose submit button is still
 `disabled` and whose list is empty has not mounted, even with the right title and
 `challenge: null`.
 
-Measured cause on `https://www.ab.gr/storelocator` (2026-10-24, real Chrome): the
+Measured cause on a Next.js store-locator SPA (2026-10-24, real Chrome): the
 injected stealth shim, not the site.
 
 - A fake `navigator.plugins` (built with `Object.create(PluginArray.prototype)`)
@@ -238,7 +329,7 @@ DOM order counted.
 Why it matters: an SPA list page usually renders the same cards **twice** — a
 hidden mobile container first, the visible desktop copy second — so a
 `querySelector`-based waiter locked onto the hidden copy and `visible` never
-arrived. Measured on `masoutis.gr` (27 search URLs, `wait_selector: "div.product"`,
+arrived. Measured on a 27-URL grocery search list (`wait_selector: "div.product"`,
 `concurrency: 6`, 2026-11-06):
 
 | setting | wall | result |
@@ -507,20 +598,35 @@ STEP 6: extract (§3) → done
 | lightpanda | ❌ | ❌ | ~ | ❌ fake placeholder PNG |
 
 Measured on **v0.2.5** (2026-10-24): the render build paints — `obscura fetch
-<url> -s out.png` wrote a 63 KB PNG — but a data-driven SPA can still stay
-**unmounted**. `ab.gr/eshop/search` returns a ~1 MB shell with an empty Apollo
-state (~518 B), 0 product links and 0 prices, both at the default 30 s script
-deadline and with `OBSCURA_SCRIPT_DEADLINE_MS=120000`, and both through
-`webrain_batch` and the bare binary (no webrain injection). Obscura's own stderr
-names the cause: React hydration throws `TypeError: Cannot read properties of
-undefined (reading 'firstChild')` in `_next/.../_app.js`, so the app never mounts.
+<url> -s out.png` wrote a 63 KB PNG — but a data-driven SPA stays **unmounted**.
+A large supermarket SPA search page returns a ~1 MB shell with an empty Apollo
+state (~518 B), 0 product links, 0 prices and no consent modal, both at the
+default 30 s script deadline and with `OBSCURA_SCRIPT_DEADLINE_MS=120000`, and
+both through `webrain_batch` and the bare binary (no webrain injection).
+Obscura's own stderr names the cause: React hydration throws
+`TypeError: Cannot read properties of undefined (reading 'firstChild')` in
+`_next/.../_app.js`, so the app never mounts.
+
+**This was fixed upstream in v0.2.6 / v0.2.7.** v0.2.6 gave 28 missing HTML
+interface globals distinct prototypes (`#1387`) and v0.2.7 did the same for 24
+more aliased interfaces (`#1482`). Re-measured 2026-11-25 on **v0.2.7**: the
+interface probe passes (`HTMLTemplateElement.prototype !== Element.prototype`,
+`createElement('template').constructor.name === 'HTMLTemplateElement'`), and
+the same SPA search page mounts natively — 20 product cards, the full result
+count, prices, and the cookie-consent modal that had never rendered on v0.2.5.
+Accept it with a click on its accept button (writes `VersionedCookieConsent`).
+The `HTMLTemplateElement` init-script polyfill used on v0.2.5 is **obsolete on
+v0.2.7 — remove it**. Upgrade with `webrain install --engine obscura --stealth
+--force`; a plain `webrain install --engine obscura` prints "already installed"
+and changes nothing.
 
 The missing DOM API is **per-tag element interfaces**. Obscura exposes one class
 for every element, so `HTMLTemplateElement.prototype === Element.prototype` is
-`true` (Chrome: `false`). AB's `_app.js` feature-detects `HTMLTemplateElement` and
-polyfills `firstChild` on it — which on obscura patches `firstChild` for **all**
-elements, and `get firstChild(){ return this.content.firstChild }` throws on any
-plain node. Verified both ways: obscura `sameProto: true` → `TypeError`; Chrome
+`true` (Chrome: `false`). The site's `_app.js` feature-detects
+`HTMLTemplateElement` and polyfills `firstChild` on it — which on obscura
+patches `firstChild` for **all** elements, and
+`get firstChild(){ return this.content.firstChild }` throws on any plain node.
+Verified both ways: obscura `sameProto: true` → `TypeError`; Chrome
 `sameProto: false` → no throw, `<div>.firstChild` still works. Obscura's docs
 document SVG interface ancestry ("supports interface checks in page scripts") but
 never mention `HTMLElement`, `customElements` or `tagName`.
@@ -535,11 +641,10 @@ not "can boot a data-driven SPA."**
 The probe is a property of the **engine build**, not of the site: it returns the
 same answer for every SPA on that build. A failing probe means "this engine
 cannot boot data-driven SPAs at all", so it is not a per-site verdict — do not
-read it as "obscura dislikes ab.gr". Obscura v0.2.5 fails it, so ab.gr is a
-Chrome case on both counts (Chrome also extracts it in ~2 s, so obscura would
-never have been the only viable engine). If a later obscura build returns `false`,
-the whole class is worth re-testing at once — and still verify the extracted
-fields, not the engine name.
+read it as "obscura dislikes this site". Obscura ≤ v0.2.5 fails it; v0.2.6+
+passes and v0.2.7 mounts it natively (verified 2026-11-25). Still verify the
+extracted fields, not the engine name, and re-run the probe after any engine
+upgrade — it is the fastest way to know whether SPA support is in that build.
 
 When in doubt: navigate, read the `challenge` field, choose accordingly.
 webrain auto-selects the best asset for your platform + stealth preference

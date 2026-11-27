@@ -17,6 +17,7 @@ pub mod byok;
 pub mod captcha;
 pub mod engines;
 pub mod httpcache;
+pub mod injection;
 pub mod install;
 pub mod launch;
 pub mod login;

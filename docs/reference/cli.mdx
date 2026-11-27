@@ -15,7 +15,24 @@ binary reads**, grouped (attach/engines, stealth, network, MCP transport, vault,
 SERP tiers, agent, local AI, logging). The defaults and the long explanations
 live in [Environment Variables](/reference/environment); `webrain help env`
 prints just that section and `webrain <command> --help` prints one command's
-flags.
+page.
+
+Help follows the command path, so the deeper commands have their own page
+rather than a paragraph on their parent's:
+
+```bash
+webrain install --help         # the install page + SUBCOMMANDS
+webrain install watch --help   # ffmpeg/yt-dlp/whisper bundle, its own flags
+webrain vault rm --help        # one vault action
+webrain help install copilot   # `webrain help <cmd> [<sub>]` works too
+```
+
+`SUBCOMMANDS` is derived from the same table the overview is, so a parent page
+cannot advertise a subcommand that has no page. A path that names nothing is
+answered by its nearest parent and says what missed: `webrain install chat
+--help` prints the install page with `No page for install chat` under it, which
+is the honest answer — `chat` is not an `install` subcommand (`copilot` and
+`chat-ui` are).
 
 ## Commands
 
@@ -23,6 +40,8 @@ flags.
 |---|---|
 | `webrain mcp [--http <port>]` | Start the MCP server (stdio, or HTTP on a port) |
 | `webrain install [--force] [--engine chrome\|obscura\|lightpanda\|whisper\|vision\|watch] [--stealth] [--model NAME\|ID] [--model-update]` | Download a browser engine, or the local AI stack: `watch` = ffmpeg+yt-dlp+whisper-cli+model, `whisper` = STT GGUF model, `vision` = llama-server + one local vision model (ids in the [installation guide](/installation#optional-bundles)) |
+| `webrain install skills [--force]` | Write the bundled operator skills — compiled into the binary, so it needs no network and cannot drift from the build that serves them. Files you edited are kept unless `--force` |
+| `webrain install copilot` / `chat-ui` / `pdfium` / `nemotron` | The other non-engine pieces: the Copilot runtime `chat` drives (keyed on this build's pin), the page `chat --serve` serves (verified against four digests), the PDF render library, and local dictation. `webrain upgrade` runs the two your install already has |
 | `webrain uninstall vision [--model ID \| --all]` | Remove one installed local vision model, or all of them (also clears a legacy single-model install) |
 | `webrain upgrade` | Update to the latest release |
 | `webrain diff <a> <b> [--max N] [--json]` | What changed between two pages, or a page and a saved baseline. Either side is an http(s) URL or a local file; no browser. Exit 1 when they differ |
@@ -44,6 +63,37 @@ flags.
 | `webrain read <url> [--outline] [--filter TEXT] [--max N] [--json] [--proxy URL] [--browser]` | A page as markdown. Plain HTTP by default: asks for `text/markdown` first, retries `<path>.md` / `<path>/index.md`, converts only as a last resort, and reports the nearest `llms.txt`. **`--browser` renders the page in the attached Chrome instead** and runs the same tail (`source: browser`), which is the answer for a host that answers 403 to every plain HTTP client — the error names the flag when that happens. `--outline` prints the heading tree, `--filter` one section. No model either way |
 | `webrain pdf <file.pdf \| url> [--json]` | A PDF's text as markdown, with a stderr line naming the pages the text layer cannot deliver. No browser, no model |
 | `webrain doctor` | Full install diagnosis — version, MCP server, CDP ports (9222/9224/9225), engine discovery, vault, `recommend` |
+| `webrain skills [list]` | What is installed, and where — the directory `webrain_guide(topic="skill:<name>")` reads |
+| `webrain skills add <url\|path>` | Install **one** skill from any URL or file. The frontmatter `name:` is the identity (the file is stored under its slug), so a file without one is refused, as is anything over 64 KiB |
+| `webrain skills rm <name>` | Remove **every** copy of one skill — a leftover second copy would silently become the skill again. `remove` is the same action |
+
+## Skills
+
+A skill is a plain `.md` file the agent reads through
+`webrain_guide(topic="skill:<name>")` — house rules, a login procedure, a
+customer's conventions — without recompiling anything. There are two commands
+and they do different jobs:
+
+```bash
+webrain install skills                  # the BUNDLED set, offline
+webrain skills add <url|path>           # ONE skill, from anywhere
+webrain skills                          # what is installed, and where
+webrain skills rm <name>
+```
+
+`install skills` writes the eight skills compiled into this binary — `webrain`,
+`web-research`, `product-market-research`, `auth-media-vision`, `credentials`,
+`monitoring`, `page-tiles`, `pdf-extraction`, plus their references/workflows —
+and keeps any file you have edited unless `--force` is passed. `skills add` takes
+a path or a URL, so a third-party skill — including one an `npx skills add`
+installer already dropped in `.agents/skills/<name>/SKILL.md` — becomes readable
+by the agent.
+
+Where they land: `WEBRAIN_SKILLS_DIR`, defaulting to `<engine cache>/skills`
+(`%LOCALAPPDATA%\webrain\browsers\skills` on Windows). `install skills` also
+warns when a skill names a `webrain_*` tool this build does not expose — a skill
+written for a newer release says so instead of failing at call time. The tool
+side of all this is in [Tools](/reference/tools).
 
 ## Index-driven interaction
 

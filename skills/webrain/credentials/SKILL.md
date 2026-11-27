@@ -1,7 +1,10 @@
 ---
 name: credentials
 description: 'Secure credential handoff for any MCP-server task. Use automatically when a task prompt mentions login, credentials, password, sign in, log in, auth, or token (e.g. "login to instagram with credentials then scrape posts"). The rule: secrets NEVER pass through the model — have the user type them into a terminal or headed browser, set env vars, or store them in the local vault; reference them without ever seeing, printing, or logging the values.'
-argument-hint: 'The task that needs credentials (e.g. login to instagram and scrape 20 posts)'
+license: MIT
+compatibility: Requires the webrain binary on the host plus an MCP-capable client (or the webrain CLI); browser engines are installed by `webrain install` and need network access on first run.
+metadata:
+  argument-hint: 'The task that needs credentials (e.g. login to instagram and scrape 20 posts)'
 ---
 
 # /credentials — never see the secret

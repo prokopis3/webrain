@@ -105,6 +105,43 @@
   let past = $state(null); // history being read, or null for live
   let viewing = $state(""); // which conversation `past` belongs to
   let convos = $state([]);
+  // The rail grows as it is scrolled: 20 rows to start, the next 20 when the end
+  // comes into view, and no button to press. `more` is the server's own answer to
+  // "is there another page" — one row past the page is what it costs to know.
+  const PAGE = 20;
+  let moreSessions = $state(false);
+  let loadingMore = $state(false);
+  // Where the next page starts in the server's list. The rail's own row count is
+  // the wrong number: row 0 can be the "(new conversation)" placeholder, which is
+  // not in the store, so counting rows asked one row past the page and a
+  // conversation fell through the gap.
+  let railNext = $state(0);
+  async function loadMore() {
+    if (loadingMore || !moreSessions) return;
+    loadingMore = true;
+    try {
+      const r = await fetch(`/sessions?limit=${PAGE}&offset=${railNext}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      const have = new Set(convos.map((c) => c.id));
+      convos = [...convos, ...(j.sessions || []).filter((c) => !have.has(c.id))];
+      moreSessions = j.more === true;
+      railNext = j.next ?? railNext + PAGE;
+    } catch {
+      /* the rail keeps what it has */
+    } finally {
+      loadingMore = false;
+    }
+  }
+  // Reading a thread lifts it to the top, immediately — the row moves under the
+  // click that opened it, before the transcript has arrived. A thread the rail was
+  // not showing (found by search, several pages down) gets a bare row that the
+  // next list read fills in.
+  function toTop(id) {
+    if (!id) return;
+    const row = convos.find((c) => c.id === id);
+    convos = row ? [row, ...convos.filter((c) => c.id !== id)] : [{ id, title: "", ts: "", n: 0 }, ...convos];
+  }
   let current = $state("");
   let turns = $state([]); // per-turn ledger of the live conversation, newest first
   let pastTurns = $state([]); // the ledger of the conversation being read
@@ -184,8 +221,11 @@
         ? catalog.items
         : catalog.items.filter((r) => r.kind === want || (want === "tool" && r.kind === "builtin"));
     // A builtin the Runtime tab switched off is not offered in `#`: that menu is
-    // what the model can reach this session, not a catalogue of what exists.
-    const usable = rows.filter((r) => !(r.kind === "builtin" && builtinOff.includes(r.name)));
+    // what the model can reach this session, not a catalogue of what exists —
+    // and one the runtime withheld is not reachable at all.
+    const usable = rows.filter(
+      (r) => !withheld.has(r.name) && !(r.kind === "builtin" && builtinOff.includes(r.name)),
+    );
     // What the draft already names is not offered again — a pick always writes
     // `@name `, so the trailing space is the boundary that keeps `@web` from
     // hiding `@webrain`. The menu answers "what can I still add".
@@ -468,16 +508,35 @@
   let ctxOpen = $state(false);
   let ctxBusy = $state(false);
   const ctxPct = $derived(ctx?.limit ? Math.min(100, (ctx.used / ctx.limit) * 100) : 0);
+  // The panel's own total: the attribution is the same measurement and is there
+  // before the first turn, when the system prompt and the tool definitions are
+  // already in the window and `usage_info` has not spoken yet. Reading `ctx.used`
+  // alone said "0 / 128k" above a list of rows adding up to 16k.
+  const ctxUsed = $derived(Math.max(ctx?.used || 0, ctxInfo?.totalTokens || 0));
+  const ctxUsedPct = $derived(ctx?.limit ? Math.min(100, (ctxUsed / ctx.limit) * 100) : 0);
   // 230.5K / 1M, the way a window is spoken about.
   const toks = (n) =>
     n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+
+  async function seedCtx() {
+    try {
+      const j = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
+      if (!ctx && j.promptTokenLimit) {
+        ctx = { used: j.totalTokens || 0, limit: j.promptTokenLimit };
+      }
+    } catch {
+      /* no ring until the first turn reports one */
+    }
+  }
 
   async function openCtx() {
     ctxOpen = !ctxOpen;
     if (!ctxOpen) return;
     ctxInfo = null;
     try {
-      ctxInfo = await (await fetch("/context")).json();
+      // The conversation's own window and cache: each one runs its own session, so
+      // asking without naming it reported whichever thread was opened last.
+      ctxInfo = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
     } catch {
       ctxInfo = { error: "the server is not reachable" };
     }
@@ -492,7 +551,12 @@
     const a = ctxInfo?.attribution?.contextAttribution;
     const c = a?.categories;
     if (!c) return [];
-    const lim = a.limit || ctxInfo.promptTokenLimit || 0;
+    // The session's budget, not the model's advertised window: the header above
+    // these rows is `used / promptTokenLimit`, and this page's ring and the
+    // runtime's compaction both speak that number. Measured on a 1M-context
+    // model the two differ — rows read 1.5% against the header's 12% for the
+    // same tokens, which is two bases in one panel.
+    const lim = ctxInfo.promptTokenLimit || a.limit || 0;
     const row = (label, n) => {
       const p = lim ? (n / lim) * 100 : 0;
       // A share under a tenth of a percent is not zero, and "0.0%" reads as zero.
@@ -502,11 +566,24 @@
       row("System Instructions", (c.systemPrompt || 0) + (c.customInstructions || 0)),
       row("Tool Definitions", (c.systemTools || 0) + (c.mcpTools || 0)),
     ].filter((r) => r.n > 0);
-    const user = [row("Messages", c.messages || 0)].filter((r) => r.n > 0);
+    // Tool results are their own line, out of the runtime's per-source `entries`:
+    // `kind: "tool"` is the tokens one tool's output left in the window, and the
+    // categories roll it into `messages` ("user/assistant/tool message tokens").
+    // Subtracting keeps the two rows adding up to the runtime's own figure instead
+    // of showing the same tokens twice — VS Code does the same, reporting what the
+    // entries do not cover as Messages.
+    const listed = ctxInfo?.attribution?.contextAttribution?.entries;
+    const toolResults = Array.isArray(listed)
+      ? listed.filter((e) => e.kind === "tool").reduce((n, e) => n + (e.tokens || 0), 0)
+      : 0;
+    const user = [
+      row("Messages", Math.max(0, (c.messages || 0) - toolResults)),
+      row("Tool Results", toolResults),
+    ].filter((r) => r.n > 0);
     // Everything the runtime counted into the prompt that its own categories do
     // not name. Derived, never guessed: the remainder, shown only when there is
-    // one. (There is no Tool Results row: this SDK reports user, assistant and
-    // tool messages as one `messages` figure, so a split would be invented.)
+    // one. Tool Results was taken out of `messages` above, so it is not counted
+    // a second time here.
     const known = (c.systemPrompt || 0) + (c.customInstructions || 0) + (c.systemTools || 0) +
       (c.mcpTools || 0) + (c.messages || 0);
     const other = Math.max(0, (ctxInfo.totalTokens || 0) - known);
@@ -557,7 +634,7 @@
         })
       ).json();
       push({ kind: j.error ? "err" : "note", text: `compact: ${j.text || j.error || "done"}` });
-      ctxInfo = await (await fetch("/context")).json();
+      ctxInfo = await (await fetch(`/context?convo=${encodeURIComponent(current)}`)).json();
     } catch {
       push({ kind: "err", text: "compact: the server is not reachable" });
     } finally {
@@ -627,6 +704,14 @@
       : /(progress|doing|active|start)/i.test(s || "")
         ? "▸ "
         : "· ";
+  const todoDone = (t) => /^(done|complet|finish|✓|✔)/i.test(t?.status || "");
+  // The one row the collapsed summary names: the step in progress, else the next
+  // still open. That is the line VS Code's list keeps visible while folded.
+  const activeTodo = $derived(
+    todos.find((t) => /(progress|doing|active|start)/i.test(t.status || "")) ??
+      todos.find((t) => !todoDone(t)) ??
+      null,
+  );
   // The prompts this page drew a bubble for, so the runtime's echo of the same
   // message does not draw a second one. Not rendered, so not reactive.
   let echoed = [];
@@ -759,6 +844,14 @@
   // from its `configuration` event. Shown in the tools checklist because a list
   // of what the model *has* cannot explain a tool that never appears.
   let runtimeOff = $state("");
+  // Built-ins this session cannot call, from the catalogue's own flag. The list
+  // is the runtime's *registry* (33 names); the allowlist the session was built
+  // with serves a handful, and a checkbox for the rest was a switch wired to
+  // nothing — ticking `powershell` changed nothing and the model kept answering
+  // `no such tool exists in this session`.
+  const withheld = $derived(
+    new Set(catalog.items.filter((r) => r.kind === "builtin" && r.live === false).map((r) => r.name)),
+  );
   const builtinOn = (name) => !builtinOff.includes(name);
   function toggleBuiltin(name) {
     builtinOff = builtinOn(name)
@@ -820,10 +913,10 @@
   // "open history" painted all of them at once.
   const list = $derived(past ?? items);
   const hiddenCount = $derived(Math.max(0, list.length - tail));
-  // The conversation the running turn belongs to: the one a foreign frame named,
-  // or this one when the turn is ours. `busy` alone is a fact about the server,
-  // not about where the work is.
-  const runningConvo = $derived(runningIn || (busy ? busyConvo : ""));
+  // The conversation the running turn belongs to. This tab's own turn wins over a
+  // foreign one: two conversations can now be mid-turn at the same time, and the
+  // Stop button and the "working" state belong to the thread on screen.
+  const runningConvo = $derived(busy ? busyConvo || current : runningIn);
   const shown = $derived(list.length > tail ? list.slice(-tail) : list);
   // Which ledger the panel is reading: a saved conversation shows its own, so
   // the numbers stop changing to the live one's the moment you open history.
@@ -856,8 +949,12 @@
       };
     }
     const t = ledger[0];
+    // The cache share is the one header number a reopened conversation used to
+    // lose: the stored row has `cached` and `input`, so the same ratio comes back
+    // instead of an em-dash where a percentage was.
+    const hit = t && t.input > 0 ? `${Math.round(((t.cached ?? 0) / t.input) * 100)}%` : "—";
     return t
-      ? { model: t.model, tok: `${t.input} / ${t.output}`, speed: t.speed, hit: "—", cost: t.cost }
+      ? { model: t.model, tok: `${t.input} / ${t.output}`, speed: t.speed, hit, cost: t.cost }
       : { model: "—", tok: "— / —", speed: "—", hit: "—", cost: "—" };
   });
   // Nothing measured yet: the header and the panel say so once, instead of
@@ -1772,9 +1869,13 @@
       sources: sources.length,
     };
     turns = [turn, ...turns];
-    // Same numbers, on disk: reopening this conversation from history replays
-    // them instead of showing a column of blanks.
-    fetch("/ledger", { method: "POST", body: JSON.stringify({ n: turn.n, turn }) }).catch(() => {});
+    // Same numbers, on disk, under the conversation that earned them: reopening
+    // this conversation from history replays them instead of showing a column of
+    // blanks, and a background turn's row does not land in the thread on screen.
+    fetch("/ledger", {
+      method: "POST",
+      body: JSON.stringify({ n: turn.n, turn, convo: current }),
+    }).catch(() => {});
     const steps = turnSteps();
     // What the turn cost in time and in motion, on the same line as the bill: the
     // prompt row's timestamp is the turn's start, so a reload-safe clock is one
@@ -1813,12 +1914,20 @@
 
   async function loadSessions() {
     try {
-      const r = await fetch("/sessions");
+      // One page: the rail grows as it is scrolled, so the boot reads 20 rows
+      // instead of every conversation this machine ever had. Once the reader has
+      // scrolled, re-reading keeps that depth instead of collapsing the list.
+      const r = await fetch(`/sessions?limit=${Math.max(PAGE, convos.length)}&offset=0`);
       if (!r.ok) return;
       const j = await r.json();
       current = j.current || "";
       convos = j.sessions || [];
-      pruneSetups(convos, current);
+      moreSessions = j.more === true;
+      railNext = j.next ?? convos.length;
+      // Nothing reports the window before a turn, so the ring did not exist while
+      // 16k of system prompt and tool definitions were already in it. One read of
+      // the runtime's own accounting is enough to draw it.
+      if (!ctx) seedCtx();
       // A turn keeps running on the server across a reload; without this a
       // refreshed page looks idle while the agent is still working. Only ever
       // raised here — `assistant.idle` is what lowers it, so a turn this page
@@ -2022,6 +2131,10 @@
       backToLive();
       return follow();
     }
+    // The thread you just picked belongs at the top of the rail, the way every
+    // chat app orders it. The server records the same fact in `seen`, so this is
+    // only the immediate half — a reload comes back in the same order.
+    toTop(id);
     // Claim either way — it is what makes the next turn land in this thread —
     // but only pay for the transcript when this tab does not already hold it.
     // One request on a first open, a header-sized one on a revisit.
@@ -2041,6 +2154,15 @@
     // the tool calls, not just the prose that mentioned them. A conversation
     // saved before transcripts were kept still opens from its words.
     past = rowsOf(j);
+    // A row the rail did not have — a Ctrl+K hit several pages down — was inserted
+    // with no title, so it read as a blank line until the next list read. The first
+    // thing the user said is what the server titles a thread by; take it from here.
+    const mine = convos.find((c) => c.id === id);
+    const first = mine && !mine.title ? past.find((r) => r.kind === "user" && r.text) : null;
+    if (first) {
+      const title = first.text.slice(0, 90);
+      convos = convos.map((c) => (c.id === id ? { ...c, title } : c));
+    }
     pastTurns = j.turns || [];
     viewing = id;
     route(id);
@@ -2053,6 +2175,14 @@
     // the transcript save lands on the wrong id.
     swapDraft(id);
     current = id;
+    // Coming back to a thread that never stopped: the rail's row says whether the
+    // server is still working on it, and a tab that showed an idle composer over a
+    // live turn was how "my answer vanished" looked.
+    const running = convos.find((c) => c.id === id);
+    if (running) {
+      busy = !!running.busy;
+      busyConvo = busy ? id : "";
+    }
     seededFor = id;
     turns = pastTurns;
     // The live pane is this conversation now, so the rows it was holding belong
@@ -2519,7 +2649,9 @@
     fetch("/mode", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: mode === "plan" ? "plan" : "interactive" }),
+      // The conversation whose session takes the mode. Each one runs its own, so a
+      // switch made here must not land on whichever thread was opened last.
+      body: JSON.stringify({ mode: mode === "plan" ? "plan" : "interactive", convo: current }),
     }).catch(() => {});
     const r = await fetch("/turn", {
       method: "POST",
@@ -2531,6 +2663,10 @@
         tools: toolsSel,
         tools_off: builtinOff,
         delivery,
+        // The conversation this turn belongs to. The server keeps one session per
+        // conversation, so without this a turn started from a thread you are not
+        // looking at would land on whichever one the page opened last.
+        convo: current,
         // Only what the operator typed: the render hint and the suggestion
         // contract are standing instructions now, held by the session.
         instructions,
@@ -2857,7 +2993,9 @@
       } else if (o.name === "context") {
         // What the window costs right now, in the runtime's own accounting.
         try {
-          const j = await (await fetch("/context")).json();
+          const j = await (
+            await fetch(`/context?convo=${encodeURIComponent(current)}`)
+          ).json();
           push({
             kind: "note",
             text: j.error
@@ -3302,7 +3440,7 @@
     if (switching) return false;
     switching = model || "…";
     try {
-      const r = await fetch("/switch", {
+      const r = await fetch(`/switch?convo=${encodeURIComponent(current)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ provider, model, effort }),
@@ -3318,7 +3456,9 @@
         kind: "note",
         text: j.restarted
           ? `${j.provider} · ${j.model} — a new session, so the model starts without this transcript's context`
-          : `${j.model} · effort ${j.effort || "the model's default"}`,
+          : j.pending
+            ? `${j.model} · saved for this chat — it applies to the first turn`
+            : `${j.model} · effort ${j.effort || "the model's default"}`,
       });
       return true;
     } catch (e) {
@@ -3523,6 +3663,16 @@
   async function deleteConvo(id) {
     await fetch(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
     cache.delete(id);
+    // Its per-conversation setup goes with it — the one place a key is dropped,
+    // because it is the one place the page *knows* the conversation is gone. (The
+    // menu used to sweep every key not on the list it had read; once the list
+    // became a page, that sweep deleted the setups of every conversation further
+    // down. A stale key is a few dozen bytes, which is cheaper than losing one.)
+    try {
+      localStorage.removeItem(setupId(id));
+    } catch {
+      /* private mode */
+    }
     if (past) past = null;
     loadSessions();
   }
@@ -3663,23 +3813,6 @@
     if (Array.isArray(s.off)) builtinOff = s.off;
   }
 
-  // One setup key per conversation is fine; one per conversation that ever
-  // existed is a leak, because the server keeps a bounded history and the rest
-  // are gone. Dropped whenever the menu is reloaded — the thread list is the
-  // only authority on which conversations still exist.
-  function pruneSetups(list, keep) {
-    try {
-      const live = new Set([keep, ...list.map((c) => c.id)]);
-      for (const k of Object.keys(localStorage)) {
-        if (k.startsWith(SETUP_PREFIX) && !live.has(k.slice(SETUP_PREFIX.length))) {
-          localStorage.removeItem(k);
-        }
-      }
-    } catch {
-      /* private mode, or a full quota — nothing to prune */
-    }
-  }
-
   // What the conversation on screen was held with, and whether that is still what
   // this runtime is running. Both halves matter: a different model is a restart
   // of the live session, so the page asks rather than doing it.
@@ -3758,12 +3891,23 @@
   // say so instead of letting a site's odd behaviour look like ours.
   let stealthOff = $state(false);
 
+  // True when this chat carries its own saved switches rather than inheriting
+  // the defaults. A chat that never saved one answers the defaults, which is
+  // what makes a brand-new chat behave like the last one you configured.
+  let rtOwn = $state(false);
+  // Opt-in on save: the same switches become what every NEW chat starts from.
+  let rtDefault = $state(false);
+
   async function loadSettings() {
     try {
-      const r = await fetch("/settings");
+      // Scoped to the open conversation: two chats can hold different switches,
+      // and a closed one still answers what it was held with.
+      const r = await fetch(`/settings?convo=${encodeURIComponent(current)}`);
       if (!r.ok) return;
       const j = await r.json();
       stealthOff = j.stealth?.noise === false;
+      rtOwn = j.own === true;
+      rtDefault = false;
       // The page appended the standing hints to what is stored; the field shows
       // the operator's own words only, so they come back out here.
       if (j.settings) rt = { ...rt, ...j.settings, instructions: stripHints(j.settings.instructions) };
@@ -3782,19 +3926,28 @@
     try {
       // The standing hints ride along, or saving the Runtime tab would wipe the
       // one thing keeping `html` mode and the suggestion tail in force.
-      const body = { ...rt, instructions: withHints(rt.instructions, rawHtml) };
-      const r = await fetch("/settings", {
+      const body = {
+        ...rt,
+        instructions: withHints(rt.instructions, rawHtml),
+        default: rtDefault,
+      };
+      // The conversation rides the query, the way every other route names it: one
+      // resolution point on the server, so a save can never land on another chat.
+      const r = await fetch(`/settings?convo=${encodeURIComponent(current)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
       const j = await r.json();
       if (!j.restart && !j.patched?.error) hintsPushed = body.instructions;
+      rtOwn = true;
       rtSaved = j.restart
-        ? "saved — the next turn restarts the session, and its prompt cache starts over"
+        ? "saved for this chat — the next turn restarts the session, and its prompt cache starts over"
         : j.patched?.error
           ? `saved, but the live session refused it: ${j.patched.error}`
-          : "saved — patched into the live session, nothing restarted";
+          : j.default
+            ? "saved for this chat, and as the default every new chat starts from"
+            : "saved for this chat — patched into the live session, nothing restarted";
     } catch {
       rtSaved = "could not save: the server is not reachable";
     }
@@ -3930,10 +4083,14 @@
   // cards read, into rows `flip` already knows how to act on — one toggle
   // implementation whether the switch is in the transcript or in the panel.
   let manage = $state({ skills: [], mcp: [], prompts: [], resources: [], agents: [], agentCurrent: null });
+  // Which of the three registry tabs is still reading. The lists used to appear
+  // empty until four routes answered, which reads as "nothing installed".
+  let mngBusy = $state(false);
   // The settings lists are the model picker's list, so they get its filter too —
   // the cross-tool skill tree alone can be hundreds of rows.
   let skillFilter = $state("");
   async function loadManage() {
+    mngBusy = true;
     try {
       const [s, m, items, ag] = await Promise.all([
         fetch("/skills").then((r) => r.json()),
@@ -3981,6 +4138,8 @@
       if (ag.current && ag.current.error) toast(`agents: ${ag.current.error}`, "err");
     } catch {
       /* a panel with no rows beats one that lies about what is installed */
+    } finally {
+      mngBusy = false;
     }
   }
 
@@ -4164,7 +4323,12 @@
     }
   }
 
-  $effect(() => {
+  // Boot, once. The body reaches `pushHints` through `loadSettings`, which reads
+  // the instructions, the html switch and the value it last pushed — and the POST
+  // that follows then writes that last one, so a tracked block ran the whole boot
+  // twice. Measured on an empty chat: 23 requests, two `/sessions`, two `/catalog`,
+  // three `/settings`. Nothing here has to re-run, so it is untracked.
+  $effect(() => untrack(() => {
     loadSettings();
     loadPmode();
     loadPending();
@@ -4264,7 +4428,7 @@
       document.removeEventListener("click", ripple);
       if (raf) cancelAnimationFrame(raf);
     };
-  });
+  }));
 
   // A live chip asks for its own summary as it appears — a row that just ran is
   // open, and its sources are the evidence. A row from disk waits for its
@@ -5212,7 +5376,14 @@
                   {/each}
                 </div>
               {/if}
-              {item.files?.length ? withoutLines(item.text) : item.text}
+              {#if item.files?.length}
+                {withoutLines(item.text)}
+              {:else}
+                <!-- A mention reads as a thing you picked, not as words: the same
+                     `markInput` that tints the draft paints the sent message, so a
+                     thread shows at a glance what was handed to the turn. -->
+                {@html markInput(item.text)}
+              {/if}
             </div>
           {/if}
         </div>
@@ -5318,7 +5489,16 @@
     >
   {/if}
 
-  <aside class="rail" inert={!panelOpen}>
+  <aside
+    class="rail"
+    inert={!panelOpen}
+    onscroll={(e) => {
+      // 240 px of runway: the next page is asked for before the end is visible, so
+      // the list reads as continuous rather than "stopped, then jumped".
+      const el = e.currentTarget;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) loadMore();
+    }}
+  >
     <!-- Search is the first thing in the rail, because the rail is where history
          lives. Typing replaces the thread list with matches; clearing restores
          it. One field, one place. -->
@@ -5382,12 +5562,12 @@
               class="convo"
               class:on={c.id === (viewing || current)}
               class:reading={!!past && c.id === (viewing || current)}
-              class:run={c.id === runningConvo}
+              class:run={c.id === runningConvo || !!c.busy}
               onclick={() => openConvo(c.id)}
               title={c.id}
             >
               <span class="title">
-                {#if c.id === runningConvo}<i class="rundot" aria-hidden="true"></i>{/if}
+                {#if c.id === runningConvo || c.busy}<i class="rundot" aria-hidden="true"></i>{/if}
                 {c.id === current ? "live · " : ""}{c.title || "(no prompt)"}
               </span>
               <span class="meta">{c.n ? `${c.ts} · ${c.n} msg` : "empty"}</span>
@@ -5428,6 +5608,12 @@
         {/if}
       {/each}
 
+    <!-- The next page is on its way. A circle, not a bar: the list keeps its
+         rows while this turns, and a bar would read as progress nobody measured. -->
+    {#if loadingMore}
+      <p class="none rspin"><span class="spin" aria-hidden="true"></span> loading…</p>
+    {/if}
+
     <div class="side-foot">
       <!-- One line each: a rail this narrow turned a second line into a letter.
            The icon says which panel; the tooltip says what is behind it. -->
@@ -5437,6 +5623,9 @@
         onclick={() => {
           modelOpen = false;
           settingsOpen = true;
+          // The drawer is per conversation, so opening it re-reads that chat's
+          // switches — the page cannot carry them over from the last chat.
+          loadSettings();
         }}
         title="settings — provider, model, tools, runtime switches"
       >
@@ -5573,17 +5762,29 @@
   />
   <!-- The agent's todo rows, above the field and above the attachments: during a
        long run this is what says what it is doing, and a row three screens up in
-       the transcript has already scrolled past. -->
+       the transcript has already scrolled past. Folded it is one line — the step
+       in progress — and opened it is the whole list, the shape the Copilot chat
+       list uses. -->
   {#if todos.length}
-    <div class="qrail todorail">
-      <span class="eyebrow">todo · {todosDone}/{todos.length}</span>
-      {#each todos.slice(0, 4) as t, i (t.id ?? i)}
-        <span class="qchip" title={t.description || t.status || "?"}>
-          <span class="qtext">{todoMark(t.status)}{t.title || t.id}</span>
-        </span>
-      {/each}
-      {#if todos.length > 4}<span class="eyebrow">+{todos.length - 4}</span>{/if}
-    </div>
+    <details class="qrail todorail" open={busy}>
+      <summary>
+        <span class="eyebrow">todo · {todosDone}/{todos.length}</span>
+        {#if activeTodo}
+          <span class="qtext" title={activeTodo.description || activeTodo.status || ""}>
+            {todoMark(activeTodo.status)}{activeTodo.title || activeTodo.id}
+          </span>
+        {/if}
+      </summary>
+      <ol class="todolist">
+        {#each todos as t, i (t.id ?? i)}
+          <li class:done={todoDone(t)}>
+            <span class="qtext" title={t.description || t.status || "?"}>
+              {todoMark(t.status)}{t.title || t.id}
+            </span>
+          </li>
+        {/each}
+      </ol>
+    </details>
   {/if}
   <!-- Attachments are files on disk the agent was told about; the chips are the
        receipt, and the prompt lines are what actually reaches the model. An image
@@ -5628,15 +5829,13 @@
       {/each}
     </div>
   {/if}
-  {#if busy && runningConvo && runningConvo !== current}
-    <!-- There is one live session, and it is busy in another conversation. Saying
-         which one is the difference between "this page is stuck" and "it is
-         waiting for another chat to finish". The owner is `runningConvo`, not
-         `runningIn`: a turn this tab started belongs to a conversation too, and
-         opening a second thread used to hand it this one's stop button. -->
+  {#if runningIn && runningIn !== current}
+    <!-- A conversation you are not reading is still working. It keeps streaming
+         into its own session, so this is news, not a limit: the thread will be
+         exactly where you left it. The rail row carries the same dot. -->
     <p class="runhint">
-      a turn is running in <b>{convos.find((c) => c.id === runningConvo)?.title || runningConvo}</b> — this
-      conversation waits for it
+      <b>{convos.find((c) => c.id === runningIn)?.title || runningIn}</b> is still working — you can
+      reply here
     </p>
   {/if}
   <footer>
@@ -5937,14 +6136,15 @@
         </button>
         {#if ctxOpen}
           <div class="ctxpop">
+            <h3 class="ctx-title">Session Info</h3>
             {#if !ctxInfo}
               <p class="none">reading the runtime's accounting…</p>
             {:else if ctxInfo.error}
               <p class="none">{ctxInfo.error}</p>
             {:else}
               <p class="ctxpop-h">
-                <b>{toks(ctx.used)} / {toks(ctx.limit)} tokens</b>
-                <span>{ctxPct.toFixed(0)}%</span>
+                <b>{toks(ctxUsed)} / {toks(ctx.limit)} tokens</b>
+                <span>{ctxUsedPct.toFixed(0)}%</span>
               </p>
               <!-- One line, the window split the way the rows below read: each
                    segment is a share of the allowance, and the darker one on the
@@ -6023,6 +6223,7 @@
   off={builtinOff}
   allow={autoTools}
   sel={toolsSel}
+  dead={withheld}
   {runtimeOff}
   icons={ICON}
   onclose={() => (toolsOpen = false)}
@@ -6451,7 +6652,9 @@
               placeholder="filter {rows.length} {isSkills ? "skills" : "servers"}"
               bind:value={skillFilter}
             />
-            {#if !shown.length}
+            {#if mngBusy}
+              <p class="mngempty"><span class="spin" aria-hidden="true"></span> reading the registry…</p>
+            {:else if !shown.length}
               <p class="mngempty">
                 {needle
                   ? `nothing matches “${skillFilter.trim()}”`
@@ -6550,7 +6753,9 @@
                 moves it live, so nothing restarts.
               </small>
             </div>
-            {#if !manage.agents.length}
+            {#if mngBusy}
+              <p class="mngempty"><span class="spin" aria-hidden="true"></span> reading the registry…</p>
+            {:else if !manage.agents.length}
               <p class="mngempty">
                 none found — a definition added to the workspace or the user
                 configuration appears here, and the model can write one with
@@ -6784,11 +6989,21 @@
                 approves tools, paths and URLs without asking anyone.
               </small>
             </div>
+            <label class="tcheck">
+              <input type="checkbox" bind:checked={rtDefault} />
+              <span class="box" aria-hidden="true"></span>
+              <span>also make this the default every new chat starts from</span>
+            </label>
             <div class="sfld">
               <button class="linky" onclick={saveSettings}>save runtime settings</button>
               {#if rtSaved}<small>{rtSaved}</small>{/if}
             </div>
-            <small>Stored in settings.json beside the chat database, not in this browser.</small>
+            <small>
+              {rtOwn
+                ? "These belong to this conversation. A chat that never saved its own takes settings.json."
+                : "This chat saved nothing yet — it is running the defaults in settings.json."}
+              Stored in the chat database, not in this browser.
+            </small>
           </div>
         {:else if setTab === "storage"}
           <dl class="facts">
@@ -7813,8 +8028,21 @@
     transition: opacity var(--motion-short) var(--ease); }
   .shot:hover button, .shot button:focus-visible { opacity: 1; }
   /* The todo rail: same chips as the queue, one line, above the attachments. */
-  .todorail { border-style: solid; }
-  .todorail .qchip { border-left: 3px solid var(--tertiary); }
+  .todorail { border-style: solid; display: block; }
+  /* One line folded, the list opened — the shape the Copilot chat todo list
+     uses. `<details>` carries the open/closed state and the keyboard for free. */
+  .todorail > summary { display: flex; align-items: center; gap: var(--s2);
+    cursor: pointer; list-style: none; }
+  .todorail > summary::-webkit-details-marker { display: none; }
+  .todorail > summary::after { content: "▾"; margin-left: auto; color: var(--faint);
+    font-size: 9px; transition: transform var(--motion-short) var(--ease); }
+  .todorail[open] > summary::after { transform: rotate(180deg); }
+  .todorail .qtext { border-left: 3px solid var(--tertiary); padding-left: var(--s2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30rem; }
+  .todolist { list-style: none; margin: var(--s2) 0 0; padding: 0 0 0 var(--s2);
+    display: grid; gap: 2px; max-height: 9rem; overflow-y: auto; }
+  .todolist li { font-size: 12px; color: var(--on-surface-variant); }
+  .todolist li.done { color: var(--faint); text-decoration: line-through; }
   /* The preview you see before sending. It is a blob URL — no round trip, and it
      dies with the list. */
   .attached .thumb { width: 1.5rem; height: 1.5rem; object-fit: cover; border-radius: 3px;
@@ -7870,6 +8098,17 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-skill) 40%, transparent); }
   /* The wipe: the pill grows up from the baseline. Only the paint moves. */
   @keyframes tintin { from { background-size: 100% 0; } to { background-size: 100% 62%; } }
+  /* The same three tints in a sent message. The composer's layer paints
+     transparent glyphs behind a textarea, so the tokens it marks are re-painted
+     here as real text — one rule per sigil over the same `--m-*` tokens, so a
+     `/`, `#` or `@` is the same colour wherever it is drawn. */
+  .msg.user .body :global(mark) { color: inherit; background-color: transparent;
+    border-radius: 0.34em; padding: 0 0.16em;
+    background-image: linear-gradient(var(--tint), var(--tint));
+    background-repeat: no-repeat; background-position: 0 94%; background-size: 100% 62%; }
+  .msg.user .body :global(mark.mc) { --tint: color-mix(in srgb, var(--m-cmd) 22%, transparent); }
+  .msg.user .body :global(mark.mt) { --tint: color-mix(in srgb, var(--m-tool) 22%, transparent); }
+  .msg.user .body :global(mark.ms) { --tint: color-mix(in srgb, var(--m-skill) 24%, transparent); }
   textarea:focus { outline: none; }
   textarea::placeholder { color: var(--faint); }
   .send { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--s1);
@@ -7995,6 +8234,9 @@
     box-shadow: 0 12px 32px rgb(0 0 0 / 0.45); animation: rise var(--motion-short) var(--ease); }
   /* Header says the window, rows say the share of it — the same reading as the
      Copilot chat's session-info panel, in the type this page already uses. */
+  .ctx-title { margin: 0 0 var(--s2); font-family: var(--mono); font-size: 10px;
+    font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--on-surface); }
   .ctxpop-h { display: flex; align-items: baseline; justify-content: space-between;
     gap: var(--s2); margin: 0 0 var(--s2); font-size: 11.5px;
     font-variant-numeric: tabular-nums; }
@@ -8166,6 +8408,14 @@
   .mngname b { font-weight: 600; font-size: 13.5px; letter-spacing: 0.1px; }
   .mngname small { color: var(--dim); font-size: 11.5px; }
   .mngempty { margin: var(--s3) var(--s2); color: var(--dim); font-size: 13px; }
+  /* One spinner for every "this is still arriving": the rail's next page and the
+     three registry tabs. A ring, because it says "working" without claiming how
+     far along anything is. */
+  .spin { display: inline-block; width: 11px; height: 11px; margin-right: var(--s2);
+    vertical-align: -1px; border-radius: 50%; border: 2px solid var(--outline-variant);
+    border-top-color: var(--primary); animation: turn 700ms linear infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+  .rspin { display: flex; align-items: center; padding: var(--s2); }
   .mswitch { flex: none; width: 44px; height: 44px; display: grid; place-items: center;
     border: 0; background: none; cursor: pointer; border-radius: var(--shape-full); }
   .mswitch i { width: 34px; height: 20px; border-radius: var(--shape-full);
