@@ -1,6 +1,6 @@
 ---
-title: Overview
-description: webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping — one binary, three browser engines plus fast no-browser HTTP, 18 intent-based tools, any OS, any MCP client, plus `webrain chat` on your own model key.
+title: "Overview"
+description: "webrain is an open-source Rust MCP server for LLM-driven browser automation and web scraping — one binary, three browser engines plus fast no-browser HTTP, 19 intent-based tools, any OS, any MCP client, plus `webrain chat` on your own model key."
 ---
 
 # What is webrain?
@@ -8,7 +8,7 @@ description: webrain is an open-source Rust MCP server for LLM-driven browser au
 **webrain** is an open-source (MIT) Rust **MCP server** for LLM-driven browser
 automation and web scraping. It is one static binary that drives **three
 browser engines** (Chrome, Lightpanda, Obscura) plus a fast no-browser HTTP
-path, and it exposes **18 intent-based tools** over the Model Context Protocol.
+path, and it exposes **19 intent-based tools** over the Model Context Protocol.
 It also ships `webrain chat`, which runs the agent loop itself against your own
 model key, so you do not need a separate client at all.
 Install it on any system, point any MCP client (GitHub Copilot, Claude, Codex,
@@ -42,8 +42,7 @@ it directly.
 - **Stealth login** — real-Chrome profiles with an encrypted local credential
   vault (AES-256-GCM + optional TOTP); transfer cookies across engines.
 - **Get past challenges** — reads the `challenge` field on every navigate and
-  clears Cloudflare/Turnstile via real Chrome + a persistent profile and native
-  login.
+  uses real Chrome, persistent profiles, and authenticated sessions for protected pages; interactive challenges may still require a human.
 - **See the page** — `webrain_observe` (a11y / semantic / state), plus vision
   tiles (screenshot → vector store) for tables and charts.
 - **Read anything** — `webrain_pdf` (extract + render), JSON-LD, media, plus
@@ -81,5 +80,5 @@ backend drives Chrome, Lightpanda, and Obscura interchangeably.
 - [Agent Decision Guide](/guides/agent-decision-guide) — which tool for which task
 - [MCP Server](/mcp/server) — connect Claude, Cursor, or Copilot
 - [Browser Engines](/concepts/browsers) — which browser, how to handle a challenge
-- [Tools Reference](/reference/tools) — the 18-tool intent-based surface
+- [Tools Reference](/reference/tools) — the 19-tool intent-based surface
 - [webrain vs Playwright](/comparisons/playwright) — and other comparisons
